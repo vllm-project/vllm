@@ -695,6 +695,59 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def moe_gptq_gemm_rdna3(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    torch.ops._rocm_C.moe_gptq_gemm_rdna3(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna3")
+    def _moe_gptq_gemm_rdna3_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
     @register_fake("_C::allspark_w8a16_gemm")
@@ -868,9 +921,10 @@ def cutlass_scaled_mm_azp(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    :param azp_adj: In the per-tensor case, this should include the azp.
-    Always per-channel.
-    :param azp: Only set in the per-token case. Per-token if set.
+    Args:
+        azp_adj: In the per-tensor case, this should include the azp.
+            Always per-channel.
+        azp: Only set in the per-token case. Per-token if set.
     """
     assert b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
@@ -3886,9 +3940,12 @@ def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     Note that sylvester hadamard transforms are also symmetric, which means that
     this function is also applies the (transpose <=> inverse) transform.
 
-    :param x: value to be transformed inplace
-    :param inplace: modify value in place
-    :return: value after transformation
+    Args:
+        x: value to be transformed inplace
+        inplace: modify value in place
+
+    Returns:
+        value after transformation
     """
     return torch.ops._C.hadacore_transform(x, inplace)
 

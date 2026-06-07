@@ -17,10 +17,9 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
-from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseBackend,
-    FlashMLASparseMetadata,
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
 )
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
@@ -80,41 +79,10 @@ def _get_dcp_flashmla_partials(
     return out, lse
 
 
-class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASHMLA_SPARSE_DSV4"
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V4 layout: 448 NoPE + 64 RoPE = 512 (overrides the
-        # V3.2 default of 576 from FlashMLASparseBackend).
-        return [512]
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
-
-
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
-    backend_cls = DeepseekV4FlashMLASparseBackend
+    backend_cls = DeepseekV4FlashMLABackend
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -194,7 +162,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            FlashMLASparseMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -238,7 +206,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
@@ -349,7 +317,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         compressed_k_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_k_cache: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> None:
         swa_only = attn_metadata is None
