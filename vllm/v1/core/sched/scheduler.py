@@ -113,7 +113,7 @@ class PrefillCheckpointState:
 
 
 class CudaEventPool:
-    """Pre-allocated pool of CUDA events for checkpoint synchronisation.
+    """Pre-allocated pool of CUDA events for checkpoint synchronization.
 
     Avoids per-step ``torch.cuda.Event`` allocation overhead.
     Non-timing events are used (``enable_timing=False``).
@@ -179,7 +179,7 @@ class FlowPrefillMixin:
         # Suspended prefill state: request_id -> PrefillCheckpointState
         self._suspended_prefills: dict[str, PrefillCheckpointState] = {}
 
-        # Pre-allocated CUDA event pool for checkpoint synchronisation
+        # Pre-allocated CUDA event pool for checkpoint synchronization
         self._event_pool = CudaEventPool(size=256)
 
         if self._fp_granularity is not None:
@@ -210,7 +210,7 @@ class FlowPrefillMixin:
         2. Decode queue depth is below ``preemption_decode_threshold``.
 
         Returns a list of ``(request_id, checkpoint, tokens_to_schedule)``
-        tuples.  The CUDA query is non-blocking — no CPU synchronisation.
+        tuples.  The CUDA query is non-blocking — no CPU synchronization.
         """
         if not self._suspended_prefills:
             return []
@@ -591,7 +591,7 @@ class Scheduler(FlowPrefillMixin, SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-        # FlowPrefill: initialise sub-chunk preemption state.
+        # FlowPrefill: initialize sub-chunk preemption state.
         # When preemption_granularity is None (the default) this is a no-op
         # that adds zero scheduling overhead.
         if self.scheduler_config.preemption_granularity is not None:

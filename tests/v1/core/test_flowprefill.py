@@ -16,7 +16,7 @@ Test coverage:
   - Checkpoint insertion decision logic (_fp_maybe_checkpoint).
   - Resume logic (_fp_try_resume_suspended) with mocked CUDA events.
   - Full scheduling loop (_fp_schedule) — checkpoint and non-checkpoint paths.
-  - No CPU synchronisation guarantee: query() is non-blocking.
+  - No CPU synchronization guarantee: query() is non-blocking.
 """
 
 from __future__ import annotations
