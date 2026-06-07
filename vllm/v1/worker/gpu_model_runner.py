@@ -6015,16 +6015,15 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
-            # Also warm forward_native (taken when generators dict is non-empty),
-            # but skip the extra call in 'processed_logits' / 'processed_logprobs'
-            # modes — there TopKTopPSampler binds forward = forward_native at
-            # init time, so the warmup call is redundant and only inflates peak
-            # memory during profile_run.
-            # No .clone() of logits: warmup output is discarded, so any in-place
-            # mutation by forward_native does not affect correctness.
-            if self.sampler.logprobs_mode not in (
-                "processed_logits",
-                "processed_logprobs",
+            # Skip the second sampler warm-up on ROCm. The first sampler
+            # call JITs the AITER top_k_top_p kernel, which leaves an HSA
+            # signal that is never retired on MI300X; the second warm-up's
+            # implicit device sync then hangs. The second pass is not
+            # essential, so gate it to non-ROCm platforms only.
+            enable_second_sampler_warmup = not current_platform.is_rocm()
+            if enable_second_sampler_warmup and (
+                self.sampler.logprobs_mode
+                not in ("processed_logits", "processed_logprobs")
             ):
                 self.sampler(
                     logits=logits,
@@ -6228,7 +6227,14 @@ class GPUModelRunner(
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
-        if get_pp_group().is_last_rank:
+        # Skip the profile-time sampler run on ROCm: the AITER top_k_top_p
+        # kernel queued by the first sampler call hangs _sync_device on
+        # MI300X. Non-ROCm platforms keep the upstream run, which also
+        # contributes to peak-memory / KV-cache sizing.
+        skip_sampler_warmup = current_platform.is_rocm()
+        if skip_sampler_warmup:
+            output = None
+        elif get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
             else:
