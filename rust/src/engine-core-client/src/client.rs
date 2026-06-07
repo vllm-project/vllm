@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -10,6 +11,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::utility::EngineCoreUtilityRequest;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
@@ -22,7 +24,7 @@ pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TransportMode {
     /// The Rust process owns the startup handshake and allocates or binds the
     /// frontend transport addresses itself before replying to engine
@@ -657,6 +659,24 @@ impl EngineCoreClient {
             });
         }
         Ok(results.into_iter().all(|ok| ok))
+    }
+
+    /// Load or refresh one LoRA adapter on every connected engine.
+    pub async fn add_lora(&self, lora_request: &LoraRequest) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("add_lora", (lora_request,))
+            .await?
+            .into_iter()
+            .all(|loaded| loaded))
+    }
+
+    /// Remove one LoRA adapter from every connected engine.
+    pub async fn remove_lora(&self, lora_id: u64) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("remove_lora", (lora_id,))
+            .await?
+            .into_iter()
+            .all(|removed| removed))
     }
 
     /// Put the engine to sleep.

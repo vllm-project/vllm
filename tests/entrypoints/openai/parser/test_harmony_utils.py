@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai_harmony import Message, Role
+from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -269,7 +269,8 @@ class TestCommonParseInputToHarmonyMessage:
         assert messages[0].recipient == "functions.get_current_time"
 
     def test_system_message(self, parse_function):
-        """Test parsing system message."""
+        """Test parsing system messages, which are parsed into developer messages
+        with DeveloperContent."""
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",
@@ -278,9 +279,9 @@ class TestCommonParseInputToHarmonyMessage:
         messages = parse_function(chat_msg)
 
         assert len(messages) == 1
-        # System messages are converted using Message.from_dict
-        # which should preserve the role
-        assert messages[0].author.role == Role.SYSTEM
+        assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "You are a helpful assistant"
 
     def test_developer_message(self, parse_function):
         """Test parsing developer message."""
@@ -293,6 +294,8 @@ class TestCommonParseInputToHarmonyMessage:
 
         assert len(messages) == 1
         assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "Use concise language"
 
     def test_user_message_with_string_content(self, parse_function):
         """Test parsing user message with string content."""

@@ -12,11 +12,11 @@ from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import CompletionOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
