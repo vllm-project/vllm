@@ -31,7 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
-    _sync_engine_id_across_model_parallel,
+    _sync_engine_id_across_tp,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -607,24 +607,32 @@ def test_should_launch_bootstrap_server_external_lb_uses_local_first_rank():
         assert should_launch_bootstrap_server(vllm_config) is False
 
 
-def test_sync_engine_id_across_model_parallel_uses_world_group(monkeypatch):
+def test_sync_engine_id_across_tp_includes_pp_group(monkeypatch):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
     assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.engine_id = "local-engine"
-    fake_world_group = SimpleNamespace(
-        broadcast_object=MagicMock(return_value="shared-engine")
+    fake_tp_group = SimpleNamespace(
+        broadcast_object=MagicMock(return_value="tp-engine")
+    )
+    fake_pp_group = SimpleNamespace(
+        broadcast_object=MagicMock(return_value="pp-engine")
     )
     monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_world_group",
-        lambda: fake_world_group,
+        "vllm.distributed.parallel_state.get_tp_group",
+        lambda: fake_tp_group,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_pp_group",
+        lambda: fake_pp_group,
     )
 
-    _sync_engine_id_across_model_parallel(vllm_config)
+    _sync_engine_id_across_tp(vllm_config)
 
-    fake_world_group.broadcast_object.assert_called_once_with("local-engine", src=0)
-    assert vllm_config.kv_transfer_config.engine_id == "shared-engine"
+    fake_tp_group.broadcast_object.assert_called_once_with("local-engine", src=0)
+    fake_pp_group.broadcast_object.assert_called_once_with("tp-engine", src=0)
+    assert vllm_config.kv_transfer_config.engine_id == "pp-engine"
 
 
 @pytest.mark.asyncio
