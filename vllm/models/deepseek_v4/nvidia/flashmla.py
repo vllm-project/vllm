@@ -410,7 +410,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         topk_indices: torch.Tensor,
         topk_lens: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata,
+        attn_metadata: DeepseekV4FlashMLAMetadata,
         output: torch.Tensor,
     ) -> None:
         if layer.compress_ratio not in (4, 128):
