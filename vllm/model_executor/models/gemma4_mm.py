@@ -976,8 +976,6 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
 ):
-    requires_mm_lora_sequential_encoding = ("image", "video")
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
