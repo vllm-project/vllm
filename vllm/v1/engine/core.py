@@ -512,12 +512,12 @@ class EngineCore:
         if self.scheduler.has_requests():
             self.scheduler.prefetch_waiting_requests()
         scheduler_output = self.scheduler.schedule()
-            with self.log_error_detail(scheduler_output):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
-            if self.is_ec_consumer:
-                model_executed = scheduler_output.total_num_scheduled_tokens > 0
+        with self.log_error_detail(scheduler_output):
+            exec_future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
+        if self.is_ec_consumer:
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
