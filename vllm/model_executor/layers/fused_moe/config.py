@@ -102,23 +102,26 @@ def _quant_flags_to_group_shape(
 class RoutingMethodType(IntEnum):
     # Default: Softmax -> TopK
     Default = (0,)
-    # Renormalize: TopK -> Softmax/Sigmoid
+    # Renormalize: TopK -> Softmax
     Renormalize = (1,)
     # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
     # -> Top8 experts from the Top4 groups
     DeepSeekV3 = (2,)
     # Llama4: Top1 -> Sigmoid
     Llama4 = (3,)
-    # RenormalizeNaive: Softmax/Sigmoid -> TopK -> Renormalize
+    # RenormalizeNaive: Softmax -> TopK -> Renormalize
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
+    # (routeScale=1.0, epsilon=1e-20)
     MiniMax2 = (7,)
+    # Sigmoid: Sigmoid -> TopK (no renormalization)
+    Sigmoid = (8,)
     # Unspecified
-    Unspecified = (8,)
+    Unspecified = (9,)
     # other routing types (not passed to FlashInfer kernels)
     # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
     DeepseekV4 = (100,)
@@ -132,6 +135,7 @@ def get_routing_method_type(
     renormalize: bool,
     num_expert_group: int | None,
     has_e_score_bias: bool,
+    routed_scaling_factor: float | None = 1.0,
 ) -> RoutingMethodType:
     if scoring_func == "sqrtsoftplus":
         # DeepSeek V4 uses sqrtsoftplus routing with optional routing bias
@@ -142,20 +146,21 @@ def get_routing_method_type(
             return RoutingMethodType.Unspecified
 
     if has_e_score_bias:
-        if (num_expert_group or 0) > 0 and scoring_func == "sigmoid":
-            return RoutingMethodType.DeepSeekV3
-        elif scoring_func == "sigmoid":
-            return RoutingMethodType.MiniMax2
+        if scoring_func == "sigmoid":
+            if not renormalize:
+                return RoutingMethodType.Unspecified
+            if (num_expert_group or 0) > 0:
+                return RoutingMethodType.DeepSeekV3
+            if routed_scaling_factor in (None, 1.0):
+                return RoutingMethodType.MiniMax2
+            return RoutingMethodType.Unspecified
         else:
             return RoutingMethodType.Unspecified
 
     if scoring_func == "sigmoid":
-        if top_k == 1:
-            return RoutingMethodType.Llama4
-        elif renormalize:
+        if renormalize:
             return RoutingMethodType.SigmoidRenorm
-        else:
-            return RoutingMethodType.Unspecified
+        return RoutingMethodType.Sigmoid
 
     if scoring_func == "softmax":
         if renormalize:
@@ -1260,6 +1265,8 @@ class FusedMoEConfig:
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
+
+    max_capture_size: int = 0
 
     def __post_init__(self):
         if self.dp_size > 1:
