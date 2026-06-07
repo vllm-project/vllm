@@ -108,7 +108,7 @@ class KimiK2ToolParser(ToolParser):
 
                 content = model_output[: model_output.find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
-                    tools_called=True,
+                    tools_called=bool(tool_calls),
                     tool_calls=tool_calls,
                     content=content if content else None,
                 )

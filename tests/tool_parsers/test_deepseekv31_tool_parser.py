@@ -59,3 +59,28 @@ def test_extract_tool_calls_with_multiple_tools(parser):
 
     # prefix is content
     assert result.content == "some prefix text"
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        # Truncated JSON (missing closing brace)
+        (
+            "<｜tool▁calls▁begin｜>"
+            '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x":1<｜tool▁call▁end｜>'
+            "<｜tool▁calls▁end｜>"
+        ),
+        # JSON with unmatched quote
+        (
+            "<｜tool▁calls▁begin｜>"
+            '<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{"x": "unclosed<｜tool▁call▁end｜>'
+            "<｜tool▁calls▁end｜>"
+        ),
+    ],
+)
+def test_extract_tool_calls_malformed_json_arguments(parser, model_output):
+    """Parser must not pass malformed JSON arguments to clients."""
+    result = parser.extract_tool_calls(model_output, None)
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == model_output

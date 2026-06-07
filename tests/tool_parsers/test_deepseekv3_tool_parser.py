@@ -83,10 +83,5 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
             parallel_tool_calls_names=["get_weather", "search_hotels"],
             # xfail markers
             xfail_streaming={},
-            xfail_nonstreaming={
-                "test_malformed_input": (
-                    "Parser sets tools_called=True even when tool_calls is "
-                    "empty (detects start token but fails to parse)"
-                ),
-            },
+            xfail_nonstreaming={},
         )
