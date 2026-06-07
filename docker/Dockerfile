@@ -814,20 +814,21 @@ ARG PYTORCH_NIGHTLY
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/opt/uv/cache \
+COPY --from=build /workspace/dist/*.whl /tmp/vllm-dist/
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
+        && uv pip install --system /tmp/vllm-dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing vLLM..." \
-        && uv pip install --system dist/*.whl --verbose \
+        && uv pip install --system /tmp/vllm-dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
-    fi
+    fi \
+    && rm -rf /tmp/vllm-dist
 
 RUN --mount=type=cache,target=/opt/uv/cache \
 . /etc/environment && \
@@ -837,10 +838,11 @@ uv pip list
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 # Install EP kernels wheels (DeepEP) that have been built in the `build` stage
-RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
-    --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+COPY --from=build /tmp/ep_kernels_workspace/dist/*.whl /tmp/ep-kernels-dist/
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --system /tmp/ep-kernels-dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && rm -rf /tmp/ep-kernels-dist
 
 # Download FlashInfer precompiled cubins AFTER all pip installs are done.
 # This must run after the vLLM wheel and EP kernels installs above, because
