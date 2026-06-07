@@ -1868,13 +1868,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests -- unless the
-                # executor is asleep. sleep(level>=1) discards the KV cache,
-                # but execute_dummy_batch runs a decode-shaped batch that
-                # reads/writes KV memory, causing an illegal memory access
-                # (e.g. sleep(level=1) followed by sleep(level=0) while KV
-                # is still released). The finished-sync all-reduce below still
-                # runs (DP group, no GPU work), keeping DP ranks in lockstep.
-                elif not self.model_executor.is_sleeping:
+                # engine is sleeping. sleep(level>=1) calls pause_scheduler()
+                # before the device→host KV offload begins; model_executor
+                # .is_sleeping only flips True after the offload completes, so
+                # we guard on self.is_sleeping() (= is_scheduler_paused() or
+                # model_executor.is_sleeping) to cover the offload window too.
+                # The finished-sync all-reduce below still runs (DP group, no
+                # GPU work), keeping DP ranks in lockstep.
+                elif not self.is_sleeping():
                     with self.log_iteration_details(None):
                         self.execute_dummy_batch()
 
