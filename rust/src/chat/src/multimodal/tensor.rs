@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
+use llm_multimodal::{ModelSpecificValue, PreprocessedImages, PreprocessedVideos};
 use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
@@ -25,8 +25,8 @@ pub(super) enum KwargValue {
     Passthrough(ProtocolKwargValue),
 }
 
-/// Collect `pixel_values` and model-specific outputs into one tensor map.
-pub(super) fn collect_tensors(
+/// Collect image tensors and model-specific outputs into one tensor map.
+pub(super) fn collect_image_tensors(
     preprocessed: PreprocessedImages,
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
@@ -42,8 +42,42 @@ pub(super) fn collect_tensors(
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 
+    collect_named_tensors("pixel_values", pixel_values, model_specific, float_dtype)
+}
+
+/// Collect video tensors and model-specific outputs into one tensor map.
+pub(super) fn collect_video_tensors(
+    preprocessed: PreprocessedVideos,
+    float_dtype: ModelDtype,
+) -> Result<HashMap<String, KwargValue>> {
+    let PreprocessedVideos {
+        pixel_values,
+        model_specific,
+        ..
+    } = preprocessed;
+
+    let pixel_values = {
+        let shape = pixel_values.shape().to_vec();
+        let data = pixel_values.into_iter().collect();
+        KwargValue::from_f32_tensor(data, shape, float_dtype)?
+    };
+
+    collect_named_tensors(
+        "pixel_values_videos",
+        pixel_values,
+        model_specific,
+        float_dtype,
+    )
+}
+
+fn collect_named_tensors(
+    pixel_values_key: &str,
+    pixel_values: KwargValue,
+    model_specific: HashMap<String, ModelSpecificValue>,
+    float_dtype: ModelDtype,
+) -> Result<HashMap<String, KwargValue>> {
     let mut tensors = HashMap::new();
-    tensors.insert("pixel_values".to_string(), pixel_values);
+    tensors.insert(pixel_values_key.to_string(), pixel_values);
     for (key, value) in model_specific {
         tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
     }
