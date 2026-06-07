@@ -466,7 +466,7 @@ class IterationStats:
             request_id=request_id,
             e2e_latency=e2e_latency,
             num_prompt_tokens=num_prompt_tokens,
-            num_preemptions =req_stats.num_preemptions,
+            num_preemptions=req_stats.num_preemptions,
             num_generation_tokens=req_stats.num_generation_tokens,
             max_tokens_param=max_tokens_param,
             queued_time=queued_time,
