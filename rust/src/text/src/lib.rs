@@ -45,9 +45,9 @@ pub struct TextLlm {
     /// Tokenizer/model metadata backend responsible for prompt encode/decode
     /// and sampling hints.
     backend: DynTextBackend,
-    /// Context window size derived by the backend or from engine startup
-    /// handshake, with optional override from config.
-    max_model_len: Option<u32>,
+    /// Context window size reported by the engine startup handshake, with
+    /// optional override from config.
+    max_model_len: u32,
 }
 
 impl TextLlm {
@@ -71,7 +71,7 @@ impl TextLlm {
     /// This takes priority over both the engine-reported default and any
     /// tokenizer/model metadata exposed by the backend.
     pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
-        self.max_model_len = Some(max_model_len);
+        self.max_model_len = max_model_len;
         self
     }
 
@@ -129,9 +129,7 @@ impl TextLlm {
         };
 
         let mut sampling_hints = self.backend.sampling_hints()?;
-        if let Some(max_model_len) = self.max_model_len {
-            sampling_hints.max_model_len = Some(max_model_len);
-        }
+        sampling_hints.max_model_len = Some(self.max_model_len);
         let PreparedTextRequest {
             text_request,
             generate_request,

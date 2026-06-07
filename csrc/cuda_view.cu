@@ -1,3 +1,4 @@
+// TODO: Remove this once ROCm upgrade to torch 2.11.
 #include <torch/all.h>
 #include <torch/cuda.h>
 #include <cuda_runtime.h>
