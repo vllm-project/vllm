@@ -96,14 +96,6 @@ class RayDistributedExecutor(Executor):
 
         self.scheduler_output: SchedulerOutput | None = None
 
-    @property
-    def max_concurrent_batches(self) -> int:
-        """Ray distributed executor supports pipeline parallelism,
-        meaning that it allows PP size batches to be executed concurrently.
-        """
-        pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
-
     def shutdown(self) -> None:
         if logger:
             # Somehow logger can be None here.

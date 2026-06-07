@@ -101,11 +101,21 @@ This command will do the following:
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.
 1. Download the pre-built wheel of the base commit.
-1. Use its compiled libraries in the installation.
+1. Use its compiled libraries and `vllm-rs` binary in the installation.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
     2. If you rebase your dev branch, it is recommended to uninstall vllm and re-run the above command to make sure your libraries are up to date.
+
+!!! tip "Rebuilding the Rust frontend"
+If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and install it without re-running the full pip install:
+
+    ```bash
+    ./build_rust.sh          # release build
+    ./build_rust.sh --debug  # faster build for development
+    ```
+
+    This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
 
