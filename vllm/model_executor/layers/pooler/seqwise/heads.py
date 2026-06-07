@@ -52,7 +52,11 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
         pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
+        if len(pooled_data) != len(pooling_params):
+            raise ValueError(
+                f"pooled_data length ({len(pooled_data)}) does not match "
+                f"pooling_params length ({len(pooling_params)})"
+            )
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
@@ -72,7 +76,11 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         dimensions_list = [pooling_param.dimensions for pooling_param in pooling_params]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
-            assert len(embeddings) == len(dimensions_list)
+            if len(embeddings) != len(dimensions_list):
+                raise ValueError(
+                    f"embeddings length ({len(embeddings)}) does not match "
+                    f"dimensions_list length ({len(dimensions_list)})"
+                )
             if len(set(dimensions_list)) == 1 and not isinstance(embeddings, list):
                 # if all dimensions are the same
                 d = dimensions_list[0]
@@ -125,7 +133,11 @@ class ClassifierPoolerHead(SequencePoolerHead):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
         pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
+        if len(pooled_data) != len(pooling_params):
+            raise ValueError(
+                f"pooled_data length ({len(pooled_data)}) does not match "
+                f"pooling_params length ({len(pooling_params)})"
+            )
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
