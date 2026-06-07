@@ -29,7 +29,6 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_block_hash,
 )
-from vllm import SamplingParams
 from vllm.v1.request import RequestStatus
 
 
