@@ -384,7 +384,7 @@ class Scheduler(SchedulerInterface):
             except Exception:
                 pass
 
-def schedule(self) -> SchedulerOutput:
+    def schedule(self) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
