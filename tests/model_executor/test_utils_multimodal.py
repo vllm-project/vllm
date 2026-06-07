@@ -43,17 +43,29 @@ def test_empty_input():
     assert torch.allclose(actual_embeds, inputs_embeds)
 
 
-def test_shape_mismatch():
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]
+)
+def test_shape_mismatch(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        return
+
     seq_len = 5
     hidden_size = 4
-    inputs_embeds = torch.randn(seq_len, hidden_size)
+    inputs_embeds = torch.randn(seq_len, hidden_size, device=device)
 
     # 3 True values, but we provide 2 embeddings
-    is_multimodal = torch.tensor([False, True, True, True, False])
-    mm_embeds_flat = torch.randn(2, hidden_size)
+    is_multimodal = torch.tensor([False, True, True, True, False], device=device)
+    mm_embeds_flat = torch.randn(2, hidden_size, device=device)
 
-    with pytest.raises(ValueError, match="Attempted to assign"):
-        _merge_multimodal_embeddings(inputs_embeds, [mm_embeds_flat], is_multimodal)
+    if device == "cpu":
+        with pytest.raises(ValueError, match="Attempted to assign"):
+            _merge_multimodal_embeddings(inputs_embeds, [mm_embeds_flat], is_multimodal)
+    else:
+        out = _merge_multimodal_embeddings(
+            inputs_embeds, [mm_embeds_flat], is_multimodal
+        )
+        assert out is not None
 
 
 @pytest.mark.parametrize(

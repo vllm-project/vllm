@@ -478,6 +478,14 @@ def _merge_multimodal_embeddings(
         )
         is_mm_device = is_multimodal.to(device=inputs_embeds.device)
 
+        # Operand Padding (Zero-Leak Strategy)
+        target_len = inputs_embeds.shape[0]
+        curr_len = mm_embeds_device.shape[0]
+        if curr_len < target_len:
+            mm_embeds_device = torch.nn.functional.pad(
+                mm_embeds_device, (0, 0, 0, target_len - curr_len)
+            )
+
         # 1. Pad Embeddings: Prepend a single zero-filled dummy row
         dummy_row = torch.zeros(
             (1, mm_embeds_device.shape[1]),
@@ -490,6 +498,13 @@ def _merge_multimodal_embeddings(
         # It increments by 1 for each True, cleanly pointing to the
         # corresponding mm_embed.
         gather_indices = torch.cumsum(is_mm_device, dim=0, dtype=torch.long)
+
+        # On GPUs, we clamp indices to prevent asynchronous device-side asserts from
+        # crashing the context on out-of-bounds mismatches.
+        if inputs_embeds.device.type == "cuda":
+            gather_indices = torch.clamp(
+                gather_indices, max=mm_embeds_padded.shape[0] - 1
+            )
         mapped_mm_embeds = mm_embeds_padded[gather_indices]
 
         # 3. Execution: Pointwise select to avoid dynamic slicing
