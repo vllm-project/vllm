@@ -714,6 +714,8 @@ class OutputProcessor:
         engine_core_output: EngineCoreOutput,
         req_state: RequestState,
         iteration_stats: IterationStats | None,
+        extra_attributes: dict[str, Any] | None = None,
+        span_kind: Any | None = None,
     ) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
@@ -763,12 +765,15 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
+        if extra_attributes:
+            attributes.update(extra_attributes)
+
         instrument_manual(
             span_name="llm_request",
             start_time=arrival_time_ns,
             attributes=attributes,
             context=trace_context,
-            kind=SpanKind.SERVER,
+            kind=span_kind if span_kind is not None else SpanKind.SERVER,
         )
 
     def _update_stats_from_output(
