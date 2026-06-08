@@ -90,16 +90,20 @@ impl MultimodalModelContext {
     }
 }
 
+/// Token identity for one media-type placeholder.
+#[derive(Clone)]
+struct PlaceholderSpec {
+    token: String,
+    marker_token_id: u32,
+    embed_token_id: u32,
+}
+
 /// Static model-specific prompt and tensor-layout behavior.
 #[derive(Clone)]
 struct ResolvedMultimodalSpec {
     raw: &'static dyn ModelProcessorSpec,
-    image_placeholder_token: String,
-    image_placeholder_marker_token_id: u32,
-    image_placeholder_embed_token_id: u32,
-    video_placeholder_token: String,
-    video_placeholder_marker_token_id: u32,
-    video_placeholder_embed_token_id: u32,
+    image_placeholder: PlaceholderSpec,
+    video_placeholder: PlaceholderSpec,
     field_layouts: HashMap<String, FieldLayout>,
     keep_on_cpu_keys: HashSet<String>,
 }
@@ -107,40 +111,45 @@ struct ResolvedMultimodalSpec {
 impl ResolvedMultimodalSpec {
     fn new(raw: &'static dyn ModelProcessorSpec, context: &MultimodalModelContext) -> Result<Self> {
         let metadata = context.metadata();
-        let image_placeholder_token =
+        let tokenizer = context.tokenizer();
+        // image
+        let image_token =
             raw.placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
-        let video_placeholder_token =
-            raw.video_placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
-        let image_placeholder_marker_token_id = context
-            .tokenizer()
-            .token_to_id(&image_placeholder_token)
+        let image_marker_token_id = tokenizer
+            .token_to_id(&image_token)
             .ok_or_else(|| {
                 multimodal!(
-                    "placeholder token `{image_placeholder_token}` is not in the tokenizer vocabulary"
+                    "placeholder token `{image_token}` is not in the tokenizer vocabulary"
                 )
             })?;
-        let image_placeholder_embed_token_id =
+        let image_embed_token_id =
             raw.placeholder_token_id(&metadata).map_err(|error| multimodal!("{error}"))? as u32;
-        let video_placeholder_marker_token_id = context
-            .tokenizer()
-            .token_to_id(&video_placeholder_token)
+        // video
+        let video_token =
+            raw.video_placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
+        let video_marker_token_id = tokenizer
+            .token_to_id(&video_token)
             .ok_or_else(|| {
                 multimodal!(
-                    "placeholder token `{video_placeholder_token}` is not in the tokenizer vocabulary"
+                    "placeholder token `{video_token}` is not in the tokenizer vocabulary"
                 )
             })?;
-        let video_placeholder_embed_token_id =
+        let video_embed_token_id =
             raw.video_placeholder_token_id(&metadata)
                 .map_err(|error| multimodal!("{error}"))? as u32;
 
         Ok(Self {
             raw,
-            image_placeholder_token,
-            image_placeholder_marker_token_id,
-            image_placeholder_embed_token_id,
-            video_placeholder_token,
-            video_placeholder_marker_token_id,
-            video_placeholder_embed_token_id,
+            image_placeholder: PlaceholderSpec {
+                token: image_token,
+                marker_token_id: image_marker_token_id,
+                embed_token_id: image_embed_token_id,
+            },
+            video_placeholder: PlaceholderSpec {
+                token: video_token,
+                marker_token_id: video_marker_token_id,
+                embed_token_id: video_embed_token_id,
+            },
             field_layouts: raw.field_layouts(),
             keep_on_cpu_keys: raw.keep_on_cpu_keys().into_iter().collect(),
         })
@@ -159,8 +168,8 @@ impl ResolvedMultimodalSpec {
             .into_iter()
             .map(|replacement| ResolvedPromptReplacement {
                 replacement,
-                placeholder_marker_token_id: self.image_placeholder_marker_token_id,
-                placeholder_embed_token_id: self.image_placeholder_embed_token_id,
+                placeholder_marker_token_id: self.image_placeholder.marker_token_id,
+                placeholder_embed_token_id: self.image_placeholder.embed_token_id,
             })
             .collect())
     }
@@ -178,8 +187,8 @@ impl ResolvedMultimodalSpec {
             .into_iter()
             .map(|replacement| ResolvedPromptReplacement {
                 replacement,
-                placeholder_marker_token_id: self.video_placeholder_marker_token_id,
-                placeholder_embed_token_id: self.video_placeholder_embed_token_id,
+                placeholder_marker_token_id: self.video_placeholder.marker_token_id,
+                placeholder_embed_token_id: self.video_placeholder.embed_token_id,
             })
             .collect())
     }
@@ -398,7 +407,7 @@ impl MultimodalModelInfo {
     /// The HF renderer uses this token while flattening image content in string
     /// content format.
     pub fn placeholder_token(&self) -> &str {
-        &self.spec.image_placeholder_token
+        &self.spec.image_placeholder.token
     }
 
     /// Return the template-visible video placeholder token for this model.
@@ -406,7 +415,7 @@ impl MultimodalModelInfo {
     /// The HF renderer uses this token while flattening video content in string
     /// content format.
     pub fn video_placeholder_token(&self) -> &str {
-        &self.spec.video_placeholder_token
+        &self.spec.video_placeholder.token
     }
 
     /// Run media fetch, preprocessing, prompt expansion, and feature build.
