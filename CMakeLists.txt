@@ -1313,7 +1313,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3_wmma.cu")
   endif()
 
+  set(VLLM_ROCM_HAS_GFX950 OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx950")
+    set(VLLM_ROCM_HAS_GFX950 ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/sparse_mla_decode.cu")
     set_source_files_properties("csrc/rocm/sparse_mla_decode.cu"
@@ -1332,6 +1334,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+  if(VLLM_ROCM_HAS_GFX950)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX950)
   endif()
 endif()
 
