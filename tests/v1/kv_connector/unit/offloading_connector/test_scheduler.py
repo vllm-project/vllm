@@ -1419,7 +1419,6 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
         token_ids=[0] * offloaded_block_size,
         skip_reading_prefix_cache=True,
     )
-    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
