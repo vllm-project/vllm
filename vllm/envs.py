@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
+    VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -114,6 +115,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -155,6 +157,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
+    VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -282,6 +285,7 @@ if TYPE_CHECKING:
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
 
 
 def get_default_cache_root():
@@ -879,6 +883,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
+    # When True, GroupCoordinator constructs its CPU/device subgroups via
+    # ``torch.distributed.split_group(backend=...)``
+    # and ``init_distributed_environment`` initializes the default PG with
+    # mixed ``cpu:gloo,cuda:nccl`` backend + eager ``device_id`` binding.
+    "VLLM_DISTRIBUTED_USE_SPLIT_GROUP": lambda: bool(
+        int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
+    ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
@@ -1035,6 +1046,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
     ),
+    # Retain local sliding-window KV checkpoints for prefix caching.
+    # Unset (default) preserves the dense local checkpointing behavior. `0`
+    # retains only the latest completed prompt boundary. Positive values retain
+    # checkpoints at the specified interval boundaries (rounded up to the
+    # prefix-cache alignment).
+    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
+    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+        else None
+    ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
@@ -1099,6 +1121,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - use aiter tuned gemms for unquantized gemms
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
+    ),
+    "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
@@ -1302,6 +1327,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
+    ),
+    # Optional comma-separated list of node IPs that Ray data-parallel
+    # placement groups may use. When set, create_dp_placement_groups only
+    # considers these nodes (the DP master node is always included).
+    # This environment variable is ignored if data-parallel-backend is not Ray.
+    "VLLM_RAY_DP_PLACEMENT_NODE_IPS": lambda: os.getenv(
+        "VLLM_RAY_DP_PLACEMENT_NODE_IPS", ""
     ),
     # Comma-separated *additional* prefixes of env vars to copy from the
     # driver to Ray workers.  These are merged with the built-in defaults
