@@ -771,21 +771,25 @@ class Worker(WorkerBase):
             # memory intensity from the trace.
             #
             # Per-request quantities:
-            #   sq = number of scheduled (new) tokens for this request
-            #   sk = total sequence length (computed + scheduled tokens)
+            #   query_len = number of scheduled (new) tokens for this request
+            #   seq_len   = total sequence length (computed + scheduled tokens)
             #
-            # Aggregated across requests in each phase (c_=context, g_=gen):
-            #   sk   = sum of sk        (total KV length)
-            #   sqsq = sum of sq*sq     (proxy for QK^T compute cost)
-            #   sqsk = sum of sq*sk     (proxy for QK^T compute cost for decode and chunked prefill)
-            #   bs   = total scheduled tokens across all requests
-            c_sk = 0
-            c_sqsq = 0
-            c_sqsk = 0
-            g_sk = 0
-            g_sqsq = 0
-            g_sqsk = 0
-            bs = 0
+            # Aggregated across requests in each phase
+            # (ctx_=context, gen_=generation):
+            #   seq_len_sum = sum of seq_len   (total KV length)
+            #   qq_compute  = sum of query_len*query_len
+            #                 (proxy for QK^T compute cost)
+            #   qk_compute  = sum of query_len*seq_len
+            #                 (proxy for QK^T compute cost for decode and
+            #                  chunked prefill)
+            #   total_scheduled_tokens = scheduled tokens across all requests
+            ctx_seq_len_sum = 0
+            ctx_qq_compute = 0
+            ctx_qk_compute = 0
+            gen_seq_len_sum = 0
+            gen_qq_compute = 0
+            gen_qk_compute = 0
+            total_scheduled_tokens = 0
 
             # Build a map of req_id -> num_computed_tokens for all requests
             new_req_ids = {
@@ -806,35 +810,37 @@ class Worker(WorkerBase):
             for req_id, num_tokens in (
                 scheduler_output.num_scheduled_tokens.items()
             ):
-                sq = num_tokens
-                bs += sq
-                sk = num_computed_tokens_ids.get(req_id, 0) + sq
+                query_len = num_tokens
+                total_scheduled_tokens += query_len
+                seq_len = (
+                    num_computed_tokens_ids.get(req_id, 0) + query_len
+                )
                 if (
                     scheduler_output.scheduled_cached_reqs.is_context_phase(
                         req_id
                     )
                     or req_id in new_req_ids
                 ):
-                    c_sk += sk
-                    c_sqsq += sq * sq
-                    c_sqsk += sq * sk
+                    ctx_seq_len_sum += seq_len
+                    ctx_qq_compute += query_len * query_len
+                    ctx_qk_compute += query_len * seq_len
                 else:
-                    g_sk += sk
-                    g_sqsq += sq * sq
-                    g_sqsk += sq * sk
+                    gen_seq_len_sum += seq_len
+                    gen_qq_compute += query_len * query_len
+                    gen_qk_compute += query_len * seq_len
             annotation = "".join([
-                "execute_", str(bs), "_context_",
+                "execute_", str(total_scheduled_tokens), "_context_",
                 str(iteration_details.num_ctx_requests),
                 "(sq", str(iteration_details.num_ctx_tokens),
-                "sk", str(c_sk),
-                "sqsq", str(c_sqsq),
-                "sqsk", str(c_sqsk),
+                "sk", str(ctx_seq_len_sum),
+                "sqsq", str(ctx_qq_compute),
+                "sqsk", str(ctx_qk_compute),
                 ")_generation_",
                 str(iteration_details.num_generation_requests),
                 "(sq", str(iteration_details.num_generation_tokens),
-                "sk", str(g_sk),
-                "sqsq", str(g_sqsq),
-                "sqsk", str(g_sqsk),
+                "sk", str(gen_seq_len_sum),
+                "sqsq", str(gen_qq_compute),
+                "sqsk", str(gen_qk_compute),
                 ")",
             ])
         else:
