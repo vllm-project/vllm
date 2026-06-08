@@ -47,12 +47,17 @@ macro (append_cmake_prefix_path PKG EXPR)
   list(APPEND CMAKE_PREFIX_PATH ${_PREFIX_PATH})
 endmacro()
 
-#
-# Add a target named `hipify${NAME}` that runs the hipify preprocessor on a set
-# of CUDA source files. The names of the corresponding "hipified" sources are
-# stored in `OUT_SRCS`.
-#
+# Resolve hipified output paths for `NAME` into `OUT_SRCS` and register the
+# `.cu` sources with the shared `hipify_all` target. Per-extension hipify
+# targets are unsafe to run in parallel against a shared csrc/ output dir, so
+# accumulation here is paired with a single finalize step.
 function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+  if (TARGET hipify_all)
+    message(FATAL_ERROR
+      "hipify_sources_target(${NAME}) called after vllm_finalize_hipify_target. "
+      "Add the new HIP extension before the finalizer call in CMakeLists.txt.")
+  endif()
+
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -73,17 +78,47 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
 
-  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
-  add_custom_target(
-    hipify${NAME}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
-    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
-    BYPRODUCTS ${HIP_SRCS}
-    COMMENT "Running hipify on ${NAME} extension source files.")
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_SRCS ${SRCS})
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS ${HIP_SRCS})
+
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
 
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
+endfunction()
+
+# Define the single shared `hipify_all` custom target that runs hipify once
+# on the union of every HIP extension's sources. Call after the last HIP
+# `define_extension_target`.
+function (vllm_finalize_hipify_target)
+  if (TARGET hipify_all)
+    return()
+  endif()
+
+  get_property(ALL_SRCS GLOBAL PROPERTY VLLM_HIPIFY_ALL_SRCS)
+  get_property(ALL_BYPRODUCTS GLOBAL PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS)
+
+  if (NOT ALL_SRCS)
+    return()
+  endif()
+
+  list(REMOVE_DUPLICATES ALL_SRCS)
+  list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
+
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  add_custom_target(
+    hipify_all
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
+    BYPRODUCTS ${ALL_BYPRODUCTS}
+    COMMENT "Running hipify on all extension source files.")
 endfunction()
 
 #
@@ -449,6 +484,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
 endfunction()
 
+
+function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;11.0f" "${TGT_CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a" "${TGT_CUDA_ARCHS}")
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
+endfunction()
+
 #
 # Override the GPU architectures detected by cmake/torch and filter them by
 # `GPU_SUPPORTED_ARCHES`. Sets the final set of architectures in
@@ -551,7 +596,7 @@ function (define_extension_target MOD_NAME)
 
   if (ARG_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
+    add_dependencies(${MOD_NAME} hipify_all)
     # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
     target_include_directories(${MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
       ${ARG_INCLUDE_DIRECTORIES})

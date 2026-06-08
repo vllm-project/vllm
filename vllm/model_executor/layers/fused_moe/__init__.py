@@ -93,7 +93,6 @@ if HAS_TRITON:
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
         CutlassExpertsW4A8Fp8,
-        cutlass_moe_w4a8_fp8,
     )
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmExperts,
@@ -114,7 +113,7 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExperts,
         XPUExpertsFp8,
-        XPUExpertsMXFp4,
+        XPUExpertsMxFp4,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         fused_experts,
@@ -133,7 +132,6 @@ if HAS_TRITON:
         "fused_experts",
         "get_config_file_name",
         "GroupedTopk",
-        "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
         "CutlassExpertsW4A8Fp8",
@@ -145,7 +143,9 @@ if HAS_TRITON:
         "TritonOrDeepGemmExperts",
         "XPUExperts",
         "XPUExpertsFp8",
-        "XPUExpertsMXFp4",
+        "XPUExpertsBlockFp8",
+        "XPUExpertsMxFp8",
+        "XPUExpertsMxFp4",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

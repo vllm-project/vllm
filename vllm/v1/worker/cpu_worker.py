@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Must be imported firstly
+import vllm.v1.worker.cpu.shm  # noqa # isort: skip
+
 import math
 import os
 import sys
@@ -101,6 +105,8 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
+        self.device = torch.device("cpu")
+
         # Check whether critical libraries are loaded
         def check_preloaded_libs(name: str):
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
@@ -141,9 +147,16 @@ class CPUWorker(Worker):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: CPUModelRunner = CPUModelRunner(
-            self.vllm_config, torch.device("cpu")
-        )
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.cpu.model_runner import (
+                CPUModelRunner as CPUModelRunnerV2,
+            )
+
+            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")

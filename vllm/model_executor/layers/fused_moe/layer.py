@@ -50,9 +50,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -329,14 +326,15 @@ class FusedMoE(PluggableLayer):
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=max_num_batched_tokens,
+            max_capture_size=compilation_config.max_cudagraph_capture_size,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -472,7 +470,6 @@ class FusedMoE(PluggableLayer):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    inplace=not self.moe_config.disable_inplace,
                 )
             )
 
@@ -603,12 +600,14 @@ class FusedMoE(PluggableLayer):
     ):
         """
         Load grouped weight scales for group quantization or model weights
-            :param shard_dim: dimension to shard
-            :param expert_data: parameter for a particular expert
-            :param shard_id: either w1, w2, or w3
-            :param loaded_weight: checkpoint weight to load into the param
-            :param tp_rank: tensor parallel rank
-            :param load_full_w2: whether or not the w2 loaded should be sharded.
+
+        Args:
+            shard_dim: dimension to shard
+            expert_data: parameter for a particular expert
+            shard_id: either w1, w2, or w3
+            loaded_weight: checkpoint weight to load into the param
+            tp_rank: tensor parallel rank
+            load_full_w2: whether or not the w2 loaded should be sharded.
         """
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
@@ -731,16 +730,19 @@ class FusedMoE(PluggableLayer):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            # Handle padding: loaded_weight might be smaller than shard_size on last
-            # TP rank
-            start_offset = shard_size * tp_rank
+            # When the parameter has been padded (e.g. MXFP4 rounding up
+            # intermediate_size_per_partition), shard_size is the padded
+            # size.  Compute the offset into the checkpoint weight using
+            # the *unpadded* per-rank size so that every TP rank lands at
+            # the correct slice.
+            tp_size = self.moe_config.moe_parallel_config.tp_size
+            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
                 # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
                 return
-            narrow_size = min(shard_size, available)
+            narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
@@ -769,21 +771,18 @@ class FusedMoE(PluggableLayer):
     ):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
-        # Narrow parameter and load.
-        shard_size = expert_data.shape[shard_dim]
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            # Handle padding: loaded_weight might be smaller than shard_size on last
-            # TP rank
-            start_offset = shard_size * tp_rank
+            # Same padding fix as _load_w13: use unpadded per-rank size.
+            tp_size = self.moe_config.moe_parallel_config.tp_size
+            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
                 # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
                 return
-            narrow_size = min(shard_size, available)
+            narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
@@ -893,6 +892,7 @@ class FusedMoE(PluggableLayer):
         if quant_method_name in (
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsWNA16RDNA3MoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
@@ -977,6 +977,19 @@ class FusedMoE(PluggableLayer):
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
+
+            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
+            # The generic assignment below would broadcast w1/w3 into the
+            # whole expert row, so the second shard would overwrite the first.
+            if (
+                "ModelOpt" in quant_method_name
+                and param.data.ndim == 2
+                and shard_id in ("w1", "w3")
+            ):
+                scale_expert_id = global_expert_id if use_global_sf else expert_id
+                scale_shard_id = 0 if shard_id == "w1" else 1
+                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
+                return True if return_success else None
 
             if (
                 "compressed" in quant_method_name.lower()
