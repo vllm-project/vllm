@@ -529,10 +529,7 @@ class GGUFModelLoader(BaseModelLoader):
             assert mmproj_file is not None, (
                 "Could not find mm_proj file for multimodal GGUF model"
             )
-            for name, weight in gguf_quant_weights_iterator(
-                mmproj_file, gguf_to_hf_name_map
-            ):
-                yield name, weight
+            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
 
         gguf_files = self._get_all_gguf_files(model_name_or_path)
         if len(gguf_files) > 1:
@@ -541,8 +538,7 @@ class GGUFModelLoader(BaseModelLoader):
             weights = gguf_quant_weights_iterator(
                 model_name_or_path, gguf_to_hf_name_map
             )
-        for name, weight in weights:
-            yield name, weight
+        yield from weights
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)

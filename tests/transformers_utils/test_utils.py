@@ -250,6 +250,14 @@ class TestIsGGUF:
 
 
 class TestRemoteGGUFSourceResolution:
+    @pytest.fixture(autouse=True)
+    def clear_remote_gguf_base_model_cache(self):
+        from vllm.transformers_utils import gguf_utils
+
+        gguf_utils._get_remote_gguf_base_model_ids.cache_clear()
+        yield
+        gguf_utils._get_remote_gguf_base_model_ids.cache_clear()
+
     def test_config_source_uses_first_base_model_with_config(self, monkeypatch):
         from vllm.transformers_utils import gguf_utils
 
@@ -428,3 +436,50 @@ class TestRemoteGGUFSourceResolution:
         assert (
             resolve_gguf_tokenizer_source(gguf_path, revision="local-rev") == "org/base"
         )
+
+    def test_remote_base_model_ids_are_cached_between_resolvers(self, monkeypatch):
+        from vllm.transformers_utils import gguf_utils
+
+        class FakeInfo:
+            card_data = {"base_model": "org/base"}
+
+        class FakeHfApi:
+            call_count = 0
+
+            def model_info(self, repo_id, revision=None):
+                self.call_count += 1
+                assert repo_id == "org/model-GGUF"
+                assert revision == "gguf-rev"
+                return FakeInfo()
+
+        fake_api = FakeHfApi()
+
+        def fake_file_or_path_exists(model, filename, revision=None):
+            return (
+                model == "org/base"
+                and filename in {"config.json", "tokenizer_config.json"}
+                and revision is None
+            )
+
+        monkeypatch.setattr(gguf_utils, "hf_api", lambda: fake_api)
+        monkeypatch.setattr(
+            gguf_utils,
+            "file_or_path_exists",
+            fake_file_or_path_exists,
+        )
+
+        assert (
+            resolve_gguf_config_source(
+                "org/model-GGUF:UD-IQ4_NL",
+                revision="gguf-rev",
+            )
+            == "org/base"
+        )
+        assert (
+            resolve_gguf_tokenizer_source(
+                "org/model-GGUF:UD-IQ4_NL",
+                revision="gguf-rev",
+            )
+            == "org/base"
+        )
+        assert fake_api.call_count == 1

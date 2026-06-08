@@ -150,21 +150,22 @@ def _normalize_base_model_ids(base_model: Any) -> list[str]:
     return []
 
 
+@cache
 def _get_remote_gguf_base_model_ids(
     repo_id: str,
     revision: str | None = None,
-) -> list[str]:
+) -> tuple[str, ...]:
     try:
         info = hf_api().model_info(repo_id, revision=revision)
     except Exception as e:
         logger.debug("Failed to inspect GGUF model card for %s: %s", repo_id, e)
-        return []
+        return ()
 
     card_data = getattr(info, "card_data", None)
     base_model = getattr(card_data, "base_model", None)
     if base_model is None and isinstance(card_data, dict):
         base_model = card_data.get("base_model")
-    return _normalize_base_model_ids(base_model)
+    return tuple(_normalize_base_model_ids(base_model))
 
 
 def _normalize_hf_repo_id(value: Any) -> str | None:
@@ -231,9 +232,11 @@ def _resolve_gguf_hf_source(
     if is_remote_gguf(model):
         source: str | Path
         source, _ = split_remote_gguf(model)
-        base_model_ids = _get_remote_gguf_base_model_ids(
-            source,
-            revision=revision,
+        base_model_ids = list(
+            _get_remote_gguf_base_model_ids(
+                source,
+                revision=revision,
+            )
         )
     elif check_gguf_file(model):
         source = Path(model).parent
