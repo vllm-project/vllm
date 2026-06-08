@@ -675,7 +675,11 @@ def test_mxfp4_patterns_fire_on_model(monkeypatch):
         rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op(),
         rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op(),
     ])
-    # Standalone quant must be fully eliminated (mirrors PR#42864 check_before_ops)
+    # Standalone quant must be absent from the post-pass graph (mirrors PR#42864)
+    backend.check_not_in_after_ops([
+        rocm_aiter_ops.get_dynamic_mxfp4_quant_op(),
+    ])
+    # Standalone quant must be fully eliminated from before→after
     backend.check_before_ops(
         [rocm_aiter_ops.get_dynamic_mxfp4_quant_op()],
         fully_replaced=True,

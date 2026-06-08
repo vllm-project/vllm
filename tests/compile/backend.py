@@ -121,6 +121,17 @@ class TestBackend:
             assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
             assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
 
+    def check_not_in_after_ops(
+        self, ops: Sequence[OpOverload | OpOverloadPacket]
+    ):
+        """Assert ops are absent from the post-pass graph (fully replaced)."""
+        for op in ops:
+            num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
+            assert num_post == 0, (
+                f"Op {op.name()} should be absent from post-pass graph "
+                f"but found {num_post} node(s)"
+            )
+
     def op_count(self, op: OpOverload | OpOverloadPacket, before=False) -> int:
         graph = self.graph_pre_pass if before else self.graph_post_pass
         return len(list(find_op_nodes(op, graph)))
