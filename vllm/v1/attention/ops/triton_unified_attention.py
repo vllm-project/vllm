@@ -1804,7 +1804,6 @@ def unified_attention(
     use_nvfp4_bytewise_decode = (
         use_nvfp4
         and not use_raw_current_kv
-        and max_seqlen_q == 1
         and sliding_window_val == 0
         and chunk_lookback == -1
         and mm_prefix_range is None
