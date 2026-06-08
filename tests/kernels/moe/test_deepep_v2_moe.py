@@ -455,7 +455,7 @@ def _deep_ep_v2_moe_cudagraph(
             num_experts=num_local_experts,
             experts_per_token=config.topk,
             hidden_dim=hidden_size,
-            intermediate_size_per_partition=config.n,
+            intermediate_size=config.n,
         )
         fused_experts = TrtLlmFp8ExpertsModular(
             moe_config=moe_config,

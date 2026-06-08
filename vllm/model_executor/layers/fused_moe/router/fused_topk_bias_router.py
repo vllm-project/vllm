@@ -173,8 +173,7 @@ def fused_topk_bias(
     if indices_type is not None:
         if input_tokens is not None and input_tokens.dtype != indices_type:
             input_tokens = input_tokens.to(dtype=indices_type)
-        if (hash_indices_table is not None
-                and hash_indices_table.dtype != indices_type):
+        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
             hash_indices_table = hash_indices_table.to(dtype=indices_type)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
