@@ -49,7 +49,6 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -224,6 +223,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -3193,7 +3193,9 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
+    def apply_sparse_weight_patches(
+        self, patches: Iterable["SparseWeightPatch"]
+    ) -> None:
         """Apply sparse flat-index patches directly to existing model params."""
         model = self.get_model()
         for patch in patches:
