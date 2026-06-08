@@ -892,3 +892,40 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+def is_shared_expert_fse_compatible(quant_config) -> bool:
+    """Return False when the quant config is incompatible with AITER FSE.
+
+    Blocks FSE when the quant config uses Quark OCP-MX dtypes (fp4/fp6) or
+    excludes the shared expert from quantization (via Quark exclude list or
+    any backend's modules_to_not_convert), which would cause a dtype mismatch
+    or silent accuracy failure inside FusedMoE.
+    """
+    if quant_config is None:
+        return True
+
+    # Quark-specific checks (config stored under quant_config.quant_config dict)
+    raw_config = getattr(quant_config, "quant_config", None)
+    if isinstance(raw_config, dict):
+        # Case 1: OCP-MX weight dtype — emulation backend incompatible with FSE.
+        global_quant = raw_config.get("global_quant_config", {})
+        if isinstance(global_quant, dict):
+            weight_cfg = global_quant.get("weight", {})
+            if isinstance(weight_cfg, dict) and weight_cfg.get("dtype") in {
+                "fp4",
+                "fp6_e3m2",
+                "fp6_e2m3",
+            }:
+                return False
+        # Case 2: shared expert excluded from quant → dtype mismatch in FusedMoE.
+        exclude = raw_config.get("exclude", [])
+        if any("shared_expert" in str(e) for e in exclude):
+            return False
+
+    # General: any backend's modules_to_not_convert covering the shared expert.
+    modules_to_not_convert = getattr(quant_config, "modules_to_not_convert", None)
+    return not (
+        modules_to_not_convert
+        and any("shared_expert" in m for m in modules_to_not_convert)
+    )
