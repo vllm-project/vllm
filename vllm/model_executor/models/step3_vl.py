@@ -709,12 +709,6 @@ class Step3VLForConditionalGeneration(
             out_hidden_size=self.config.hidden_size,
         )
 
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",

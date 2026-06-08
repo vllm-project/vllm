@@ -21,7 +21,6 @@ from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -57,8 +56,11 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
-from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -357,6 +359,14 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        parser: Parser | None = None
+        if self.parser_cls is not None:
+            parser = self.parser_cls(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -378,7 +388,7 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            reasoning_parser,
+            parser,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -959,7 +969,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        reasoning_parser: ReasoningParser | None = None,
+        parser: Parser | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1068,28 +1078,20 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
-            if reasoning_parser:
-                # If the reasoning parser is enabled,
-                # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+            if parser is not None:
+                reasoning, content, tool_calls = parser.parse(
+                    output.text,
+                    request,
+                    enable_auto_tools=self.enable_auto_tools,
                 )
                 if not request.include_reasoning:
                     reasoning = None
             else:
                 reasoning = None
                 content = output.text
+                tool_calls = []
 
             auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            tool_calls, content = self._parse_tool_calls_from_content(
-                request=request,
-                tokenizer=tokenizer,
-                content=content,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_parser_cls=self.tool_parser,
-            )
             if is_mistral_tokenizer(tokenizer):
                 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 
