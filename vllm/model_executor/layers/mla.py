@@ -5,10 +5,13 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -129,6 +132,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                     rocm_aiter_ops.is_mla_enabled()
                     and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
                 )
+                if self._f3_fusion_enabled:
+                    logger.info(
+                        "F3 fused RoPE+KV-cache dispatch auto-enabled "
+                        "(prefix=%s)", prefix
+                    )
             except Exception:
                 pass  # aiter not available; stay False
 
