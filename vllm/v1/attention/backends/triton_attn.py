@@ -76,6 +76,7 @@ class TritonAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     is_all_pure_prefill: bool
+    is_decode_only: bool
 
     seq_threshold_3D: int
     num_par_softmax_segments: int
@@ -209,6 +210,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
             seq_lens_cpu = seq_lens_cpu[: query_lens.shape[0]]
             is_all_pure_prefill = bool(torch.all(seq_lens_cpu == query_lens).item())
+        is_prefilling = common_attn_metadata.is_prefilling
+        is_decode_only = is_prefilling is not None and not bool(
+            torch.any(is_prefilling[: common_attn_metadata.num_reqs]).item()
+        )
 
         use_cascade = common_prefix_len > 0
 
@@ -755,6 +760,7 @@ class TritonAttentionImpl(AttentionImpl):
             and key is not None
             and value is not None
             and max_seqlen_q > 1
+            and not attn_metadata.is_decode_only
         )
 
         unified_attention(
