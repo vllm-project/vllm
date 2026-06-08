@@ -12,11 +12,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine,
 )
-from vllm.distributed.parallel_state import get_world_group
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
+    get_world_group,
+)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -28,6 +32,13 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _normalize_req_id(request_id: str) -> str:
+    parts = request_id.rsplit("-", 1)
+    if len(parts) == 2 and len(parts[1]) == 8:
+        return parts[0]
+    return request_id
 
 
 @dataclass
@@ -54,9 +65,11 @@ class ReqMeta:
 @dataclass
 class P2pNcclConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta]
+    ssm_requests: list[ReqMeta]
 
     def __init__(self):
         self.requests = []
+        self.ssm_requests = []
 
     def add_request(
         self,
@@ -69,8 +82,21 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
             ReqMeta.make_meta(request_id, token_ids, block_ids, block_size)
         )
 
+    def add_ssm_request(self, request_id: str) -> None:
+        self.ssm_requests.append(
+            ReqMeta(request_id=request_id, block_ids=torch.tensor([]), num_tokens=0)
+        )
 
-class P2pNcclConnector(KVConnectorBase_V1):
+
+class P2pNcclConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        # Mamba does not support cross-layer block layout
+        if self._has_mamba:
+            return False
+        # P2P NCCL does not benefit from cross-layer blocks
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -103,9 +129,97 @@ class P2pNcclConnector(KVConnectorBase_V1):
             else None
         )
 
+        self._has_mamba = False
+        self._conv_decomp: Any = None
+        self._mamba_states_sent: set[str] = set()
+        if role == KVConnectorRole.WORKER:
+            self._detect_mamba(kv_cache_config)
+
+    def _detect_mamba(self, kv_cache_config: "KVCacheConfig") -> None:
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+        self._has_mamba = any(
+            not isinstance(g.kv_cache_spec, FullAttentionSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
+        if not self._has_mamba:
+            return
+
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            is_conv_state_dim_first,
+        )
+
+        assert is_conv_state_dim_first(), (
+            "P2pNccl mamba state transfer requires DS conv state layout. "
+            "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            ssm_conv_transfer_utils,
+        )
+
+        mamba_spec = next(
+            spec
+            for g in kv_cache_config.kv_cache_groups
+            for spec in [g.kv_cache_spec]
+            if isinstance(spec, MambaSpec)
+        )
+        self._conv_decomp = ssm_conv_transfer_utils.derive_mamba_conv_split(
+            mamba_spec,
+            get_tensor_model_parallel_world_size(),
+        )
+        logger.info(
+            "P2pNcclConnector detected mamba model, conv_decomp=%s",
+            self._conv_decomp,
+        )
+
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def _is_attention_layer(self, layer: Any) -> bool:
+        cache = getattr(layer, "kv_cache", None)
+        return isinstance(cache, torch.Tensor)
+
+    def _load_mamba_states(
+        self,
+        forward_context: "ForwardContext",
+        request_id: str,
+        remote_address: str,
+        mamba_req_idx: int = 0,
+    ) -> None:
+        fc_attn_meta = forward_context.attn_metadata
+        if not isinstance(fc_attn_meta, dict):
+            return
+        from vllm.v1.attention.backends.gdn_attn import (
+            GDNAttentionMetadata,
+        )
+        from vllm.v1.attention.backends.mamba_attn import (
+            BaseMambaAttentionMetadata,
+        )
+
+        for layer_name in forward_context.no_compile_layers:
+            layer = forward_context.no_compile_layers[layer_name]
+            meta = fc_attn_meta.get(layer_name)
+            if not isinstance(meta, (BaseMambaAttentionMetadata, GDNAttentionMetadata)):
+                continue
+            kv_cache = getattr(layer, "kv_cache", None)
+            if isinstance(kv_cache, (tuple, list)) and len(kv_cache) > 0:
+                kv_cache = kv_cache[0]
+            if not isinstance(kv_cache, torch.Tensor) or kv_cache.shape[0] == 0:
+                continue
+            norm_id = _normalize_req_id(request_id)
+            received = self.p2p_nccl_engine.recv_tensor(
+                norm_id + "#" + layer_name + "_conv", remote_address
+            )
+            if received is None:
+                continue
+            slot = 0
+            if isinstance(meta, BaseMambaAttentionMetadata):
+                si = meta.state_indices_tensor_d
+                if si is not None and mamba_req_idx < len(si):
+                    slot = si[mamba_req_idx].item()
+            if 0 <= slot < kv_cache.shape[0]:
+                kv_cache[slot] = received.to(kv_cache.dtype)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -123,9 +237,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Only consumer/decode loads KV Cache
         if self.is_producer:
             return
-
         assert self.p2p_nccl_engine is not None
-
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
             return
@@ -163,7 +275,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             else:
                 layer[block_ids[:num_block], ...] = kv_cache
                 logger.warning(
-                    "🚧kv_cache does not match, block_ids:%d, "
+                    "kv_cache does not match, block_ids:%d, "
                     "num_block:%d, request_id:%s",
                     len(block_ids),
                     num_block,
@@ -173,14 +285,18 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Get the metadata
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, P2pNcclConnectorMetadata)
-
         if metadata is None:
             return
 
         # Load the KV for each request each layer
+        mamba_req_idx = 0
         for request in metadata.requests:
             request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, False)
+            norm_id = _normalize_req_id(request_id)
+            try:
+                ip, port = self.parse_request_id(request_id, False)
+            except ValueError:
+                continue
             remote_address = ip + ":" + str(port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
@@ -188,23 +304,23 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE
-                kv_cache = getattr(layer, "kv_cache", None)
-                if kv_cache is None:
+                if not self._is_attention_layer(layer):
                     continue
-
-                layer = kv_cache
-
-                kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address
+                kv_cache = layer.kv_cache
+                received = self.p2p_nccl_engine.recv_tensor(
+                    norm_id + "#" + layer_name, remote_address
                 )
-
-                if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
+                if received is None:
                     continue
-
                 inject_kv_into_layer(
-                    layer, kv_cache, request.block_ids, request.request_id
+                    kv_cache, received, request.block_ids, request.request_id
                 )
+
+            if self._has_mamba:
+                self._load_mamba_states(
+                    forward_context, request_id, remote_address, mamba_req_idx
+                )
+                mamba_req_idx += 1
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -216,6 +332,68 @@ class P2pNcclConnector(KVConnectorBase_V1):
             layer_name: the name of that layer
         """
         return
+
+    def _save_mamba_states(
+        self,
+        forward_context: "ForwardContext",
+        connector_metadata: "P2pNcclConnectorMetadata",
+    ) -> None:
+        fc_attn_meta = forward_context.attn_metadata
+        if not isinstance(fc_attn_meta, dict):
+            return
+        from vllm.v1.attention.backends.gdn_attn import (
+            GDNAttentionMetadata,
+        )
+        from vllm.v1.attention.backends.mamba_attn import (
+            BaseMambaAttentionMetadata,
+        )
+
+        for layer_name in forward_context.no_compile_layers:
+            layer = forward_context.no_compile_layers[layer_name]
+            meta = fc_attn_meta.get(layer_name)
+            if not isinstance(meta, (BaseMambaAttentionMetadata, GDNAttentionMetadata)):
+                continue
+            kv_cache = getattr(layer, "kv_cache", None)
+            if isinstance(kv_cache, (tuple, list)) and len(kv_cache) > 0:
+                kv_cache = kv_cache[0]
+            if not isinstance(kv_cache, torch.Tensor) or kv_cache.shape[0] == 0:
+                continue
+            logger.debug(
+                "_save_mamba_states: SENDING layer=%s shape=%s",
+                layer_name,
+                kv_cache.shape,
+            )
+            slot = 0
+            if isinstance(meta, BaseMambaAttentionMetadata):
+                si = meta.state_indices_tensor_p
+                if si is not None and len(si) > 0:
+                    slot = si[0].item()
+            if slot >= kv_cache.shape[0]:
+                continue
+            ssm_requests = connector_metadata.requests
+            for req_idx, request in enumerate(ssm_requests):
+                norm_id = _normalize_req_id(request.request_id)
+                tensor_id = norm_id + "#" + layer_name + "_conv"
+                if tensor_id in self._mamba_states_sent:
+                    continue
+                try:
+                    ip, port = self.parse_request_id(request.request_id, True)
+                except ValueError:
+                    continue
+                remote_address = ip + ":" + str(port + self._rank)
+                if isinstance(meta, BaseMambaAttentionMetadata):
+                    si = meta.state_indices_tensor_p
+                    if si is not None and req_idx < len(si):
+                        slot = si[req_idx].item()
+                if slot >= kv_cache.shape[0]:
+                    continue
+                state_slice = kv_cache[slot].clone()
+                self.p2p_nccl_engine.send_tensor(
+                    tensor_id,
+                    state_slice,
+                    remote_address,
+                )
+                self._mamba_states_sent.add(tensor_id)
 
     def save_kv_layer(
         self,
@@ -238,20 +416,33 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Only producer/prefill saves KV Cache
         if not self.is_producer:
             return
-
         assert self.p2p_nccl_engine is not None
-
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
             request_id = request.request_id
-            ip, port = self.parse_request_id(request_id, True)
+            norm_id = _normalize_req_id(request_id)
+            try:
+                ip, port = self.parse_request_id(request_id, True)
+            except ValueError:
+                continue
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = kv_layer[request.block_ids, ...]
             self.p2p_nccl_engine.send_tensor(
-                request_id + "#" + layer_name, kv_cache, remote_address
+                norm_id + "#" + layer_name, kv_cache, remote_address
             )
+
+        if self._has_mamba:
+            from vllm.forward_context import get_forward_context
+
+            fc = get_forward_context()
+            if fc is not None:
+                self._save_mamba_states(fc, connector_metadata)
+
+    def clear_connector_metadata(self) -> None:
+        self._mamba_states_sent.clear()
+        super().clear_connector_metadata()
 
     def wait_for_save(self):
         if self.is_producer:
@@ -273,9 +464,22 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         assert self.p2p_nccl_engine is not None
-
+        # Normalize request IDs to match tensor_id keys in the engine
+        norm_finished_req_ids = {_normalize_req_id(rid) for rid in finished_req_ids}
         no_compile_layers = self._vllm_config.compilation_config.static_forward_context
-        return self.p2p_nccl_engine.get_finished(finished_req_ids, no_compile_layers)
+        sent, recvd = self.p2p_nccl_engine.get_finished(
+            norm_finished_req_ids, no_compile_layers
+        )
+
+        if self._has_mamba:
+            for request_id in finished_req_ids:
+                norm_id = _normalize_req_id(request_id)
+                for layer_name in no_compile_layers:
+                    tensor_id = norm_id + "#" + layer_name + "_conv"
+                    with self.p2p_nccl_engine.recv_store_cv:
+                        self.p2p_nccl_engine.recv_store.pop(tensor_id, None)
+
+        return sent, recvd
 
     # ==============================
     # Scheduler-side methods
@@ -303,11 +507,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             return 0, False
 
         prompt_token_ids = request.prompt_token_ids or []
+        # The last prompt token is always computed locally by the decoder
         num_external_tokens = len(prompt_token_ids) - 1 - num_computed_tokens
-
         if num_external_tokens < 0:
             num_external_tokens = 0
-
         return num_external_tokens, False
 
     def update_state_after_alloc(
@@ -321,6 +524,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 request,
                 blocks.get_block_ids()[0],
             )
+
+    def _truncate_mamba_token_ids(self, token_ids: list[int]) -> list[int]:
+        """P-side: drop the last prompt token so the prefiller sends h(N-1).
+        The decoder recomputes the last token to derive h(N).
+        Only effective when self._has_mamba and token_ids has > 1 element."""
+        if self._has_mamba and len(token_ids) > 1:
+            return token_ids[:-1]
+        return token_ids
 
     def build_connector_meta(
         self,
@@ -354,7 +565,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is not chunked prefill
                 meta.add_request(
                     request_id=new_req.req_id,
-                    token_ids=new_req.prompt_token_ids or [],
+                    token_ids=self._truncate_mamba_token_ids(
+                        new_req.prompt_token_ids or []
+                    ),
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                 )
@@ -375,9 +588,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
             resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
 
             if self.is_producer:
+                # Skip requests that completed prefill in a single step
+                if req_id not in self.chunked_prefill:
+                    continue
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens = num_scheduled_tokens + num_computed_tokens
-                assert req_id in self.chunked_prefill
                 assert new_block_ids is not None
                 block_ids = new_block_ids[0]
                 if not resumed_from_preemption:
@@ -391,7 +606,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is all prefilled finally
                 meta.add_request(
                     request_id=req_id,
-                    token_ids=prompt_token_ids,
+                    token_ids=self._truncate_mamba_token_ids(prompt_token_ids),
                     block_ids=block_ids,
                     block_size=self._block_size,
                 )
@@ -411,7 +626,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # of the block_ids for the request.
                 assert new_block_ids is not None
                 block_ids = new_block_ids[0]
-
                 meta.add_request(
                     request_id=req_id,
                     token_ids=token_ids,
@@ -439,7 +653,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         self.chunked_prefill.pop(request.request_id, None)
+        return False, None
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self.chunked_prefill.pop(request.request_id, None)
         return False, None
 
     # ==============================
@@ -468,7 +689,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
     def check_tensors_except_dim(tensor1, tensor2, dim):
         shape1 = tensor1.size()
         shape2 = tensor2.size()
-
         if len(shape1) != len(shape2) or not all(
             s1 == s2 for i, (s1, s2) in enumerate(zip(shape1, shape2)) if i != dim
         ):
