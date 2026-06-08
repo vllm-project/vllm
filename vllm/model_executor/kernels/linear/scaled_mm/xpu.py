@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -37,6 +38,11 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
             return False, "XPUW8A8FP8Linear only support on XPU"
+        if not envs.VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL:
+            return (
+                False,
+                "XPUW8A8FP8Linear requires VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL=1",
+            )
         return True, None
 
     @classmethod
