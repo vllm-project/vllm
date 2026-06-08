@@ -30,9 +30,23 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
-
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+
+  // preprocess W-int4A-fp8 weight for marlin kernel
+  ops.def(
+      "marlin_int4_fp8_preprocess(Tensor qweight, "
+      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+
+  // gptq_marlin repack from GPTQ.
+  ops.def(
+      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+
+  // awq_marlin repack from AWQ.
+  ops.def(
+      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
+      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
 #endif
 
 #ifndef USE_ROCM
