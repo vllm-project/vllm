@@ -554,7 +554,7 @@ class Qwen3ASRForConditionalGeneration(
         audio = stt_params.audio
         model_config = stt_params.model_config
         task_type = stt_params.task_type
-        to_language = stt_params.to_language
+        to_language = stt_params.to_language or stt_params.language
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
