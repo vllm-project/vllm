@@ -1618,7 +1618,12 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/attention
+      --ignore=kernels/attention/test_rocm_aiter_mla.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_sparse.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_variants.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
@@ -1690,6 +1695,29 @@ steps:
   - vllm/envs.py
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
+
+- label: Kernels AITER MLA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/attention/mla/
+  - csrc/rocm/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+  - tests/kernels/rocm/utils.py
+  commands:
+  - pytest -v -s kernels/attention/test_rocm_aiter_mla.py
+      kernels/attention/test_rocm_aiter_mla_sparse.py
+      kernels/attention/test_rocm_aiter_mla_variants.py
+      kernels/attention/test_rocm_aiter_mla_fp8_support.py
 
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
@@ -3089,7 +3117,12 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/attention
+      --ignore=kernels/attention/test_rocm_aiter_mla.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_sparse.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_variants.py
+      --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -3143,6 +3176,30 @@ steps:
   - vllm/envs.py
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
+
+- label: Kernels AITER MLA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/attention/mla/
+  - csrc/rocm/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_sparse.py
+  - tests/kernels/rocm/aiter/test_rocm_aiter_mla_variants.py
+  - tests/kernels/rocm/utils.py
+  commands:
+  - pytest -v -s kernels/attention/test_rocm_aiter_mla.py
+      kernels/attention/test_rocm_aiter_mla_sparse.py
+      kernels/attention/test_rocm_aiter_mla_variants.py
+      kernels/attention/test_rocm_aiter_mla_fp8_support.py
 
 #-----------------------------------------------------  mi355 · models / language  -----------------------------------------------------#
 
