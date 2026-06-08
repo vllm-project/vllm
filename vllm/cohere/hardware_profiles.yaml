@@ -14,6 +14,9 @@ profiles:
       # Re-enable for Cohere serves to restore v0.19 prefill/TTFT performance on
       # Hopper/Blackwell; warmup only runs autotune when FlashInfer + SM 9.0/10.0.
       enable-flashinfer-autotune: ""
+      # v0.19 defaulted fast_moe_cold_start=True for MoE models; v0.21 forces
+      # False on torch>=2.11 but request it explicitly to match v0.19 behavior.
+      compilation-config: '{"fast_moe_cold_start": true}'
       # Cohere thinking markers for ReasoningConfig / thinking-token-budget.
       reasoning-config: '{"reasoning_start_str":"<|START_THINKING|>","reasoning_end_str":"<|END_THINKING|>"}'
     env:
@@ -41,9 +44,6 @@ profiles:
     when: server.type == "vllm" && matches(gpu.name, "gb200")
     args:
       attention-backend: "FLASHINFER"
-      # v0.21 auto-selects VLLM_CUTLASS for C4 FP8 MoE; v0.19 GB200 TTFT was ~45%
-      # faster at mc=1/1k. Prefer FlashInfer TRTLLM on SM100 (SigmoidRenorm routing).
-      moe-backend: "flashinfer_trtllm"
     env:
       VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE: "true"
 
