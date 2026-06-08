@@ -832,8 +832,8 @@ class FlashAttentionImpl(AttentionImpl):
                         )
 
                         attn_metadata.mm_prefix_block_sparse = compute_block_sparsity(
-                            tile_m=128,
-                            tile_n=128,
+                            tile_m=64,
+                            tile_n=64,
                             batch_size=cu_seqlens_q.shape[0] - 1,
                             num_heads=1,
                             seqlen_q=max_seqlen_q,
