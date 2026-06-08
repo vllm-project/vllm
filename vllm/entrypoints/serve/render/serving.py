@@ -191,8 +191,12 @@ class OpenAIServingRender:
         request_id = f"chatcmpl-{random_uuid()}"
 
         # ACE Phase 3: link this request_id to its conversation session so that
-        # model_runner can install attention hooks keyed by request_id.
-        _ace_session_id = getattr(request, "conversation_id", None)
+        # model_runner can install attention hooks keyed by request_id. Validate
+        # the client-supplied conversation_id before it reaches the global
+        # registry, mirroring the check in render_chat().
+        _ace_session_id = _validate_conversation_id(
+            getattr(request, "conversation_id", None)
+        )
         if getattr(request, "context_compression", None) == "ace" and _ace_session_id:
             _ace_register_req(request_id, _ace_session_id)
 

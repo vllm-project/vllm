@@ -209,9 +209,12 @@ def apply_pixol_eviction(
     if _total(messages) <= budget_chars:
         return 0
 
+    # Only compress tool-result messages. User/system turns may carry the task
+    # description, security constraints, or behavioral guardrails that must never
+    # be silently evicted (see context_compression.apply_ace_eviction).
     tool_indices = [
         i for i, m in enumerate(messages)
-        if m.get("role") in ("tool", "user")
+        if m.get("role") == "tool"
         and isinstance(m.get("content"), str)
         and len(m["content"]) >= min_chars
     ]
