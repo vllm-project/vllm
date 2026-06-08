@@ -498,7 +498,7 @@ class FlashInferTrtllmAPIDecode:
     decode kernels because their dtype/layout/output constraints differ.
     """
 
-    kernel: ClassVar[FlashInferDecodeKernel]
+    kernel: FlashInferDecodeKernel
 
     block_tables: torch.Tensor
     """
@@ -514,20 +514,6 @@ class FlashInferTrtllmAPIDecode:
 
     max_seq_len: int
     """The maximum sequence length for KV Cache."""
-
-
-@dataclass
-class XQADecode(FlashInferTrtllmAPIDecode):
-    """Metadata for the SM90 XQA decode pathway."""
-
-    kernel: ClassVar[FlashInferDecodeKernel] = FlashInferDecodeKernel.XQA
-
-
-@dataclass
-class TRTLLMGenDecode(FlashInferTrtllmAPIDecode):
-    """Metadata for the SM100 trtllm-gen decode pathway."""
-
-    kernel: ClassVar[FlashInferDecodeKernel] = FlashInferDecodeKernel.TRTLLM_GEN
 
 
 @dataclass
@@ -681,11 +667,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             vllm_config, self.kv_cache_spec, is_prefill=False
         )
 
-        # Per-phase static support check.  Used only for `__init__`-time
-        # decisions like `supports_spec_as_decode`.  The runtime decision
-        # for each `build()` call is made below.
+        # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
+        # must be selected statically for FULL cudagraph capture.
         can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             self.num_qo_heads, self.num_kv_heads, is_prefill=False
+        )
+        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode
+        self.flashinfer_trtllm_api_decode_kernel: FlashInferDecodeKernel | None = (
+            self._get_flashinfer_trtllm_api_decode_kernel()
+            if can_use_xqa_or_trtllm_gen_decode
+            else None
         )
         self._init_reorder_batch_threshold(
             1, supports_spec_as_decode=can_use_xqa_or_trtllm_gen_decode
@@ -708,6 +699,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
+        capability = current_platform.get_device_capability()
+        arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
+        decode_backend = (
+            self.flashinfer_trtllm_api_decode_kernel.value
+            if self.flashinfer_trtllm_api_decode_kernel is not None
+            else "flashinfer-native"
+        )
+        logger.info_once(
+            "FlashInfer resolved query dtypes: prefill=%s, decode=%s, "
+            "decode_backend=%s, kv_cache_dtype=%s, arch=%s",
+            self.q_data_type_prefill,
+            self.q_data_type_decode,
+            decode_backend,
+            self.kv_cache_dtype,
+            arch,
+        )
         # Preparing persistent buffers
         # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
         # reused CPU buffers to avoid a race condition between step N async copies to
@@ -823,11 +830,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = workspace_buffer
 
     @staticmethod
-    def _get_flashinfer_trtllm_api_decode_cls() -> type[FlashInferTrtllmAPIDecode]:
+    def _get_flashinfer_trtllm_api_decode_kernel() -> FlashInferDecodeKernel:
         if current_platform.is_device_capability(90):
-            return XQADecode
+            return FlashInferDecodeKernel.XQA
         assert current_platform.is_device_capability_family(100)
-        return TRTLLMGenDecode
+        return FlashInferDecodeKernel.TRTLLM_GEN
 
     def _get_prefill_wrapper(
         self,
@@ -996,18 +1003,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_with_flashinfer_trtllm_api = use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_decode_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type_decode,
-            is_prefill=False,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
+        decode_with_flashinfer_trtllm_api = (
+            self.use_trtllm_decode_attention and self.dcp_world_size <= 1
         )
         all_uses_trtllm = (num_prefills == 0 or prefill_use_trtllm) and (
             num_decodes == 0 or decode_with_flashinfer_trtllm_api
@@ -1275,8 +1272,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "XQA/trtllm-gen decode requires uniform query lengths per request. "
                     f"Got {num_decode_tokens=} and {num_decodes=}."
                 )
-                decode_cls = self._get_flashinfer_trtllm_api_decode_cls()
-                attn_metadata.decode = decode_cls(
+                assert self.flashinfer_trtllm_api_decode_kernel is not None
+                attn_metadata.decode = FlashInferTrtllmAPIDecode(
+                    kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],
                     max_seq_len=max_seq_len,
@@ -1528,8 +1526,13 @@ class FlashInferImpl(AttentionImpl):
                 self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
-        decode_with_xqa = isinstance(attn_metadata.decode, XQADecode)
-        decode_with_trtllm_gen = isinstance(attn_metadata.decode, TRTLLMGenDecode)
+        decode_kernel = (
+            attn_metadata.decode.kernel
+            if isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode)
+            else None
+        )
+        decode_with_xqa = decode_kernel == FlashInferDecodeKernel.XQA
+        decode_with_trtllm_gen = decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
         decode_with_flashinfer_trtllm_api = decode_with_xqa or decode_with_trtllm_gen
 
         # The attn+quant fusion happens when output_scale is provided.
