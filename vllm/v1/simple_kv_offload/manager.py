@@ -359,30 +359,13 @@ class SimpleCPUOffloadScheduler:
             gpu_ext_start = n_computed_g - n_ext_g
             group_gpu_ids = block_ids_by_group[g]
 
-            # Build deduped load pairs for this group. SWA reuse can cause
-            # the same ``gpu_block_id`` to appear at multiple logical
-            # positions; keep the LAST occurrence (most recent CPU data)
-            # for each GPU block to avoid over-incrementing ``ref_cnt``
-            # and corrupting the free list (same defect class as #42085).
-            load_map: dict[int, tuple[int, KVCacheBlock]] = {}
             for i, cpu_blk in enumerate(cpu_blocks_g):
                 # Skip null blocks (e.g. sliding window or mamba padding).
                 if cpu_blk.is_null:
                     continue
-                gpu_bid = group_gpu_ids[gpu_ext_start + i]
-                # Later occurrence overwrites earlier → keeps the last.
-                load_map[gpu_bid] = (cpu_blk.block_id, cpu_blk)
-
-            seen_cpu_block_ids: set[int] = set()
-            for gpu_bid, (cpu_bid, cpu_blk) in load_map.items():
-                gpu_block_ids.append(gpu_bid)
-                cpu_block_ids.append(cpu_bid)
-                # Dedup CPU blocks for resource management (touch/free).
-                # Different GPU blocks can map to the same CPU block when
-                # distinct logical positions share identical content.
-                if cpu_bid not in seen_cpu_block_ids:
-                    seen_cpu_block_ids.add(cpu_bid)
-                    cpu_blocks_to_touch.append(cpu_blk)
+                gpu_block_ids.append(group_gpu_ids[gpu_ext_start + i])
+                cpu_block_ids.append(cpu_blk.block_id)
+                cpu_blocks_to_touch.append(cpu_blk)
 
         # Touch CPU blocks to prevent eviction during async load.
         self.cpu_block_pool.touch(cpu_blocks_to_touch)
@@ -589,15 +572,6 @@ class SimpleCPUOffloadScheduler:
             # Cap to blocks with confirmed KV data.
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
-            # Eagerly track ``in_flight`` during the scan to dedup both within a
-            # request (SWA reuses the same physical block at multiple logical
-            # positions as the window slides) and across requests in the same
-            # step (prefix sharing produces the same ``gpu_block_id`` in two
-            # requests' scan ranges). Without eager dedup, the same
-            # ``gpu_block_id`` could appear multiple times in
-            # ``merged_gpu_block_ids``, leading to over-incremented ``ref_cnt``
-            # and corruption of the ``BlockPool`` free list (see #42085, #42571).
-
             for g in range(num_groups):
                 # FIXME (yifan): handle CPU cache eviction, where
                 # num_stored_blocks can be stale and omit evicted blocks in
@@ -627,10 +601,9 @@ class SimpleCPUOffloadScheduler:
                         advanced_per_group[g] += 1
                         continue
 
-                    # Skip if already scheduled for store or already cached in CPU.
+                    # Skip if already cached in CPU.
                     if (
-                        gpu_block_id in in_flight
-                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
                         is not None
@@ -665,7 +638,6 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
                 merged_gpu_block_ids.extend(gpu_block_ids)
                 merged_cpu_block_ids.extend(cpu_block_ids)
-                in_flight.update(gpu_block_ids)
 
                 # Touch GPU blocks to prevent freeing during async copy
                 gpu_block_pool.touch(
