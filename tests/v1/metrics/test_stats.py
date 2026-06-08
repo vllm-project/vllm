@@ -1,17 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    compute_request_modality,
 )
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_compute_request_modality():
+    """Request modality: text / single modality / mixed."""
+
+    @dataclass
+    class _Feature:
+        modality: str
+
+    assert compute_request_modality(None) == "text"
+    assert compute_request_modality([]) == "text"
+    assert compute_request_modality([_Feature("image")]) == "image"
+    assert compute_request_modality([_Feature("audio"), _Feature("audio")]) == "audio"
+    assert compute_request_modality([_Feature("image"), _Feature("audio")]) == "mixed"
+
+
+def test_finished_request_modality_tracking():
+    """modality flows through to FinishedRequestStats (defaults to text)."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+
+    # Image request.
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="img-req",
+        num_prompt_tokens=100,
+        max_tokens_param=10,
+        req_stats=req_stats,
+        modality="image",
+    )
+    # Text-only request: modality defaults to "text".
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="text-req",
+        num_prompt_tokens=100,
+        max_tokens_param=10,
+        req_stats=req_stats,
+    )
+
+    assert iteration_stats.finished_requests[0].modality == "image"
+    assert iteration_stats.finished_requests[1].modality == "text"
 
 
 def test_prefill_kv_computed_with_cache():

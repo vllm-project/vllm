@@ -14,6 +14,36 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
+# Label values for the "modality" label used to distinguish text-only requests
+# from requests carrying multi-modal data (image, audio, video, ...).
+# Only "text" is pre-registered as a metric bucket; every other modality
+# ("image", "audio", "video", "mixed", or any custom modality a model reports)
+# is created lazily on first use, so cardinality stays bounded by the
+# modalities the loaded model actually serves.
+REQUEST_MODALITY_TEXT = "text"
+# A request carrying more than one distinct multi-modal modality.
+REQUEST_MODALITY_MIXED = "mixed"
+
+
+def compute_request_modality(mm_features) -> str:
+    """Return the request-level modality label for metrics.
+
+    Args:
+        mm_features: The request's multi-modal feature specs, or None for a
+            text-only request. Each item is expected to expose a ``modality``
+            attribute (e.g. ``"image"``, ``"audio"``, ``"video"``).
+
+    Returns:
+        ``"text"`` when there is no multi-modal data, the single modality when
+        all items share one, otherwise ``"mixed"``.
+    """
+    if not mm_features:
+        return REQUEST_MODALITY_TEXT
+    modalities = {feature.modality for feature in mm_features}
+    if len(modalities) == 1:
+        return next(iter(modalities))
+    return REQUEST_MODALITY_MIXED
+
 
 @dataclass
 class BaseCacheStats:
@@ -237,6 +267,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    modality: str = REQUEST_MODALITY_TEXT
 
 
 @dataclass
@@ -433,6 +464,7 @@ class IterationStats:
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
         num_cached_tokens: int = 0,
+        modality: str = REQUEST_MODALITY_TEXT,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -472,6 +504,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            modality=modality,
         )
         self.finished_requests.append(finished_req)
 

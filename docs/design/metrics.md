@@ -29,7 +29,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
-- `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
+- `vllm:request_success_total` (Counter) - Number of finished requests, labeled by finish reason (`finished_reason`) and input modality (`modality`: `text`, `image`, `audio`, `video`, or `mixed` for requests combining multiple modalities).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
@@ -55,7 +55,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
 - `vllm:request_prompt_tokens` - Request prompt length.
 - `vllm:request_generation_tokens` - Request generation length.
-- `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
+- `vllm:request_success` - Number of finished requests by their finish reason (either an EOS token was generated or the max sequence length was reached) and input `modality` (`text`, `image`, `audio`, `video`, or `mixed`). The `modality` label lets you compute request rate by input type, e.g. `rate(vllm:request_success_total{modality="image"}[5m])`; sum over the non-`text` values for the overall multi-modal request rate.
 - `vllm:request_queue_time_seconds` - Queue time.
 - `vllm:request_prefill_time_seconds` - Requests prefill time.
 - `vllm:request_decode_time_seconds` - Requests decode time.
@@ -330,9 +330,10 @@ vllm:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 2745
 ...
 # HELP vllm:request_success_total Count of successfully processed requests.
 # TYPE vllm:request_success_total counter
-vllm:request_success_total{finished_reason="stop",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
-vllm:request_success_total{finished_reason="length",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0
-vllm:request_success_total{finished_reason="abort",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
+vllm:request_success_total{finished_reason="stop",modality="text",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
+vllm:request_success_total{finished_reason="length",modality="text",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0
+vllm:request_success_total{finished_reason="length",modality="image",model_name="meta-llama/Llama-3.1-8B-Instruct"} 12.0
+vllm:request_success_total{finished_reason="abort",modality="text",model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0
 ...
 # HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
 # TYPE vllm:time_to_first_token_seconds histogram

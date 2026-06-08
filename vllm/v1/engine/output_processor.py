@@ -32,10 +32,12 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
+    REQUEST_MODALITY_TEXT,
     IterationStats,
     LoRARequestStates,
     RequestStateStats,
     SchedulerStats,
+    compute_request_modality,
 )
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -149,6 +151,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        modality: str = REQUEST_MODALITY_TEXT,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -172,6 +175,9 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        # Request-level input modality ("text", "image", "audio", "video", or
+        # "mixed"), used for the "modality" label on request metrics.
+        self.modality = modality
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -267,6 +273,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            modality=compute_request_modality(request.mm_features),
         )
 
     def make_request_output(
@@ -810,6 +817,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            modality=req_state.modality,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
