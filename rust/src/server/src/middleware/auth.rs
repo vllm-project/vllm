@@ -7,6 +7,7 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
@@ -54,14 +55,19 @@ fn verify_token(authorization: Option<&HeaderValue>, api_keys: &[String]) -> boo
         return false;
     }
 
+    let token_hash = sha256_digest(token.as_bytes());
     let mut token_match = false;
     for api_key in api_keys {
-        token_match |= constant_time_eq(token.as_bytes(), api_key.as_bytes());
+        token_match |= constant_time_eq(&token_hash, &sha256_digest(api_key.as_bytes()));
     }
     token_match
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
     use subtle::ConstantTimeEq;
 
     bool::from(left.ct_eq(right))
@@ -69,13 +75,21 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{constant_time_eq, sha256_digest};
 
     #[test]
-    fn constant_time_eq_checks_content_and_length() {
-        assert!(constant_time_eq(b"secret", b"secret"));
-        assert!(!constant_time_eq(b"secret", b"secrex"));
-        assert!(!constant_time_eq(b"secret", b"secret-more"));
-        assert!(!constant_time_eq(b"secret-more", b"secret"));
+    fn constant_time_eq_checks_sha256_digests() {
+        assert!(constant_time_eq(
+            &sha256_digest(b"secret"),
+            &sha256_digest(b"secret")
+        ));
+        assert!(!constant_time_eq(
+            &sha256_digest(b"secret"),
+            &sha256_digest(b"secrex")
+        ));
+        assert!(!constant_time_eq(
+            &sha256_digest(b"secret"),
+            &sha256_digest(b"secret-more")
+        ));
     }
 }

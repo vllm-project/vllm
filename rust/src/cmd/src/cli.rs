@@ -16,6 +16,7 @@ use educe::Educe;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
@@ -84,6 +85,7 @@ pub enum Command {
 }
 
 /// Runtime arguments shared by the external-engine and managed-engine paths.
+#[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
@@ -177,8 +179,9 @@ pub struct SharedRuntimeArgs {
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
-    #[arg(long = "api-key", value_name = "API_KEY")]
-    #[serde(default, deserialize_with = "deserialize_api_keys")]
+    #[arg(long, env = "VLLM_API_KEY", value_delimiter = ' ')]
+    #[serde_as(as = "DefaultOnNull<OneOrMany<_>>")]
+    #[serde(default)]
     pub api_key: Vec<String>,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
@@ -219,6 +222,9 @@ impl SharedRuntimeArgs {
     }
 
     fn resolved_api_keys(&self) -> Vec<String> {
+        // clap handles VLLM_API_KEY for the managed serve path. The
+        // Python-supervised frontend path enters through --args-json, so
+        // keep the env fallback here for that serde-only path.
         let keys = if self.api_key.is_empty() {
             std::env::var("VLLM_API_KEY").ok().into_iter().collect::<Vec<_>>()
         } else {
@@ -318,28 +324,6 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
-}
-
-fn deserialize_api_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match Option::<Value>::deserialize(deserializer)? {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::String(value)) => Ok(vec![value]),
-        Some(Value::Array(values)) => values
-            .into_iter()
-            .map(|value| match value {
-                Value::String(value) => Ok(value),
-                _ => Err(serde::de::Error::custom(
-                    "api_key must be a string or an array of strings",
-                )),
-            })
-            .collect(),
-        Some(_) => Err(serde::de::Error::custom(
-            "api_key must be a string or an array of strings",
-        )),
-    }
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {

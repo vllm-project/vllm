@@ -101,12 +101,18 @@ fn build_router_with_options(
             state.clone(),
             middleware::track_server_load,
         ))
-        .layer(from_fn(middleware::track_http_metrics))
-        .layer(TraceLayer::new_for_http());
+        .layer(from_fn(middleware::track_http_metrics));
 
     if enable_api_key_auth {
-        router = router.layer(from_fn_with_state(state, middleware::authenticate_api_key));
+        router = router.layer(from_fn_with_state(
+            state.clone(),
+            middleware::authenticate_api_key,
+        ));
     }
+
+    // Later layers wrap earlier ones. Keep tracing outside auth so rejected
+    // requests are visible, while metrics/load only see authenticated traffic.
+    router = router.layer(TraceLayer::new_for_http());
 
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));
