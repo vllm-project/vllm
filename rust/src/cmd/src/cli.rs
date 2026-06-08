@@ -392,6 +392,22 @@ pub struct ServeArgs {
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     pub managed_engine: ManagedEngineArgs,
+
+    /// run server per local DP rank and aggregate health by supervisor
+    #[arg(long)]
+    pub data_parallel_multi_port_external_lb: bool,
+    /// HTTP port for supervisor
+    #[arg(long, default_value_t = 9256)]
+    pub data_parallel_supervisor_port: u16,
+    /// seconds between child health probe rounds.
+    #[arg(long, default_value_t = 5)]
+    pub dp_supervisor_probe_interval_s: u16,
+    /// timeout for each child health probe request.
+    #[arg(long, default_value_t = 5)]
+    pub dp_supervisor_probe_timeout_s: u16,
+    /// retries allowed once the supervisor is ready.
+    #[arg(long, default_value_t = 3)]
+    pub dp_supervisor_probe_failure_threshold: usize,
 }
 
 impl ServeArgs {
