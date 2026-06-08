@@ -117,8 +117,8 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             scale = scale.to(torch.float32)
         layer._xpu_scale = scale.t().contiguous()
 
-    def _get_layer_params(self, layer: torch.nn.Module) -> FP8BlockParams:
-        params = super()._get_layer_params(layer)
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:
+        params = super()._get_layer_params(layer, **kwargs)
         # _xpu_scale is set at end of process_weights_after_loading.
         # Guard here because base-class process_weights calls self._get_layer_params
         # (Python dynamic dispatch) before _xpu_scale exists.
