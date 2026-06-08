@@ -24,11 +24,22 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
+docker_pull_lock_path() {
+  local image_ref="$1"
+  local image_hash
+  image_hash=$(printf '%s' "$image_ref" | sha256sum | awk '{print $1}')
+  echo "/tmp/docker-pull-${image_hash}.lock"
+}
+
 cleanup_docker() {
-  # Share the same lock with image pull to avoid cleanup/pull races on one node.
-  local docker_lock="/tmp/docker-pull.lock"
+  # Keep cleanup serialized across jobs, but do not block image pulls for
+  # unrelated images.
+  local docker_lock="/tmp/docker-cleanup.lock"
   exec 9>"$docker_lock"
-  flock 9
+  if ! flock -w 600 9; then
+    echo "Could not acquire cleanup lock within 600 s, skipping cleanup." >&2
+    return 0
+  fi
 
   docker_root=$(docker info -f '{{.DockerRootDir}}')
   if [ -z "$docker_root" ]; then
@@ -321,25 +332,9 @@ aws ecr-public get-login-password --region us-east-1 | docker login --username A
 
 # --- Build or pull test image ---
 IMAGE="${IMAGE_TAG_XPU:-${image_name}}"
+IMAGE_PULL_LOCK="$(docker_pull_lock_path "${IMAGE}")"
 
 echo "Using image: ${IMAGE}"
-
-if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-  echo "Image already exists locally, skipping pull"
-else
-  echo "Image not found locally, waiting for lock..."
-
-  flock /tmp/docker-pull.lock bash -c "
-    if docker image inspect '${IMAGE}' >/dev/null 2>&1; then
-      echo 'Image already pulled by another runner'
-    else
-      echo 'Pulling image...'
-      timeout 900 docker pull '${IMAGE}'
-    fi
-  "
-
-  echo "Pull step completed"
-fi
 
 remove_docker_container() {
   docker rm -f "${container_name}" || true
@@ -355,28 +350,35 @@ fi
 export CMDS="${commands}"
 export HF_TOKEN ZE_AFFINITY_MASK
 
-{
-  flock 9
-  if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    echo 'Image missing before container creation, pulling again...'
-    timeout 900 docker pull "${IMAGE}"
-  fi
+exec 8>"${IMAGE_PULL_LOCK}"
+if ! flock -w 2400 8; then
+  echo "ERROR: Could not acquire image pull lock within 2400 s." >&2
+  exit 1
+fi
 
-  docker create \
-    --device /dev/dri:/dev/dri \
-    --net=host \
-    --ipc=host \
-    --privileged \
-    -v /dev/dri/by-path:/dev/dri/by-path \
-    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
-    --entrypoint='' \
-    -e HF_TOKEN \
-    -e ZE_AFFINITY_MASK \
-    -e CMDS \
-    --name "${container_name}" \
-    "${IMAGE}" \
-    bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
-    >/dev/null
-} 9>/tmp/docker-pull.lock
+if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+  echo "Image already exists locally, skipping pull"
+else
+  echo "Image not found locally, pulling image..."
+  timeout 1800 docker pull "${IMAGE}"
+fi
+
+docker create \
+  --device /dev/dri:/dev/dri \
+  --net=host \
+  --ipc=host \
+  --privileged \
+  -v /dev/dri/by-path:/dev/dri/by-path \
+  -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+  --entrypoint='' \
+  -e HF_TOKEN \
+  -e ZE_AFFINITY_MASK \
+  -e CMDS \
+  --name "${container_name}" \
+  "${IMAGE}" \
+  bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
+  >/dev/null
+
+flock -u 8
 
 docker start -a "${container_name}"
