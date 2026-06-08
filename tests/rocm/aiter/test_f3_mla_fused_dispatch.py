@@ -107,6 +107,47 @@ class TestHasFusedRopeMlaKvCache:
 
 
 # ---------------------------------------------------------------------------
+# Tests: probe → mla.py _f3_fusion_enabled consistency
+# ---------------------------------------------------------------------------
+
+
+def test_mla_wrapper_f3_enabled_via_probe():
+    """_f3_fusion_enabled must be True when has_fused_rope_mla_kv_cache() returns
+    True — no env var required. Mirrors what mla.py __init__ computes."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    f3 = bool(
+        rocm_aiter_ops.is_mla_enabled()
+        and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+    )
+    if rocm_aiter_ops.has_fused_rope_mla_kv_cache():
+        assert f3 is True, (
+            "_f3_fusion_enabled should be True when kernel present "
+            "(no env var needed)"
+        )
+    # When kernel is absent the probe already returned False — f3 must be False
+    else:
+        assert f3 is False
+
+
+def test_f3_probe_consistent_with_dispatch():
+    """If has_fused_rope_mla_kv_cache() is True, the kernel import used by
+    fused_rope_and_mla_kv_cache_write() must also succeed."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
+        pytest.skip("F3 kernel absent — dispatch not testable")
+
+    try:
+        from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
+    except ImportError:
+        pytest.fail(
+            "has_fused_rope_mla_kv_cache() returned True but "
+            "aiter.fused_qk_rope_concat_and_cache_mla is not importable"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: do_rope_and_kv_cache_update() dispatch
 # ---------------------------------------------------------------------------
 

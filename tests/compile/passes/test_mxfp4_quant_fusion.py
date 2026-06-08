@@ -27,7 +27,7 @@ import math
 import pytest
 import torch
 
-from vllm._aiter_ops import IS_AITER_FOUND, is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.platforms import current_platform
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -55,16 +55,6 @@ _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
 )
 
 
-def _import_fusion_module(name: str):
-    """Import a fusion module, skipping on AttributeError (missing vllm._C)."""
-    try:
-        import importlib
-
-        return importlib.import_module(name)
-    except (ImportError, AttributeError) as e:
-        pytest.skip(f"{name} not importable: {e}")
-
-
 # ─── UNIT TESTS: feature probes ───────────────────────────────────────────────
 
 
@@ -86,16 +76,13 @@ def test_unit_probe_rmsnorm_false_without_aiter():
 # ─── UNIT TESTS: get_*_op staticmethods ──────────────────────────────────────
 
 
+@_NEEDS_MXFP4_STANDALONE
 def test_unit_get_ops_exist():
     """All new get_*_op staticmethods must return non-None OpOverloads.
 
-    They reference torch.ops.vllm.* which are registered when
-    rocm_aiter_ops.register_ops_once() runs (triggered by importing _aiter_ops).
-    Without ROCm, vllm._C is absent so _aiter_ops import raises AttributeError.
+    Guarded by _NEEDS_MXFP4_STANDALONE because get_fused_rmsnorm_mxfp4_quant_op()
+    returns None when has_fused_rmsnorm_mxfp4_quant() is False (older AITER build).
     """
-    if not is_aiter_found_and_supported():
-        pytest.skip("AITER not available — ops not registered on this platform")
-
     ops = {
         "get_dynamic_mxfp4_quant_op": rocm_aiter_ops.get_dynamic_mxfp4_quant_op,
         "get_fused_rmsnorm_mxfp4_quant_op": (
@@ -116,23 +103,36 @@ def test_unit_get_ops_exist():
 # ─── UNIT TESTS: DeepSeek-R1 shape traces ────────────────────────────────────
 
 
+@_NEEDS_MXFP4_STANDALONE
 @pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
 def test_unit_deepseek_shape_no_residual(epsilon):
-    """Pattern inputs at DeepSeek-R1 hidden_size=7168 have correct shape."""
-    _import_fusion_module("vllm.compilation.passes.fusion.rocm_aiter_fusion")
-    # Use a small M but real N to check shape logic
-    # Re-create inputs at DS-R1 scale by overriding device to cpu (no GPU needed)
-    x = torch.empty(4, 7168, dtype=torch.bfloat16, device="cpu")
-    w = torch.empty(7168, dtype=torch.bfloat16, device="cpu")
-    assert x.shape == (4, 7168)
-    assert w.shape == (7168,)
-    # Verify fake output shapes match MXFP4 packing rules
-    M, N = x.shape
-    expected_fp4_shape = (M, N // 2)
-    expected_scale_shape = (M, math.ceil(N / 32))
-    assert expected_fp4_shape == (4, 3584)
-    assert expected_scale_shape == (4, 224)
+    """Fused op output shapes match MXFP4 packing rules at DS-R1 hidden_size=7168.
 
+    Exercises the fused kernel (not just arithmetic) to confirm the packing
+    contract holds at the target model's actual hidden dimension.
+    """
+    hidden_size = 7168
+    num_tokens = 4
+    fused_op = rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op()
+    weight = torch.ones(hidden_size, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
+
+    fp4, scale = fused_op(x=x, weight=weight, epsilon=epsilon)
+
+    assert fp4.shape == (num_tokens, hidden_size // 2), (
+        f"fp4 shape {fp4.shape} != expected {(num_tokens, hidden_size // 2)}"
+    )
+    expected_scale_cols = math.ceil(hidden_size / 32)
+    assert scale.shape[1] >= expected_scale_cols, (
+        f"scale cols {scale.shape[1]} < ceil(N/32)={expected_scale_cols}"
+    )
+
+
+# ─── UNIT TESTS: model helper guard ─────────────────────────────────────────
+# _AiterRMSNormMXFP4QuantModel uses torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant
+# which is registered by vllm._C.  The _NEEDS_MXFP4_STANDALONE marker on every
+# test that instantiates it ensures _VLLM_C_AVAILABLE is True before the op is
+# accessed, so the class can safely live at module scope.
 
 # ─── UNIT TESTS: registration ordering in RocmAiterRMSNormQuantFusionPass ────
 
