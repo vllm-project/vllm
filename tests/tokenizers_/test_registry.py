@@ -59,18 +59,19 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     )
 
 
-def test_resolve_tokenizer_args_remote_gguf_base_tokenizer(monkeypatch):
+def test_resolve_tokenizer_args_remote_gguf_keeps_embedded_tokenizer(monkeypatch):
     from vllm.tokenizers import registry
 
-    def fake_resolve_gguf_tokenizer_source(tokenizer_name, revision=None):
-        assert tokenizer_name == "org/model-GGUF:UD-IQ4_NL"
+    def fake_get_gguf_file_path_from_hf(tokenizer_name, quant_type, revision=None):
+        assert tokenizer_name == "org/model-GGUF"
+        assert quant_type == "UD-IQ4_NL"
         assert revision == "gguf-rev"
-        return "org/base"
+        return "model-UD-IQ4_NL.gguf"
 
     monkeypatch.setattr(
         registry,
-        "resolve_gguf_tokenizer_source",
-        fake_resolve_gguf_tokenizer_source,
+        "get_gguf_file_path_from_hf",
+        fake_get_gguf_file_path_from_hf,
     )
 
     tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
@@ -79,19 +80,14 @@ def test_resolve_tokenizer_args_remote_gguf_base_tokenizer(monkeypatch):
     )
 
     assert tokenizer_mode == "hf"
-    assert tokenizer_name == "org/base"
+    assert tokenizer_name == "org/model-GGUF"
     assert args == ()
-    assert "gguf_file" not in kwargs
-    assert kwargs["revision"] is None
+    assert kwargs["gguf_file"] == "model-UD-IQ4_NL.gguf"
+    assert kwargs["revision"] == "gguf-rev"
 
 
-def test_resolve_tokenizer_args_local_gguf_base_tokenizer(monkeypatch):
+def test_resolve_tokenizer_args_local_gguf_keeps_embedded_tokenizer(monkeypatch):
     from vllm.tokenizers import registry
-
-    def fake_resolve_gguf_tokenizer_source(tokenizer_name, revision=None):
-        assert tokenizer_name == "/models/qwen.gguf"
-        assert revision == "local-rev"
-        return "org/base"
 
     monkeypatch.setattr(
         registry,
@@ -103,11 +99,6 @@ def test_resolve_tokenizer_args_local_gguf_base_tokenizer(monkeypatch):
         "check_gguf_file",
         lambda tokenizer_name: tokenizer_name == "/models/qwen.gguf",
     )
-    monkeypatch.setattr(
-        registry,
-        "resolve_gguf_tokenizer_source",
-        fake_resolve_gguf_tokenizer_source,
-    )
 
     tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
         "/models/qwen.gguf",
@@ -115,10 +106,10 @@ def test_resolve_tokenizer_args_local_gguf_base_tokenizer(monkeypatch):
     )
 
     assert tokenizer_mode == "hf"
-    assert tokenizer_name == "org/base"
+    assert tokenizer_name == Path("/models")
     assert args == ()
-    assert "gguf_file" not in kwargs
-    assert kwargs["revision"] is None
+    assert kwargs["gguf_file"] == "qwen.gguf"
+    assert kwargs["revision"] == "local-rev"
 
 
 def test_customized_tokenizer():

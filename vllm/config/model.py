@@ -5,7 +5,6 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -44,11 +43,9 @@ from vllm.transformers_utils.config import (
     uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
-    check_gguf_file,
     is_gguf,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
-    resolve_gguf_tokenizer_source,
     split_remote_gguf,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
@@ -495,29 +492,11 @@ class ModelConfig:
         )
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
-        tokenizer_was_default = self.tokenizer is None
-        tokenizer_revision_was_default = self.tokenizer_revision is None
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
-        if tokenizer_was_default and is_gguf(self.model):
-            gguf_source: str | Path
-            if is_remote_gguf(self.model):
-                gguf_source, _ = split_remote_gguf(self.model)
-            elif check_gguf_file(self.model):
-                gguf_source = Path(self.model).parent
-            else:
-                gguf_source = self.model
-            tokenizer_source = resolve_gguf_tokenizer_source(
-                self.model,
-                revision=self.revision,
-            )
-            if tokenizer_source != gguf_source:
-                self.tokenizer = maybe_model_redirect(str(tokenizer_source))
-                if tokenizer_revision_was_default:
-                    self.tokenizer_revision = None
 
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
