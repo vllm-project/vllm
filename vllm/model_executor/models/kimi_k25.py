@@ -235,7 +235,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "vision_chunk", grid_sizes
             ),
-            grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
+            grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
 
     def _call_hf_processor(

@@ -16,7 +16,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 def _make_bare_scheduler() -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.original_block_size = 16
     scheduler._block_size = 16
     scheduler.load_specs = {}
     scheduler._preempted_req_ids = set()

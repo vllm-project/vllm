@@ -257,7 +257,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return router_logits_dtype != torch.float32
+        return router_logits_dtype in [torch.bfloat16, torch.float32]
 
     @staticmethod
     def _supports_routing_method(
@@ -279,6 +279,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
                 RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
                 RoutingMethodType.Simulated,
             ]
@@ -290,6 +291,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
                 RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
                 RoutingMethodType.Simulated,
             ]
@@ -401,11 +403,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             assert apply_router_weight_on_input
         else:
             assert not apply_router_weight_on_input
-
-        # Currently FI requires bfloat16 routing bias.
-        # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
