@@ -189,8 +189,14 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_counts(usage_prompt_tokens, output_tokens)),
+                    usage: include_continuous_usage.then(|| {
+                        let cached = output
+                            .prefill_stats
+                            .as_ref()
+                            .map(|s| s.num_cached_tokens as u32)
+                            .unwrap_or(0);
+                        Usage::from_counts(usage_prompt_tokens, output_tokens, cached)
+                    }),
                 })
                 .await;
             }
@@ -211,6 +217,7 @@ async fn generate_chunk_stream(
             usage: Some(Usage::from_counts(
                 prompt_tokens.unwrap_or_default(),
                 output_tokens,
+                cached_tokens_total,
             )),
         })
         .await;

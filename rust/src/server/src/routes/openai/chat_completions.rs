@@ -191,7 +191,12 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
+    let cached_tokens = collected
+        .prefill_stats
+        .as_ref()
+        .map(|s| s.num_cached_tokens as u32)
+        .unwrap_or(0);
+    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32, cached_tokens);
 
     Ok(ChatCompletionResponse {
         id: request_id,
@@ -401,7 +406,11 @@ async fn chat_completion_chunk_stream(
                         &request_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
+                        Usage::from_counts(
+                            prompt_token_count as u32,
+                            output_token_count as u32,
+                            cached_token_count as u32,
+                        ),
                     ))
                     .await;
                 }

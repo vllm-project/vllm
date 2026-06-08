@@ -194,6 +194,7 @@ async fn collect_completion(
         usage: Some(Usage::from_counts(
             collected.prompt_token_ids.len() as u32,
             collected.token_ids.len() as u32,
+            collected.prefill_stats.as_ref().map(|s| s.num_cached_tokens as u32).unwrap_or(0),
         )),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
@@ -302,6 +303,7 @@ async fn completion_chunk_stream(
                             Usage::from_counts(
                                 finished.prompt_token_count as u32,
                                 finished.output_token_count as u32,
+                                finished.cached_token_count as u32,
                             ),
                         )))
                         .await;
