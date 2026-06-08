@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
@@ -13,6 +14,12 @@ use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraErr
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+pub(crate) type ApiKeyHash = [u8; 32];
+
+pub(crate) fn hash_api_key(api_key: &str) -> ApiKeyHash {
+    Sha256::digest(api_key.as_bytes()).into()
+}
 
 /// Shared router state for the minimal single-model OpenAI server.
 pub struct AppState {
@@ -27,8 +34,8 @@ pub struct AppState {
     pub enable_request_id_headers: bool,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
-    /// API keys accepted as bearer tokens for guarded routes.
-    api_keys: Vec<String>,
+    /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
+    api_key_hashes: Vec<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -55,7 +62,7 @@ impl AppState {
             enable_log_requests: false,
             enable_request_id_headers: false,
             server_info: None,
-            api_keys: Vec::new(),
+            api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -89,16 +96,20 @@ impl AppState {
 
     /// Configure API keys accepted by guarded HTTP routes.
     pub fn with_api_keys(mut self, api_keys: Vec<String>) -> Self {
-        self.api_keys = api_keys.into_iter().filter(|key| !key.is_empty()).collect();
+        self.api_key_hashes = api_keys
+            .into_iter()
+            .filter(|key| !key.is_empty())
+            .map(|key| hash_api_key(&key))
+            .collect();
         self
     }
 
     pub(crate) fn has_api_keys(&self) -> bool {
-        !self.api_keys.is_empty()
+        !self.api_key_hashes.is_empty()
     }
 
-    pub(crate) fn api_keys(&self) -> &[String] {
-        &self.api_keys
+    pub(crate) fn api_key_hashes(&self) -> &[ApiKeyHash] {
+        &self.api_key_hashes
     }
 
     /// The primary model name echoed back in API responses (the first served

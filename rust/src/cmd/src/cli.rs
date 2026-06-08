@@ -221,16 +221,12 @@ impl SharedRuntimeArgs {
         Duration::from_secs(self.shutdown_timeout)
     }
 
-    fn resolved_api_keys(&self) -> Vec<String> {
-        // clap handles VLLM_API_KEY for the managed serve path. The
-        // Python-supervised frontend path enters through --args-json, so
-        // keep the env fallback here for that serde-only path.
-        let keys = if self.api_key.is_empty() {
-            std::env::var("VLLM_API_KEY").ok().into_iter().collect::<Vec<_>>()
-        } else {
-            self.api_key.clone()
-        };
-        keys.into_iter().filter(|key| !key.is_empty()).collect()
+    fn apply_env_api_key_fallback(&mut self) {
+        if self.api_key.is_empty()
+            && let Ok(api_key) = std::env::var("VLLM_API_KEY")
+        {
+            self.api_key.push(api_key);
+        }
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -247,7 +243,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_keys = self.resolved_api_keys();
+        let api_keys = sanitize_api_keys(self.api_key);
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -291,7 +287,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_keys = self.resolved_api_keys();
+        let api_keys = sanitize_api_keys(self.api_key);
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -326,13 +322,20 @@ fn default_engine_ready_timeout_secs() -> u64 {
     600
 }
 
+fn sanitize_api_keys(api_keys: Vec<String>) -> Vec<String> {
+    api_keys.into_iter().filter(|key| !key.is_empty()).collect()
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let args: SharedRuntimeArgs = serde_json::from_str(value)
+    let mut args: SharedRuntimeArgs = serde_json::from_str(value)
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    // --args-json is parsed with serde, so clap's env support does not run for
+    // the Python-supervised frontend path.
+    args.apply_env_api_key_fallback();
     args.unsupported.check()?;
     Ok(args)
 }
