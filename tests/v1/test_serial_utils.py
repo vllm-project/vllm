@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import time
 from collections import UserDict
 from dataclasses import dataclass
 
@@ -509,3 +510,105 @@ def test_output_socket_drops_undecodable_frame():
     assert not isinstance(received, Exception), received
     assert isinstance(received, EngineCoreOutputs)
     assert received.engine_index == 7
+
+
+def test_dp_coordinator_drops_undecodable_frame():
+    """A malformed frame on the DP coordinator's sockets must not crash it.
+
+    Regression test for issue #44486: the DP coordinator decodes engine
+    messages with ``decoder.decode(buffer)`` (and a raw ``msgspec.msgpack``
+    decode on the front-end socket). ``run_coordinator`` only catches
+    ``KeyboardInterrupt``, so a ``ValidationError`` from a garbage frame
+    propagated uncaught and killed the coordinator process.
+
+    This drives the real ``DPCoordinatorProc.process_input_socket`` loop. A fake
+    engine subscribes so the coordinator reaches its steady-state poll loop;
+    then a garbage frame (an ``int`` where ``EngineCoreOutputs`` is expected,
+    reproducing "Expected array, got int") is pushed to the engine output
+    socket, followed by a valid stats update. The coordinator must drop the bad
+    frame and still publish the valid stats to the front-end.
+    """
+    import threading
+
+    from vllm.utils.network_utils import get_open_zmq_ipc_path
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.engine.coordinator import DPCoordinatorProc
+    from vllm.v1.metrics.stats import SchedulerStats
+
+    front_addr = get_open_zmq_ipc_path()
+    back_output_addr = get_open_zmq_ipc_path()
+    back_publish_addr = get_open_zmq_ipc_path()
+
+    coord = DPCoordinatorProc(engine_count=1, enable_wave_coordination=True)
+    captured: dict = {}
+
+    def run():
+        try:
+            # Mirrors run_coordinator(), which only catches KeyboardInterrupt;
+            # any other exception would crash the coordinator process.
+            coord.process_input_socket(
+                front_addr, back_output_addr, back_publish_addr, None
+            )
+        except KeyboardInterrupt:
+            captured["exc"] = "KeyboardInterrupt"
+        except BaseException as e:  # noqa: BLE001
+            captured["exc"] = f"{type(e).__name__}: {e}"
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    ctx = coord.ctx
+    encoder = MsgpackEncoder()
+    try:
+        # Act as the single engine subscribing, so the coordinator finishes
+        # startup and enters its steady-state poll loop.
+        sub_back = ctx.socket(zmq.SUB)
+        sub_back.setsockopt(zmq.SUBSCRIBE, b"")
+        sub_back.connect(back_publish_addr)
+        sub_back.RCVTIMEO = 5000
+        assert sub_back.recv() == b"READY"
+
+        # Subscribe to the front-end stats stream to observe liveness.
+        sub_front = ctx.socket(zmq.SUB)
+        sub_front.setsockopt(zmq.SUBSCRIBE, b"")
+        sub_front.connect(front_addr)
+        sub_front.RCVTIMEO = 8000
+        time.sleep(0.2)  # let the SUB subscription propagate to the XPUB
+
+        push = ctx.socket(zmq.PUSH)
+        push.connect(back_output_addr)
+
+        # 1) garbage frame (int where an EngineCoreOutputs array is expected).
+        push.send(bytes(encoder.encode(123)[0]))
+        # 2) a valid stats update from the engine.
+        valid = EngineCoreOutputs(
+            engine_index=0,
+            scheduler_stats=SchedulerStats(num_waiting_reqs=5, num_running_reqs=3),
+        )
+        push.send(bytes(encoder.encode(valid)[0]))
+
+        # The coordinator must survive the garbage frame and publish the stats
+        # from the valid one ([waiting, running] == [5, 3]) to the front-end.
+        seen = None
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                decoded = msgspec.msgpack.decode(sub_front.recv())
+            except zmq.Again:
+                break
+            if decoded[0] == [[5, 3]]:
+                seen = decoded[0]
+                break
+
+        assert "exc" not in captured, f"coordinator crashed: {captured.get('exc')}"
+        assert thread.is_alive(), "coordinator loop exited unexpectedly"
+        assert seen == [[5, 3]], (
+            "coordinator did not publish stats from the valid frame "
+            f"(captured={captured})"
+        )
+    finally:
+        # The loop only exits on KeyboardInterrupt; destroying the context
+        # force-closes its sockets so the thread unwinds cleanly.
+        with contextlib.suppress(Exception):
+            ctx.destroy(linger=0)
+        thread.join(timeout=5)
