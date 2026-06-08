@@ -341,9 +341,12 @@ def rocm_aiter_fused_experts(
             - moe_config.intermediate_size_per_partition_unpadded
         )
 
-        # MXFP4 W4A16 weights are interleave-shuffled in oracle/mxfp4.py;
-        # match with GateMode.INTERLEAVE or aiter#3123 dispatch returns
-        # garbage / fails JIT.
+        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
+        # for interleaved vs separated gate and up weights.
+        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
+        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
+        # which always sets `is_guinterleave=True`.
+        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
         gate_mode = ""
         if quant_config.use_mxfp4_w4a16:
             try:

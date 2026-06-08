@@ -1657,7 +1657,8 @@ class rocm_aiter_ops:
     def fused_moe_supports_gate_mode(cls) -> bool:
         """Probe whether the installed aiter.fused_moe accepts `gate_mode`.
 
-        Added in aiter#3123 (>=0.1.14). Builds with older aiter must omit the kwarg.
+        Added in https://github.com/ROCm/aiter/pull/3123 (>=0.1.14).
+        Builds with older AITER must omit this argument.
         """
         import inspect
 
