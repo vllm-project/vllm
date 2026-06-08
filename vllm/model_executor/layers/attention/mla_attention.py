@@ -753,7 +753,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if self.impl.dcp_world_size > 1:
+                if fp8_attention and self.impl.supports_quant_query_input:
+                    # Quantize local Q before the DCP all-gather to avoid
+                    # sending BF16 query activations across DCP ranks.
+                    assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                    assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                else:
+                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
+                    mqa_q = torch.cat((mqa_ql_nope, mqa_q_pe), dim=-1)
+                    # mqa_q do allgather in head dim.
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -761,12 +776,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
-            if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
-                # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not is_sparse_impl:
@@ -1511,7 +1520,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.model_config.dtype,
+                dtype=self.q_data_type,
                 device=device,
             )
         else:
@@ -2046,6 +2055,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         if use_fp8_prefill:
             q = q.to(prefill_metadata.q_data_type)
@@ -2158,6 +2168,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
@@ -2208,9 +2219,25 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 toks=toks,
             )
 
+            # Match the non-DCP FP8 prefill bridge: kv_b_proj may need a
+            # non-FP8 activation dtype, then its projected K/V are recast for
+            # FP8 context attention.
+            _kv_b_proj_w_dtype = (
+                self.kv_b_proj.weight.dtype
+                if hasattr(self.kv_b_proj, "weight")
+                else self.kv_b_proj.params_dtype
+            )
+            if (
+                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
+            ) and _kv_b_proj_w_dtype != torch.uint8:
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            if use_fp8_prefill:
+                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
