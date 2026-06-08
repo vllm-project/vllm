@@ -10,7 +10,7 @@ from tests.utils import RemoteOpenAIServer
 def chat_server_with_prefix_caching(request):
     args = [
         "--dtype",
-        "bfloat16",
+        "half",
         "--max-model-len",
         "512",
         "--enforce-eager",
