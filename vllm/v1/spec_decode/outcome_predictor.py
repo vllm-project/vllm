@@ -134,7 +134,7 @@ class OutcomePredictor(nn.Module):
     ) -> OutcomePredictor:
         """Load a trained OutcomePredictor from disk."""
         predictor = cls(hidden_size=hidden_size, K=K, mlp_hidden=mlp_hidden)
-        state_dict = torch.load(path, map_location=device or torch.device("cpu"))
+        state_dict = torch.load(path, map_location=device or torch.device("cpu"), weights_only=True)
         predictor.load_state_dict(state_dict)
         predictor.eval()
         if device is not None:
