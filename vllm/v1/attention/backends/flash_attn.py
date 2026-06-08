@@ -837,7 +837,7 @@ class FlashAttentionImpl(AttentionImpl):
                     mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
                     mm_aux = [mm_prefix_ranges]
                     if attn_metadata.mm_prefix_block_sparse is None:
-                        from vllm.v1.attention.backends.fa_utils import (
+                        from vllm.vllm_flash_attn.flash_attn_interface import (
                             compute_block_sparsity,
                         )
 
