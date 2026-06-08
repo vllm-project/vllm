@@ -54,25 +54,6 @@ class CompressorBackend(AttentionBackend):
     def get_builder_cls() -> type["CompressorMetadataBuilder"]:
         return CompressorMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
-
 
 @dataclass
 class CompressorMetadata:
@@ -153,6 +134,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             self.block_size = 8
         else:
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # FlashMLA's UE8M0 paged layout needs 576B alignment; the FlashInfer

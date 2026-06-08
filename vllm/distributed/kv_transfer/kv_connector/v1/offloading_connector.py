@@ -34,7 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -44,10 +44,6 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        return True
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -74,12 +70,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        assert self.connector_worker is not None
-        self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         assert self.connector_worker is not None
@@ -176,7 +166,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
-        return "HND"
+        return "LBHNC"
 
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None

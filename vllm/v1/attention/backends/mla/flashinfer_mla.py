@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
 
@@ -90,10 +89,6 @@ class FlashInferMLABackend(MLACommonBackend):
                     f"in [64, 128, 192], but got {qk_nope_head_dim}"
                 )
         return None
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 g_fi_workspace = torch.zeros(
@@ -189,7 +184,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            kv_cache=kv_c_and_k_pe_cache,
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,

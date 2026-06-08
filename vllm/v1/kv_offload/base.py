@@ -330,10 +330,8 @@ class CanonicalKVCacheTensor:
     """
     A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    For attention backends where the raw tensor has num_blocks at a
-    non-leading physical dimension (e.g. FlashAttention's
-    (2, num_blocks, ...) layout), the tensor is split so that each
-    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
+    With standardized layouts (RFC #42082) num_blocks is always the
+    leading logical dimension.
     """
 
     # The KV cache tensor with shape (num_blocks, ...)

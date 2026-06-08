@@ -129,19 +129,15 @@ class FlashMLASparseBackend(AttentionBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
+
+class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # V3.2 main MLA: 656-byte custom storage format. See module docstring.
-            return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [256]
+
+    @staticmethod
+    def get_name() -> str:
+        return "V4_FLASHMLA_SPARSE"
 
 
 @dataclass
@@ -311,6 +307,67 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             dtype=torch.int32,
             device=device,
         )
+
+        # DeepseekV4: has compress_ratios in hf_config.
+        hf_config = vllm_config.model_config.hf_config
+        self.is_deepseek_v4 = (
+            hasattr(hf_config, "compress_ratios") and len(hf_config.compress_ratios) > 0
+        )
+        self.compress_ratio = 1
+        if self.is_deepseek_v4:
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
+            # Pre-allocate compressed slot mapping buffer for CUDA graph
+            # address stability when compress_ratio > 1.
+            if self.compress_ratio > 1:
+                max_num_batched_tokens = (
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                )
+                self.compressed_slot_mapping_buffer = torch.empty(
+                    max_num_batched_tokens,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+
+            # Pre-allocate C128A topk buffers for CUDA graph address stability.
+            if self.compress_ratio == 128:
+                max_num_batched_tokens = (
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                )
+                # Pad to B_TOPK alignment (128 covers both h_q=64 B_TOPK=64 and
+                # h_q=128 B_TOPK=128). FlashMLA decode asserts extra_topk % B_TOPK
+                # == 0; unaligned widths (e.g. 17 = ceil(2136/128)) crash the
+                # sm100 head64 kernel. Padded slots stay -1 and decode_lens caps
+                # them via topk_length, so the pad is a no-op at kernel level.
+                # Mirrors _SPARSE_PREFILL_TOPK_ALIGNMENT in cache_utils.py.
+                _C128A_TOPK_ALIGNMENT = 128
+                c128a_max_compressed = cdiv(
+                    self.model_config.max_model_len, self.compress_ratio
+                )
+                c128a_max_compressed = (
+                    cdiv(c128a_max_compressed, _C128A_TOPK_ALIGNMENT)
+                    * _C128A_TOPK_ALIGNMENT
+                )
+                # Stored so _build_c128a_metadata passes it as the kernel's
+                # max_compressed_tokens, matching the buffer stride. Otherwise
+                # the kernel's default 8192 iterates past row width and spills
+                # writes into adjacent rows (present in both decode and prefill
+                # branches of _build_c128a_topk_metadata_kernel).
+                self.c128a_max_compressed = c128a_max_compressed
+                self.c128a_global_decode_buffer = torch.empty(
+                    (max_num_batched_tokens, c128a_max_compressed),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self.c128a_decode_lens_buffer = torch.empty(
+                    max_num_batched_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                self.c128a_prefill_buffer = torch.empty(
+                    (max_num_batched_tokens, c128a_max_compressed),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
 
     def _build_fp8_mixed_decode_prefill(
         self,
@@ -793,7 +850,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         out, lse = flash_mla_with_kvcache(
             q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(2),
             block_table=kernel_metadata.dummy_block_table,
             head_dim_v=512,
             cache_seqlens=kernel_metadata.cache_lens,
@@ -817,7 +874,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+            -1, 1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of

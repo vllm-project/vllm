@@ -51,7 +51,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 from vllm.v1.request import RequestStatus
@@ -109,7 +109,7 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 def _expand_transfer_regions(
     base_addrs: list[int],
     block_lens: list[int],
-    is_kv_layout_blocks_first: bool,
+    is_kv_layout_blocks_first: bool,  # kept for API compat, unused
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert len(base_addrs) == len(block_lens), (
@@ -118,22 +118,13 @@ def _expand_transfer_regions(
     )
     regions: list[TransferRegion] = []
     for base_addr, block_len in zip(base_addrs, block_lens):
-        kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
                 base_addr=base_addr,
                 block_len=block_len,
-                kv_block_len=kv_block_len,
+                kv_block_len=block_len,
             )
         )
-        if is_kv_layout_blocks_first:
-            regions.append(
-                TransferRegion(
-                    base_addr=base_addr + kv_block_len,
-                    block_len=block_len,
-                    kv_block_len=kv_block_len,
-                )
-            )
     return regions
 
 
@@ -377,10 +368,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         if vllm_config.model_config.use_mla:
             return None
         logger.info_once(
-            "MooncakeConnector setting KV cache layout to HND for "
+            "MooncakeConnector setting KV cache layout to LBHNC for "
             "heterogeneous TP-safe KV transfer."
         )
-        return "HND"
+        return "LBHNC"
 
     ############################################################
     # Scheduler Side Methods
@@ -852,7 +843,7 @@ class MooncakeConnectorWorker:
         # NOTE (NickLucche) models with multiple backends are not supported yet
         backend = get_current_attn_backend(vllm_config)
         self.backend_name = backend.get_name()
-        self.kv_cache_layout = get_kv_cache_layout()
+        self.kv_cache_layout = resolve_kv_cache_layout().name
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
@@ -1736,7 +1727,7 @@ class MooncakeConnectorWorker:
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
-            is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
+            is_kv_layout_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
         )
 
     def _get_sender_transfer_plan(

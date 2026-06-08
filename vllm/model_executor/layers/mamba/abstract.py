@@ -26,11 +26,7 @@ class MambaBase(AttentionLayerBase):
     kv_cache: tuple[torch.Tensor, ...]
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.
-
-        Each block's ``C`` bytes hold the layer's states (e.g. conv, ssm)
-        packed contiguously; slice them out and reinterpret per dtype/shape.
-        """
+        """Unpack a raw 4D ``[B, 1, 1, C]`` int8 view into per-state views."""
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
         offset = 0

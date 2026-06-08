@@ -17,13 +17,13 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
     """
     device = torch.device("cuda")
 
-    # storage_block_size = block_size // compress_ratio = 256 // 4 = 64
+    # storage_block_size = block_size // tokens_per_state = 256 // 4 = 64
     kv_cache_spec = MLAAttentionSpec(
         block_size=256,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=4,
+        tokens_per_state=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
     builder = DeepseekV32IndexerMetadataBuilder(

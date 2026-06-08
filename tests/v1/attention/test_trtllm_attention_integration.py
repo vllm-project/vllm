@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from tests.v1.attention.test_attention_backends import create_and_prepopulate_kv_cache
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -16,14 +17,13 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
 from vllm.v1.attention.backends.utils import (
     PerLayerParameters,
-    get_kv_cache_layout,
+    resolve_kv_cache_layout,
     set_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
 
 if not current_platform.is_device_capability_family(100):
     pytest.skip(
@@ -86,96 +86,6 @@ def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
     }
 
 
-def _create_hnd_kv_cache(
-    k_contexts,
-    v_contexts,
-    block_size,
-    num_kv_heads,
-    head_size,
-    dtype,
-    device,
-    num_blocks,
-    common_attn_metadata,
-    kv_in_head_dim=False,
-):
-    """Create and populate a packed KV cache with HND-compatible strides.
-
-    When kv_in_head_dim=False (default), returns (B, H, N, 2*hs) with K/V
-    packed in the content dim. When kv_in_head_dim=True, returns
-    (B, 2*H, N, hs) with K/V as separate head groups.
-    """
-    seq_lens = common_attn_metadata.seq_lens.cpu()
-    query_lens = (
-        common_attn_metadata.query_start_loc_cpu[1:]
-        - common_attn_metadata.query_start_loc_cpu[:-1]
-    )
-    block_table = common_attn_metadata.block_table_tensor
-    slot_mapping = common_attn_metadata.slot_mapping
-    batch_size = len(k_contexts)
-
-    # kv_in_head_dim: (B, N, 2*H, hs) — K/V as separate head groups
-    # else:           (B, N, H, 2*hs) — K/V packed in content dim
-    n_heads, content = (
-        (2 * num_kv_heads, head_size)
-        if kv_in_head_dim
-        else (num_kv_heads, 2 * head_size)
-    )
-    kv_cache = torch.zeros(
-        num_blocks,
-        block_size,
-        n_heads,
-        content,
-        dtype=dtype,
-        device=device,
-    )
-    kv_cache_flat = kv_cache.view(-1, n_heads, content)
-
-    start_block_idx = 1
-    for i in range(batch_size):
-        k_ctx, v_ctx = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_ctx.shape[0]
-        if kv_in_head_dim:
-            kv_cache_flat[start:end, :num_kv_heads] = k_ctx
-            kv_cache_flat[start:end, num_kv_heads:] = v_ctx
-        else:
-            kv_cache_flat[start:end, :, :head_size] = k_ctx
-            kv_cache_flat[start:end, :, head_size:] = v_ctx
-        start_block_idx += cdiv(int(seq_lens[i]), block_size)
-
-    blocks_end = start_block_idx
-
-    # Randomly permute blocks (starting from block 1; block 0 is null).
-    perm = torch.randperm(blocks_end - 1) + 1
-    inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache[1:blocks_end] = kv_cache[perm]
-
-    # Build block table.
-    start_block_idx = 1
-    for i in range(batch_size):
-        n_blocks = cdiv(int(seq_lens[i]), block_size)
-        block_table[i, :n_blocks] = inv_perm[
-            start_block_idx : start_block_idx + n_blocks
-        ]
-        start_block_idx += n_blocks
-
-    # Build slot mapping that is consistent with the block table.
-    for i in range(batch_size):
-        ctx_len = int(seq_lens[i]) - int(query_lens[i])
-        token_offsets = torch.arange(int(query_lens[i])) + ctx_len
-        block_indices = token_offsets // block_size
-        intra_block_offsets = token_offsets % block_size
-        start = common_attn_metadata.query_start_loc_cpu[i]
-        end = common_attn_metadata.query_start_loc_cpu[i + 1]
-        slot_mapping[start:end] = block_table[
-            i, block_indices
-        ] * block_size + intra_block_offsets.to(device)
-
-    # Transpose to canonical: (B, H, N, 2*hs) or (B, 2*H, N, hs)
-    return kv_cache.transpose(1, 2).contiguous()
-
-
 def _create_nvfp4_hnd_kv_cache(
     k_contexts,
     v_contexts,
@@ -188,39 +98,15 @@ def _create_nvfp4_hnd_kv_cache(
     common_attn_metadata,
     kv_scale_val,
 ):
-    """Create an nvfp4 KV cache by quantizing bf16 context via
-    reshape_and_cache_flash, using the same block-table layout as
-    _create_hnd_kv_cache.
+    """Create an nvfp4 KV cache with 2H head layout.
 
-    The returned tensor is dtype ``uint8`` with head-group layout
-      ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
-    where K heads occupy the first ``num_kv_heads`` heads and V heads the second.
-    Each ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
-      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
-        two per byte.
-      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
-        scale per 16-element block.
-
-    Args:
-        k_contexts: List of key context tensors, one per sequence.
-        v_contexts: List of value context tensors, one per sequence.
-        block_size: Number of tokens per cache block.
-        num_kv_heads: Number of key/value heads.
-        head_size: Head dimension (must be divisible by 16).
-        dtype: Source data type for the bf16 intermediate cache.
-        device: Target device.
-        num_blocks: Total number of blocks to allocate.
-        common_attn_metadata: Metadata containing block tables and
-            sequence lengths.
-        kv_scale_val: Scalar float used as both k_scale and v_scale
-            during quantization.
-
-    Returns:
-        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, HND-strided).
+    The returned tensor is dtype ``uint8`` with logical shape
+    ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)`` where K occupies
+    the first H heads and V occupies the next H heads, and
+    ``full_dim = head_size // 2 + head_size // 16`` packs FP4 data and
+    FP8 block scales per head.
     """
-    # First create a bf16 HND cache so block tables are populated.
-    # Use kv_in_head_dim=True so K/V are separate head groups (B, 2*H, N, hs).
-    bf16_cache = _create_hnd_kv_cache(
+    bf16_cache = create_and_prepopulate_kv_cache(
         k_contexts,
         v_contexts,
         block_size,
@@ -230,10 +116,9 @@ def _create_nvfp4_hnd_kv_cache(
         device,
         num_blocks,
         common_attn_metadata,
-        kv_in_head_dim=True,
+        layout=KVCacheLayout.LBHNC,
     )
 
-    # (num_blocks, 2 * num_kv_heads, block_size, full_dim) — K heads first, then V heads
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     nvfp4_cache = torch.zeros(
         (num_blocks, 2 * num_kv_heads, block_size, full_dim),
@@ -242,8 +127,6 @@ def _create_nvfp4_hnd_kv_cache(
     )
     k_cache, v_cache = nvfp4_cache.split(num_kv_heads, dim=1)
 
-    # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
-    # bf16_cache is (B, 2*H, N, hs); split K/V on head dim.
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -256,19 +139,24 @@ def _create_nvfp4_hnd_kv_cache(
         ctx_len = int(seq_lens[i]) - int(query_lens[i])
         if ctx_len == 0:
             continue
-        # Gather context tokens from the bf16 cache using block table.
         n_ctx_blocks = (ctx_len + block_size - 1) // block_size
         blocks = block_table[i, :n_ctx_blocks]
-        # bf16_cache is (B, 2*H, N, hs); split K and V head groups.
-        k_bf16, v_bf16 = bf16_cache[blocks].split(num_kv_heads, dim=1)
-        k_ctx = k_bf16.transpose(1, 2).reshape(-1, num_kv_heads, head_size)[:ctx_len]
-        v_ctx = v_bf16.transpose(1, 2).reshape(-1, num_kv_heads, head_size)[:ctx_len]
-        # Build slot mapping for these context tokens.
+        # bf16_cache is (B, H, N, 2*head_size); extract K and V from last dim.
+        k_ctx = (
+            bf16_cache[blocks, :, :, :head_size]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
+        v_ctx = (
+            bf16_cache[blocks, :, :, head_size:]
+            .transpose(1, 2)
+            .reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        )
         token_offsets = torch.arange(ctx_len, device=device)
         block_indices = token_offsets // block_size
         intra_offsets = token_offsets % block_size
         slots = block_table[i, block_indices] * block_size + intra_offsets
-        # reshape_and_cache_flash expects (B, N, H, D) cache views.
+        # reshape_and_cache_flash expects (B, N, H, D) cache views
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             k_ctx,
             v_ctx,
@@ -362,7 +250,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     common_attn_metadata = create_common_attn_metadata(batch_spec, BLOCK_SIZE, device)
 
-    # 2. Create HND KV cache
+    # 2. Create HNC KV cache
     is_nvfp4 = kv_cache_dtype == "nvfp4"
     if is_nvfp4:
         # Compute a global scale from the context data.
@@ -382,7 +270,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
     else:
         kv_scale_val = 1.0
-        kv_cache = _create_hnd_kv_cache(
+        kv_cache = create_and_prepopulate_kv_cache(
             k_contexts,
             v_contexts,
             BLOCK_SIZE,
@@ -392,11 +280,12 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             device,
             NUM_GPU_BLOCKS,
             common_attn_metadata,
+            layout=KVCacheLayout.LBHNC,
         )
 
     # 3. Run through FlashInfer with TRTLLM enabled
-    set_kv_cache_layout("HND")
-    get_kv_cache_layout.cache_clear()
+    set_kv_cache_layout("LBHNC")
+    resolve_kv_cache_layout.cache_clear()
 
     try:
         is_nvfp4 = kv_cache_dtype == "nvfp4"
@@ -510,7 +399,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     finally:
         set_kv_cache_layout(None)
-        get_kv_cache_layout.cache_clear()
+        resolve_kv_cache_layout.cache_clear()
 
 
 @pytest.mark.parametrize(

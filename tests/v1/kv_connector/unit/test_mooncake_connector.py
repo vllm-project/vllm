@@ -25,8 +25,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    compute_layer_kv_cache_shape_bytes,
+)
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -613,11 +616,14 @@ def test_register_kv_caches():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        shape = compute_layer_kv_cache_shape_bytes(
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+            ),
+            2,
         )
-        tensor1 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        tensor2 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        tensor1 = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+        tensor2 = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
         kv_caches = {"layer0": tensor1, "layer1": tensor2}
 
         with patch.object(
@@ -634,7 +640,7 @@ def test_register_kv_caches():
             # Verify block_len_per_layer is set correctly.
             assert len(worker.block_len_per_layer) == len(registered_ptrs)
             for bl in worker.block_len_per_layer:
-                assert bl == tensor1.nbytes // tensor1.shape[0]
+                assert bl == tensor1.stride(0) * tensor1.element_size()
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():

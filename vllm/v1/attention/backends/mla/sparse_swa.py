@@ -77,6 +77,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # FlashInfer contiguous full-cache layout.
         assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # FlashMLA's UE8M0 paged layout needs 576B alignment; FlashInfer's
         # contiguous bf16/fp8 cache uses the natural element-size page.
@@ -124,30 +128,6 @@ class DeepseekSparseSWABackend(AttentionBackend):
 
             return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
         return DeepseekSparseSWAMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 SWA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
 
 
 @dataclass
@@ -211,7 +191,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
         mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
         self.head_size = mla_spec.head_size  # Already considered quantization.
-        self.compress_ratio = mla_spec.compress_ratio
+        self.compress_ratio = mla_spec.tokens_per_state
         self.block_size = mla_spec.block_size
 
         # Handle MTP: adjust decode_threshold like the indexer does

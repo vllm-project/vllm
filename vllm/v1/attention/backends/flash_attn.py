@@ -57,9 +57,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -135,43 +132,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout format {cache_layout}.")
-        return stride_order
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -687,7 +647,7 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+                [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -734,10 +694,7 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, 2*C) order; transpose to
-        # (B, N, H, 2*C) = (num_blocks, block_size, num_kv_heads, 2*head_size)
-        # which FlashAttention expects, then split K/V on the content dim.
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        # (B, H, N, 2*head_size) -> ((B, N, H, head_size), (B, N, H, head_size))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
@@ -868,9 +825,7 @@ class FlashAttentionImpl(AttentionImpl):
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
-        # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        k_cache, v_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
@@ -882,8 +837,8 @@ class FlashAttentionImpl(AttentionImpl):
         reshape_and_cache_flash(
             key,
             value,
-            key_cache,
-            value_cache,
+            k_cache,
+            v_cache,
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
@@ -1171,10 +1126,11 @@ def cascade_attention(
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
+    num_kv_heads = key_cache.shape[-2]
     assert common_prefix_len % block_size == 0
     num_common_kv_blocks = common_prefix_len // block_size
     assert num_common_kv_blocks > 0
-    descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
+    descale_shape = (cu_prefix_query_lens.shape[0] - 1, num_kv_heads)
 
     # Process shared prefix.
     prefix_output, prefix_lse = flash_attn_varlen_func(
@@ -1202,7 +1158,7 @@ def cascade_attention(
         num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
     )
 
-    descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
+    descale_shape = (cu_query_lens.shape[0] - 1, num_kv_heads)
 
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(

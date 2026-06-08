@@ -845,16 +845,6 @@ Options:
 """)
 
 
-def test_multi_connector_prefer_cross_layer_blocks(mc):
-    mc._connectors[0].prefer_cross_layer_blocks = False
-    mc._connectors[1].prefer_cross_layer_blocks = True
-    assert mc.prefer_cross_layer_blocks is False
-
-    mc._connectors[0].prefer_cross_layer_blocks = True
-    mc._connectors[1].prefer_cross_layer_blocks = True
-    assert mc.prefer_cross_layer_blocks is True
-
-
 def test_multi_connector_worker_metadata(mc):
     class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         def __init__(self, data: set[str]):

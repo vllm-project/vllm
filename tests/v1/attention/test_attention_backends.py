@@ -27,9 +27,10 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
+    resolve_kv_cache_layout,
     set_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -105,26 +106,18 @@ def create_and_prepopulate_kv_cache(
     device: torch.device,
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
+    layout: KVCacheLayout,
     randomize_blocks: bool = True,
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
-    Args:
-        k_contexts: List of key context tensors for each sequence
-        v_contexts: List of value context tensors for each sequence
-        seq_lens: List of sequence lengths
-        block_size: Size of each block
-        num_kv_heads: Number of KV heads
-        head_size: Size of each head
-        dtype: Data type for the cache
-        device: Device to create the cache on
-        num_blocks: Total number of blocks in the cache
-        block_table: Block table tensor to populate
-        randomize_blocks: Whether to randomly permute blocks
-                          or use sequential order
+    Mirrors production's ``reshape_kv_cache``: allocates a flat buffer in
+    the physical order dictated by *layout*, then permutes to the logical
+    ``[B, H, N, C]`` shape that every backend expects.
 
     Returns:
-        Tuple of (kv_cache, updated_block_table)
+        A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
+        2 * head_size)`` order with strides determined by *layout*.
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -136,38 +129,44 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    kv_cache = torch.zeros(
-        num_blocks, block_size, num_kv_heads, 2 * head_size, dtype=dtype, device=device
-    )
-    kv_cache_flat = kv_cache.view(-1, num_kv_heads, 2 * head_size)
+    # --- allocate ---------------------------------------------------------
+    # Logical 4D shape is always [B, H, N, C].
+    logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
+    stride_order = layout.layer_stride_order
+    physical_4d = tuple(logical_4d[i] for i in stride_order)
+    inv_order = [stride_order.index(i) for i in range(4)]
 
-    # Populate the cache with the context tokens
-    # Start from block_id=1 since block_id=0 is considered the null block
-    start_block_idx = 1
+    kv_cache_physical = torch.zeros(physical_4d, dtype=dtype, device=device)
+    # Permute to logical [B, H, N, C] — mirrors reshape_kv_cache.
+    kv_cache = kv_cache_physical.permute(*inv_order)
+
+    # --- populate ---------------------------------------------------------
+    # Write context tokens into the cache via the logical view:
+    # kv_cache[block, :, token_in_block, :] routes correctly regardless
+    # of physical layout.
+    start_block_idx = 1  # block 0 is the null block
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
-        start = start_block_idx * block_size
-        end = start + k_context.shape[0]
-        kv_cache_flat[start:end, :, :head_size] = k_context
-        kv_cache_flat[start:end, :, head_size:] = v_context
-
-        # Stay block aligned and allocate enough blocks for the new tokens
+        for t in range(k_context.shape[0]):
+            blk = start_block_idx + t // block_size
+            off = t % block_size
+            kv_cache[blk, :, off, :head_size] = k_context[t]
+            kv_cache[blk, :, off, head_size:] = v_context[t]
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
     blocks_end = start_block_idx
 
     # Permute the context blocks (excluding block 0 which is null)
     if randomize_blocks:
-        # Random permutation starting from block 1
         perm = torch.randperm(blocks_end - 1) + 1
     else:
-        # Sequential order starting from block 1
         perm = torch.arange(1, blocks_end)
 
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    # Add 1 to account for starting from block 1
     inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache[1:blocks_end, ...] = kv_cache[perm, ...]
+    # Shuffle on the physical tensor (dim-0 is always the block dim for
+    # layer-compact layouts).
+    kv_cache_physical[1:blocks_end, ...] = kv_cache_physical[perm, ...]
 
     # Construct the right block table
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -456,6 +455,7 @@ def _test_backend_correctness(
     common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
+    layout = resolve_kv_cache_layout()
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -466,6 +466,7 @@ def _test_backend_correctness(
         device=device,
         num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
         common_attn_metadata=common_attn_metadata,
+        layout=layout,
         randomize_blocks=True,
     )
 
@@ -473,51 +474,26 @@ def _test_backend_correctness(
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        reset_kv_cache_layout = False
-
-        # Resolve backend class for both enum and string names.
-        actual_backend = backend_name
-        if backend_name == "FLEX_ATTENTION_SLOW":
-            actual_backend = AttentionBackendEnum.FLEX_ATTENTION
-        if hasattr(actual_backend, "get_class"):
-            backend_cls = actual_backend.get_class()
-        else:
-            backend_cls = None
-
-        if backend_name == AttentionBackendEnum.FLASHINFER:
-            set_kv_cache_layout("HND")
-            reset_kv_cache_layout = True
-
         kv_cache_for_backend = kv_cache
-        if backend_cls is not None:
-            try:
-                stride_order = backend_cls.get_kv_cache_stride_order()
-            except (AttributeError, NotImplementedError):
-                stride_order = tuple(range(kv_cache.ndim))
-            if stride_order != tuple(range(kv_cache.ndim)):
-                inv_order = [stride_order.index(i) for i in range(len(stride_order))]
-                kv_cache_for_backend = (
-                    kv_cache.permute(*stride_order).contiguous().permute(*inv_order)
-                )
 
-        try:
-            backend_output = run_attention_backend(
-                backend_name,
-                kv_cache_spec,
-                ["placeholder"],
-                vllm_config,
-                device,
-                common_attn_metadata,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache_for_backend,
-                sliding_window=sliding_window,
-                attn_type=attn_type,
-            )
-        finally:
-            if reset_kv_cache_layout:
-                set_kv_cache_layout(None)
+        # FlashInfer reads the layout at plan time; override to match
+        # the physical order of the test cache.
+        set_kv_cache_layout(layout.name)
+
+        backend_output = run_attention_backend(
+            backend_name,
+            kv_cache_spec,
+            ["placeholder"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache_for_backend,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+        )
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (
@@ -564,7 +540,10 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """Test backend's correctness with causal attention."""
 
@@ -649,7 +628,9 @@ else:
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_sliding_window_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -711,7 +692,9 @@ def test_sliding_window_backend_correctness(
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_sliding_window_encoder_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -768,7 +751,9 @@ if current_platform.is_rocm():
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 def test_non_causal_backend_correctness(
-    default_vllm_config, batch_spec_name: str, model: str
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
 ):
     """Test backend's correctness with non-causal (bidirectional) decoder
     attention, as used by DFlash speculative decoding."""

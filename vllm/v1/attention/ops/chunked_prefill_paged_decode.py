@@ -27,9 +27,10 @@ def has_native_kv_cache_layout(
 ) -> bool:
     """Return whether KV cache blocks can use the native ROCm pairing.
 
-    The native reshape_and_cache writer assumes packed blocks. If cache update
-    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
-    should use the matching Triton path too.
+    The C++ ``ops.paged_attention_rocm`` custom kernel requires each block
+    to be contiguous in memory. Returns False for stride-padded hybrid
+    layouts and for the unified KV cache (RFC #42082, see
+    :meth:`PagedAttention.split_kv_cache`), routing them to Triton.
     """
     return (
         key_cache.stride(0) == key_cache.shape[1:].numel()
@@ -472,8 +473,8 @@ def chunked_prefill_paged_decode(
             stride_k_cache_3=key_cache.stride(3),
             stride_v_cache_0=value_cache.stride(0),
             stride_v_cache_1=value_cache.stride(1),
-            stride_v_cache_2=value_cache.stride(2),
-            stride_v_cache_3=value_cache.stride(3),
+            stride_v_cache_2=value_cache.stride(3),
+            stride_v_cache_3=value_cache.stride(2),
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
