@@ -206,7 +206,7 @@ def flash_attn_varlen_func(
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
-    # FA4 mask_mod / aux_tensors (for PrefixLM bidirectional attention)
+    # FA4 only
     mask_mod=None,
     aux_tensors=None,
     block_sparse_tensors=None,
@@ -301,6 +301,12 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support s_aux")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if mask_mod is not None:
+            raise NotImplementedError("FA2 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA2 does not support aux_tensors")
+        if block_sparse_tensors is not None:
+            raise NotImplementedError("FA2 does not support block_sparse_tensors")
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -329,6 +335,12 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
+        if mask_mod is not None:
+            raise NotImplementedError("FA3 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA3 does not support aux_tensors")
+        if block_sparse_tensors is not None:
+            raise NotImplementedError("FA3 does not support block_sparse_tensors")
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
             k,

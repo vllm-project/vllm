@@ -216,10 +216,20 @@ class FlashAttentionBackend(AttentionBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
+        if (
+            use_mm_prefix
+            and get_flash_attn_version(head_size=head_size, has_sinks=has_sink) != 4
+        ):
+            return (
+                "mm_prefix (PrefixLM bidirectional attention) requires "
+                "FlashAttention v4, which does not resolve for this "
+                "head_size"
+            )
         return None
 
 
@@ -1096,11 +1106,11 @@ class FlashAttentionImpl(AttentionImpl):
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape)
+            q_descale=layer._q_scale.expand(descale_shape)  # type: ignore[operator]
             if self.supports_quant_query_input
             else None,
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
+            k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
+            v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
             num_splits=1 if self.batch_invariant_enabled else 0,
         )
 
@@ -1117,7 +1127,7 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
     """
     import cutlass
     import cutlass.cute as cute
-    from cutlass import Int32
+    from cutlass import Int32  # type: ignore[attr-defined]
 
     @cute.jit
     def mm_prefix_mask_mod(
@@ -1130,7 +1140,7 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
     ):
         keep = kv_idx <= q_idx
         ranges = aux_tensors[0]
-        for i in cutlass.range_constexpr(max_ranges):
+        for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
             r_start = ranges[batch_idx, i, 0]
             r_end = ranges[batch_idx, i, 1]
             valid = r_start < r_end

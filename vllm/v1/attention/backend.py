@@ -267,6 +267,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
         return None
@@ -334,6 +335,7 @@ class AttentionBackend(ABC):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
         )
         if combination_reason is not None:

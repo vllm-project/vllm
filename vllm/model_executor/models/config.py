@@ -76,13 +76,15 @@ class Gemma4Config(VerifyAndUpdateConfig):
             return
 
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         max_head_dim = max(head_dim, global_head_dim)
 
         if is_fa_version_supported(4) and max_head_dim <= 512:
             if (
                 vllm_config.attention_config.flash_attn_version is None
-                and vllm_config.attention_config.backend is None
+                and vllm_config.attention_config.backend
+                in (None, AttentionBackendEnum.FLASH_ATTN)
             ):
                 vllm_config.attention_config.flash_attn_version = 4
                 logger.info(
@@ -93,10 +95,6 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     global_head_dim,
                 )
         elif vllm_config.attention_config.backend is None:
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
-
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
