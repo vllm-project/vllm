@@ -702,21 +702,12 @@ class Step3VLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=["patch_pixel_values"],
+            buffer_keys=[
+                "pixel_values",
+                "patch_pixel_values",
+            ],
             out_hidden_size=self.config.hidden_size,
         )
-
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
-
-    def get_max_frames_per_video(
-        self,
-    ) -> int:
-        return 0
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -734,38 +725,17 @@ class Step3VLForConditionalGeneration(
         )
         return min_budget, max_budget
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(mm_kwargs.get("pixel_values", []))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
         img_output_tokens = self._compute_spatial_tokens(
             self.config.vision_config.image_size,
             self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
-        )
-        patch_output_tokens = self._compute_spatial_tokens(
-            504,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-        return [
-            img_output_tokens + num_patch * patch_output_tokens
-            for num_patch in num_patches
-        ]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        img_grid = (
-            self.config.vision_config.image_size // self.config.vision_config.patch_size
         )
 
         # NOTE: 504 is the hard coded size for each patch after processing
@@ -773,13 +743,24 @@ class Step3VLForConditionalGeneration(
         # of the vision model and may need to be updated if the architecture changes.
         # The number of tokens for each patch is calculated based on this
         # size and the patch size.
+        patch_output_tokens = self._compute_spatial_tokens(
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+        img_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
         patch_grid = 504 // self.config.vision_config.patch_size
         total_image_pixel = img_grid * img_grid
         total_patch_pixel = patch_grid * patch_grid
 
-        num_patches = mm_kwargs.get("num_patches")
         return [
-            total_image_pixel + num_patch * total_patch_pixel
+            EncoderItemSpec(
+                input_size=(total_image_pixel + num_patch * total_patch_pixel),
+                output_tokens=(img_output_tokens + num_patch * patch_output_tokens),
+            )
             for num_patch in num_patches
         ]
 
@@ -861,33 +842,27 @@ class Step3VLForConditionalGeneration(
             device=device,
             dtype=dtype,
         )
-        # num_patches is NOT in buffers -- the per-item merge is done
+        # num_patches is NOT in values -- the per-item merge is done
         # CPU-side by finalize_encoder_cudagraph_output using the actual
         # batch's num_patches from mm_kwargs.
-        mm_kwargs = {
+        values = {
             "pixel_values": dummy_pixel_values,
             "patch_pixel_values": dummy_patch_pixel_values,
         }
 
-        buffers = {
-            "patch_pixel_values": dummy_patch_pixel_values,
-        }
-
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         # Graph captures only the compute (vision model + conv projector).
         # Per-item merge happens CPU-side in finalize_encoder_cudagraph_output
         # using actual num_patches from the batch data.
-        pixel_values = mm_kwargs["pixel_values"]
-        patch_pixel_values = buffers["patch_pixel_values"]
+        pixel_values = values["pixel_values"]
+        patch_pixel_values = values["patch_pixel_values"]
 
         image_features = self._process_image_features(
             self._get_vision_model_output(pixel_values)
@@ -989,10 +964,11 @@ class Step3VLForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        # Only patch_pixel_values lives in the buffers dict; num_patches is
+        # Only patch_pixel_values lives in the values dict; num_patches is
         # processed CPU-side by finalize_encoder_cudagraph_output.
         return EncoderCudaGraphReplayBuffers(
-            buffers={
+            values={
+                "pixel_values": mm_kwargs["pixel_values"],
                 "patch_pixel_values": mm_kwargs["patch_pixel_values"],
             },
         )

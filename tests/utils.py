@@ -33,6 +33,8 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -44,6 +46,7 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
@@ -61,7 +64,28 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
+logger = init_logger(__name__)
+
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
+    """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
+    trust_remote_code modules would otherwise fetch from third-party CDNs
+    (often unreachable from US-based CI)."""
+    if HF_HUB_OFFLINE:
+        return
+    for repo_id, filename in assets:
+        try:
+            hf_hub_download(repo_id=repo_id, filename=filename)
+        except Exception as e:
+            logger.warning(
+                "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
+                repo_id,
+                filename,
+                e,
+            )
+
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -514,11 +538,22 @@ class RemoteVLLMServer:
             if current_platform.is_rocm():
                 with _nvml():
                     handles = amdsmi_get_processor_handles()
-                    total_used = 0
-                    for handle in handles:
+                    devices = get_physical_device_indices(
+                        list(range(current_platform.device_count()))
+                    )
+                    total_used_mib = 0
+                    for device in devices:
+                        handle = handles[device]
                         vram_info = amdsmi_get_gpu_vram_usage(handle)
-                        total_used += vram_info["vram_used"]
-                    return total_used
+                        total_used_mib += vram_info["vram_used"]
+                    # amdsmi reports VRAM in MiB; convert to bytes so this
+                    # matches the CUDA/nvml branch (already bytes) and the
+                    # byte-based target in _wait_for_gpu_memory_release. Without
+                    # this, that wait compares MiB against a ~2e9-byte target,
+                    # is always satisfied instantly, and returns "released to
+                    # 0.00 GB" while the previous server's VRAM is still
+                    # resident -- OOMing the next server's startup on ROCm.
+                    return total_used_mib * 1024 * 1024
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
@@ -636,7 +671,8 @@ class RemoteVLLMServer:
         )
 
     def url_for(self, *parts: str) -> str:
-        return self.url_root + "/" + "/".join(parts)
+        path = "/".join(part.strip("/") for part in parts if part)
+        return f"{self.url_root}/{path}"
 
     def get_client(self, **kwargs):
         if "timeout" not in kwargs:
@@ -1092,6 +1128,7 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -1105,6 +1142,9 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
 
     compare_all_settings(
@@ -1114,6 +1154,7 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
+        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1125,6 +1166,7 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -1135,7 +1177,15 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
+
+    if force_v1_runner:
+        all_envs = [
+            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
+        ]
 
     trust_remote_code = False
     for args in all_args:
@@ -1324,43 +1374,38 @@ def multi_process_parallel(
 ) -> None:
     import ray
 
-    # Using ray helps debugging the error when it failed
-    # as compared to multiprocessing.
-    # NOTE: We need to set working_dir for distributed tests,
-    # otherwise we may get import errors on ray workers
-    # NOTE: Force ray not to use gitignore file as excluding, otherwise
-    # it will not move .so files to working dir.
-    # So we have to manually add some of large directories
-    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    # Using ray helps debugging the error when it failed as compared to
+    # multiprocessing. For local Ray workers, putting the repo root on
+    # PYTHONPATH is enough and avoids uploading the full source tree, which
+    # exceeds Ray's working_dir package size limit on CI.
+    env_vars = {
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+        ),
+        **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
+    }
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes": [
-                "build",
-                ".git",
-                "cmake-build-*",
-                "shellcheck",
-                "dist",
-                "ep_kernels_workspace",
-            ],
+            "env_vars": env_vars,
         }
     )
 
     distributed_init_port = get_open_port()
-    refs = []
-    for rank in range(tp_size * pp_size):
-        refs.append(
-            test_target.remote(
-                monkeypatch,
-                tp_size,
-                pp_size,
-                rank,
-                distributed_init_port,
-            ),
-        )
-    ray.get(refs)
-
-    ray.shutdown()
+    try:
+        refs = []
+        for rank in range(tp_size * pp_size):
+            refs.append(
+                test_target.remote(
+                    monkeypatch,
+                    tp_size,
+                    pp_size,
+                    rank,
+                    distributed_init_port,
+                ),
+            )
+        ray.get(refs)
+    finally:
+        ray.shutdown()
 
 
 @contextmanager
@@ -1394,6 +1439,18 @@ def wait_for_gpu_memory_to_clear(
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
+    if (
+        current_platform.is_rocm()
+        and threshold_ratio is not None
+        and threshold_ratio < 0.05
+    ):
+        # ROCm can keep a small runtime/driver footprint resident even after
+        # all model allocations are gone. On MI300 this has been observed
+        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
+        # near the amount of free memory needed by the next vLLM runner.
+        min_threshold_bytes = 4 * 1024**3
+        threshold_bytes = max(threshold_bytes or 0, min_threshold_bytes)
+
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
     devices = get_physical_device_indices(devices)
@@ -1420,15 +1477,26 @@ def wait_for_gpu_memory_to_clear(
             print(f"{k}={v}; ", end="")
         print("")
 
-        if threshold_bytes is not None:
-            is_free = lambda used, total: used <= threshold_bytes / 2**30
-            threshold = f"{threshold_bytes / 2**30} GiB"
+        if threshold_bytes is not None and threshold_ratio is not None:
+            threshold_gib = threshold_bytes / 2**30
+            threshold = f"max({threshold_gib:.2f} GiB, {threshold_ratio:.3f})"
+            all_free = all(
+                used <= max(threshold_gib, total * threshold_ratio)
+                for used, total in output_raw.values()
+            )
+        elif threshold_bytes is not None:
+            threshold_gib = threshold_bytes / 2**30
+            threshold = f"{threshold_gib} GiB"
+            all_free = all(used <= threshold_gib for used, _ in output_raw.values())
         else:
-            is_free = lambda used, total: used / total <= threshold_ratio
-            threshold = f"{threshold_ratio:.2f}"
+            assert threshold_ratio is not None
+            threshold = f"{threshold_ratio:.3f}"
+            all_free = all(
+                used / total <= threshold_ratio for used, total in output_raw.values()
+            )
 
         dur_s = time.time() - start_time
-        if all(is_free(used, total) for used, total in output_raw.values()):
+        if all_free:
             print(
                 f"Done waiting for free GPU memory on devices {devices=} "
                 f"({threshold=}) {dur_s=:.02f}"
@@ -1442,6 +1510,32 @@ def wait_for_gpu_memory_to_clear(
             )
 
         time.sleep(5)
+
+
+def wait_for_rocm_memory_to_settle(
+    *,
+    threshold_ratio: float = 0.1,
+    timeout_s: float = 240,
+) -> None:
+    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+
+    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    loads in a single test process can OOM the *next* engine/model startup
+    even after ``cleanup_dist_env_and_memory``. This gives the driver time to
+    actually release VRAM before the next allocation. No-op off ROCm.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    num_gpus = current_platform.device_count()
+    if num_gpus == 0:
+        return
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(num_gpus)),
+        threshold_ratio=threshold_ratio,
+        timeout_s=timeout_s,
+    )
 
 
 _P = ParamSpec("_P")

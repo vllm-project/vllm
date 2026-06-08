@@ -59,19 +59,9 @@ class MooncakeStoreScheduler:
         )
         self.client = LookupKeyClient(vllm_config)
 
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.original_block_size = vllm_config.cache_config.block_size
-        # LCM for multi-group HMA; bs * pcp * dcp for single-group. Matches
-        # the engine's own scheduler block size by construction.
+        # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
-        )
-
-        self._discard_partial_chunks = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "discard_partial_chunks", True
-            )
         )
 
         # Per-request state
@@ -88,18 +78,19 @@ class MooncakeStoreScheduler:
     ) -> tuple[int, bool]:
         """Check for external KV cache hit."""
         # Look up against the full prefill range, not just the prompt.
-        if self._discard_partial_chunks:
-            token_len = request.num_tokens // self._block_size * self._block_size
-        else:
-            token_len = request.num_tokens
-
+        token_len = request.num_tokens // self._block_size * self._block_size
         if token_len < self._block_size:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
 
         if num_external_hit_tokens == request.num_tokens:
-            num_external_hit_tokens -= 1
+            # Leave a sub-block tail uncomputed for sampling, on a block
+            # boundary so the recv-side load mask covers every yielded chunk.
+            num_external_hit_tokens = max(
+                0,
+                (request.num_tokens - 1) // self._block_size * self._block_size,
+            )
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -176,7 +167,9 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
-            self._request_trackers.pop(req_id, None)
+            self.load_specs.pop(req_id, None)
+            if request_tracker := self._request_trackers.get(req_id):
+                request_tracker.reset()
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -214,9 +207,7 @@ class MooncakeStoreScheduler:
             self._request_trackers[request.req_id] = request_tracker
 
             last_chunk_tokens_num = (
-                (len(prefill_tokens) // self._block_size * self._block_size)
-                if self._discard_partial_chunks
-                else len(prefill_tokens)
+                len(prefill_tokens) // self._block_size * self._block_size
             )
 
             req_meta = ReqMeta.from_request_tracker(
@@ -226,8 +217,6 @@ class MooncakeStoreScheduler:
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
-                discard_partial_chunks=self._discard_partial_chunks,
-                original_block_size=self.original_block_size,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -269,9 +258,7 @@ class MooncakeStoreScheduler:
                     self._request_trackers[req_id] = request_tracker
 
                     last_chunk_tokens_num = (
-                        (len(prefill_tokens) // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else len(prefill_tokens)
+                        len(prefill_tokens) // self._block_size * self._block_size
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
@@ -282,8 +269,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
                     )
                 else:
                     # Decode/chunked request
@@ -310,9 +295,7 @@ class MooncakeStoreScheduler:
                     request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
-                        (prefill_end // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else prefill_end
+                        prefill_end // self._block_size * self._block_size
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
@@ -323,8 +306,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
                     )
 
                 if req_meta is not None:
@@ -341,10 +322,6 @@ class MooncakeStoreScheduler:
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size != 0) and (
-                    num_tokens_to_compute == unfinished_req.num_tokens - 1
-                ):
-                    num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
                     req_id=request_id,
                     token_len=num_tokens_to_compute,
@@ -358,7 +335,6 @@ class MooncakeStoreScheduler:
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
-                    discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -374,8 +350,10 @@ class MooncakeStoreScheduler:
         if self.kv_role == "kv_consumer":
             return False, None
         tracker = self._request_trackers.get(request.request_id)
-        assert tracker is not None
-        if tracker.num_saved_tokens <= 0:
+        # Missing tracker can happen when the request is aborted before the
+        # connector observes the normal finished lifecycle or is preempted
+        # before finishing.
+        if tracker is None or tracker.num_saved_tokens <= 0:
             return False, None
         total_blocks = sum(len(g) for g in block_ids)
         delay_free_blocks = total_blocks > 0
@@ -386,3 +364,30 @@ class MooncakeStoreScheduler:
                 request.request_id,
             )
         return delay_free_blocks, None
+
+    def reset_store(self) -> bool:
+        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+
+        Routes through the existing LookupKey ZMQ admin channel to worker
+        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+
+        Ordering assumption: caller (typically
+        ``Scheduler.reset_connector_cache``, invoked via
+        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        in-flight Mooncake lookups or transfers. For RL workflows this is
+        satisfied at the step boundary after weight updates and rollout
+        drain. Violating this can allow stale KV to be served on the next
+        request, defeating the hard-reset guarantee.
+
+        Returns True on ACK from worker, False on NACK or RPC error.
+        """
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("Mooncake store reset via remove_all succeeded.")
+            else:
+                logger.warning("Mooncake store reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("Mooncake reset_store RPC failed: %s", e)
+            return False

@@ -50,7 +50,7 @@ To select a different backend, set `kv_connector_extra_config.backends` in `--kv
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector":"NixlConnector",
-    "kv_role":"kv_both",
+    "kv_role":"kv_producer",
     "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
   }'
 ```
@@ -60,7 +60,7 @@ You can also pass JSON keys individually using dotted arguments, and you can app
 ```bash
 vllm serve <MODEL> \
   --kv-transfer-config.kv_connector NixlConnector \
-  --kv-transfer-config.kv_role kv_both \
+  --kv-transfer-config.kv_role kv_producer \
   --kv-transfer-config.kv_connector_extra_config.backends+ LIBFABRIC
 ```
 
@@ -81,7 +81,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8100 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Consumer (Decoder) Configuration
@@ -96,7 +96,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8200 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Proxy Server
@@ -212,10 +212,21 @@ sequenceDiagram
 Enable bidirectional KV transfer by setting `bidirectional_kv_xfer` in `kv_connector_extra_config` on **both** P and D instances:
 
 ```bash
+# Prefill instance
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector": "NixlConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "bidirectional_kv_xfer": true
+    }
+  }'
+
+# Decode instance
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_consumer",
     "kv_connector_extra_config": {
       "bidirectional_kv_xfer": true
     }
@@ -359,11 +370,10 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
-- **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+- **kv_both** (deprecated): Previously used as a catch-all when the role was not predetermined. This value is now deprecated for NixlConnector and will be removed in a future release.
 
-!!! tip
-    NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
-    Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
+!!! warning
+    `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.
 
 ### KV Load Failure Policy
 
@@ -374,6 +384,10 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 !!! warning
     Using `kv_load_failure_policy="recompute"` can lead to performance degradation in production deployments. When KV loads fail, the decode instance will execute prefill work with decode-optimized configurations, which is inefficient and defeats the purpose of disaggregated prefilling. This also increases tail latency for other ongoing decode requests.
+
+### For NVIDIA GB-series GPUs
+
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 
