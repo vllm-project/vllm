@@ -50,8 +50,10 @@ class OpenAIBaseModel(BaseModel):
 
         # Compare against both field names and aliases
         if any(k not in field_names for k in data):
-            logger.debug(
-                "The following fields were present in the request but ignored: %s",
+            logger.warning(
+                "The following fields were present in the request but "
+                "ignored by vLLM. This may indicate a client bug or an "
+                "attempt to inject unexpected fields: %s",
                 data.keys() - field_names,
             )
         return result
