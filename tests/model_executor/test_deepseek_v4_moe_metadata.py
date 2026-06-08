@@ -29,6 +29,31 @@ def test_deepseek_v4_fused_moe_metadata_is_available_to_mixture():
     assert mixture.num_redundant_experts == 0
 
 
+def test_deepseek_v4_fused_moe_metadata_handles_moe_runner_shape():
+    moe = object.__new__(DeepseekV4MoE)
+    moe.n_routed_experts = 256
+    moe.n_shared_experts = 1
+    moe.experts = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            num_logical_experts=256,
+            num_experts=256,
+            num_local_experts=128,
+        ),
+        routed_experts=SimpleNamespace(
+            global_num_experts=256,
+            local_num_experts=128,
+        ),
+    )
+
+    moe._sync_fused_moe_metadata()
+
+    assert moe.n_logical_experts == 256
+    assert moe.n_physical_experts == 256
+    assert moe.n_local_physical_experts == 128
+    assert moe.n_local_experts == 128
+    assert moe.n_redundant_experts == 0
+
+
 def test_deepseek_v4_fused_moe_init_exports_moe_metadata(monkeypatch):
     class FakeGate:
         def __init__(self, *args, **kwargs):
