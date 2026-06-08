@@ -39,7 +39,6 @@ def _get_config_dtype_str(
     use_fp8_w8a16: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_nvfp4: bool = False,
     ocp_mx_scheme: str | None = None,
 ) -> str | None:
     """
@@ -55,8 +54,6 @@ def _get_config_dtype_str(
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
-    elif use_nvfp4:
-        return "nvfp4"
     elif ocp_mx_scheme is not None:
         # The output of this function is passed to `try_get_optimal_moe_config`,
         # and as we only simulate OCP MX execution in fused_moe for now,
@@ -448,7 +445,6 @@ class FusedMoEQuantConfig:
             use_fp8_w8a16=self.use_fp8_w8a16,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
-            use_nvfp4=self.use_nvfp4_w4a4,
             ocp_mx_scheme=self.ocp_mx_scheme,
             dtype=dtype,
         )

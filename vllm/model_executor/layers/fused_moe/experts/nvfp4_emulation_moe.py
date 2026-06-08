@@ -34,6 +34,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _e2m1_inline,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -42,31 +45,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
-
-NVFP4_BLOCK_SIZE = 16
-
-
-@triton.jit
-def _e2m1_decode_and_sign(nibble):
-    """Decode an NVFP4 nibble (4 bits: 1 sign + 3 magnitude) to float32.
-
-    Uses direct IEEE 754 bit construction instead of a comparison tree.
-    For magnitudes 2-7 the FP32 bit pattern is 0x3F000000 + (mag << 22),
-    which is a single shift + add + bitcast.  Magnitudes 0 (zero) and 1
-    (E2M1 subnormal = 0.5) are patched with two tl.where ops.
-    """
-    magnitude = nibble & 0x07
-    sign = (nibble >> 3) & 1
-
-    # Construct IEEE FP32 bits: works for mag 2-7.
-    fp32_bits = 0x3F000000 + (magnitude.to(tl.int32) << 22)
-    val = fp32_bits.to(tl.float32, bitcast=True)
-
-    # Fix mag 0 and 1 (E2M1 subnormals).
-    val = tl.where(magnitude == 0, 0.0, val)
-    val = tl.where(magnitude == 1, 0.5, val)
-
-    return tl.where(sign == 1, -val, val)
 
 
 @triton.jit
@@ -131,7 +109,6 @@ def fused_moe_nvfp4_emulation_kernel(
     """
     BLOCK_SIZE_K_PACKED: tl.constexpr = BLOCK_SIZE_K // 2
 
-    # -----------------------------------------------------------
     # Map program ids to the block of C it should compute.
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
@@ -143,7 +120,6 @@ def fused_moe_nvfp4_emulation_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # -----------------------------------------------------------
     # Token / expert setup
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
@@ -169,7 +145,6 @@ def fused_moe_nvfp4_emulation_kernel(
         )
         return
 
-    # -----------------------------------------------------------
     # Pointer setup
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -203,12 +178,11 @@ def fused_moe_nvfp4_emulation_kernel(
     # Load per-expert global scale (scalar).
     w_global_scale = tl.load(w_global_scale_ptr + off_experts).to(tl.float32)
 
-    # -----------------------------------------------------------
     # K-loop with FP32 accumulation
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # --- Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K] ---
+        # Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K].
         if block_k_diviable:
             a = tl.load(
                 a_ptrs,
@@ -222,7 +196,7 @@ def fused_moe_nvfp4_emulation_kernel(
                 other=0.0,
             )
 
-        # --- Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] ---
+        # Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
         if block_k_diviable:
             raw_bytes = tl.load(b_ptrs)
         else:
@@ -233,11 +207,10 @@ def fused_moe_nvfp4_emulation_kernel(
         low_nibble = raw_bytes & 0x0F
         high_nibble = (raw_bytes >> 4) & 0x0F
 
-        # Decode E2M1 with sign for both halves.
-        low_decoded = _e2m1_decode_and_sign(low_nibble)
-        high_decoded = _e2m1_decode_and_sign(high_nibble)
+        low_decoded = _e2m1_inline(low_nibble)
+        high_decoded = _e2m1_inline(high_nibble)
 
-        # --- Load and apply per-block FP8 scales ---
+        # Load and apply per-block FP8 scales.
         # Scale shape: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED], one scale per
         # group_size_packed packed elements.
         b_scale_ptrs = (
@@ -270,7 +243,6 @@ def fused_moe_nvfp4_emulation_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
 
-    # -----------------------------------------------------------
     # Router weight multiplication (in float32 for stability)
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -278,7 +250,6 @@ def fused_moe_nvfp4_emulation_kernel(
 
     accumulator = accumulator.to(compute_type)
 
-    # -----------------------------------------------------------
     # Write output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
@@ -357,7 +328,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        group_size=NVFP4_BLOCK_SIZE,
+        group_size=16,
         BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
         BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
@@ -372,6 +343,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
     )
 
 
+# TODO: There is actually no support for tuning of the underlying triton hyperparameters in benchmarks/kernels/benchmark_moe.py, to be added.
 class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     """
     Extension of TritonExperts to support emulated NVFP4 MoE experts.
