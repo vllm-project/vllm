@@ -202,6 +202,8 @@ pub enum ChatEvent {
         prompt_token_count: usize,
         /// Number of output tokens generated.
         output_token_count: usize,
+        /// Number of prompt tokens served from cache.
+        cached_token_count: u32,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,

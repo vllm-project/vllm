@@ -20,6 +20,7 @@ pub struct CollectedAssistantMessage {
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub output_token_count: usize,
+    pub cached_token_count: u32,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
@@ -77,6 +78,7 @@ impl ChatEventStream {
                     message: done,
                     prompt_token_count,
                     output_token_count,
+                    cached_token_count,
                     finish_reason,
                     kv_transfer_params,
                 } => {
@@ -90,6 +92,7 @@ impl ChatEventStream {
                         }),
                         token_ids,
                         output_token_count,
+                        cached_token_count,
                         finish_reason,
                         kv_transfer_params,
                     });
@@ -192,6 +195,7 @@ mod tests {
                     message: Default::default(),
                     prompt_token_count: 2,
                     output_token_count: 1,
+                    cached_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -229,6 +233,7 @@ mod tests {
                 }),
                 token_ids: vec![],
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }

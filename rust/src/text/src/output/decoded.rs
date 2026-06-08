@@ -42,6 +42,7 @@ impl Default for TextDecodeOptions {
 pub struct Finished {
     pub prompt_token_count: usize,
     pub output_token_count: usize,
+    pub cached_token_count: u32,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
@@ -98,12 +99,14 @@ pub async fn decoded_text_event_stream(
 ) -> crate::Result<()> {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
+    let mut cached_token_count = 0_u32;
     let mut token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut logprobs: Option<DecodedLogprobs> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
+        cached_token_count = cached_token_count.max(output.cached_token_count);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -269,6 +272,7 @@ pub async fn decoded_text_event_stream(
                 finished: Some(Finished {
                     prompt_token_count,
                     output_token_count,
+                    cached_token_count,
                     finish_reason: reason,
                     kv_transfer_params,
                 }),

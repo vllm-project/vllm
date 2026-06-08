@@ -125,6 +125,7 @@ async fn generate_chunk_stream(
     pin_mut!(stream);
     let mut prompt_tokens: Option<u32> = None;
     let mut output_tokens = 0_u32;
+    let mut cached_token_count = 0_u32;
 
     while let Some(next) = stream.next().await {
         match next {
@@ -134,6 +135,7 @@ async fn generate_chunk_stream(
                         output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len() as u32);
                 }
                 let usage_prompt_tokens = prompt_tokens.unwrap_or_default();
+                cached_token_count = cached_token_count.max(output.cached_token_count);
 
                 let token_ids = output.token_ids;
                 output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
@@ -178,8 +180,9 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_counts(usage_prompt_tokens, output_tokens)),
+                    usage: include_continuous_usage.then(|| {
+                        Usage::from_counts(usage_prompt_tokens, output_tokens, cached_token_count)
+                    }),
                 })
                 .await;
             }
@@ -200,6 +203,7 @@ async fn generate_chunk_stream(
             usage: Some(Usage::from_counts(
                 prompt_tokens.unwrap_or_default(),
                 output_tokens,
+                cached_token_count,
             )),
         })
         .await;
@@ -399,6 +403,7 @@ mod tests {
                 token_ids: Vec::new(),
                 logprobs: None,
                 finish_reason: None,
+                cached_token_count: 0,
                 kv_transfer_params: None,
             }),
             Ok(GenerateOutput {
@@ -410,6 +415,7 @@ mod tests {
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
+                cached_token_count: 2,
                 kv_transfer_params: None,
             }),
         ]);
@@ -434,8 +440,28 @@ mod tests {
             2
         );
         assert_eq!(
+            chunks[0]
+                .usage
+                .as_ref()
+                .expect("chunk usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(2)
+        );
+        assert_eq!(
             chunks[1].usage.as_ref().expect("final usage").prompt_tokens,
             2
+        );
+        assert_eq!(
+            chunks[1]
+                .usage
+                .as_ref()
+                .expect("final usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(2)
         );
     }
 }

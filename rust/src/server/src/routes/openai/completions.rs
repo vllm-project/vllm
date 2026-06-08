@@ -162,6 +162,7 @@ async fn collect_completion(
     let usage = Usage::from_counts(
         collected.prompt_token_ids.len() as u32,
         collected.token_ids.len() as u32,
+        collected.cached_token_count,
     );
 
     if log_request {
@@ -301,6 +302,7 @@ async fn completion_chunk_stream(
                             Usage::from_counts(
                                 finished.prompt_token_count as u32,
                                 finished.output_token_count as u32,
+                                finished.cached_token_count,
                             ),
                         )))
                         .await;
@@ -514,6 +516,7 @@ mod tests {
                 finished: Some(Finished {
                     prompt_token_count: 5,
                     output_token_count: 2,
+                    cached_token_count: 3,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -527,6 +530,7 @@ mod tests {
             1,
             false,
             ResponseOptions {
+                include_usage: true,
                 requested_logprobs: Some(1),
                 ..Default::default()
             },
@@ -564,6 +568,22 @@ mod tests {
                 );
             }
             CompletionSseChunk::Usage(_) => panic!("expected regular chunk"),
+        }
+
+        match &chunks[3] {
+            CompletionSseChunk::Usage(chunk) => {
+                assert_eq!(
+                    chunk
+                        .usage
+                        .as_ref()
+                        .expect("usage")
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map(|details| details.cached_tokens),
+                    Some(3)
+                );
+            }
+            CompletionSseChunk::Chunk(_) => panic!("expected usage chunk"),
         }
     }
 }

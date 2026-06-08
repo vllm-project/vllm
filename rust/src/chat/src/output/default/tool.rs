@@ -242,6 +242,7 @@ pub(crate) async fn tool_event_stream(
             ContentEvent::Done {
                 prompt_token_count,
                 output_token_count,
+                cached_token_count,
                 finish_reason,
                 kv_transfer_params,
             } => {
@@ -252,6 +253,7 @@ pub(crate) async fn tool_event_stream(
                 y.yield_ok(AssistantEvent::Done {
                     prompt_token_count,
                     output_token_count,
+                    cached_token_count,
                     finish_reason,
                     kv_transfer_params,
                 })
@@ -467,6 +469,7 @@ mod tests {
             .chain(std::iter::once(Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             })));
@@ -508,6 +511,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -661,6 +665,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 3,
                 output_token_count: 0,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -699,6 +704,7 @@ mod tests {
                 AssistantEvent::Done {
                     prompt_token_count: 3,
                     output_token_count: 0,
+                    cached_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -741,6 +747,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 0,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -781,6 +788,7 @@ mod tests {
                 AssistantEvent::Done {
                     prompt_token_count: 1,
                     output_token_count: 0,
+                    cached_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -798,6 +806,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -903,6 +912,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),

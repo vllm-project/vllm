@@ -451,7 +451,7 @@ pub struct ServerUnsupportedArgs {
         default_missing_value = "true",
         num_args = 0..=1
     )]
-    pub enable_prompt_tokens_details: Option<Unsupported>,
+    pub enable_prompt_tokens_details: Option<Noop>,
 
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(

@@ -139,6 +139,7 @@ async fn collect_chat_completion(
         logprobs,
         token_ids,
         output_token_count,
+        cached_token_count,
         finish_reason,
         kv_transfer_params,
     } = collected;
@@ -183,7 +184,11 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
+    let usage = Usage::from_counts(
+        prompt_token_count as u32,
+        output_token_count as u32,
+        cached_token_count,
+    );
 
     if log_request {
         info!(
@@ -394,6 +399,7 @@ async fn chat_completion_chunk_stream(
                 prompt_token_count,
                 finish_reason,
                 output_token_count,
+                cached_token_count,
                 ..
             }) => {
                 if log_request {
@@ -436,7 +442,11 @@ async fn chat_completion_chunk_stream(
                         &request_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
+                        Usage::from_counts(
+                            prompt_token_count as u32,
+                            output_token_count as u32,
+                            cached_token_count,
+                        ),
                     ))
                     .await;
                 }
@@ -919,6 +929,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -931,6 +942,7 @@ mod tests {
             1,
             false,
             ResponseOptions {
+                include_usage: true,
                 requested_logprobs: true,
                 include_reasoning: true,
                 ..Default::default()
@@ -942,11 +954,21 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .expect("stream chunks");
 
-        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.len(), 4);
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let logprobs = chunks[1].choices[0].logprobs.as_ref().expect("logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "hi");
+        assert_eq!(
+            chunks[3]
+                .usage
+                .as_ref()
+                .expect("usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -982,6 +1004,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1034,6 +1057,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 2,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1112,6 +1136,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 2,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1242,6 +1267,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 4,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1320,6 +1346,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),

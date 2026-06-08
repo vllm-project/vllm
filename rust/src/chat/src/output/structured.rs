@@ -129,6 +129,7 @@ impl StructuredEventState {
         &mut self,
         prompt_token_count: usize,
         output_token_count: usize,
+        cached_token_count: u32,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
     ) -> Result<Vec<ChatEvent>> {
@@ -139,6 +140,7 @@ impl StructuredEventState {
             message: self.message.clone(),
             prompt_token_count,
             output_token_count,
+            cached_token_count,
             finish_reason,
             kv_transfer_params,
         });
@@ -275,12 +277,14 @@ pub(crate) async fn structured_chat_event_stream(
             AssistantEvent::Done {
                 prompt_token_count,
                 output_token_count,
+                cached_token_count,
                 finish_reason,
                 kv_transfer_params,
             } => {
                 for next in state.finish(
                     prompt_token_count,
                     output_token_count,
+                    cached_token_count,
                     finish_reason,
                     kv_transfer_params,
                 )? {
@@ -315,6 +319,7 @@ mod tests {
             Ok(AssistantEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -366,6 +371,7 @@ mod tests {
             Ok(AssistantEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -414,6 +420,7 @@ mod tests {
             Ok(AssistantEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -462,6 +469,7 @@ mod tests {
             Ok(AssistantEvent::Done {
                 prompt_token_count: 1,
                 output_token_count: 1,
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),

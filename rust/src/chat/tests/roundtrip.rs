@@ -510,6 +510,7 @@ fn decoded_completion_stream(
                 finished: Some(Finished {
                     prompt_token_count: 0,
                     output_token_count: 0,
+                    cached_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -521,6 +522,7 @@ fn decoded_completion_stream(
             let finished = (index == last_index).then(|| Finished {
                 prompt_token_count,
                 output_token_count: completion_body.chars().count(),
+                cached_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             });

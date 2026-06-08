@@ -467,7 +467,7 @@ fn frontend_args_json_accepts_noop_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2,"enable_prompt_tokens_details":true}"#,
     ])
     .unwrap();
 
