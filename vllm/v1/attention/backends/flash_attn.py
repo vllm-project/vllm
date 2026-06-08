@@ -837,22 +837,19 @@ class FlashAttentionImpl(AttentionImpl):
                     mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
                     mm_aux = [mm_prefix_ranges]
                     if attn_metadata.mm_prefix_block_sparse is None:
-                        from vllm.vllm_flash_attn.cute.compute_block_sparsity import (
+                        from vllm.v1.attention.backends.fa_utils import (
                             compute_block_sparsity,
                         )
 
                         attn_metadata.mm_prefix_block_sparse = compute_block_sparsity(
-                            tile_m=64,
-                            tile_n=64,
-                            batch_size=cu_seqlens_q.shape[0] - 1,
-                            num_heads=1,
-                            seqlen_q=max_seqlen_q,
-                            seqlen_k=max_seqlen_k,
+                            head_size=self.head_size,
                             mask_mod=mm_mask_mod,
                             aux_tensors=mm_aux,
-                            device=query.device,
                             cu_seqlens_q=cu_seqlens_q,
                             seqused_k=seqused_k,
+                            max_seqlen_q=max_seqlen_q,
+                            max_seqlen_k=max_seqlen_k,
+                            device=query.device,
                         )
                     mm_block_sparse = attn_metadata.mm_prefix_block_sparse
 

@@ -222,6 +222,55 @@ def flash_attn_supports_mla():
     return False
 
 
+def compute_block_sparsity(
+    head_size: int,
+    mask_mod: Any,
+    aux_tensors: list[Any],
+    cu_seqlens_q: Any,
+    seqused_k: Any,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    device: Any,
+) -> Any:
+    """Compute block sparsity for mm_prefix masks using arch-matched tiles.
+
+    Tile sizes must match what FA4's kernel selects, otherwise
+    normalize_block_sparse_config raises on tile_n mismatch.
+    """
+    from vllm.vllm_flash_attn.cute.compute_block_sparsity import (
+        compute_block_sparsity as _compute_block_sparsity,
+    )
+    from vllm.vllm_flash_attn.cute.interface import _tile_size_fwd_sm90
+
+    cap = current_platform.get_device_capability()
+    assert cap is not None
+    assert cap.major in (8, 9, 10, 12), f"Unsupported SM major version: {cap.major}"
+
+    if cap.major == 8:
+        tile_m, tile_n = 128, 64
+    elif cap.major == 9:
+        cfg = _tile_size_fwd_sm90(head_size, head_size, False, False)
+        tile_m, tile_n = cfg.m_block_size, cfg.n_block_size
+    elif cap.major == 10:
+        tile_m, tile_n = 128, 128
+    else:  # major == 12
+        tile_m, tile_n = (128, 128) if head_size <= 64 else (128, 64)
+
+    return _compute_block_sparsity(
+        tile_m=tile_m,
+        tile_n=tile_n,
+        batch_size=cu_seqlens_q.shape[0] - 1,
+        num_heads=1,
+        seqlen_q=max_seqlen_q,
+        seqlen_k=max_seqlen_k,
+        mask_mod=mask_mod,
+        aux_tensors=aux_tensors,
+        device=device,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+    )
+
+
 def is_flash_attn_varlen_func_available() -> bool:
     """Check if flash_attn_varlen_func is available.
 
