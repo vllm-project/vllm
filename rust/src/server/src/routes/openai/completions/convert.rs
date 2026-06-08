@@ -4,9 +4,7 @@ use super::types::CompletionRequest;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
-use crate::routes::openai::utils::structured_outputs::{
-    convert_from_response_format_value, ensure_structured_output_backend,
-};
+use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
 
 /// Lowered completion request plus the public response metadata carried by
@@ -68,9 +66,8 @@ pub(crate) fn prepare_completion_request(
         .unwrap_or(false);
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
-    let mut structured_outputs =
+    let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
-    ensure_structured_output_backend(&mut structured_outputs);
 
     let text_request = TextRequest {
         request_id: request_id.clone(),

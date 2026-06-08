@@ -4,18 +4,6 @@ use vllm_engine_core_client::protocol::StructuredOutputsParams;
 
 use crate::error::ApiError;
 
-/// Default structured-output backend, set when a request bypasses the Python
-/// Processor that normally resolves it (otherwise the engine sees `backend: None`).
-const DEFAULT_STRUCTURED_OUTPUT_BACKEND: &str = "guidance";
-
-/// Set a concrete structured-output backend when the request does not already
-/// specify one, so the engine can build the grammar.
-pub fn ensure_structured_output_backend(params: &mut Option<StructuredOutputsParams>) {
-    if let Some(so) = params.as_mut() {
-        so.backend.get_or_insert_with(|| DEFAULT_STRUCTURED_OUTPUT_BACKEND.to_string());
-    }
-}
-
 /// JSON schema specification nested inside a `json_schema` response format.
 ///
 /// Mirrors the Python vLLM `JsonSchemaResponseFormat` class.
@@ -141,40 +129,4 @@ pub fn convert_from_response_format_value(
         )
     })?;
     convert_from_response_format(Some(&fmt), &None)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ensure_backend_defaults_when_absent() {
-        let mut params = Some(StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        });
-        ensure_structured_output_backend(&mut params);
-        assert_eq!(
-            params.unwrap().backend.as_deref(),
-            Some(DEFAULT_STRUCTURED_OUTPUT_BACKEND)
-        );
-    }
-
-    #[test]
-    fn ensure_backend_keeps_existing() {
-        let mut params = Some(StructuredOutputsParams {
-            json_object: Some(true),
-            backend: Some("xgrammar".to_string()),
-            ..Default::default()
-        });
-        ensure_structured_output_backend(&mut params);
-        assert_eq!(params.unwrap().backend.as_deref(), Some("xgrammar"));
-    }
-
-    #[test]
-    fn ensure_backend_noop_when_none() {
-        let mut params: Option<StructuredOutputsParams> = None;
-        ensure_structured_output_backend(&mut params);
-        assert!(params.is_none());
-    }
 }
