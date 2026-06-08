@@ -1,0 +1,11 @@
+# FFM overlay for gfx1250 builds
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# extract tarball into /root/x/ffm/.
+ADD ubuntu_24_04_rel.tar.gz /root/x/ffm/
+ENV HSA_MODEL_LIB=/root/x/ffm/libhsakmtmodel.so
+ENV HSA_MODEL_TOML="/root/x/ffm/ffm_config.toml"
+ENV HSA_MODEL_ARGS=ffm_enable_time_slicing
+ENV HSA_MODEL_TOPOLOGY=/root/x/ffm/topology/mi450
+ENV HSA_MODEL_NUM_THREADS=64
