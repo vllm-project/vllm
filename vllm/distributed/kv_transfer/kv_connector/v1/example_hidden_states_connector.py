@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -150,6 +151,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
         self._hs_group_idx: int = 0
+        # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
+        # Set in register_kv_caches (after distributed init).
+        self._is_tp_rank_zero: bool = True
 
         # Async write infrastructure (worker-side).
         # Dedicated CUDA stream for DtoH copies so they don't block
@@ -214,6 +218,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         path to the client, guaranteeing that the lock file exists (and
         LOCK_EX is held) by the time the client tries to open it.
         """
+        if not self._is_tp_rank_zero:
+            return
         if not self.use_lock or not self.has_connector_metadata():
             return
         metadata = self._get_connector_metadata()
@@ -237,6 +243,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             logger.error("Hidden-states write failed for req_id=%s: %r", req_id, exc)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        self._is_tp_rank_zero = get_tensor_model_parallel_rank() == 0
+
         from vllm.model_executor.models.extract_hidden_states import (
             CacheOnlyAttentionLayer,
         )
@@ -297,6 +305,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Called from get_finished for each request that has finished generating.
         """
+        if not self._is_tp_rank_zero:
+            return
         assert self._kv_cache is not None
 
         # Compute slot mapping from block_ids
