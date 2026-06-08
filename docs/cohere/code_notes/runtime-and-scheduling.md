@@ -171,3 +171,19 @@ Validation: see
 ([feature doc](../tests/features/auto_config.md)) for the full CPU unit
 suite covering arch detection, CEL evaluation, type coercion, profile
 resolution, and `__post_init__` opt-in semantics.
+
+## 9) FlashInfer Autotune (TTFT / Prefill)
+
+Upstream v0.21 disabled `enable_flashinfer_autotune` at the default `-O2`
+optimization level due to a FlashInfer correctness issue
+([flashinfer#3197](https://github.com/flashinfer-ai/flashinfer/issues/3197)).
+v0.19 had autotune enabled at `-O2`, so Cohere perf benchmarks can see higher
+TTFT on v0.21 even when other scheduler flags match.
+
+The `vllm-default` hardware profile re-enables autotune via
+`enable-flashinfer-autotune` when `VLLM_ENABLE_COHERE_AUTO_CONFIG=1`. Warmup
+only runs the benchmark sweep on Hopper/Blackwell (SM 9.0/10.0) with FlashInfer
+installed; other platforms ignore the flag at runtime.
+
+Override with `--no-enable-flashinfer-autotune` or `-O2` without auto-config if
+you need to match upstream's conservative default.
