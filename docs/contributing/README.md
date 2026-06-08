@@ -101,7 +101,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual mypy-3.10
+    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
