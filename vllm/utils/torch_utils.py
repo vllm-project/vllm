@@ -14,7 +14,17 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library, infer_schema
+from torch.library import Library
+
+try:
+    from torch.library import infer_schema as _torch_infer_schema
+
+    _INFER_SCHEMA_SUPPORTS_MUTATES_ARGS = True
+except ImportError:
+    # Older torch versions expose infer_schema under torch._custom_op.impl
+    from torch._custom_op.impl import infer_schema as _torch_infer_schema
+
+    _INFER_SCHEMA_SUPPORTS_MUTATES_ARGS = False
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -27,6 +37,17 @@ else:
     IntermediateTensors = object
 
 logger = init_logger(__name__)
+
+
+def infer_schema(op_func: Callable, mutates_args: list[str] | None = None) -> str:
+    """Torch-version-compatible infer_schema wrapper.
+
+    Newer torch exposes infer_schema(op_func, mutates_args=...), while
+    older torch only supports infer_schema(op_func).
+    """
+    if _INFER_SCHEMA_SUPPORTS_MUTATES_ARGS:
+        return _torch_infer_schema(op_func, mutates_args=mutates_args or [])
+    return _torch_infer_schema(op_func)
 
 
 STR_DTYPE_TO_TORCH_DTYPE = {

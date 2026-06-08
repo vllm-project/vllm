@@ -348,8 +348,13 @@ class SHMManager {
                                std::to_string(errno));
     }
 
-    void* shm_ptr = mmap(nullptr, shm_size, PROT_READ | PROT_WRITE,
-                         MAP_SHARED | MAP_POPULATE, fd, 0);
+    int mmap_flags = MAP_SHARED;
+#ifdef MAP_POPULATE
+    mmap_flags |= MAP_POPULATE;
+#endif
+
+    void* shm_ptr =
+        mmap(nullptr, shm_size, PROT_READ | PROT_WRITE, mmap_flags, fd, 0);
 
     if (shm_ptr == MAP_FAILED) {
       TORCH_CHECK(false,

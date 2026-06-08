@@ -40,6 +40,16 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13" "3.14")
 
+# In local developer environments, prefer a predictable default python from
+# .venv when available. CI remains explicit by default.
+set(_VLLM_LOCAL_PYTHON_FALLBACK_DEFAULT OFF)
+if(EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python" AND NOT DEFINED ENV{CI})
+  set(_VLLM_LOCAL_PYTHON_FALLBACK_DEFAULT ON)
+endif()
+option(VLLM_ALLOW_LOCAL_VENV_PYTHON_FALLBACK
+  "Allow CMake to auto-select ${CMAKE_SOURCE_DIR}/.venv/bin/python when VLLM_PYTHON_EXECUTABLE is unset"
+  ${_VLLM_LOCAL_PYTHON_FALLBACK_DEFAULT})
+
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
 
@@ -70,9 +80,19 @@ set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
 if (VLLM_PYTHON_EXECUTABLE)
   find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
 else()
-  message(FATAL_ERROR
-    "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
-    " before running cmake configure.")
+  set(_VLLM_LOCAL_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+  if(VLLM_ALLOW_LOCAL_VENV_PYTHON_FALLBACK AND EXISTS "${_VLLM_LOCAL_PYTHON}")
+    set(VLLM_PYTHON_EXECUTABLE "${_VLLM_LOCAL_PYTHON}")
+    message(STATUS
+      "VLLM_PYTHON_EXECUTABLE is not set. Defaulting to ${VLLM_PYTHON_EXECUTABLE}")
+    find_python_from_executable(${VLLM_PYTHON_EXECUTABLE} "${PYTHON_SUPPORTED_VERSIONS}")
+  else()
+    message(FATAL_ERROR
+      "Please set VLLM_PYTHON_EXECUTABLE to the path of the desired python version"
+      " before running cmake configure."
+      " To allow local fallback to ${_VLLM_LOCAL_PYTHON}, set"
+      " -DVLLM_ALLOW_LOCAL_VENV_PYTHON_FALLBACK=ON.")
+  endif()
 endif()
 
 #
@@ -120,6 +140,8 @@ set(SPINLOOP_COMPILE_FLAGS "")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
   list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
 endif()
+# spinloop uses Py_buffer APIs which are unavailable when Py_LIMITED_API is set.
+list(APPEND SPINLOOP_COMPILE_FLAGS "-UPy_LIMITED_API")
 define_extension_target(
   spinloop
   DESTINATION vllm

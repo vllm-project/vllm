@@ -1,6 +1,15 @@
 /.venv
 /build
 dist
+/.deps
+/.github
+/.mypy_cache
+/.pytest_cache
+/.ruff_cache
+/.cache
+/.DS_Store
+vllm_env/
+**/__pycache__/
 vllm/*.so
 vllm/vllm-rs
 

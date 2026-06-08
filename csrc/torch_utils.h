@@ -9,7 +9,12 @@
 // Otherwise, use TORCH_CHECK via torch/all.h.
 
 #ifdef TORCH_TARGET_VERSION
-  #include <torch/headeronly/util/Exception.h>
+  #if __has_include(<torch/headeronly/util/Exception.h>)
+    #include <torch/headeronly/util/Exception.h>
+  #else
+    #include <c10/util/Exception.h>
+    #define STD_TORCH_CHECK TORCH_CHECK
+  #endif
   #define TORCH_UTILS_CHECK STD_TORCH_CHECK
 #else
   #include <torch/all.h>

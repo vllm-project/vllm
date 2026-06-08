@@ -2,6 +2,9 @@
 #define UTILS_HPP
 
 #include <atomic>
+#if defined(__APPLE__)
+  #include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 #include <ATen/cpu/Utils.h>
 
@@ -53,21 +56,40 @@ struct Counter {
   int64_t acquire_counter() { return counter++; }
 };
 
+inline uint32_t get_l2_cache_size_fallback() {
+#if defined(__APPLE__)
+  uint64_t l2_cache_size = 0;
+  size_t size = sizeof(l2_cache_size);
+  if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &size, nullptr, 0) == 0 &&
+      l2_cache_size > 0) {
+    return static_cast<uint32_t>(l2_cache_size);
+  }
+  return 0;
+#elif defined(_SC_LEVEL2_CACHE_SIZE)
+  long sys_l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+  if (sys_l2 > 0) {
+    return static_cast<uint32_t>(sys_l2);
+  }
+  return 0;
+#else
+  return 0;
+#endif
+}
+
 inline int64_t get_available_l2_size() {
+#if defined(TORCH_VERSION_MAJOR) && defined(TORCH_VERSION_MINOR) && \
+    (TORCH_VERSION_MAJOR > 2 ||                                     \
+     (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11))
+  auto caps = at::cpu::get_cpu_capabilities();
+  auto it = caps.find("l2_cache_size");
+  if (it != caps.end()) {
+    return static_cast<int64_t>(it->second.toInt()) >> 1;
+  }
+#endif
+
 #if defined(__s390x__) || defined(__powerpc__)
   static int64_t size = []() {
-    uint32_t l2_cache_size = 0;
-    auto caps = at::cpu::get_cpu_capabilities();
-    auto it = caps.find("l2_cache_size");
-    if (it != caps.end()) {
-      l2_cache_size = static_cast<uint32_t>(it->second.toInt());
-    }
-    if (l2_cache_size == 0) {
-      long sys_l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
-      if (sys_l2 > 0) {
-        l2_cache_size = static_cast<uint32_t>(sys_l2);
-      }
-    }
+    uint32_t l2_cache_size = get_l2_cache_size_fallback();
     if (l2_cache_size == 0) {
       l2_cache_size = 256 * 1024;
     }
@@ -76,8 +98,10 @@ inline int64_t get_available_l2_size() {
   return size;
 #else
   static int64_t size = []() {
-    auto caps = at::cpu::get_cpu_capabilities();
-    const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
+    uint32_t l2_cache_size = get_l2_cache_size_fallback();
+    if (l2_cache_size == 0) {
+      l2_cache_size = 256 * 1024;
+    }
     return l2_cache_size >> 1;  // use 50% of L2 cache
   }();
   return size;

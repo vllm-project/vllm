@@ -159,7 +159,14 @@ def bundle_tcmalloc(build_lib: str) -> None:
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
+        super().__init__(
+            name,
+            sources=[],
+            # Keep setuptools' expected extension suffix aligned with CMake,
+            # which installs these modules as abi3 on supported interpreters.
+            py_limited_api=not is_freethreaded(),
+            **kwa,
+        )
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
