@@ -276,7 +276,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
-        num_computed_tokens: int | None = None
+        num_computed_tokens: int | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -664,7 +664,6 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 engine_core_output.num_computed_tokens,
-
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
