@@ -135,6 +135,7 @@ class AsyncLookupManager(ABC):
             self._evict_if_full()
             self._lookup_state[key] = None
             self._lookup_batch.append((key, req_context))
+            self.flush()  # TODO:testing
             return None
         return self._lookup_state[key]
 
