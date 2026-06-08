@@ -670,11 +670,16 @@ def test_mxfp4_patterns_fire_on_model(monkeypatch):
         compiled = torch.compile(model, backend=backend)
         compiled(x, residual)
 
-    # Both fused ops must appear; standalone quant must be gone
+    # Both fused ops must appear in the post-pass graph
     backend.check_after_ops([
         rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op(),
         rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op(),
     ])
+    # Standalone quant must be fully eliminated (mirrors PR#42864 check_before_ops)
+    backend.check_before_ops(
+        [rocm_aiter_ops.get_dynamic_mxfp4_quant_op()],
+        fully_replaced=True,
+    )
     assert fusion_pass.matched_count == 2, (
         f"matched_count must be 2 (one per site), got {fusion_pass.matched_count}"
     )
