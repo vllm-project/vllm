@@ -55,7 +55,7 @@ class FsAsyncLookupManager(AsyncLookupManager):
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool | None]:
+    ) -> Iterable[bool]:
         return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
 
 

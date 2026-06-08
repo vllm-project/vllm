@@ -23,12 +23,12 @@ There is no explicit lock.  Thread safety is achieved by ownership:
   the scheduler (get_nowait inside drain_results).  queue.SimpleQueue is
   thread-safe by design.
 
-query() accumulates new keys in _lookup_batch without touching the queue.
+lookup() accumulates new keys in _lookup_batch without touching the queue.
 flush() is called once per step from the tier's on_schedule_end(), posting
 the entire batch as a single queue item so the background thread sees one
 batch per step.
-drain_results() is called before any query() calls in the same step, so
-query() is a pure OrderedDict operation.
+drain_results() is called before any lookup() calls in the same step, so
+lookup() is a pure OrderedDict operation.
 """
 
 import queue
@@ -79,7 +79,7 @@ class AsyncLookupManager(ABC):
         # req_id → keys looked up by that request (reverse index for cleanup).
         self._req_keys: dict[str, set[OffloadKey]] = {}
 
-        # Accumulates (key, req_context) pairs during query() calls.
+        # Accumulates (key, req_context) pairs during lookup() calls.
         # Flushed as one queue item per step by flush().
         self._lookup_batch: list[tuple[OffloadKey, ReqContext]] = []
 
@@ -107,7 +107,7 @@ class AsyncLookupManager(ABC):
     @abstractmethod
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool | None]:
+    ) -> Iterable[bool]:
         """
         Check whether a batch of blocks exist in this tier.
 
@@ -136,12 +136,11 @@ class AsyncLookupManager(ABC):
             self.drain_results()
             self._need_to_drain = False
         req_id = req_context.req_id
-        if key not in self._lookup_state:
-            self._lookup_state[key] = LookupState(request_ids={req_id})
+        state = self._lookup_state.get(key)
+        if state is None:
+            state = LookupState()
+            self._lookup_state[key] = state
             self._lookup_batch.append((key, req_context))
-            self._req_keys.setdefault(req_id, set()).add(key)
-            return None
-        state = self._lookup_state[key]
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
         return state.result
@@ -149,7 +148,7 @@ class AsyncLookupManager(ABC):
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
 
-        Called once per step from on_schedule_end() after all query() calls
+        Called once per step from on_schedule_end() after all lookup() calls
         are done. The worker receives the full batch and processes it during
         the model-execution window, maximising time available before the next
         step's drain_results().  Safe to call with an empty batch (no-op).
@@ -171,7 +170,7 @@ class AsyncLookupManager(ABC):
                 break
             for key, result in batch:
                 state = self._lookup_state.get(key)
-                if state is not None and state.result is None:
+                if state is not None:
                     state.result = result
 
     def cleanup(self, req_id: str) -> None:
@@ -180,7 +179,7 @@ class AsyncLookupManager(ABC):
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
-        for key in self._req_keys.pop(req_id):
+        for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
             if not state.request_ids:
@@ -188,7 +187,7 @@ class AsyncLookupManager(ABC):
 
     def shutdown(self) -> None:
         """Stop the worker thread."""
-        self._lookup_queue.put(None)
+        self._lookup_queue.put(None)  # unblock _worker from _lookup_queue.get()
         self._thread.join()
 
     # ------------------------------------------------------------------

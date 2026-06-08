@@ -67,7 +67,7 @@ class ObjAsyncLookupManager(AsyncLookupManager):
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool | None]:
+    ) -> Iterable[bool]:
         descriptors = [
             (
                 _PROBE_ADDR,
