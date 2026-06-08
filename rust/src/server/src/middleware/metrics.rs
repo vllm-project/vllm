@@ -3,10 +3,12 @@
 
 use std::time::Instant;
 
-use axum::extract::{MatchedPath, Request};
+use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
+
+use super::route_handler;
 
 /// Endpoints that will be excluded from HTTP metrics tracking.
 ///
@@ -33,10 +35,7 @@ const EXCLUDED_HANDLERS: &[&str] = &[
 /// (`PrometheusFastApiInstrumentator` style) family names and labels.
 pub async fn track_http_metrics(req: Request, next: Next) -> Response {
     let method = req.method().as_str().to_string();
-    let handler = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map_or_else(|| "none".to_string(), |path| path.as_str().to_string());
+    let handler = route_handler(req.extensions()).to_string();
     let excluded = EXCLUDED_HANDLERS.contains(&handler.as_str());
     let started_at = Instant::now();
 

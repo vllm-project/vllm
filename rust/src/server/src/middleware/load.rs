@@ -6,12 +6,14 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
 use axum::body::{Body, Bytes, HttpBody};
-use axum::extract::{MatchedPath, Request, State};
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use http_body::{Frame, SizeHint};
 
 use crate::state::AppState;
+
+use super::route_handler;
 
 /// Endpoints that will be tracked for server load.
 ///
@@ -45,10 +47,7 @@ pub async fn track_server_load(
     req: Request,
     next: Next,
 ) -> Response {
-    let handler = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map_or_else(|| "none", |path| path.as_str());
+    let handler = route_handler(req.extensions());
 
     if !TRACKED_HANDLERS.contains(&handler) {
         return next.run(req).await;

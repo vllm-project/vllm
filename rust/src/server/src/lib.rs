@@ -50,6 +50,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
+use crate::config::normalize_root_path;
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
@@ -187,7 +188,15 @@ where
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 
-    info!(model, "starting vLLM server");
+    // Also serve every route under the configured reverse-proxy prefix. The
+    // bare routes remain available for proxies that strip the prefix.
+    let app = apply_root_path_nesting(app, config.root_path.as_deref())?;
+
+    if let Some(root_path) = config.root_path.as_deref() {
+        info!(model, root_path, "starting vLLM server");
+    } else {
+        info!(model, "starting vLLM server");
+    }
 
     let listener = Listener::bind(&config.listener_mode)
         .await
@@ -371,6 +380,21 @@ where
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     state.shutdown(shutdown_deadline).await
+}
+
+/// Duplicate all routes under `root_path` when it is set, so the server
+/// responds on both bare paths (`/v1/chat/completions`) and prefixed paths
+/// (`/api/v1/chat/completions`).
+///
+/// Trailing slashes are trimmed, and a leading `/` is ensured. `None`, empty,
+/// and root-only (`/`) values are treated as a no-op. Dynamic route patterns
+/// are rejected before calling Axum's infallible nesting API.
+pub(crate) fn apply_root_path_nesting(app: Router, root_path: Option<&str>) -> Result<Router> {
+    let Some(prefix) = normalize_root_path(root_path)? else {
+        return Ok(app);
+    };
+    let nested = Router::new().nest(&prefix, app.clone());
+    Ok(app.merge(nested))
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.

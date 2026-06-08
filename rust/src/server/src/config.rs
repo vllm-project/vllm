@@ -155,6 +155,37 @@ impl TlsConfig {
     }
 }
 
+/// Normalize and validate the static prefix passed to [`axum::Router::nest`].
+pub(crate) fn normalize_root_path(root_path: Option<&str>) -> Result<Option<String>> {
+    let Some(root_path) = root_path else {
+        return Ok(None);
+    };
+    let prefix = root_path.trim_end_matches('/');
+    if prefix.is_empty() {
+        return Ok(None);
+    }
+    let prefix = if prefix.starts_with('/') {
+        prefix.to_owned()
+    } else {
+        format!("/{prefix}")
+    };
+
+    let contains_route_pattern = prefix.split('/').any(|segment| {
+        segment.starts_with(':')
+            || segment.starts_with('*')
+            || segment.contains('{')
+            || segment.contains('}')
+    });
+    if contains_route_pattern {
+        bail!(
+            "--root-path must be a static URL path without route parameters, got {:?}",
+            root_path
+        );
+    }
+
+    Ok(Some(prefix))
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -204,6 +235,11 @@ pub struct Config {
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
+    /// Optional static URL path prefix for reverse-proxy deployments (e.g.,
+    /// `/api`). When set, all routes are duplicated under this prefix so the
+    /// server responds on both bare paths (`/v1/chat/completions`) and prefixed
+    /// paths (`/api/v1/chat/completions`).
+    pub root_path: Option<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
@@ -237,6 +273,7 @@ impl Config {
                 max_logprobs
             );
         }
+        normalize_root_path(self.root_path.as_deref())?;
         self.transport_mode.validate()?;
 
         Ok(())

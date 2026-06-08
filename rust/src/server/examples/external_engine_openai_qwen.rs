@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
         cors: CorsConfig::default(),
         tls: None,
         api_keys: Vec::new(),
+        root_path: None,
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
