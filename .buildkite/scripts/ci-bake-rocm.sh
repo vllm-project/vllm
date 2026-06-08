@@ -1557,8 +1557,8 @@ confirm_remote_image_push() {
         fi
 
         if [[ -z "${remote_revision}" \
-              && ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 \
-              && image_tag_is_commit_scoped ]]; then
+              && ${IMAGE_EXISTED_BEFORE_BUILD} -eq 0 ]] \
+              && image_tag_is_commit_scoped; then
             echo "Remote image exists under a commit-scoped tag; accepting push despite missing revision label."
             return 0
         fi
