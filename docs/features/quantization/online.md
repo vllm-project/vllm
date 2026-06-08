@@ -62,6 +62,8 @@ weight name. Unset fields fall back to the `--quantization` shorthand's
 defaults, or for already-quantized checkpoints to whatever the checkpoint
 declares.
 
+On XPU, non-block FP8 scaled-mm linear layers default to W8A16; setting --linear-backend xpu_w8a8_fp8 forces W8A8.
+
 The CLI accepts the same shape as JSON or as dotted keys:
 
 ```bash
