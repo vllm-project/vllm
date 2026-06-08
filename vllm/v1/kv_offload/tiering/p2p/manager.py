@@ -3,7 +3,7 @@
 """
 P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
 
-Owns transports, sessions, and the SecondaryTierManager interface.
+Owns transports and a single bidirectional P2PSession per remote peer.
 """
 
 from __future__ import annotations
@@ -28,10 +28,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
-from vllm.v1.kv_offload.tiering.p2p.session import (
-    P2PClientSession,
-    P2PServerSession,
-)
+from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -40,7 +37,12 @@ logger = init_logger(__name__)
 
 
 class P2PSecondaryTierManager(SecondaryTierManager):
-    """Secondary tier for P2P KV cache sharing."""
+    """Secondary tier for P2P KV cache sharing.
+
+    A single P2PSession per remote peer handles both client-role (loading
+    blocks from the peer) and server-role (serving blocks to the peer)
+    over the same control connection.
+    """
 
     def __init__(
         self,
@@ -65,17 +67,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         )
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
-        self._server_sessions: dict[str, P2PServerSession] = {}
-        self._client_sessions: dict[str, P2PClientSession] = {}
+        self._sessions: dict[str, P2PSession] = {}
 
         self._finished_jobs: list[JobResult] = []
         self._failed_req_ids: set[str] = set()
 
         # Concurrency: a re-entrant lock serialises the poller thread
         # against the scheduler thread. Each public API method acquires the
-        # lock around its body and releases it on return. RLock allows safe
-        # re-entry when one method calls another (e.g. when get_finished_jobs
-        # drives _poll_once synchronously in test mode).
+        # lock around its body and releases it on return.
         self._lock = threading.RLock()
 
         # Poller stats for diagnostics (poller-thread-only fields).
@@ -116,25 +115,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """Ensures client session exists for the remote peer.
+        """Ensure a session exists for the remote peer.
 
-        Only opens a client session on the decoder side (do_remote_prefill).
-        On the prefiller side, the remote peer in kv_transfer_params is the
-        decoder's address, used by submit_store to look up the server session
-        — we must not connect to it as a client.
+        On the decoder side (do_remote_prefill), create a session and
+        initiate the connection if one doesn't already exist. On the
+        prefiller side, the session is created lazily by submit_store
+        in pending mode and promoted to connected when the decoder's
+        inbound connection arrives.
         """
         with self._lock:
             kv_params = req_context.kv_transfer_params
             if kv_params and kv_params.get("do_remote_prefill"):
                 peer_id = self._remote_id_from_params(kv_params)
-                if peer_id and peer_id not in self._client_sessions:
-                    conn = self._control.connect(peer_id)
-                    self._client_sessions[peer_id] = P2PClientSession(
-                        peer_id,
-                        conn,
-                        local_id=self._local_id,
-                        transport=self._data,
-                    )
+                if peer_id:
+                    self._get_or_create_session(peer_id, initiate_connect=True)
             return RequestOffloadingContext()
 
     @override
@@ -150,7 +144,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._failed_req_ids.discard(kv_request_id)
             peer_id = self._remote_id_from_params(kv_params)
             if peer_id:
-                session = self._client_sessions.get(peer_id)
+                session = self._sessions.get(peer_id)
                 if session is not None:
                     session.cancel_request(kv_request_id)
 
@@ -189,20 +183,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return
 
             # Lazy session creation: prefiller-first mode finishes prefill
-            # (and submit_store) before the decoder connects. Create a pending
-            # session here so blocks can be buffered; _accept_new_peers will
-            # attach the connection once it arrives.
-            session = self._server_sessions.get(peer_id)
+            # (and submit_store) before the decoder connects. Create a
+            # pending session here so blocks can be buffered; the inbound
+            # connect from the decoder will be attached in _accept_new_peers.
+            session = self._sessions.get(peer_id)
             if session is None:
-                session = P2PServerSession(
-                    peer_id=peer_id,
-                    local_id=self._local_id,
-                    transport=self._data,
-                    local_block_len=self._data.block_len,
-                )
-                self._server_sessions[peer_id] = session
+                session = self._make_pending_session(peer_id)
+                self._sessions[peer_id] = session
                 logger.info(
-                    "P2P %s: created pending server session for peer %s "
+                    "P2P %s: created pending session for peer %s "
                     "(kv_request_id=%s, %d blocks)",
                     self._local_id,
                     peer_id,
@@ -255,10 +244,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=True))
                 return
 
-            session = self._client_sessions.get(peer_id)
+            session = self._sessions.get(peer_id)
             if session is None:
                 logger.warning(
-                    "P2P %s: submit_load job_id=%d NO CLIENT SESSION for peer=%s",
+                    "P2P %s: submit_load job_id=%d NO SESSION for peer=%s",
                     self._local_id,
                     job_id,
                     peer_id,
@@ -293,10 +282,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_schedule_end(self) -> None:
-        """No-op. Each API method now manages its own lock acquire/release.
-
-        Kept for SecondaryTierManager interface compatibility.
-        """
+        """No-op. Each API method now manages its own lock acquire/release."""
         return
 
     # ------------------------------------------------------------------
@@ -332,6 +318,43 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
+    def _make_pending_session(self, peer_id: str) -> P2PSession:
+        return P2PSession(
+            peer_id=peer_id,
+            local_id=self._local_id,
+            transport=self._data,
+            local_block_len=self._data.block_len,
+        )
+
+    def _get_or_create_session(
+        self, peer_id: str, *, initiate_connect: bool
+    ) -> P2PSession:
+        """Return the existing session for peer_id, or create a new one.
+
+        If initiate_connect is True and no session exists, opens an
+        outbound ControlConnection, builds a connected session (which
+        sends our ConnectMsg immediately), and stores it.
+
+        If initiate_connect is False and no session exists, returns a
+        pending session (no connection yet).
+        """
+        session = self._sessions.get(peer_id)
+        if session is not None:
+            return session
+        if initiate_connect:
+            conn = self._control.connect(peer_id)
+            session = P2PSession(
+                peer_id=peer_id,
+                local_id=self._local_id,
+                transport=self._data,
+                local_block_len=self._data.block_len,
+                conn=conn,
+            )
+        else:
+            session = self._make_pending_session(peer_id)
+        self._sessions[peer_id] = session
+        return session
+
     def _accept_new_peers(self, new_connections: list) -> None:
         for conn in new_connections:
             logger.info(
@@ -340,7 +363,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 conn.peer_id,
             )
             try:
-                existing = self._server_sessions.get(conn.peer_id)
+                existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
                     if existing.connected:
                         raise ValueError(f"duplicate connection from {conn.peer_id}")
@@ -351,7 +374,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                         conn.peer_id,
                     )
                 else:
-                    self._server_sessions[conn.peer_id] = P2PServerSession(
+                    self._sessions[conn.peer_id] = P2PSession(
                         peer_id=conn.peer_id,
                         local_id=self._local_id,
                         transport=self._data,
@@ -359,7 +382,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                         conn=conn,
                     )
                     logger.info(
-                        "P2P %s: created connected server session for %s",
+                        "P2P %s: created connected session for %s",
                         self._local_id,
                         conn.peer_id,
                     )
@@ -367,29 +390,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 logger.error("P2P %s: rejecting peer: %s", self._local_id, exc)
                 conn.close()
 
-    def _reap_dead_servers(self) -> None:
+    def _reap_dead_sessions(self) -> None:
         # Pending sessions (no connection yet) are kept untouched —
         # they're awaiting the decoder's connect handshake, not dead.
-        dead = [
-            pid
-            for pid, s in self._server_sessions.items()
-            if s.connected and not s.alive
-        ]
+        dead = [pid for pid, s in self._sessions.items() if s.connected and not s.alive]
         for pid in dead:
-            session = self._server_sessions.pop(pid)
-            for job_id in session.close():
-                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            self._data.remove_remote_peer(pid)
-            logger.warning("P2P %s: server peer %s down", self._local_id, pid)
-
-    def _reap_dead_clients(self) -> None:
-        dead = [pid for pid, s in self._client_sessions.items() if not s.alive]
-        for pid in dead:
-            session = self._client_sessions.pop(pid)
-            for job_id, kv_request_id in session.close():
+            session = self._sessions.pop(pid)
+            failed_loads, failed_stores = session.close()
+            for job_id, kv_request_id in failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
                 self._failed_req_ids.add(kv_request_id)
-            logger.warning("P2P %s: client peer %s down", self._local_id, pid)
+            for job_id in failed_stores:
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._data.remove_remote_peer(pid)
+            logger.warning("P2P %s: peer %s down", self._local_id, pid)
 
     # ------------------------------------------------------------------
     # Polling
@@ -398,11 +412,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _poll_once(self) -> None:
         """One sweep of the polling work.
 
-        Drains the control transport, polls every server and client
-        session, accumulates their results into ``_finished_jobs``, and
-        reaps any dead sessions. Holds ``self._lock`` for the duration of
-        the per-session polling; the scheduler thread cannot interleave
-        API calls until this returns.
+        Drains the control transport, polls every session, accumulates
+        their results into ``_finished_jobs``, and reaps any dead sessions.
+        Holds ``self._lock`` for the duration of the per-session polling.
         """
         new_connections = self._control.poll()
         if new_connections:
@@ -428,41 +440,34 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
             self._accept_new_peers(new_connections)
 
-            for srv in self._server_sessions.values():
-                for sr in srv.poll():
-                    self._finished_jobs.append(
-                        JobResult(job_id=sr.job_id, success=sr.success)
-                    )
-
-            for cli in self._client_sessions.values():
-                for lr in cli.poll():
+            for session in self._sessions.values():
+                loads, stores = session.poll()
+                for lr in loads:
                     self._finished_jobs.append(
                         JobResult(job_id=lr.job_id, success=lr.success)
                     )
                     if not lr.success:
                         self._failed_req_ids.add(lr.kv_request_id)
+                for sr in stores:
+                    self._finished_jobs.append(
+                        JobResult(job_id=sr.job_id, success=sr.success)
+                    )
 
-            self._reap_dead_servers()
-            self._reap_dead_clients()
+            self._reap_dead_sessions()
 
             held_s = time.monotonic() - held_t0
             if held_s > self._poll_max_held_s:
                 self._poll_max_held_s = held_s
             if held_s > 0.1:
                 logger.debug(
-                    "P2P %s: _poll_once held lock %.3fs (sessions server:%d client:%d)",
+                    "P2P %s: _poll_once held lock %.3fs (sessions=%d)",
                     self._local_id,
                     held_s,
-                    len(self._server_sessions),
-                    len(self._client_sessions),
+                    len(self._sessions),
                 )
 
     def _poll_loop(self) -> None:
-        """Background thread target: drive _poll_once on an interval.
-
-        Exits when ``_stop_event`` is set. Each iteration's exception is
-        logged and swallowed so the poller survives transient failures.
-        """
+        """Background thread target: drive _poll_once on an interval."""
         logger.info("P2P %s: poller thread started", self._local_id)
         ticks = 0
         while not self._stop_event.is_set():
@@ -473,12 +478,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             ticks += 1
             if ticks % 5000 == 0:
                 logger.debug(
-                    "P2P %s: poller tick=%d sessions=server:%d client:%d "
+                    "P2P %s: poller tick=%d sessions=%d "
                     "[poll_acq=%d max_wait=%.3fs max_held=%.3fs]",
                     self._local_id,
                     ticks,
-                    len(self._server_sessions),
-                    len(self._client_sessions),
+                    len(self._sessions),
                     self._poll_acquire_count,
                     self._poll_max_wait_s,
                     self._poll_max_held_s,
@@ -496,11 +500,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._poller_thread.join(timeout=5.0)
             self._poller_thread = None
         with self._lock:
-            for srv in self._server_sessions.values():
-                srv.close()
-            for cli in self._client_sessions.values():
-                cli.close()
-            self._server_sessions.clear()
-            self._client_sessions.clear()
+            for session in self._sessions.values():
+                session.close()
+            self._sessions.clear()
             self._control.close()
             self._data.close()
