@@ -1567,7 +1567,40 @@ def get_frame_times_and_chosen_fps(
     return selected_target_fps, frame_indices
 
 
+def _patch_remote_code_processor_image_token_ids(model_config) -> None:
+    """Transformers v5.10 made `image_token_ids` a read-only property of
+    `ProcessorMixin`. Molmo2 has a remote code processor which directly assigns to this
+    attribute in `__init__`, which now raises an error. To fix this, we patch the class
+    with a writeable property that is compatible with the remote code's `__init__`."""
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        processor_cls = get_class_from_dynamic_module(
+            "processing_molmo2.Molmo2Processor",
+            model_config.model,
+            revision=model_config.revision,
+        )
+    except Exception:
+        # Nothing to do if processor class is not remote
+        return
+
+    image_token_ids = getattr(processor_cls, "image_token_ids", None)
+    if isinstance(image_token_ids, property) and image_token_ids.fset is None:
+
+        def fget(self) -> list[int | None]:
+            return getattr(self, "_image_token_ids", [None])
+
+        def fset(self, value: list[int | None]):
+            self._image_token_ids = value
+
+        processor_cls.image_token_ids = property(fget, fset)
+
+
 class Molmo2ProcessingInfo(BaseProcessingInfo):
+    def get_hf_processor(self, **kwargs: object):
+        _patch_remote_code_processor_image_token_ids(self.ctx.model_config)
+        return super().get_hf_processor(**kwargs)
+
     def get_data_parser(self):
         return MultiModalDataParser(
             video_needs_metadata=True,

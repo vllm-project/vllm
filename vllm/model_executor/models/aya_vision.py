@@ -280,7 +280,15 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
                 min_patches=image_processor.min_patches,
                 max_patches=image_processor.max_patches,
             )
-            repl = hf_processor._prompt_split_image(num_patches=num_patches)
+            try:
+                repl = hf_processor.replace_image_token(
+                    image_inputs={"num_patches": [num_patches]},
+                    image_idx=item_idx,
+                )
+            except Exception:
+                # Older versions of vLLM used this private method which was changed in
+                # Transformers v5.10. We keep it here for backward compatibility.
+                repl = hf_processor._prompt_split_image(num_patches=num_patches)
 
             return PromptUpdateDetails.select_text(repl, img_patch_token)
 
