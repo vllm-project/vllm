@@ -16,7 +16,7 @@ from vllm.distributed.parallel_state import (
     get_eplb_group,
     get_tp_group,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
 
@@ -69,7 +69,7 @@ def make_fused_moe_layer(
     rank: int,
     layer_idx: int,
     test_config: TestConfig,
-) -> FusedMoEFactory:
+) -> MoERunner:
     fml = FusedMoEFactory(
         num_experts=test_config.num_experts,
         top_k=test_config.num_topk,

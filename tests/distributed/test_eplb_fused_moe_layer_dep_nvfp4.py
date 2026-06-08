@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
@@ -43,7 +43,7 @@ def make_fused_moe_layer(
     rank: int,
     layer_idx: int,
     test_config: TestConfig,
-) -> FusedMoEFactory:
+) -> MoERunner:
     quant_config = None
 
     device = torch.device(f"cuda:{rank}")
