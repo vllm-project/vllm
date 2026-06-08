@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import TYPE_CHECKING, cast
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -31,7 +33,8 @@ from vllm.entrypoints.openai.engine.serving import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -538,6 +541,18 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                # Encode routed_experts for transport. JSON can't carry raw
+                # bytes, so we write the ndarray as a ``.npy`` byte stream
+                # and base64-encode it. ``pybase64`` is ~3x faster than the
+                # stdlib ``base64`` on large payloads thanks to SIMD.
+                routed_experts_b64 = None
+                if output.routed_experts is not None:
+                    buf = io.BytesIO()
+                    np.save(buf, output.routed_experts)
+                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                        "ascii"
+                    )
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -551,6 +566,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=routed_experts_b64,
                 )
                 choices.append(choice_data)
 

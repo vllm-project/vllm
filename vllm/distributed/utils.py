@@ -64,6 +64,20 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def is_weak_contiguous(inp: torch.Tensor) -> bool:
+    """Check that *inp* occupies a single contiguous block of memory.
+
+    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    whose strides are not strictly C-contiguous (e.g. column-major) as
+    long as the underlying storage from the tensor's offset onward is
+    exactly ``numel * element_size`` bytes.
+    """
+    return inp.is_contiguous() or (
+        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
+        == inp.numel() * inp.element_size()
+    )
+
+
 def split_tensor_along_last_dim(
     tensor: torch.Tensor,
     num_partitions: int,
@@ -491,6 +505,16 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
 
+def get_cpu_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
 def init_gloo_process_group(
     prefix_store: PrefixStore,
     group_rank: int,
@@ -570,6 +594,10 @@ def stateless_init_torch_distributed_process_group(
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
+    if backend == "gloo":
+        gloo_timeout = get_cpu_distributed_timeout_or_none()
+        if gloo_timeout is not None:
+            timeout = gloo_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(
