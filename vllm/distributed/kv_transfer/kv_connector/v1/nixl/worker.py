@@ -272,9 +272,8 @@ class NixlConnectorWorker:
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
-        # Number of NIXL descriptor regions per SSM layer per block:
-        # conv sub-projections + 1 SSM temporal.
-        # Mamba2/GDN: 3 + 1 = 4; Mamba1: 1 + 1 = 2.
+        # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
+        # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
         self._ssm_regions_per_layer: int = 0
         if self._conv_decomp is not None:
             self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1

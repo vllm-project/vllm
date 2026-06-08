@@ -7,8 +7,7 @@ contiguous in memory.  Each D rank reads its slices via separate
 RDMA transfers — no P-side permutation needed.
 
 Supported model types:
-  - Mamba1: conv = [x] (single sub-projection, contiguous TP shard),
-    temporal = (intermediate_size, state_size)
+  - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
@@ -87,8 +86,6 @@ class MambaConvSplitInfo:
         """
         offsets: list[tuple[int, int]] = []
         if tp_ratio >= 1:
-            # remote_base tracks the start of each sub-projection within
-            # the (larger) P page; each D rank reads its slice from it.
             remote_base = 0
             for size in self.proj_bytes:
                 offsets.append((remote_base + local_rank_offset * size, size))
@@ -162,11 +159,8 @@ def derive_mamba_conv_split(
 
     local_proj_dims: tuple[int, ...]
     if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
-        # Mamba1: the conv state holds only the x projection (B and C are
-        # computed from x post-conv via x_proj), so the conv dim is a single
+        # Mamba1 conv state holds only x (no B/C), so it's a single
         # contiguous TP shard with no sub-projection decomposition.
-        # Temporal state is (intermediate_size/TP, state_size); its first
-        # dim must match the conv dim.
         temporal_shape = mamba_spec.shapes[1]
         assert temporal_shape[0] == local_conv_dim, (
             f"Mamba1 temporal state dim ({temporal_shape[0]}) doesn't match "
