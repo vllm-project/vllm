@@ -168,6 +168,15 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
+    # The topk kernel dispatches dtype based on topk_ids (set by
+    # indices_type) and assumes input_tokens/hash_indices_table match.
+    if indices_type is not None:
+        if input_tokens is not None and input_tokens.dtype != indices_type:
+            input_tokens = input_tokens.to(dtype=indices_type)
+        if (hash_indices_table is not None
+                and hash_indices_table.dtype != indices_type):
+            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
@@ -335,18 +344,6 @@ class FusedTopKBiasRouter(BaseRouter):
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using fused top-k with bias."""
-        # The topk kernel dispatches dtype based on topk_ids (set by
-        # indices_type) and assumes input_tokens/hash_indices_table match.
-        # Cast them here so backends like DeepEP that require int64 indices
-        # don't hit a dtype mismatch against the model's int32 buffers.
-        hash_table = self._hash_indices_table
-        if indices_type is not None:
-            if input_ids is not None:
-                input_ids = input_ids.to(dtype=indices_type)
-            if hash_table is not None and hash_table.dtype != indices_type:
-                self._hash_indices_table = hash_table.to(dtype=indices_type)
-                hash_table = self._hash_indices_table
-
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -358,7 +355,7 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             indices_type=indices_type,
             input_tokens=input_ids,
-            hash_indices_table=hash_table,
+            hash_indices_table=self._hash_indices_table,
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
