@@ -87,14 +87,6 @@ def is_nonstandard_gguf_quant_type(quant_type: str) -> bool:
 # e.g., Q4_K_M, Q3_K_S, Q5_K_L, Q2_K_XL
 _GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
 _HF_CONFIG_FILES = ("config.json",)
-_HF_TOKENIZER_FILES = (
-    "tokenizer_config.json",
-    "tokenizer.json",
-    "tokenizer.model",
-    "spiece.model",
-    "vocab.json",
-    "merges.txt",
-)
 _HF_REPO_ID_PATTERN = re.compile(
     r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"
 )
@@ -250,6 +242,14 @@ def _resolve_gguf_hf_source(
     for base_model in base_model_ids:
         # GGUF repo revisions are not meaningful for the referenced HF base model.
         if _source_has_any_file(base_model, filenames, revision=None):
+            logger.warning_once(
+                "GGUF metadata redirects HF config loading from %s to base "
+                "model '%s'. `trust_remote_code` is not inherited across "
+                "implicit GGUF base-model redirects; pass an explicit "
+                "`--hf-config-path` to opt in for that repository.",
+                model,
+                base_model,
+            )
             return base_model
 
     return source
@@ -269,20 +269,6 @@ def resolve_gguf_config_source(
         return _resolve_gguf_hf_source(
             model,
             _HF_CONFIG_FILES,
-            revision=revision,
-        )
-    return model
-
-
-def resolve_gguf_tokenizer_source(
-    model: str | Path,
-    revision: str | None = None,
-) -> str | Path:
-    """Resolve where a GGUF model should load tokenizer/processor files from."""
-    if is_gguf(model):
-        return _resolve_gguf_hf_source(
-            model,
-            _HF_TOKENIZER_FILES,
             revision=revision,
         )
     return model

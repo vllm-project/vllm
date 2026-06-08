@@ -237,3 +237,117 @@ def test_remote_gguf_get_config_uses_gguf_parser_fallback(monkeypatch):
         )
     ]
     assert config.architectures == ["FakeModel"]
+
+
+def test_remote_gguf_get_config_disables_trust_for_metadata_base(
+    monkeypatch,
+):
+    from transformers import PretrainedConfig
+
+    from vllm.transformers_utils import config as config_module
+
+    calls = []
+
+    class FakeParser:
+        def parse(
+            self,
+            model,
+            trust_remote_code,
+            revision=None,
+            code_revision=None,
+            hf_overrides=None,
+            **kwargs,
+        ):
+            calls.append((model, trust_remote_code, revision, kwargs))
+            return {}, PretrainedConfig(architectures=["FakeModel"])
+
+    _patch_config_source(monkeypatch, config_module, "org/base")
+    monkeypatch.setattr(
+        config_module,
+        "file_or_path_exists",
+        lambda model, config_name, revision=None: (
+            model == "org/base"
+            and config_name == config_module.HF_CONFIG_NAME
+            and revision is None
+        ),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "is_mistral_model_repo",
+        lambda model_name_or_path, revision=None: False,
+    )
+    monkeypatch.setattr(
+        config_module,
+        "get_config_parser",
+        lambda config_format: FakeParser(),
+    )
+
+    get_config(
+        "org/model-GGUF:UD-IQ4_NL",
+        trust_remote_code=True,
+        revision="gguf-rev",
+    )
+
+    assert calls == [("org/base", False, None, {})]
+
+
+def test_local_gguf_get_config_disables_trust_for_metadata_base(
+    monkeypatch,
+):
+    from transformers import PretrainedConfig
+
+    from vllm.transformers_utils import config as config_module
+
+    calls = []
+
+    class FakeParser:
+        def parse(
+            self,
+            model,
+            trust_remote_code,
+            revision=None,
+            code_revision=None,
+            hf_overrides=None,
+            **kwargs,
+        ):
+            calls.append((model, trust_remote_code, revision, kwargs))
+            return {}, PretrainedConfig(architectures=["FakeModel"])
+
+    _patch_config_source(monkeypatch, config_module, "org/base")
+    monkeypatch.setattr(
+        config_module,
+        "is_gguf",
+        lambda model: model == "/models/qwen.gguf",
+    )
+    monkeypatch.setattr(
+        config_module,
+        "check_gguf_file",
+        lambda model: model == "/models/qwen.gguf",
+    )
+    monkeypatch.setattr(
+        config_module,
+        "file_or_path_exists",
+        lambda model, config_name, revision=None: (
+            model == "org/base"
+            and config_name == config_module.HF_CONFIG_NAME
+            and revision is None
+        ),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "is_mistral_model_repo",
+        lambda model_name_or_path, revision=None: False,
+    )
+    monkeypatch.setattr(
+        config_module,
+        "get_config_parser",
+        lambda config_format: FakeParser(),
+    )
+
+    get_config(
+        "/models/qwen.gguf",
+        trust_remote_code=True,
+        revision="local-rev",
+    )
+
+    assert calls == [("org/base", False, None, {})]

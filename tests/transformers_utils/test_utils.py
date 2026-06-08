@@ -9,7 +9,6 @@ from vllm.transformers_utils.gguf_utils import (
     is_gguf,
     is_remote_gguf,
     resolve_gguf_config_source,
-    resolve_gguf_tokenizer_source,
     split_remote_gguf,
 )
 from vllm.transformers_utils.utils import (
@@ -372,72 +371,10 @@ class TestRemoteGGUFSourceResolution:
             == gguf_path.parent
         )
 
-    def test_tokenizer_source_checks_tokenizer_files_not_config(self, monkeypatch):
-        from vllm.transformers_utils import gguf_utils
-
-        class FakeInfo:
-            card_data = {"base_model": "org/base"}
-
-        class FakeHfApi:
-            def model_info(self, repo_id, revision=None):
-                return FakeInfo()
-
-        def fake_file_or_path_exists(model, config_name, revision=None):
-            return (
-                model == "org/model-GGUF"
-                and config_name == "config.json"
-                and revision == "gguf-rev"
-            ) or (
-                model == "org/base"
-                and config_name == "tokenizer_config.json"
-                and revision is None
-            )
-
-        monkeypatch.setattr(gguf_utils, "hf_api", lambda: FakeHfApi())
-        monkeypatch.setattr(
-            gguf_utils,
-            "file_or_path_exists",
-            fake_file_or_path_exists,
-        )
-
-        assert (
-            resolve_gguf_tokenizer_source(
-                "org/model-GGUF:UD-IQ4_NL",
-                revision="gguf-rev",
-            )
-            == "org/base"
-        )
-
-    def test_local_tokenizer_source_uses_metadata_base_model(self, monkeypatch):
-        from vllm.transformers_utils import gguf_utils
-
-        gguf_path = Path("/models/qwen.gguf")
-
-        monkeypatch.setattr(
-            gguf_utils,
-            "check_gguf_file",
-            lambda model: Path(model) == gguf_path,
-        )
-        monkeypatch.setattr(
-            gguf_utils,
-            "_get_local_gguf_base_model_ids",
-            lambda model: ("org/base",),
-        )
-        monkeypatch.setattr(
-            gguf_utils,
-            "file_or_path_exists",
-            lambda model, config_name, revision=None: (
-                model == "org/base"
-                and config_name == "tokenizer_config.json"
-                and revision is None
-            ),
-        )
-
-        assert (
-            resolve_gguf_tokenizer_source(gguf_path, revision="local-rev") == "org/base"
-        )
-
-    def test_remote_base_model_ids_are_cached_between_resolvers(self, monkeypatch):
+    def test_remote_base_model_ids_are_cached_between_config_resolvers(
+        self,
+        monkeypatch,
+    ):
         from vllm.transformers_utils import gguf_utils
 
         class FakeInfo:
@@ -456,9 +393,7 @@ class TestRemoteGGUFSourceResolution:
 
         def fake_file_or_path_exists(model, filename, revision=None):
             return (
-                model == "org/base"
-                and filename in {"config.json", "tokenizer_config.json"}
-                and revision is None
+                model == "org/base" and filename == "config.json" and revision is None
             )
 
         monkeypatch.setattr(gguf_utils, "hf_api", lambda: fake_api)
@@ -476,7 +411,7 @@ class TestRemoteGGUFSourceResolution:
             == "org/base"
         )
         assert (
-            resolve_gguf_tokenizer_source(
+            resolve_gguf_config_source(
                 "org/model-GGUF:UD-IQ4_NL",
                 revision="gguf-rev",
             )

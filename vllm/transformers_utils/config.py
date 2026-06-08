@@ -742,7 +742,9 @@ def get_config(
             if model != gguf_repo:
                 # The local GGUF file points at a verified HF base model.  Do
                 # not pass gguf_file, or Transformers will parse the unsupported
-                # GGUF architecture instead of the base config.
+                # GGUF architecture instead of the base config.  Do not inherit
+                # trust_remote_code across this implicit metadata redirect.
+                trust_remote_code = False
                 revision = None
             elif file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision=revision):
                 model = gguf_repo
@@ -761,7 +763,9 @@ def get_config(
             if model != remote_gguf_repo:
                 # A GGUF repo revision does not apply to the referenced base
                 # model. Use the base model's default revision unless users
-                # pass an explicit hf_config_path.
+                # pass an explicit hf_config_path.  Do not inherit
+                # trust_remote_code across this implicit metadata redirect.
+                trust_remote_code = False
                 revision = None
             elif not file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
                 kwargs["gguf_file"] = get_gguf_file_path_from_hf(
