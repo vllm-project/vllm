@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import BatchFeature, ProcessorMixin, TensorType
-from transformers.image_utils import ImageInput
+from transformers.image_utils import ImageInput, is_valid_image, load_image
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -46,6 +48,20 @@ class MistralCommonImageProcessor:
         ncols, nrows = self.mm_encoder._image_to_num_tokens(image)
         return ncols * nrows, nrows, ncols
 
+    def fetch_images(self, image_url_or_urls: Any) -> Any:
+        if isinstance(image_url_or_urls, (list, tuple)):
+            return [self.fetch_images(image) for image in image_url_or_urls]
+        if isinstance(image_url_or_urls, str):
+            return load_image(image_url_or_urls)
+        if is_valid_image(image_url_or_urls):
+            return image_url_or_urls
+
+        msg = (
+            "only a single or a list of entries is supported but got "
+            f"type={type(image_url_or_urls)}"
+        )
+        raise TypeError(msg)
+
 
 class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
@@ -77,3 +93,11 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         # HF PixtralProcessor-compatible aliases for the integer token IDs.
         self.image_break_token_id = self.image_break_id
         self.image_end_token_id = self.image_end_id
+
+    def replace_image_token(
+        self,
+        processed_images: BatchFeature,
+        image_idx: int = 0,
+    ) -> str:
+        # Mistral chat templates already insert Pixtral image placeholders.
+        return self.image_token

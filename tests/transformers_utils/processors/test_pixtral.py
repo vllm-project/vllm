@@ -5,7 +5,11 @@ from dataclasses import dataclass
 
 import pytest
 
-from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.transformers_utils.processors import pixtral as pixtral_module
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -80,3 +84,26 @@ def test_token_properties_are_instance_attributes(processor):
         assert attr in processor.__dict__, (
             f"{attr} must be set in __init__, not inherited"
         )
+
+
+def test_image_processor_fetch_images_accepts_images_and_lists(monkeypatch):
+    image_processor = MistralCommonImageProcessor(FakeImageEncoder())
+    image = object()
+    monkeypatch.setattr(
+        pixtral_module, "is_valid_image", lambda candidate: candidate is image
+    )
+
+    assert image_processor.fetch_images(image) is image
+    assert image_processor.fetch_images([image, (image,)]) == [image, [image]]
+
+
+def test_image_processor_fetch_images_rejects_invalid_input(monkeypatch):
+    image_processor = MistralCommonImageProcessor(FakeImageEncoder())
+    monkeypatch.setattr(pixtral_module, "is_valid_image", lambda candidate: False)
+
+    with pytest.raises(TypeError, match="only a single or a list of entries"):
+        image_processor.fetch_images(object())
+
+
+def test_replace_image_token_is_noop_for_mistral_template_tokens(processor):
+    assert processor.replace_image_token(processed_images={}, image_idx=0) == "[IMG]"
