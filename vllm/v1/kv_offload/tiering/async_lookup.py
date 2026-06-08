@@ -134,7 +134,7 @@ class AsyncLookupManager(ABC):
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = False
+            self._need_to_drain = True
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
