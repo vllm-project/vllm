@@ -13,9 +13,7 @@ flashinfer-python==0.6.12
 flashinfer-cubin==0.6.12
 apache-tvm-ffi==0.1.9
 tilelang==0.1.9
-# Cap nvidia-cudnn-frontend (transitive dep of flashinfer) due to
-# breaking changes in 1.19.0
-nvidia-cudnn-frontend>=1.13.0,<1.19.0
+nvidia-cudnn-frontend>=1.19.1
 
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.2
