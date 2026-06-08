@@ -298,6 +298,11 @@ class AutoAWQConfig(QuantizationConfig):
             if current_platform.is_xpu():
                 return AutoAWQXPULinearMethod(self)
 
+            # On CPU, use Marlin linear method which uses choose_mp_linear_kernel
+            # to select the best available kernel (CPUWNA16LinearKernel on CPU)
+            if current_platform.is_cpu():
+                return AutoAWQMarlinLinearMethod(self)
+
             # Check if Marlin is supported and not using batch invariant mode
             # (Marlin kernels are not batch invariant)
             use_marlin = (
@@ -416,11 +421,13 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
 
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
-            has_zp=self.quant_config.zero_point,
-        )
+        # Skip Marlin verification on CPU - it will use CPUWNA16LinearKernel
+        if not current_platform.is_cpu():
+            verify_marlin_supported(
+                quant_type=self.quant_config.quant_type,
+                group_size=self.quant_config.group_size,
+                has_zp=self.quant_config.zero_point,
+            )
 
     def create_weights(
         self,
