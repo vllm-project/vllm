@@ -557,22 +557,24 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         match_rocm_aiter_rope: bool,
         **extra_kwargs,
     ) -> None:
-        # The pattern's traced ``eps`` literal is collapsed to ``Ignored()``
-        # by ``torch._inductor.pattern_matcher.fx_to_pattern`` (it elides
-        # Python float constants on match), so a single registration matches
-        # every eps value at apply time. Iterating eps here only produces
-        # duplicate patterns that the matcher rejects. ``is_neox`` is the
-        # only axis that changes the rotary op recorded in the traced graph
-        # (different ops for is_neox True/False), so its registrations are
-        # structurally distinct.
-        for neox in [True, False]:
-            pattern_cls(
-                layer=layer,
-                eps=1e-6,
-                is_neox=neox,
-                match_rocm_aiter_rope=match_rocm_aiter_rope,
-                **extra_kwargs,
-            ).register(self.patterns)
+        # Register the common RMSNorm epsilons, mirroring the sibling
+        # ``qk_norm_rope_fusion`` and ``sequence_parallelism`` passes. On torch
+        # versions where ``fx_to_pattern`` elides Python float constants the
+        # eps slot collapses to ``Ignored()`` and the second eps is a harmless
+        # duplicate that the matcher de-duplicates; on versions that preserve
+        # the literal these explicit registrations are what let both 1e-5 and
+        # 1e-6 models match. ``is_neox`` changes the rotary op recorded in the
+        # traced graph (distinct ops for True/False), so those registrations
+        # are always structurally distinct.
+        for eps in [1e-5, 1e-6]:
+            for neox in [True, False]:
+                pattern_cls(
+                    layer=layer,
+                    eps=eps,
+                    is_neox=neox,
+                    match_rocm_aiter_rope=match_rocm_aiter_rope,
+                    **extra_kwargs,
+                ).register(self.patterns)
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
