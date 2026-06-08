@@ -4,7 +4,7 @@ import weakref
 
 import pytest
 
-from tests.entrypoints.multimodal.online.test_vision import TEST_IMAGE_ASSETS
+from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 
