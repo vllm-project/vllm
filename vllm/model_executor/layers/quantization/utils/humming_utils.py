@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -28,6 +29,7 @@ from humming.schema.modelopt import (
 )
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -461,6 +463,18 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     )
 
     HummingMethod.transform_humming_layer(layer)
+    if not hasattr(layer, "locks"):
+        device = layer.weight.device
+        locks = torch.zeros(1024, dtype=torch.int32, device=device)
+        layer.register_buffer("locks", locks)
+
+    compute_config = {
+        "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
+        "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
+        "gemm_type": "dense",
+    }
+
+    layer.compute_config = json.dumps(compute_config)
 
 
 def make_humming_moe_quant_config(
@@ -922,7 +936,6 @@ def convert_to_humming_moe_kernel_format(
         from humming.layer import HummingInputSchema
         from humming.schema import BaseWeightSchema
 
-        from vllm import envs
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             humming_is_layer_skipped,
         )
