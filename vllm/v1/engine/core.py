@@ -979,9 +979,22 @@ class EngineCoreProc(EngineCore):
             # its worker subprocesses are terminated instead of surviving as
             # orphans that keep holding GPU memory. Cleanup during the executor's
             # own construction is handled by MultiprocExecutor.__init__.
+            #
+            # We deliberately call ``model_executor.shutdown()`` directly rather
+            # than ``self.shutdown()``: the latter touches
+            # ``self.structured_output_manager`` / ``self.scheduler`` (created
+            # only AFTER the long warmup) and would raise AttributeError on a
+            # half-built engine. The executor is bound before warmup, so this is
+            # always safe and is the part that owns the GPU worker subprocesses.
             executor = getattr(self, "model_executor", None)
             if executor is not None:
-                executor.shutdown()
+                try:
+                    executor.shutdown()
+                except Exception:
+                    # Never let a teardown error mask the original interruption.
+                    logger.exception(
+                        "Error shutting down executor during startup abort"
+                    )
             raise
 
     @contextmanager
