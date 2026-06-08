@@ -82,7 +82,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
     # SSM/conv src columns (batch order; -1 = fresh). gdn_attn resolves to
     # physical block ids so kernels read init state from the src block directly.
-    align_src_state_indices: torch.Tensor | None = None
+    align_ssm_src_state_indices: torch.Tensor | None = None
     align_conv_src_state_indices: torch.Tensor | None = None
     align_conv_src_offset: torch.Tensor | None = None
 
@@ -110,9 +110,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "num_decode_draft_tokens_cpu": None
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
-            "align_src_state_indices": None
-            if self.align_src_state_indices is None
-            else self.align_src_state_indices[:num_reqs],
+            "align_ssm_src_state_indices": None
+            if self.align_ssm_src_state_indices is None
+            else self.align_ssm_src_state_indices[:num_reqs],
             "align_conv_src_state_indices": None
             if self.align_conv_src_state_indices is None
             else self.align_conv_src_state_indices[:num_reqs],
@@ -422,15 +422,15 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        align_src_state_indices = None
+        align_ssm_src_state_indices = None
         align_conv_src_state_indices = None
         align_conv_src_offset = None
         if not for_capture and self.cache_config.mamba_cache_mode == "align":
             info = self.mamba_cache_align_info
             idx = input_batch.idx_mapping
             n = input_batch.num_reqs
-            align_src_state_indices = info.src_ssm_col_gpu.new_full((num_reqs,), -1)
-            align_src_state_indices[:n] = info.src_ssm_col_gpu[idx]
+            align_ssm_src_state_indices = info.src_ssm_col_gpu.new_full((num_reqs,), -1)
+            align_ssm_src_state_indices[:n] = info.src_ssm_col_gpu[idx]
             align_conv_src_state_indices = info.conv_src_col_gpu.new_full(
                 (num_reqs,), -1
             )
@@ -442,7 +442,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-            align_src_state_indices=align_src_state_indices,
+            align_ssm_src_state_indices=align_ssm_src_state_indices,
             align_conv_src_state_indices=align_conv_src_state_indices,
             align_conv_src_offset=align_conv_src_offset,
         )

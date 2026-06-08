@@ -315,8 +315,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-        spec_src_state_indices = attn_metadata.spec_src_state_indices
-        non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
+        spec_ssm_src_state_indices = attn_metadata.spec_ssm_src_state_indices
+        non_spec_ssm_src_state_indices = attn_metadata.non_spec_ssm_src_state_indices
         spec_conv_src_state_indices = attn_metadata.spec_conv_src_state_indices
         non_spec_conv_src_state_indices = attn_metadata.non_spec_conv_src_state_indices
         spec_conv_src_offset = attn_metadata.spec_conv_src_offset
@@ -465,8 +465,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
                 ssm_state_indices=spec_state_indices_tensor,
                 src_ssm_state_indices=(
-                    spec_src_state_indices[: attn_metadata.num_spec_decodes]
-                    if spec_src_state_indices is not None
+                    spec_ssm_src_state_indices[: attn_metadata.num_spec_decodes]
+                    if spec_ssm_src_state_indices is not None
                     else None
                 ),
                 num_accepted_tokens=num_accepted_tokens,
@@ -480,8 +480,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert has_initial_state is not None
             assert non_spec_query_start_loc is not None
             prefill_src_indices = (
-                non_spec_src_state_indices
-                if non_spec_src_state_indices is not None
+                non_spec_ssm_src_state_indices
+                if non_spec_ssm_src_state_indices is not None
                 else non_spec_state_indices_tensor
             )
             initial_state = ssm_state[prefill_src_indices].contiguous()
@@ -520,8 +520,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     src_ssm_state_indices=(
-                        non_spec_src_state_indices[: attn_metadata.num_decodes]
-                        if non_spec_src_state_indices is not None
+                        non_spec_ssm_src_state_indices[: attn_metadata.num_decodes]
+                        if non_spec_ssm_src_state_indices is not None
                         else None
                     ),
                     use_qk_l2norm_in_kernel=True,

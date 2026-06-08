@@ -287,7 +287,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    HAS_SRC: tl.constexpr,
+    HAS_SRC_INDICES: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -311,7 +311,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     # Mamba "align" copy-free pre: READ the initial state from the src block
     # (previous running block) and WRITE the result to the window block. On a
     # non-migration step src == window (in-place, == old behavior).
-    if HAS_SRC:
+    if HAS_SRC_INDICES:
         read_idx = tl.load(src_ssm_state_indices + i_n).to(tl.int64)
     else:
         read_idx = write_idx
@@ -492,7 +492,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        HAS_SRC=src_ssm_state_indices is not None,
+        HAS_SRC_INDICES=src_ssm_state_indices is not None,
         num_warps=num_warps,
         num_stages=num_stages,
     )

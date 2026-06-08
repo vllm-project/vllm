@@ -50,6 +50,8 @@ def warmup_kernels(
     def _get_warmup_block_count(num_tokens: int, spec: Any) -> int:
         num_blocks = cdiv(num_tokens, spec.block_size)
         if isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
+            # Mamba align mode reserves extra blocks beyond the token range
+            # for speculative decoding state snapshots.
             num_blocks += spec.num_speculative_blocks
         return num_blocks
 

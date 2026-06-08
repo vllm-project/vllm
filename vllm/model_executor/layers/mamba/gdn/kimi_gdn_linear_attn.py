@@ -291,7 +291,9 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_state_indices_tensor = (
             attn_metadata_narrowed.non_spec_state_indices_tensor
         )  # noqa: E501
-        non_spec_src_state_indices = attn_metadata_narrowed.non_spec_src_state_indices
+        non_spec_ssm_src_state_indices = (
+            attn_metadata_narrowed.non_spec_ssm_src_state_indices
+        )
         non_spec_conv_src_state_indices = (
             attn_metadata_narrowed.non_spec_conv_src_state_indices
         )
@@ -418,8 +420,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             zero_idx = non_spec_state_indices_tensor[~has_initial_state]
             recurrent_state[zero_idx] = 0
             prefill_src_indices = (
-                non_spec_src_state_indices
-                if non_spec_src_state_indices is not None
+                non_spec_ssm_src_state_indices
+                if non_spec_ssm_src_state_indices is not None
                 else non_spec_state_indices_tensor
             )
             initial_state = recurrent_state[prefill_src_indices].contiguous()
@@ -465,8 +467,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ],
                 ssm_state_indices=non_spec_state_indices_tensor,
                 src_ssm_state_indices=(
-                    non_spec_src_state_indices[:num_actual_tokens]
-                    if non_spec_src_state_indices is not None
+                    non_spec_ssm_src_state_indices[:num_actual_tokens]
+                    if non_spec_ssm_src_state_indices is not None
                     else None
                 ),
             )

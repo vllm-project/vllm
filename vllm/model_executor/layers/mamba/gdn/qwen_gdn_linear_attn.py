@@ -1310,8 +1310,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # When set, the SSM recurrent kernels read their initial state from these
         # blocks (the previous running block) instead of the write-side window,
         # replacing the SSM temporal pre-copy.
-        spec_src_state_indices = attn_metadata.spec_src_state_indices
-        non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
+        spec_ssm_src_state_indices = attn_metadata.spec_ssm_src_state_indices
+        non_spec_ssm_src_state_indices = attn_metadata.non_spec_ssm_src_state_indices
         # Read-side CONV src (prev running block) + pre-reset intra-block offset.
         spec_conv_src_state_indices = attn_metadata.spec_conv_src_state_indices
         non_spec_conv_src_state_indices = attn_metadata.non_spec_conv_src_state_indices
@@ -1486,8 +1486,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     src_ssm_state_indices=(
-                        spec_src_state_indices[: attn_metadata.num_spec_decodes]
-                        if spec_src_state_indices is not None
+                        spec_ssm_src_state_indices[: attn_metadata.num_spec_decodes]
+                        if spec_ssm_src_state_indices is not None
                         else None
                     ),
                     use_qk_l2norm_in_kernel=True,
@@ -1506,8 +1506,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # or cudagraph capture). The write-back below still targets the
             # window block (non_spec_state_indices_tensor).
             prefill_init_indices = (
-                non_spec_src_state_indices
-                if non_spec_src_state_indices is not None
+                non_spec_ssm_src_state_indices
+                if non_spec_ssm_src_state_indices is not None
                 else non_spec_state_indices_tensor
             )
             initial_state = ssm_state[prefill_init_indices].contiguous()  # type: ignore[index]
@@ -1551,8 +1551,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
                     src_ssm_state_indices=(
-                        non_spec_src_state_indices[: attn_metadata.num_decodes]
-                        if non_spec_src_state_indices is not None
+                        non_spec_ssm_src_state_indices[: attn_metadata.num_decodes]
+                        if non_spec_ssm_src_state_indices is not None
                         else None
                     ),
                     use_qk_l2norm_in_kernel=True,
@@ -1658,7 +1658,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # the prev running block while writing the window block.
         non_spec_conv_src_state_indices = attn_metadata.non_spec_conv_src_state_indices
         non_spec_conv_src_offset = attn_metadata.non_spec_conv_src_offset
-        non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
+        non_spec_ssm_src_state_indices = attn_metadata.non_spec_ssm_src_state_indices
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1708,8 +1708,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
             src_ssm_state_indices=(
-                non_spec_src_state_indices[:num_actual_tokens]
-                if non_spec_src_state_indices is not None
+                non_spec_ssm_src_state_indices[:num_actual_tokens]
+                if non_spec_ssm_src_state_indices is not None
                 else None
             ),
             use_qk_l2norm_in_kernel=True,

@@ -67,8 +67,8 @@ class GDNAttentionMetadata:
     # Read-side physical block ids for the mamba "align" SSM src redirect. When
     # set, the SSM kernels source their initial state from these blocks instead
     # of [non_]spec_state_indices_tensor, eliminating the SSM temporal pre-copy.
-    spec_src_state_indices: torch.Tensor | None = None  # shape: [num_spec_decodes,]
-    non_spec_src_state_indices: torch.Tensor | None = None  # shape: [num_decodes,]
+    spec_ssm_src_state_indices: torch.Tensor | None = None  # shape: [num_spec_decodes,]
+    non_spec_ssm_src_state_indices: torch.Tensor | None = None  # shape: [num_decodes,]
 
     # Read-side CONV src: physical block id (prev running block) + pre-reset
     # intra-block token offset, so the conv kernel reads its init conv window
@@ -183,19 +183,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # triton constexpr baked at CAPTURE; the src must be routed through these
         # fixed-address buffers so capture bakes HAS_SRC=True (NULL-filled) and
         # each replay step copies the real src in. Only needed in align mode.
-        self.spec_src_state_indices_buf: torch.Tensor | None = None
-        self.non_spec_src_state_indices_buf: torch.Tensor | None = None
+        self.spec_ssm_src_state_indices_buf: torch.Tensor | None = None
+        self.non_spec_ssm_src_state_indices_buf: torch.Tensor | None = None
         self.spec_conv_src_state_indices_buf: torch.Tensor | None = None
         self.non_spec_conv_src_state_indices_buf: torch.Tensor | None = None
         self.spec_conv_src_offset_buf: torch.Tensor | None = None
         self.non_spec_conv_src_offset_buf: torch.Tensor | None = None
         if self.use_align_src_dst:
-            self.spec_src_state_indices_buf = torch.empty(
+            self.spec_ssm_src_state_indices_buf = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
                 device=device,
             )
-            self.non_spec_src_state_indices_buf = torch.empty(
+            self.non_spec_ssm_src_state_indices_buf = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
                 device=device,
@@ -214,13 +214,48 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
 
+    @staticmethod
+    def _split_align_cache_src_info(
+        src_full: torch.Tensor | None,
+        spec_mask: torch.Tensor,
+        include_non_spec: bool = True,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Split full-batch mamba align-cache src indices into spec and
+        non-spec portions. When include_non_spec=False (pure spec-only
+        batch), skip the non-spec computation and return None for it."""
+        if src_full is None:
+            return None, None
+        spec = src_full[spec_mask].contiguous()
+        non_spec = src_full[~spec_mask].contiguous() if include_non_spec else None
+        return spec, non_spec
+
+    @staticmethod
+    def _stage_align_src_for_cudagraph(
+        buf: torch.Tensor,
+        src: torch.Tensor | None,
+        n: int,
+        batch_size: int,
+        fill: int,
+    ) -> torch.Tensor:
+        """Stage mamba align-cache src indices into a persistent CUDAGraph
+        buffer for capture/replay. Copies src[:n] into buf, pads the tail
+        (n..batch_size) with fill value. If src is None (capture phase),
+        fills the entire range with fill."""
+        if src is not None:
+            buf[:n].copy_(src, non_blocking=True)
+        else:
+            buf[:n].fill_(fill)
+        out = buf[:batch_size]
+        out[n:].fill_(fill)
+        return out
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
-        align_src_state_indices: torch.Tensor | None = None,
+        align_ssm_src_state_indices: torch.Tensor | None = None,
         align_conv_src_state_indices: torch.Tensor | None = None,
         align_conv_src_offset: torch.Tensor | None = None,
         fast_build: bool = False,
@@ -243,10 +278,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # lie OUTSIDE the windowed `block_table_tensor` on a block-boundary
         # crossing, so we index m.block_table_tensor directly here. Split per
         # spec/non-spec below, mirroring the state-index tensors.
-        align_src_full: torch.Tensor | None = None
-        if align_src_state_indices is not None and self.use_align_src_dst:
+        align_ssm_src_full: torch.Tensor | None = None
+        if align_ssm_src_state_indices is not None and self.use_align_src_dst:
             num_reqs_full = m.block_table_tensor.size(0)
-            col = align_src_state_indices[:num_reqs_full].to(torch.int64)
+            col = align_ssm_src_state_indices[:num_reqs_full].to(torch.int64)
             max_col = m.block_table_tensor.size(1) - 1
             col_safe = col.clamp(min=0, max=max_col)
             rows = torch.arange(
@@ -256,7 +291,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             phys = m.block_table_tensor[rows, col_safe].to(torch.int32)
             # col < 0 == fresh -> 0 (NULL_BLOCK_ID) -> kernel starts from zero.
-            align_src_full = torch.where(col >= 0, phys, torch.zeros_like(phys))
+            align_ssm_src_full = torch.where(col >= 0, phys, torch.zeros_like(phys))
 
         # Same resolution for the CONV src column (= state_idx, the prev MAIN
         # block). The per-seq offset is carried through unchanged (batch order).
@@ -312,9 +347,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = None
             # Pure non-spec batch: every row is a non-spec decode, so the
             # resolved physical src blocks are already in non-spec order.
-            spec_src_state_indices = None
-            non_spec_src_state_indices = (
-                align_src_full.contiguous() if align_src_full is not None else None
+            spec_ssm_src_state_indices = None
+            non_spec_ssm_src_state_indices = (
+                align_ssm_src_full.contiguous()
+                if align_ssm_src_full is not None
+                else None
             )
             spec_conv_src_state_indices = None
             spec_conv_src_offset = None
@@ -375,26 +412,27 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     spec_sequence_masks_cpu, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = None
-                if align_src_full is not None:
-                    spec_src_state_indices = align_src_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                else:
-                    spec_src_state_indices = None
-                non_spec_src_state_indices = None
-                if align_conv_src_full is not None:
-                    assert align_conv_off_full is not None
-                    spec_conv_src_state_indices = align_conv_src_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                    spec_conv_src_offset = align_conv_off_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                else:
-                    spec_conv_src_state_indices = None
-                    spec_conv_src_offset = None
-                non_spec_conv_src_state_indices = None
-                non_spec_conv_src_offset = None
+                spec_ssm_src_state_indices, non_spec_ssm_src_state_indices = (
+                    self._split_align_cache_src_info(
+                        align_ssm_src_full,
+                        spec_sequence_masks_cpu,
+                        include_non_spec=False,
+                    )
+                )
+                spec_conv_src_state_indices, non_spec_conv_src_state_indices = (
+                    self._split_align_cache_src_info(
+                        align_conv_src_full,
+                        spec_sequence_masks_cpu,
+                        include_non_spec=False,
+                    )
+                )
+                spec_conv_src_offset, non_spec_conv_src_offset = (
+                    self._split_align_cache_src_info(
+                        align_conv_off_full,
+                        spec_sequence_masks_cpu,
+                        include_non_spec=False,
+                    )
+                )
                 # Padded sequences are always at the back, so the first
                 # num_spec_decodes + 1 entries of query_start_loc already
                 # contain the correct cumulative token counts.
@@ -418,35 +456,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_state_indices_tensor = block_table_tensor[
                     ~spec_sequence_masks_cpu, 0
                 ]
-                if align_src_full is not None:
-                    spec_src_state_indices = align_src_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                    non_spec_src_state_indices = align_src_full[
-                        ~spec_sequence_masks_cpu
-                    ].contiguous()
-                else:
-                    spec_src_state_indices = None
-                    non_spec_src_state_indices = None
-                if align_conv_src_full is not None:
-                    assert align_conv_off_full is not None
-                    spec_conv_src_state_indices = align_conv_src_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                    spec_conv_src_offset = align_conv_off_full[
-                        spec_sequence_masks_cpu
-                    ].contiguous()
-                    non_spec_conv_src_state_indices = align_conv_src_full[
-                        ~spec_sequence_masks_cpu
-                    ].contiguous()
-                    non_spec_conv_src_offset = align_conv_off_full[
-                        ~spec_sequence_masks_cpu
-                    ].contiguous()
-                else:
-                    spec_conv_src_state_indices = None
-                    spec_conv_src_offset = None
-                    non_spec_conv_src_state_indices = None
-                    non_spec_conv_src_offset = None
+                spec_ssm_src_state_indices, non_spec_ssm_src_state_indices = (
+                    self._split_align_cache_src_info(
+                        align_ssm_src_full, spec_sequence_masks_cpu
+                    )
+                )
+                spec_conv_src_state_indices, non_spec_conv_src_state_indices = (
+                    self._split_align_cache_src_info(
+                        align_conv_src_full, spec_sequence_masks_cpu
+                    )
+                )
+                spec_conv_src_offset, non_spec_conv_src_offset = (
+                    self._split_align_cache_src_info(
+                        align_conv_off_full, spec_sequence_masks_cpu
+                    )
+                )
 
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
@@ -587,44 +611,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
-            # SSM src (align): route through the persistent buffer so the
-            # captured kernel bakes HAS_SRC_INDICES=True. At capture
-            # spec_src_state_indices is None -> NULL-fill (kernel skips, safe);
-            # at replay copy the real src in. Tail padded with NULL_BLOCK_ID.
             if self.use_align_src_dst:
-                assert self.spec_src_state_indices_buf is not None
-                if spec_src_state_indices is not None:
-                    self.spec_src_state_indices_buf[:num_spec_decodes].copy_(
-                        spec_src_state_indices, non_blocking=True
-                    )
-                else:
-                    self.spec_src_state_indices_buf[:num_spec_decodes].fill_(
-                        NULL_BLOCK_ID
-                    )
-                spec_src_state_indices = self.spec_src_state_indices_buf[:batch_size]
-                spec_src_state_indices[num_spec_decodes:].fill_(NULL_BLOCK_ID)
-
-                # CONV src + offset persistent buffers (same capture/replay rule).
-                assert self.spec_conv_src_state_indices_buf is not None
-                assert self.spec_conv_src_offset_buf is not None
-                if spec_conv_src_state_indices is not None:
-                    self.spec_conv_src_state_indices_buf[:num_spec_decodes].copy_(
-                        spec_conv_src_state_indices, non_blocking=True
-                    )
-                    self.spec_conv_src_offset_buf[:num_spec_decodes].copy_(
-                        spec_conv_src_offset, non_blocking=True
-                    )
-                else:
-                    self.spec_conv_src_state_indices_buf[:num_spec_decodes].fill_(
-                        NULL_BLOCK_ID
-                    )
-                    self.spec_conv_src_offset_buf[:num_spec_decodes].fill_(0)
-                spec_conv_src_state_indices = self.spec_conv_src_state_indices_buf[
-                    :batch_size
-                ]
-                spec_conv_src_state_indices[num_spec_decodes:].fill_(NULL_BLOCK_ID)
-                spec_conv_src_offset = self.spec_conv_src_offset_buf[:batch_size]
-                spec_conv_src_offset[num_spec_decodes:].fill_(0)
+                spec_ssm_src_state_indices = self._stage_align_src_for_cudagraph(
+                    self.spec_ssm_src_state_indices_buf,
+                    spec_ssm_src_state_indices,
+                    num_spec_decodes,
+                    batch_size,
+                    NULL_BLOCK_ID,
+                )
+                spec_conv_src_state_indices = self._stage_align_src_for_cudagraph(
+                    self.spec_conv_src_state_indices_buf,
+                    spec_conv_src_state_indices,
+                    num_spec_decodes,
+                    batch_size,
+                    NULL_BLOCK_ID,
+                )
+                spec_conv_src_offset = self._stage_align_src_for_cudagraph(
+                    self.spec_conv_src_offset_buf,
+                    spec_conv_src_offset,
+                    num_spec_decodes,
+                    batch_size,
+                    0,
+                )
 
         if (
             self.use_full_cuda_graph
@@ -647,45 +655,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-            # SSM src (align): route through the persistent buffer so the
-            # captured kernel bakes HAS_SRC_INDICES=True (see spec branch).
             if self.use_align_src_dst:
-                assert self.non_spec_src_state_indices_buf is not None
-                if non_spec_src_state_indices is not None:
-                    self.non_spec_src_state_indices_buf[:num_decodes].copy_(
-                        non_spec_src_state_indices, non_blocking=True
-                    )
-                else:
-                    self.non_spec_src_state_indices_buf[:num_decodes].fill_(
-                        NULL_BLOCK_ID
-                    )
-                non_spec_src_state_indices = self.non_spec_src_state_indices_buf[
-                    :batch_size
-                ]
-                non_spec_src_state_indices[num_decodes:].fill_(NULL_BLOCK_ID)
-
-                assert self.non_spec_conv_src_state_indices_buf is not None
-                assert self.non_spec_conv_src_offset_buf is not None
-                if non_spec_conv_src_state_indices is not None:
-                    self.non_spec_conv_src_state_indices_buf[:num_decodes].copy_(
-                        non_spec_conv_src_state_indices, non_blocking=True
-                    )
-                    self.non_spec_conv_src_offset_buf[:num_decodes].copy_(
-                        non_spec_conv_src_offset, non_blocking=True
-                    )
-                else:
-                    self.non_spec_conv_src_state_indices_buf[:num_decodes].fill_(
-                        NULL_BLOCK_ID
-                    )
-                    self.non_spec_conv_src_offset_buf[:num_decodes].fill_(0)
-                non_spec_conv_src_state_indices = (
-                    self.non_spec_conv_src_state_indices_buf[:batch_size]
+                non_spec_ssm_src_state_indices = self._stage_align_src_for_cudagraph(
+                    self.non_spec_ssm_src_state_indices_buf,
+                    non_spec_ssm_src_state_indices,
+                    num_decodes,
+                    batch_size,
+                    NULL_BLOCK_ID,
                 )
-                non_spec_conv_src_state_indices[num_decodes:].fill_(NULL_BLOCK_ID)
-                non_spec_conv_src_offset = self.non_spec_conv_src_offset_buf[
-                    :batch_size
-                ]
-                non_spec_conv_src_offset[num_decodes:].fill_(0)
+                non_spec_conv_src_state_indices = self._stage_align_src_for_cudagraph(
+                    self.non_spec_conv_src_state_indices_buf,
+                    non_spec_conv_src_state_indices,
+                    num_decodes,
+                    batch_size,
+                    NULL_BLOCK_ID,
+                )
+                non_spec_conv_src_offset = self._stage_align_src_for_cudagraph(
+                    self.non_spec_conv_src_offset_buf,
+                    non_spec_conv_src_offset,
+                    num_decodes,
+                    batch_size,
+                    0,
+                )
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
@@ -706,8 +697,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
-            spec_src_state_indices=spec_src_state_indices,
-            non_spec_src_state_indices=non_spec_src_state_indices,
+            spec_ssm_src_state_indices=spec_ssm_src_state_indices,
+            non_spec_ssm_src_state_indices=non_spec_ssm_src_state_indices,
             spec_conv_src_state_indices=spec_conv_src_state_indices,
             non_spec_conv_src_state_indices=non_spec_conv_src_state_indices,
             spec_conv_src_offset=spec_conv_src_offset,
