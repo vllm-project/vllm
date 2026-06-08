@@ -21,6 +21,9 @@ pull_request_rules:
     - check-failure=pre-commit
     - -closed
     - -draft
+    - or:
+      - label=ready
+      - label=verified
   actions:
     comment:
       message: |

@@ -7,7 +7,7 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import multi_gpu_test, wait_for_gpu_memory_to_clear
+from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -405,28 +405,10 @@ def _get_vllm_runner_params(
     }
 
 
-def _wait_for_rocm_memory_to_settle() -> None:
-    if not current_platform.is_rocm():
-        return
-
-    num_gpus = current_platform.device_count()
-    if num_gpus == 0:
-        return
-
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(num_gpus)),
-        threshold_ratio=0.01,
-        timeout_s=120,
-    )
-
-
 @contextmanager
-def _owned_vLLM_runner(vllm_runner, kwargs):
-    try:
-        with vllm_runner(**kwargs) as runner:
-            yield runner
-    finally:
-        _wait_for_rocm_memory_to_settle()
+def _owned_vllm_runner(vllm_runner, kwargs):
+    with vllm_runner(**kwargs) as runner:
+        yield runner
 
 
 def _get_vLLM_output(
@@ -439,7 +421,7 @@ def _get_vLLM_output(
     vllm_model=None,
 ):
     runner_context = (
-        _owned_vLLM_runner(vllm_runner, kwargs)
+        _owned_vllm_runner(vllm_runner, kwargs)
         if vllm_model is None
         else nullcontext(vllm_model)
     )
@@ -801,7 +783,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     # Cache only part of all the prompts
     vllm_runner_kwargs["enable_prefix_caching"] = True
-    with _owned_vLLM_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
+    with _owned_vllm_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
         vllm_outputs_partial_cache, _ = _get_vLLM_output(
             vllm_runner,
             vllm_runner_kwargs,
@@ -861,7 +843,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
     # No prefix caching
     kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
-    with _owned_vLLM_runner(vllm_runner, kwargs_no_apc) as vllm_model:
+    with vllm_runner(**kwargs_no_apc) as vllm_model:
         outputs_no_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_no_apc,
@@ -876,7 +858,7 @@ def test_same_mamba_output_apc_on_vs_off(
         "enable_prefix_caching": True,
         "mamba_block_size": 16,
     }
-    with _owned_vLLM_runner(vllm_runner, kwargs_with_apc) as vllm_model:
+    with vllm_runner(**kwargs_with_apc) as vllm_model:
         outputs_with_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_with_apc,

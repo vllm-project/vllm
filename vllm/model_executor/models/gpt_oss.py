@@ -43,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
@@ -379,7 +380,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
-        for name, weight in weights:
+        # Use centralized weight remapping for MoE expert parameters
+        for name, weight in remap_moe_expert_weights(weights, params_dict):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
@@ -580,8 +582,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             Returns:
                 Weight dtype string (e.g., "mxfp4", "fp8") or None if not available
             """
-            if hasattr(self.layers[layer_id].mlp.experts.quant_method, "weight_dtype"):
-                return self.layers[layer_id].mlp.experts.quant_method.weight_dtype
+            if hasattr(self.layers[layer_id].mlp.experts._quant_method, "weight_dtype"):
+                return self.layers[layer_id].mlp.experts._quant_method.weight_dtype
             return None
 
         intermediate_size = self.config.intermediate_size
