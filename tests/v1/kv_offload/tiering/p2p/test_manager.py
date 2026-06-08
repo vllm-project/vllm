@@ -255,6 +255,17 @@ class TestOnRequestFinished:
         mgr.on_request_finished(ctx)
         assert "req-1" in mgr._failed_req_ids
 
+    def test_calls_session_finish_request(self):
+        """on_request_finished forwards to session.finish_request,
+        which handles both client-role cancel and server-role early-fail."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        mgr._sessions[peer_id] = session
+        ctx = _req_context(kv_params=_kv_params(kv_request_id="req-1"))
+        mgr.on_request_finished(ctx)
+        assert session.finishes == ["req-1"]
+
 
 # ---------------------------------------------------------------------------
 # Tests for get_finished_jobs
@@ -283,7 +294,7 @@ class _FakeSession:
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
         self.requests: list[tuple[int, str]] = []
-        self.cancels: list[str] = []
+        self.finishes: list[str] = []
 
     def poll(self):
         loads = self._loads
@@ -295,8 +306,8 @@ class _FakeSession:
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
 
-    def cancel_request(self, kv_request_id):
-        self.cancels.append(kv_request_id)
+    def finish_request(self, kv_request_id):
+        self.finishes.append(kv_request_id)
 
     def close(self):
         return self._close_loads, self._close_stores

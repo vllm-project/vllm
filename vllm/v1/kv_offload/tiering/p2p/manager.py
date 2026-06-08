@@ -146,7 +146,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             if peer_id:
                 session = self._sessions.get(peer_id)
                 if session is not None:
-                    session.cancel_request(kv_request_id)
+                    session.finish_request(kv_request_id)
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
