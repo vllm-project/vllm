@@ -363,6 +363,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
+        self.vllm_config = vllm_config
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
