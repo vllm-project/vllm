@@ -319,7 +319,8 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/quantization/activation_kernels.cu"
-  "csrc/torch_bindings.cpp")
+  "csrc/torch_bindings.cpp"
+  "csrc/fused_rope_fp8_kvcache_kernel.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
