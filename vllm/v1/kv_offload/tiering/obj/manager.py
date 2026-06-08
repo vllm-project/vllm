@@ -11,11 +11,7 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import (
-    FOUND,
-    NOT_FOUND,
-    AsyncLookupManager,
-)
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -221,12 +217,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        result = self._lookup_manager.lookup(key, req_context)
-        if result == FOUND:
-            return True
-        if result == NOT_FOUND:
-            return False
-        return None
+        return self._lookup_manager.lookup(key, req_context)
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)

@@ -43,11 +43,6 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 logger = init_logger(__name__)
 
-# Status values stored in _lookup_state and returned by query().
-_IN_FLIGHT: int = 0  # queued or currently being looked up by the worker
-NOT_FOUND: int = -1  # not present in this tier
-FOUND: int = 1  # present in this tier
-
 
 class AsyncLookupManager(ABC):
     """
@@ -77,7 +72,7 @@ class AsyncLookupManager(ABC):
         self._max_results = max_results
 
         # key → status; scheduler-owned, no lock needed.
-        self._lookup_state: OrderedDict[OffloadKey, int] = OrderedDict()
+        self._lookup_state: OrderedDict[OffloadKey, bool | None] = OrderedDict()
 
         # Accumulates (key, req_context) pairs during query() calls.
         # Flushed as one queue item per step by flush().
@@ -90,9 +85,9 @@ class AsyncLookupManager(ABC):
         ] = queue.SimpleQueue()
 
         # Worker → scheduler: completed result batches.
-        # Each item is a list of (key, status) pairs.
+        # Each item is a list of (key, found) pairs.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
-        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int]]] = (
+        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, bool]]] = (
             queue.SimpleQueue()
         )
         self._need_to_drain: bool = False  # need to drain the _pending_results?
@@ -123,27 +118,25 @@ class AsyncLookupManager(ABC):
     # Scheduler-thread API
     # ------------------------------------------------------------------
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> int | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
         Non-blocking lookup called from the scheduler thread.
 
         Returns:
-            FOUND     — block is present in this tier.
-            NOT_FOUND — block is not present in this tier.
-            None      — result not yet available; retry next step.
+            True  — block is present in this tier.
+            False — block is not present in this tier.
+            None  — result not yet available; retry next step.
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = False
-        status = self._lookup_state.get(key, _IN_FLIGHT)
-        if status == _IN_FLIGHT:
-            if key not in self._lookup_state:
-                # New key — buffer for async lookup; flushed by flush().
-                self._evict_if_full()
-                self._lookup_state[key] = _IN_FLIGHT
-                self._lookup_batch.append((key, req_context))
+            self._need_to_drain = True  # TODO: testing!
+        if key not in self._lookup_state:
+            # New key — buffer for async lookup; flushed by flush().
+            self._evict_if_full()
+            self._lookup_state[key] = None
+            self._lookup_batch.append((key, req_context))
             return None
-        return status  # FOUND or NOT_FOUND
+        return self._lookup_state[key]
 
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
@@ -161,10 +154,9 @@ class AsyncLookupManager(ABC):
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
 
-        Called once per step from the tier's get_finished_jobs() before
-        update_cached_exists() calls.  Applying worker results first ensures
-        that a subsequent update_cached_exists() can correctly upgrade a
-        worker NOT_FOUND to FOUND when a store completes in the same step.
+        Called from lookup() before checking state.  Applying worker results
+        first ensures that a subsequent update_cached_exists() can correctly
+        upgrade a worker False to True when a store completes in the same step.
         """
         while True:
             try:
@@ -172,24 +164,23 @@ class AsyncLookupManager(ABC):
             except queue.Empty:
                 break
             for key, status in batch:
-                # Only apply if the key is still _IN_FLIGHT.  A FOUND written
-                # by update_cached_exists() during the worker's lookup takes
-                # precedence and must not be overwritten.
-                if self._lookup_state.get(key, _IN_FLIGHT) == _IN_FLIGHT:
+                # Only apply if the key is still in-flight (None).  A True
+                # written by update_cached_exists() takes precedence.
+                if self._lookup_state.get(key) is None:
                     self._lookup_state[key] = status
 
     def update_cached_exists(self, keys: Collection[OffloadKey]) -> None:
         """Populate the cache for keys confirmed present by a completed store.
 
-        Called from TieringOffloadingManager._process_finished_jobs() when a
-        primary -> secondary store job completes for this tier.  Overwrites
-        _IN_FLIGHT or NOT_FOUND entries; leaves existing FOUND entries untouched.
+        Called from the tier's get_finished_jobs() when a store job completes.
+        Overwrites in-flight (None) or not-found (False) entries; leaves
+        existing True entries untouched.
         """
         for key in keys:
-            if self._lookup_state.get(key, _IN_FLIGHT) != FOUND:
+            if self._lookup_state.get(key) is not True:
                 if key not in self._lookup_state:
                     self._evict_if_full()
-                self._lookup_state[key] = FOUND
+                self._lookup_state[key] = True
 
     def shutdown(self) -> None:
         """Stop the worker thread."""
@@ -203,21 +194,21 @@ class AsyncLookupManager(ABC):
     def _evict_if_full(self) -> None:
         """Evict the oldest resolved entry if at capacity.
 
-        _IN_FLIGHT entries are never evicted — evicting a pending key would
-        cause its result to arrive in _pending_results with no matching
-        _IN_FLIGHT entry, leading drain_results() to insert a stale result.
+        In-flight (None) entries are never evicted — evicting a pending key
+        would cause its result to arrive with no matching entry, leading
+        drain_results() to insert a stale result.
         """
         if len(self._lookup_state) < self._max_results:
             return
         evict_key = next(
-            (k for k, st in self._lookup_state.items() if st != _IN_FLIGHT),
+            (k for k, st in self._lookup_state.items() if st is not None),
             None,
         )
         if evict_key is not None:
             del self._lookup_state[evict_key]
             return
         logger.warning(
-            "async_lookup cache full (%d entries): all entries _IN_FLIGHT, "
+            "async_lookup cache full (%d entries): all entries in-flight, "
             "skipping eviction",
             self._max_results,
         )
@@ -239,7 +230,7 @@ class AsyncLookupManager(ABC):
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, int]] = []
+            results: list[tuple[OffloadKey, bool]] = []
             for req_context, keys in batches.values():
                 try:
                     hits = self.batch_lookup(keys, req_context)
@@ -254,10 +245,10 @@ class AsyncLookupManager(ABC):
 
                 for key, hit in zip(keys, hits):
                     if hit is True:
-                        results.append((key, FOUND))
+                        results.append((key, True))
                     elif hit is False:
-                        results.append((key, NOT_FOUND))
-                    # hit is None → stays _IN_FLIGHT (not added to results)
+                        results.append((key, False))
+                    # hit is None → stays in-flight (not added to results)
 
             # Post the entire batch as one item — no lock needed.
             if results:

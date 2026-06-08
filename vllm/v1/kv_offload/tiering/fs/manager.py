@@ -26,11 +26,7 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import (
-    FOUND,
-    NOT_FOUND,
-    AsyncLookupManager,
-)
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -143,12 +139,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        result = self._lookup_manager.lookup(key, req_context)
-        if result == FOUND:
-            return True
-        if result == NOT_FOUND:
-            return False
-        return None
+        return self._lookup_manager.lookup(key, req_context)
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
