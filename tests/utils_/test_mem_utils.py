@@ -36,7 +36,7 @@ def test_memory_profiling():
     weights_memory = 128 * 1024 * 1024 * 4  # 512 MiB
 
     def measure_current_non_torch():
-        free, total = torch.cuda.mem_get_info()
+        free, total = torch.accelerator.mem_get_info()
         current_used = total - free
         current_torch = torch.accelerator.memory_reserved()
         current_non_torch = current_used - current_torch
