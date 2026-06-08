@@ -23,6 +23,14 @@ pub struct PreparedRequest {
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
+    /// Public response rendering options for route-layer helpers.
+    pub options: ChatCompletionOptions,
+    /// Lowered chat request for `vllm-chat`.
+    pub chat_request: ChatRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ChatCompletionOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
@@ -31,8 +39,6 @@ pub struct PreparedRequest {
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
     pub include_reasoning: bool,
-    /// Lowered chat request for `vllm-chat`.
-    pub chat_request: ChatRequest,
     /// Last assistant-role message content to echo back when `echo=true`.
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
@@ -146,14 +152,16 @@ pub(crate) fn prepare_chat_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        include_usage,
-        requested_logprobs,
-        include_prompt_logprobs,
-        include_reasoning,
+        options: ChatCompletionOptions {
+            include_usage,
+            requested_logprobs,
+            include_prompt_logprobs,
+            include_reasoning,
+            echo,
+            return_token_ids: request.return_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+        },
         chat_request,
-        echo,
-        return_token_ids: request.return_token_ids.unwrap_or(false),
-        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 
@@ -498,7 +506,7 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(!prepared.include_reasoning);
+        assert!(!prepared.options.include_reasoning);
     }
 
     #[test]
@@ -868,8 +876,8 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert!(prepared.requested_logprobs);
-        assert!(prepared.include_prompt_logprobs);
+        assert!(prepared.options.requested_logprobs);
+        assert!(prepared.options.include_prompt_logprobs);
         assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(0));
         assert_eq!(
             prepared.chat_request.sampling_params.prompt_logprobs,
@@ -895,7 +903,7 @@ mod tests {
 
         assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
         assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
-        assert!(!prepared.include_prompt_logprobs);
+        assert!(!prepared.options.include_prompt_logprobs);
     }
 
     #[test]

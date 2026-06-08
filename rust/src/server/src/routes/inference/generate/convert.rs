@@ -12,9 +12,19 @@ pub struct PreparedRequest {
     pub request_id: String,
     pub text_request: TextRequest,
     pub stream: bool,
+    /// Public response rendering options for route-layer helpers.
+    pub options: GenerateOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct GenerateOptions {
+    /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether the caller asked for usage on every streamed chunk.
     pub include_continuous_usage: bool,
+    /// Whether the caller requested output logprobs on generate choices.
     pub include_logprobs: bool,
+    /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
 }
 
@@ -65,10 +75,12 @@ pub fn prepare_generate_request(
         request_id: ctx.request_id,
         text_request,
         stream,
-        include_usage,
-        include_continuous_usage,
-        include_logprobs,
-        include_prompt_logprobs,
+        options: GenerateOptions {
+            include_usage,
+            include_continuous_usage,
+            include_logprobs,
+            include_prompt_logprobs,
+        },
     })
 }
 
@@ -158,7 +170,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(!prepared.include_usage);
-        assert!(!prepared.include_continuous_usage);
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
     }
 }

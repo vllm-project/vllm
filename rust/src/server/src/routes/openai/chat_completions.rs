@@ -24,7 +24,9 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::StopReason;
 
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::chat_completions::convert::prepare_chat_request;
+use crate::routes::openai::chat_completions::convert::{
+    ChatCompletionOptions, prepare_chat_request,
+};
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
@@ -76,24 +78,14 @@ pub async fn chat_completions(
             }
         };
 
-    let options = ChatCompletionOptions {
-        log_request,
-        include_usage: prepared.include_usage,
-        requested_logprobs: prepared.requested_logprobs,
-        include_prompt_logprobs: prepared.include_prompt_logprobs,
-        include_reasoning: prepared.include_reasoning,
-        echo: prepared.echo,
-        return_token_ids: prepared.return_token_ids,
-        return_tokens_as_token_ids: prepared.return_tokens_as_token_ids,
-    };
-
     if stream {
         let chunk_stream = chat_completion_chunk_stream(
             chat_stream,
             prepared.request_id,
             prepared.response_model,
             created,
-            options,
+            log_request,
+            prepared.options,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -104,7 +96,8 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            options,
+            log_request,
+            prepared.options,
         )
         .instrument(request_span.clone())
         .await
@@ -117,25 +110,13 @@ pub async fn chat_completions(
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct ChatCompletionOptions {
-    log_request: bool,
-    include_usage: bool,
-    requested_logprobs: bool,
-    include_prompt_logprobs: bool,
-    include_reasoning: bool,
-    echo: Option<String>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
-}
-
 async fn collect_chat_completion(
     stream: ChatEventStream,
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     ChatCompletionOptions {
-        log_request,
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
         requested_logprobs,
@@ -252,8 +233,8 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     ChatCompletionOptions {
-        log_request,
         include_usage,
         requested_logprobs,
         // Ignored: chat streaming prompt logprobs are rejected for Python parity.
@@ -952,6 +933,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions {
                 requested_logprobs: true,
                 include_reasoning: true,
@@ -1014,6 +996,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions {
                 requested_logprobs: true,
                 include_reasoning: true,
@@ -1065,6 +1048,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions::default(),
         )
         .collect::<Vec<_>>()
@@ -1142,6 +1126,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
@@ -1271,6 +1256,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
@@ -1348,6 +1334,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             ChatCompletionOptions {
                 include_reasoning: true,
                 ..Default::default()

@@ -24,7 +24,7 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::completions::convert::prepare_completion_request;
+use crate::routes::openai::completions::convert::{CompletionOptions, prepare_completion_request};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -42,7 +42,6 @@ pub async fn completions(
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
-    let logprobs = body.logprobs;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
@@ -57,18 +56,7 @@ pub async fn completions(
     );
 
     let created = unix_timestamp();
-    let include_prompt_logprobs = prepared.text_request.sampling_params.prompt_logprobs.is_some();
     let log_request = state.enable_log_requests;
-    let options = CompletionOptions {
-        log_request,
-        include_usage: prepared.include_usage,
-        echo: prepared.echo,
-        requested_logprobs: logprobs,
-        include_prompt_logprobs,
-        return_token_ids: prepared.return_token_ids,
-        return_tokens_as_token_ids: prepared.return_tokens_as_token_ids,
-    };
-
     let text_stream = match state
         .chat
         .text()
@@ -92,7 +80,8 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            options,
+            log_request,
+            prepared.options,
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -103,7 +92,8 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            options,
+            log_request,
+            prepared.options,
         )
         .instrument(request_span.clone())
         .await
@@ -116,24 +106,13 @@ pub async fn completions(
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct CompletionOptions {
-    log_request: bool,
-    include_usage: bool,
-    echo: Option<String>,
-    requested_logprobs: Option<u32>,
-    include_prompt_logprobs: bool,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
-}
-
 async fn collect_completion(
     stream: impl TextOutputStream,
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     CompletionOptions {
-        log_request,
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
         echo,
@@ -223,8 +202,8 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     CompletionOptions {
-        log_request,
         include_usage,
         echo,
         requested_logprobs,
@@ -546,6 +525,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             CompletionOptions {
                 requested_logprobs: Some(1),
                 ..Default::default()

@@ -22,7 +22,7 @@ use vllm_llm::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
 };
 
-use self::convert::prepare_generate_request;
+use self::convert::{GenerateOptions, prepare_generate_request};
 use self::types::{
     GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateStreamResponse,
@@ -55,14 +55,6 @@ pub async fn generate(
 
     let log_request = state.enable_log_requests;
     let stream = prepared.stream;
-    let options = GenerateOptions {
-        log_request,
-        include_usage: prepared.include_usage,
-        include_continuous_usage: prepared.include_continuous_usage,
-        include_logprobs: prepared.include_logprobs,
-        include_prompt_logprobs: prepared.include_prompt_logprobs,
-    };
-
     let raw_stream = match state
         .chat
         .text()
@@ -81,7 +73,12 @@ pub async fn generate(
     };
 
     if stream {
-        let chunk_stream = generate_chunk_stream(raw_stream, prepared.request_id, options);
+        let chunk_stream = generate_chunk_stream(
+            raw_stream,
+            prepared.request_id,
+            log_request,
+            prepared.options,
+        );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
 
         return Sse::new(sse_stream).into_response();
@@ -98,7 +95,12 @@ pub async fn generate(
         }
     };
 
-    let response = match collect_generate(collected, prepared.request_id, options) {
+    let response = match collect_generate(
+        collected,
+        prepared.request_id,
+        log_request,
+        prepared.options,
+    ) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
     };
@@ -106,21 +108,12 @@ pub async fn generate(
     Json(response).into_response()
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct GenerateOptions {
-    log_request: bool,
-    include_usage: bool,
-    include_continuous_usage: bool,
-    include_logprobs: bool,
-    include_prompt_logprobs: bool,
-}
-
 #[try_stream]
 async fn generate_chunk_stream(
     stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
     request_id: String,
+    log_request: bool,
     GenerateOptions {
-        log_request,
         include_usage,
         include_continuous_usage,
         include_logprobs,
@@ -218,8 +211,8 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
+    log_request: bool,
     GenerateOptions {
-        log_request,
         // Ignored: non-streaming raw generate responses do not include usage.
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
@@ -424,6 +417,7 @@ mod tests {
         let chunks: Vec<_> = generate_chunk_stream(
             stream,
             "raw-stream".to_string(),
+            false,
             GenerateOptions {
                 include_usage: true,
                 include_continuous_usage: true,

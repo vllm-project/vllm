@@ -15,13 +15,23 @@ pub struct PreparedRequest {
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
-    /// Whether the caller asked for the final streamed usage chunk.
-    pub include_usage: bool,
+    /// Public response rendering options for route-layer helpers.
+    pub options: CompletionOptions,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct CompletionOptions {
+    /// Whether the caller asked for the final streamed usage chunk.
+    pub include_usage: bool,
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
+    /// Whether the caller requested output logprobs on completion choices.
+    pub requested_logprobs: Option<u32>,
+    /// Whether the caller requested choice-level prompt logprobs.
+    pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
@@ -64,6 +74,7 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_prompt_logprobs = prompt_logprobs.is_some();
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -116,11 +127,15 @@ pub(crate) fn prepare_completion_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        include_usage,
+        options: CompletionOptions {
+            include_usage,
+            echo,
+            requested_logprobs: request.logprobs,
+            include_prompt_logprobs,
+            return_token_ids: request.return_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+        },
         text_request,
-        echo,
-        return_token_ids: request.return_token_ids.unwrap_or(false),
-        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 
@@ -206,7 +221,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(prepared.include_usage);
+        assert!(prepared.options.include_usage);
         assert_eq!(
             prepared.text_request.prompt,
             Prompt::TokenIds(vec![11, 22, 33])
@@ -250,7 +265,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert_eq!(prepared.options.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
     }
 
