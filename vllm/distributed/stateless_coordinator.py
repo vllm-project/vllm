@@ -79,7 +79,6 @@ class StatelessGroupCoordinator(GroupCoordinator):
         host: str = "127.0.0.1",
         global_rank: int = 0,
         global_world_size: int = 1,
-        device_index: int | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -87,7 +86,12 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         self.rank = global_rank
         self.local_rank = local_rank
-        self.device_index = device_index if device_index is not None else local_rank
+        from vllm.distributed.parallel_state import _WORLD
+
+        assert _WORLD is not None, (
+            "world group must be initialized before creating stateless groups"
+        )
+        self.device_index = _WORLD.device_index
 
         self_device_group = None
         self_cpu_group = None
@@ -159,7 +163,8 @@ class StatelessGroupCoordinator(GroupCoordinator):
             self.device = torch.device(f"xpu:{self.device_index}")
         elif current_platform.is_out_of_tree():
             self.device = torch.device(
-                f"{current_platform.device_name}:{self.device_index}")
+                f"{current_platform.device_name}:{self.device_index}"
+            )
         else:
             self.device = torch.device("cpu")
 

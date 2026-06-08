@@ -393,7 +393,13 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
-        self.device_index = device_index if device_index is not None else local_rank
+        if device_index is not None:
+            self.device_index = device_index
+        else:
+            assert _WORLD is not None, (
+                "device_index must be provided when creating the world group"
+            )
+            self.device_index = _WORLD.device_index
 
         self_device_group = None
         self_cpu_group = None
@@ -449,7 +455,8 @@ class GroupCoordinator:
             self.device = torch.device(f"xpu:{self.device_index}")
         elif current_platform.is_out_of_tree():
             self.device = torch.device(
-                f"{current_platform.device_name}:{self.device_index}")
+                f"{current_platform.device_name}:{self.device_index}"
+            )
         else:
             self.device = torch.device("cpu")
 
@@ -1275,7 +1282,6 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
-    device_index: int | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1284,7 +1290,6 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
-        device_index=device_index,
     )
 
 
@@ -1310,7 +1315,6 @@ def _init_stateless_group(
         coord_store=coord_store,
         global_rank=world.rank,
         global_world_size=world.world_size,
-        device_index=world.device_index,
     )
 
 
@@ -1659,13 +1663,12 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
         _init_elastic_ep_world(
-            config, local_rank, backend, rank, world_size,
-            device_index=device_index)
+            config, local_rank, backend, rank, world_size, device_index=device_index
+        )
         return
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(
-            ranks, local_rank, backend, device_index=device_index)
+        _WORLD = init_world_group(ranks, local_rank, backend, device_index=device_index)
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
@@ -1689,7 +1692,6 @@ def init_distributed_environment(
                 use_message_queue_broadcaster=True,
                 group_name="inner_dp_world",
                 use_device_communicator=False,
-                device_index=get_world_group().device_index,
             )
         else:
             _INNER_DP_WORLD = _WORLD
@@ -1793,7 +1795,6 @@ def initialize_model_parallel(
         backend,
         use_message_queue_broadcaster=True,
         group_name="tp",
-        device_index=get_world_group().device_index,
     )
 
     # Build the DCP model-parallel groups.
@@ -1816,7 +1817,6 @@ def initialize_model_parallel(
         backend,
         use_message_queue_broadcaster=True,
         group_name="dcp",
-        device_index=get_world_group().device_index,
     )
 
     global _PCP
@@ -1835,8 +1835,10 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
     _PCP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="pcp",
-        device_index=get_world_group().device_index,
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name="pcp",
     )
 
     # Build the pipeline model-parallel groups.
@@ -1854,8 +1856,10 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="pp",
-        device_index=get_world_group().device_index,
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name="pp",
     )
 
     global _DP
@@ -1872,8 +1876,10 @@ def initialize_model_parallel(
         )
     else:
         _DP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="dp",
-            device_index=get_world_group().device_index,
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="dp",
         )
 
     global _EP
@@ -1901,9 +1907,10 @@ def initialize_model_parallel(
             )
         else:
             _EP = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend,
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
                 group_name="ep",
-                device_index=get_world_group().device_index,
             )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -1927,7 +1934,6 @@ def initialize_model_parallel(
                     get_world_group().local_rank,
                     backend,
                     group_name="eplb",
-                    device_index=get_world_group().device_index,
                 )
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
