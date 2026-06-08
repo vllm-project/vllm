@@ -1,12 +1,12 @@
 # KV Offloading Usage Guide
 
-This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md), which extends the prefix cache by spilling KV blocks evicted from GPU memory to slower but larger tiers (CPU host memory, plus optional secondary tiers). Hits in the offload tiers are promoted back to GPU on demand.
+This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md), which extends the prefix cache by offloading completed KV blocks to slower but larger tiers (CPU host memory, plus optional secondary tiers) as they are produced. Hits in the offload tiers are promoted back to GPU on demand.
 
 ## Overview
 
 Two specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
 
-- `CPUOffloadingSpec` (default): single CPU tier. GPU evictions spill into pinned host memory.
+- `CPUOffloadingSpec` (default): single CPU tier. Completed GPU blocks are copied into pinned host memory.
 - `TieringOffloadingSpec`: multi-tier. A CPU primary tier plus one or more secondary tiers.
 
 Only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
