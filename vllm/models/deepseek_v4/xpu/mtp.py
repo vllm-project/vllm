@@ -26,7 +26,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
