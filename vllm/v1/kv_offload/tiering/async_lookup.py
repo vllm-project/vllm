@@ -129,13 +129,12 @@ class AsyncLookupManager(ABC):
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = True  # TODO: testing!
+            self._need_to_drain = False
         if key not in self._lookup_state:
             # New key — buffer for async lookup; flushed by flush().
             self._evict_if_full()
             self._lookup_state[key] = None
             self._lookup_batch.append((key, req_context))
-            self.flush()  # TODO:testing
             return None
         return self._lookup_state[key]
 
