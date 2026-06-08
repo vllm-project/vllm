@@ -157,7 +157,14 @@ def _get_remote_gguf_base_model_ids(
     base_model = getattr(card_data, "base_model", None)
     if base_model is None and isinstance(card_data, dict):
         base_model = card_data.get("base_model")
-    return tuple(_normalize_base_model_ids(base_model))
+
+    base_model_ids: list[str] = []
+    for value in _normalize_base_model_ids(base_model):
+        if normalized_repo_id := _normalize_hf_repo_id(value):
+            base_model_ids.append(normalized_repo_id)
+
+    # Preserve model card order while dropping duplicates.
+    return tuple(dict.fromkeys(base_model_ids))
 
 
 def _normalize_hf_repo_id(value: Any) -> str | None:

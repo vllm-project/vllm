@@ -291,6 +291,50 @@ class TestRemoteGGUFSourceResolution:
             == "org/base"
         )
 
+    def test_config_source_normalizes_remote_base_model_ids(self, monkeypatch):
+        from vllm.transformers_utils import gguf_utils
+
+        class FakeInfo:
+            card_data = {
+                "base_model": [
+                    "/tmp/local-model",
+                    "https://huggingface.co/org/base",
+                    "org/base",
+                ]
+            }
+
+        class FakeHfApi:
+            def model_info(self, repo_id, revision=None):
+                assert repo_id == "org/model-GGUF"
+                assert revision == "gguf-rev"
+                return FakeInfo()
+
+        probed_models = []
+
+        def fake_file_or_path_exists(model, config_name, revision=None):
+            probed_models.append(model)
+            return (
+                model == "org/base"
+                and config_name == "config.json"
+                and revision is None
+            )
+
+        monkeypatch.setattr(gguf_utils, "hf_api", lambda: FakeHfApi())
+        monkeypatch.setattr(
+            gguf_utils,
+            "file_or_path_exists",
+            fake_file_or_path_exists,
+        )
+
+        assert (
+            resolve_gguf_config_source(
+                "org/model-GGUF:UD-IQ4_NL",
+                revision="gguf-rev",
+            )
+            == "org/base"
+        )
+        assert "/tmp/local-model" not in probed_models
+
     def test_config_source_falls_back_to_gguf_repo_without_valid_base(
         self,
         monkeypatch,
