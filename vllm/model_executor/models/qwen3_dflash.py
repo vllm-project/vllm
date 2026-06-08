@@ -11,7 +11,10 @@ from transformers import Qwen3Config
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -64,6 +67,7 @@ class DFlashQwen3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
+        add_swa_attention_sink_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -109,6 +113,13 @@ class DFlashQwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
         )
+
+        self.attention_sink_bias = (
+            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
+            if add_swa_attention_sink_bias
+            else None
+        )
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -118,6 +129,7 @@ class DFlashQwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
+            sinks=self.attention_sink_bias,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -165,6 +177,14 @@ class DFlashQwen3DecoderLayer(nn.Module):
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
 
+        # DFlash drafts store the sink-bias flag inside dflash_config; fall back
+        # to the top-level attribute used by other (e.g. MiMo) configs.
+        dflash_config = getattr(config, "dflash_config", None) or {}
+        add_swa_attention_sink_bias = dflash_config.get(
+            "attention_sink_bias",
+            getattr(config, "add_swa_attention_sink_bias", False),
+        )
+
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -172,6 +192,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
+            add_swa_attention_sink_bias=add_swa_attention_sink_bias,
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -466,6 +487,8 @@ class DFlashQwen3Model(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
@@ -473,6 +496,20 @@ class DFlashQwen3Model(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+            if "attention_sink_bias" in name:
+                if name not in params_dict:
+                    continue
+        
+                # Sink bias is per-head; shard it across TP ranks like the
+                # attention heads themselves.
+                param = params_dict[name]
+                heads_per_rank = loaded_weight.shape[0] // tp_size
+                head_start = tp_rank * heads_per_rank
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
