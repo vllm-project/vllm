@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Mooncake requester config helpers."""
 
+import ipaddress
 import os
+from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _SYSFS_INFINIBAND_ROOT = Path("/sys/class/infiniband")
+_PROC_NET_ROUTE = Path("/proc/net/route")
 _DEFAULT_MOONCAKE_PKEY_INDEX = 0
 
 
@@ -127,6 +130,148 @@ def _is_compatible_rdma_device(device_path: Path) -> bool:
     return any(_is_compatible_port(port_path) for port_path in port_paths)
 
 
+def _ipv4_from_gid(gid: str) -> ipaddress.IPv4Address | None:
+    """Extract IPv4 from an IPv4-mapped RoCE GID."""
+    try:
+        ip = ipaddress.IPv6Address(gid)
+    except ValueError:
+        return None
+    return ip.ipv4_mapped
+
+
+def _first_netdev_name(device_path: Path) -> str | None:
+    """Return the first Linux netdev backing an RDMA device."""
+    try:
+        netdevs = sorted(path.name for path in (device_path / "device/net").iterdir())
+    except OSError:
+        return None
+    return netdevs[0] if netdevs else None
+
+
+def _first_roce_v2_ipv4_gid(device_path: Path) -> ipaddress.IPv4Address | None:
+    """Return the first non-link-local RoCE v2 IPv4 GID for an RDMA device."""
+    try:
+        port_paths = sorted(
+            path for path in (device_path / "ports").iterdir() if path.is_dir()
+        )
+    except OSError:
+        return None
+
+    for port_path in port_paths:
+        try:
+            gid_paths = sorted(
+                path
+                for path in (port_path / "gids").iterdir()
+                if path.name.isdigit()
+            )
+        except OSError:
+            continue
+        for gid_path in gid_paths:
+            gid_type = _read_sysfs_text(
+                port_path / "gid_attrs" / "types" / gid_path.name
+            )
+            if gid_type != "RoCE v2":
+                continue
+            gid_ip = _ipv4_from_gid(_read_sysfs_text(gid_path) or "")
+            if gid_ip is not None and not gid_ip.is_link_local:
+                return gid_ip
+    return None
+
+
+def _ipv4_from_proc_route_hex(value: str) -> ipaddress.IPv4Address | None:
+    """Decode /proc/net/route IPv4 hex, e.g. 000010AC -> 172.16.0.0."""
+    try:
+        return ipaddress.IPv4Address(int.from_bytes(bytes.fromhex(value), "little"))
+    except ValueError:
+        return None
+
+
+def _read_ipv4_routes() -> dict[str, list[ipaddress.IPv4Network]]:
+    """Read non-default IPv4 routes from /proc/net/route grouped by netdev."""
+    try:
+        lines = _PROC_NET_ROUTE.read_text().splitlines()
+    except OSError:
+        return {}
+
+    # Map each Linux netdev to its non-default IPv4 routes, e.g.
+    # {"spx_p1n1": [IPv4Network("172.16.0.0/13")]}.
+    routes: dict[str, list[ipaddress.IPv4Network]] = defaultdict(list)
+    for line in lines[1:]:
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        iface = fields[0]
+        dest_hex = fields[1]
+        flags_hex = fields[3]
+        mask_hex = fields[7]
+        try:
+            flags = int(flags_hex, 16)
+        except ValueError:
+            continue
+        # ensure the route is active
+        if not flags & 0x1:
+            continue
+        dest = _ipv4_from_proc_route_hex(dest_hex)
+        mask = _ipv4_from_proc_route_hex(mask_hex)
+        if dest is None or mask is None:
+            continue
+        try:
+            network = ipaddress.IPv4Network(f"{dest}/{mask}", strict=False)
+        except ValueError:
+            continue
+        if network.prefixlen == 0:
+            continue
+        routes[iface].append(network)
+    return routes
+
+
+def _route_group_for_device(
+    device_path: Path,
+    routes_by_netdev: Mapping[str, list[ipaddress.IPv4Network]],
+) -> str | None:
+    """Return the broadest route containing the device's RoCE v2 GID IP."""
+    netdev = _first_netdev_name(device_path)
+    gid_ip = _first_roce_v2_ipv4_gid(device_path)
+    if netdev is None or gid_ip is None:
+        return None
+
+    candidates = [
+        route for route in routes_by_netdev.get(netdev, []) if gid_ip in route
+    ]
+    if not candidates:
+        return None
+
+    # The least-specific non-default route captures the routed rail family. On
+    # split-rail RoCE hosts, direct host/link routes differ per NIC while the
+    # broad rail route is shared by mutually reachable NICs.
+    return str(min(candidates, key=lambda route: route.prefixlen))
+
+
+def _filter_to_largest_routable_rnic_group(
+    device_names: list[str],
+    route_groups: Mapping[str, str],
+) -> list[str]:
+    """Choose the largest routable RNIC group for RDMA device auto discovery."""
+    if not device_names:
+        return []
+
+    # Group devices by routed rail.
+    by_route_group: dict[str, list[str]] = defaultdict(list)
+    for name in device_names:
+        route_group = route_groups.get(name)
+        if route_group is not None:
+            by_route_group[route_group].append(name)
+    if not by_route_group:
+        return sorted(device_names)
+
+    # Pick the largest routable rail group, with a deterministic tie-break.
+    selected = min(
+        by_route_group.values(),
+        key=lambda names: (-len(names), sorted(names)[0]),
+    )
+    return sorted(selected)
+
+
 def _get_auto_discovered_worker_rnics() -> str:
     try:
         device_paths = sorted(
@@ -137,10 +282,17 @@ def _get_auto_discovered_worker_rnics() -> str:
     except OSError:
         return ""
 
-    device_names = [
-        path.name for path in device_paths if _is_compatible_rdma_device(path)
-    ]
-    return ",".join(device_names)
+    compatible = [path for path in device_paths if _is_compatible_rdma_device(path)]
+    device_names = [path.name for path in compatible]
+    routes_by_netdev = _read_ipv4_routes()
+    route_groups: dict[str, str] = {}
+    for path in compatible:
+        route_group = _route_group_for_device(path, routes_by_netdev)
+        if route_group is not None:
+            route_groups[path.name] = route_group
+
+    selected = _filter_to_largest_routable_rnic_group(device_names, route_groups)
+    return ",".join(selected)
 
 
 def get_configured_worker_rnic(
@@ -158,7 +310,8 @@ def get_configured_worker_rnic(
     if protocol == "rdma":
         logger.info(
             "No RDMA devices specified for Mooncake backend (protocol=%s). "
-            "Running automatic device selection."
+            "Running automatic device selection.",
+            protocol,
         )
         discovered_devices = _get_auto_discovered_worker_rnics()
         if discovered_devices:
@@ -172,7 +325,6 @@ def get_configured_worker_rnic(
         logger.warning(
             "No compatible RDMA devices were discovered in /sys/class/infiniband. "
             "Falling back to Mooncake's built-in auto-selection.",
-            protocol,
         )
         return ""
 
