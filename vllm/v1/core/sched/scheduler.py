@@ -621,11 +621,26 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    (
-                        new_computed_blocks,
-                        num_new_local_computed_tokens,
-                        num_uncached_common_prefix_tokens,
-                    ) = self.kv_cache_manager.get_computed_blocks(request)
+                    new_computed_blocks, num_new_local_computed_tokens = (
+                        self.kv_cache_manager.get_computed_blocks(request)
+                    )
+
+                    # In case of hybrid models, obtain hint for Marconi-style APC logic
+                    # More proper check for hybrid model case would be:
+                    # if isinstance(self.kv_cache_manager.coordinator,
+                    #               HybridKVCacheCoordinator):
+                    # but the check below is similar and avoids
+                    # importing HybridKVCacheCoordinator:
+                    if self.has_mamba_layers:
+                        # obtain num_uncached_common_prefix_tokens from coordinator's
+                        # attribute if exists, else 0
+                        # (alternative solution: pass as a return value, but
+                        # this would require multiple function signature changes)
+                        num_uncached_common_prefix_tokens = getattr(
+                            self.kv_cache_manager.coordinator,
+                            "num_uncached_common_prefix_tokens",
+                            0,
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:

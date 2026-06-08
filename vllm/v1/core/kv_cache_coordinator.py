@@ -273,7 +273,7 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
     def new_step_starts(self) -> None:
@@ -325,11 +325,11 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
         )
-        return blocks, 0, 0
+        return blocks, 0
 
 
 class UnitaryKVCacheCoordinator(KVCacheCoordinator):
@@ -389,7 +389,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
@@ -401,7 +401,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
-        return hit_blocks, len(hit_blocks[0]) * self.block_size, 0
+        return hit_blocks, len(hit_blocks[0]) * self.block_size
 
 
 class SpecGroup(NamedTuple):
@@ -533,7 +533,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
 
@@ -640,15 +640,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Uncached shared prefix detection heuristic:
         # If any attention group cached a longer prefix than the current common
         # prefix, there was a request with a shared prefix of at least that
-        # length in the past. Return the length of such common prefix:
-        num_uncached_common_prefix_tokens = longest_hit_length - hit_length
-        return (
-            tuple(
-                blocks if blocks is not None else [] for blocks in hit_blocks_by_group
-            ),
-            hit_length,
-            num_uncached_common_prefix_tokens,
-        )
+        # length in the past. Return the length of such common prefix.
+        # Implementation: Use an attribute to avoid function return signature change.
+        self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
+        return tuple(
+            blocks if blocks is not None else [] for blocks in hit_blocks_by_group
+        ), hit_length
 
 
 def get_kv_cache_coordinator(
