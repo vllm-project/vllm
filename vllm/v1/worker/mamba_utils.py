@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -238,9 +239,14 @@ class MambaCopyBuffers:
             for gid in mamba_group_ids
         ) * len(copy_funcs)
         n = max_num_reqs * entries_per_req
+
+        # XPU device addresses can exceed signed int64 range (max 2^63-1)
+        # Use uint64 for XPU to support full 64-bit address space
+        ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
+
         return cls(
-            src_ptrs=make_buffer(n, dtype=torch.int64),
-            dst_ptrs=make_buffer(n, dtype=torch.int64),
+            src_ptrs=make_buffer(n, dtype=ptr_dtype),
+            dst_ptrs=make_buffer(n, dtype=ptr_dtype),
             sizes=make_buffer(n, dtype=torch.int32),
             mamba_group_ids=mamba_group_ids,
             mamba_spec=mamba_spec,
