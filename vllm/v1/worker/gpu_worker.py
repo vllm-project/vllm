@@ -163,7 +163,7 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.accelerator.mem_get_info()[0]
+        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -174,7 +174,7 @@ class Worker(WorkerBase):
 
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.accelerator.mem_get_info()
+        free_bytes_after_sleep, total = torch.accelerator.get_memory_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
