@@ -67,7 +67,7 @@ def create_fp4_scale_tensor(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -317,6 +317,45 @@ def rotary_embedding(
             rope_dim_offset,
             inverse,
         )
+
+
+if hasattr(torch.ops._C, "fused_rope_fp8_kvcache"):
+
+    @register_fake("_C::fused_rope_fp8_kvcache")
+    def _fused_rope_fp8_kvcache_fake(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        is_neox: bool,
+        flash_layout: bool,
+    ) -> None:
+        pass
+
+
+def fused_rope_fp8_kvcache(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    is_neox: bool,
+    flash_layout: bool,
+) -> None:
+    torch.ops._C.fused_rope_fp8_kvcache(
+        key, value, key_cache, value_cache,
+        slot_mapping, positions, cos_sin_cache,
+        k_scale, v_scale, is_neox, flash_layout,
+    )
 
 
 # layer norm ops
@@ -3810,3 +3849,4 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
+

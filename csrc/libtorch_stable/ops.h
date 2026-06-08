@@ -254,6 +254,19 @@ void rotary_embedding(torch::stable::Tensor& positions,
                       int64_t head_size, torch::stable::Tensor& cos_sin_cache,
                       bool is_neox, int64_t rope_dim_offset, bool inverse);
 
+void fused_rope_fp8_kvcache(
+    torch::stable::Tensor const& key,
+    torch::stable::Tensor const& value,
+    torch::stable::Tensor& key_cache,
+    torch::stable::Tensor& value_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& positions,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& k_scale,
+    torch::stable::Tensor const& v_scale,
+    bool is_neox,
+    bool flash_layout);
+
 void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
                         int64_t head_dim, double eps,
