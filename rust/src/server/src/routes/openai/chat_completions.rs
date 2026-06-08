@@ -184,11 +184,7 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(
-        prompt_token_count as u32,
-        output_token_count as u32,
-        cached_token_count,
-    );
+    let usage = Usage::from_counts(prompt_token_count, output_token_count, cached_token_count);
 
     if log_request {
         info!(
@@ -443,8 +439,8 @@ async fn chat_completion_chunk_stream(
                         &response_model,
                         created,
                         Usage::from_counts(
-                            prompt_token_count as u32,
-                            output_token_count as u32,
+                            prompt_token_count,
+                            output_token_count,
                             cached_token_count,
                         ),
                     ))

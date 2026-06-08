@@ -24,7 +24,7 @@ pub struct CollectedGenerateOutput {
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
     /// Number of prompt tokens served from cache.
-    pub cached_token_count: u32,
+    pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -130,7 +130,7 @@ pub struct GenerateOutput {
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
     /// Number of prompt tokens served from cache, when reported by prefill stats.
-    pub cached_token_count: u32,
+    pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -246,8 +246,11 @@ impl Stream for GenerateOutputStream {
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
-        let cached_token_count =
-            raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens).unwrap_or(0);
+        let cached_token_count = raw
+            .prefill_stats
+            .as_ref()
+            .map(|stats| stats.num_cached_tokens as usize)
+            .unwrap_or(0);
 
         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
         if let Some(finish_reason) = finish_reason.as_ref() {

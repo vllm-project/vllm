@@ -129,7 +129,7 @@ impl StructuredEventState {
         &mut self,
         prompt_token_count: usize,
         output_token_count: usize,
-        cached_token_count: u32,
+        cached_token_count: usize,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
     ) -> Result<Vec<ChatEvent>> {

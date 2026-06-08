@@ -313,15 +313,19 @@ pub enum MessageContent {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub total_tokens: u32,
-    pub completion_tokens: Option<u32>,
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+    pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
 }
 
 impl Usage {
     /// Create a Usage with prompt-token cache details.
-    pub fn from_counts(prompt_tokens: u32, completion_tokens: u32, cached_tokens: u32) -> Self {
+    pub fn from_counts(
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: usize,
+    ) -> Self {
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
@@ -335,7 +339,7 @@ impl Usage {
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
-    pub cached_tokens: u32,
+    pub cached_tokens: usize,
 }
 
 /// OpenAI completions-style logprobs.

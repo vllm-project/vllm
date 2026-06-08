@@ -123,22 +123,22 @@ async fn generate_chunk_stream(
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
-    let mut prompt_tokens: Option<u32> = None;
-    let mut output_tokens = 0_u32;
-    let mut cached_token_count = 0_u32;
+    let mut prompt_tokens: Option<usize> = None;
+    let mut output_tokens = 0_usize;
+    let mut cached_token_count = 0_usize;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
                 if prompt_tokens.is_none() {
                     prompt_tokens =
-                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len() as u32);
+                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
                 }
                 let usage_prompt_tokens = prompt_tokens.unwrap_or_default();
                 cached_token_count = cached_token_count.max(output.cached_token_count);
 
                 let token_ids = output.token_ids;
-                output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
+                output_tokens = output_tokens.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
                 if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {

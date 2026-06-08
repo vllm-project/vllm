@@ -160,8 +160,8 @@ async fn collect_completion(
     };
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
     let usage = Usage::from_counts(
-        collected.prompt_token_ids.len() as u32,
-        collected.token_ids.len() as u32,
+        collected.prompt_token_ids.len(),
+        collected.token_ids.len(),
         collected.cached_token_count,
     );
 
@@ -300,8 +300,8 @@ async fn completion_chunk_stream(
                             &response_model,
                             created,
                             Usage::from_counts(
-                                finished.prompt_token_count as u32,
-                                finished.output_token_count as u32,
+                                finished.prompt_token_count,
+                                finished.output_token_count,
                                 finished.cached_token_count,
                             ),
                         )))

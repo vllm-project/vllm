@@ -20,7 +20,7 @@ pub struct CollectedAssistantMessage {
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub output_token_count: usize,
-    pub cached_token_count: u32,
+    pub cached_token_count: usize,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
