@@ -84,7 +84,7 @@ logger = init_logger(__name__)
 
 # Diagnostic flag for descriptor debugging. Set to True to enable verbose
 # logging of KV cache registration, descriptor building, and transfer data.
-_DESC_DEBUG = True
+_DESC_DEBUG = False
 
 
 class NixlConnectorWorker:
