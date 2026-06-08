@@ -152,6 +152,58 @@ def test_flashinfer_sparse_sm120_accepts_auto_for_packed_kv_layout(monkeypatch):
     )
 
 
+def test_dsv4_flashinfer_backend_validation_is_arch_specific(monkeypatch):
+    monkeypatch.setattr(
+        flashinfer_utils, "has_flashinfer_sparse_mla_sm120", lambda: True
+    )
+
+    backend_cls = dsv4_flashinfer.DeepseekV4FlashInferMLASparseBackend
+    assert backend_cls.supports_compute_capability(DeviceCapability(10, 0))
+    assert backend_cls.supports_compute_capability(DeviceCapability(12, 0))
+    assert not backend_cls.supports_compute_capability(DeviceCapability(9, 0))
+
+    base_kwargs = dict(
+        head_size=512,
+        dtype=torch.bfloat16,
+        block_size=256,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=True,
+    )
+    assert (
+        backend_cls.supports_combination(
+            **base_kwargs,
+            kv_cache_dtype="fp8",
+            device_capability=DeviceCapability(10, 0),
+        )
+        is None
+    )
+    assert (
+        backend_cls.supports_combination(
+            **base_kwargs,
+            kv_cache_dtype="fp8_ds_mla",
+            device_capability=DeviceCapability(10, 0),
+        )
+        is not None
+    )
+    assert (
+        backend_cls.supports_combination(
+            **base_kwargs,
+            kv_cache_dtype="fp8",
+            device_capability=DeviceCapability(12, 0),
+        )
+        is None
+    )
+    assert (
+        backend_cls.supports_combination(
+            **base_kwargs,
+            kv_cache_dtype="auto",
+            device_capability=DeviceCapability(12, 0),
+        )
+        == "kv_cache_dtype not supported"
+    )
+
+
 def test_cuda_selector_returns_flashinfer_sparse_sm120_backend(monkeypatch):
     try:
         from vllm.platforms.cuda import CudaPlatform

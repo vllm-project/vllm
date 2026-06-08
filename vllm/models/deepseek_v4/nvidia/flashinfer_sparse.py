@@ -15,19 +15,23 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     build_flashinfer_mixed_sparse_indices,
     compute_global_topk_indices_and_lens,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLASparseBackend
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+)
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseMetadata
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -98,18 +102,60 @@ def _as_sparse_sm120_cache(kv_cache: torch.Tensor) -> torch.Tensor:
     return kv_cache.unsqueeze(-2)
 
 
-class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """Shares the FlashMLA V4 metadata/cache pipeline; swaps the attention impl.
 
-    Inheriting from the FlashMLA V4 backend reuses its ``FlashMLASparseMetadata``
-    builder (which the V4 sparse-index pipeline needs — the V3.2 FlashInfer
-    builder lacks the ``c128a_*`` fields), 256-token blocks, head_size 512, and
-    the (num_blocks, block_size, 512) cache shape for non-``fp8_ds_mla`` dtypes.
+    Inheriting from the FlashMLA V4 backend reuses its
+    ``DeepseekV4FlashMLAMetadata`` builder (which the V4 sparse-index
+    pipeline needs — the V3.2 FlashInfer builder lacks the ``c128a_*`` fields),
+    256-token blocks, head_size 512, and the (num_blocks, block_size, 512) cache
+    shape for non-``fp8_ds_mla`` dtypes.
     """
+
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_ds_mla",
+    ]
 
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE_DSV4"
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major in (10, 12)
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if device_capability.major == 10 and kv_cache_dtype == "fp8_ds_mla":
+            return (
+                "FLASHINFER_MLA_SPARSE_DSV4 SM10 uses a plain KV row and "
+                "does not support fp8_ds_mla kv-cache dtype"
+            )
+        if device_capability.major == 12:
+            if kv_cache_dtype not in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
+                return "kv_cache_dtype not supported"
+            from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+
+            if not has_flashinfer_sparse_mla_sm120():
+                return (
+                    "FLASHINFER_MLA_SPARSE_DSV4 SM120 requires FlashInfer's "
+                    "sparse-sm120 MLA wrapper"
+                )
+        return None
 
 
 class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
@@ -173,7 +219,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         self,
         q: torch.Tensor,
         output: torch.Tensor,
-        flashmla_metadata: FlashMLASparseMetadata | None,
+        flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         self_kv_cache: torch.Tensor | None,
         swa_kv_cache: torch.Tensor,
@@ -216,7 +262,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
 
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            FlashMLASparseMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -244,7 +290,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         num_decodes = swa_metadata.num_decodes
@@ -359,7 +405,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
@@ -498,7 +544,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
@@ -580,7 +626,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         compressed_k_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> None:
         swa_only = self.compress_ratio <= 1
@@ -725,7 +771,7 @@ class DeepseekV4FlashInferTRTLLMAttention(_DeepseekV4FlashInferMLAAttentionBase)
         self,
         q: torch.Tensor,
         output: torch.Tensor,
-        flashmla_metadata: FlashMLASparseMetadata | None,
+        flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         self_kv_cache: torch.Tensor | None,
         swa_kv_cache: torch.Tensor,
@@ -792,7 +838,7 @@ class DeepseekV4FlashInferSM120Attention(_DeepseekV4FlashInferMLAAttentionBase):
         self,
         q: torch.Tensor,
         output: torch.Tensor,
-        flashmla_metadata: FlashMLASparseMetadata | None,
+        flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         self_kv_cache: torch.Tensor | None,
         swa_kv_cache: torch.Tensor,
