@@ -172,7 +172,13 @@ def _capture_generation_snapshot(
     )
     try:
         llm.apply_model(_install_logits_dtype_hook)
-        outputs = llm.generate(C5_SANITY_PROMPTS, sampling_params=sampling_params)
+        # C5 is a reasoning model; use chat template so BF16/FP32 argmaxes
+        # stay aligned. Raw `generate` on chat prompts has near-tie logits
+        # at position 0 and flips on H100.
+        conversations = [
+            [{"role": "user", "content": prompt}] for prompt in C5_SANITY_PROMPTS
+        ]
+        outputs = llm.chat(conversations, sampling_params=sampling_params)
         logits_output_dtypes = cast(
             list[str | None], llm.apply_model(_get_last_logits_output_dtype)
         )

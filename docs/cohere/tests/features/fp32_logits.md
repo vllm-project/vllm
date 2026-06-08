@@ -76,7 +76,9 @@ Runtime path: [`vllm/model_executor/layers/logits_processor.py`](../../../../vll
    [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 3. Uses the C5 model path, `tensor_parallel_size`, and
    `SamplingParams(temperature=0.0, max_tokens=32, logprobs=1, prompt_logprobs=1)`
-   over the fixed multilingual/code prompt set in `C5_SANITY_PROMPTS`. The
+   over the fixed multilingual/code prompt set in `C5_SANITY_PROMPTS`,
+   submitted via `llm.chat(...)` so the C5 chat template is applied (raw
+   `generate` has near-tie logits at position 0 that flip on H100). The
    pytest entry calls `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")`
    so `apply_cohere_auto_config` fills profile defaults from
    `EngineArgs.__post_init__` while the explicit kwargs (`model`,
