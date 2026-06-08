@@ -1636,9 +1636,6 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
-        if self.quantization == "bitsandbytes":
-            self.load_format = "bitsandbytes"
-
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
                 self.model_loader_extra_config = (
@@ -2088,10 +2085,6 @@ class EngineArgs:
                 "Consider increasing max_num_batched_tokens or "
                 "decreasing num_speculative_tokens"
             )
-
-        # bitsandbytes pre-quantized model need a specific model loader
-        if model_config.quantization == "bitsandbytes":
-            self.quantization = self.load_format = "bitsandbytes"
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)

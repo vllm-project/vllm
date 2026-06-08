@@ -453,7 +453,6 @@ class RocmPlatform(Platform):
         "mxfp4",
         "mxfp8",
         "torchao",
-        "bitsandbytes",
         "modelopt",
         "modelopt_fp4",
         "modelopt_mxfp8",

@@ -357,9 +357,6 @@ def get_quant_config(
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -407,9 +404,7 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:

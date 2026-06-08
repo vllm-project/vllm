@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from abc import abstractmethod
 
 import torch
@@ -89,23 +88,6 @@ def adjust_block_scale_shard(
     shard_offset = (shard_offset + block_n - 1) // block_n
     shard_size = (shard_size + block_n - 1) // block_n
     return shard_size, shard_offset
-
-
-def adjust_bitsandbytes_4bit_shard(
-    param: Parameter,
-    shard_offsets: dict[str, tuple[int, int]],
-    loaded_shard_id: str,
-) -> tuple[int, int]:
-    """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
-
-    total, _ = shard_offsets["total"]
-    orig_offset, orig_size = shard_offsets[loaded_shard_id]
-
-    quantized_total = param.data.shape[0]
-    quantized_offset = orig_offset * quantized_total // total
-    quantized_size = orig_size * quantized_total // total
-
-    return quantized_size, quantized_offset
 
 
 def adjust_scalar_to_fused_array(
@@ -531,10 +513,6 @@ class ColumnParallelLinear(LinearBase):
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
         # Special case for GGUF
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -749,16 +727,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 else self.output_sizes
             )
             current_shard_offset = 0
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-            if (
-                use_bitsandbytes_4bit
-                and isinstance(loaded_shard_id, tuple)
-                and self.tp_size > 1
-            ):
-                raise NotImplementedError(
-                    "Shard id with multiple indices is not supported "
-                    "for BNB quantization with TP yet."
-                )
             shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
@@ -781,17 +749,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
-                    )
-
-                if use_bitsandbytes_4bit:
-                    index = list(itertools.accumulate([0] + self.output_sizes))
-                    orig_offsets = {
-                        str(i): (index[i], size)
-                        for i, size in enumerate(self.output_sizes)
-                    }
-                    orig_offsets["total"] = (self.output_size, 0)
-                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                        param, orig_offsets, str(shard_id)
                     )
 
                 loaded_weight_shard = loaded_weight.narrow(
@@ -825,21 +782,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     param, shard_size, shard_offset
                 )
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            # bitsandbytes loads the weights of the specific portion
-            # no need to narrow
-            is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-            if use_bitsandbytes_4bit:
-                index = list(itertools.accumulate([0] + self.output_sizes))
-                orig_offsets = {
-                    str(i): (index[i], size) for i, size in enumerate(self.output_sizes)
-                }
-                orig_offsets["total"] = (self.output_size, 0)
-                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                    param, orig_offsets, str(loaded_shard_id)
-                )
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = self.tp_rank * shard_size
             if not is_sharded_weight:
@@ -1243,8 +1186,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     self.total_num_kv_heads * self.v_head_size,
                 ),
             ]
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
                 # Special case for Quantized Weights.
@@ -1264,30 +1205,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
-                    )
-
-                if use_bitsandbytes_4bit:
-                    orig_qkv_offsets = {
-                        "q": (0, self.total_num_heads * self.head_size),
-                        "k": (
-                            self.total_num_heads * self.head_size,
-                            self.total_num_kv_heads * self.head_size,
-                        ),
-                        "v": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size,
-                            self.total_num_kv_heads * self.v_head_size,
-                        ),
-                        "total": (
-                            (self.total_num_heads + self.total_num_kv_heads)
-                            * self.head_size
-                            + self.total_num_kv_heads * self.v_head_size,
-                            0,
-                        ),
-                    }
-
-                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                        param, orig_qkv_offsets, shard_id
                     )
 
                 loaded_weight_shard = loaded_weight.narrow(
@@ -1329,33 +1246,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     param, shard_size, shard_offset
                 )
 
-            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            # bitsandbytes loads the weights of the specific portion
-            # no need to narrow
-            is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-            if use_bitsandbytes_4bit:
-                orig_qkv_offsets = {
-                    "q": (0, self.num_heads * self.head_size),
-                    "k": (
-                        self.num_heads * self.head_size,
-                        self.num_kv_heads * self.head_size,
-                    ),
-                    "v": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size,
-                        self.num_kv_heads * self.v_head_size,
-                    ),
-                    "total": (
-                        (self.num_heads + self.num_kv_heads) * self.head_size
-                        + self.num_kv_heads * self.v_head_size,
-                        0,
-                    ),
-                }
-                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                    param, orig_qkv_offsets, loaded_shard_id
-                )
-
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
                 shard_rank = self.tp_rank
@@ -1492,11 +1383,7 @@ class RowParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
         # Special case for GGUF
         is_gguf_weight = getattr(param, "is_gguf_weight", False)

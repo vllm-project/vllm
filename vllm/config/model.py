@@ -746,7 +746,7 @@ class ModelConfig:
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
-        self._verify_bnb_config()
+        self._verify_quant_config()
 
     def get_model_arch_config(
         self,
@@ -1106,33 +1106,12 @@ class ModelConfig:
             )
             self.enforce_eager = True
 
-    def _verify_bnb_config(self) -> None:
-        """
-        The current version of bitsandbytes (0.46.1) with 8-bit models does not
-        yet support CUDA graph.
-        # TODO Remove this when bitsandbytes supports.
-        """
-        is_bitsandbytes = self.quantization == "bitsandbytes"
-        has_quantization_config = self.model_arch_config.quantization_config is not None
-        is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
-            if has_quantization_config
-            else False
-        )
-        if all(
-            [
-                is_bitsandbytes,
-                has_quantization_config,
-                is_8bit,
-                not self.enforce_eager,
-            ]
-        ):
-            logger.warning(
-                "CUDA graph is not supported on BitsAndBytes 8bit yet, "
-                "fallback to the eager mode."
-            )
+    def _verify_quant_config(self) -> None:
+        if self.quantization is None:
+            return
 
-            self.enforce_eager = True
+        quant_cls = me_quant.get_quantization_config(self.quantization)
+        quant_cls.verify_model_config(self)
 
     def _verify_with_expert_parallelism(self) -> None:
         if not self.is_moe:

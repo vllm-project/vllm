@@ -46,7 +46,7 @@ class InvalidComponent(Exception):
 # FfnQuantizationConfigParser to determine the weight_byte_size for
 # flops/memory estimation.
 #
-# NOTE: Methods like GPTQ and BitsAndBytes support variable bit-widths
+# NOTE: Methods like GPTQ support variable bit-widths
 # (e.g., 4-bit and 8-bit). We default to 4-bit (0.5 bytes) since this
 # is by far the most common configuration.
 _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
@@ -63,7 +63,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "awq_marlin": 0.5,
     "gptq": 0.5,
     "gptq_marlin": 0.5,
-    "bitsandbytes": 0.5,
     "modelopt_fp4": 0.5,
     "petit_nvfp4": 0.5,
     "gguf": 0.5,

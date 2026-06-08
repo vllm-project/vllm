@@ -204,6 +204,15 @@ class QuantizationConfig(ABC):
         # but is used in subclasses, should we remove this parameter?
         pass
 
+    @classmethod
+    def verify_model_config(cls, model_config: Any) -> None:
+        """Allow quantization methods to validate or update ModelConfig."""
+        return
+
+    def supports_unaligned_mlp(self) -> bool:
+        """Whether this quantization supports MLP sizes outside kernel alignment."""
+        return False
+
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
         """
         Determine if mxfp4 quantization will be used for this config.

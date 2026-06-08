@@ -60,8 +60,6 @@ backoff==2.2.1
     # via
     #   -r requirements/test/cuda.in
     #   schemathesis
-bitsandbytes==0.49.2
-    # via -r requirements/test/cuda.in
 black==24.10.0
     # via datamodel-code-generator
 blobfile==3.0.0
@@ -457,7 +455,6 @@ numpy==2.2.6
     #   -r requirements/test/cuda.in
     #   accelerate
     #   albumentations
-    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -579,7 +576,6 @@ orjson==3.11.5
 packaging==24.2
     # via
     #   accelerate
-    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -998,7 +994,6 @@ torch==2.11.0+cu130
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   accelerate
-    #   bitsandbytes
     #   encodec
     #   instanttensor
     #   mteb

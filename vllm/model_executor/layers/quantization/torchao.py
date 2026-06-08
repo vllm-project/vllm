@@ -283,6 +283,9 @@ class TorchAOConfig(QuantizationConfig):
 
         return TorchAOLinearMethod(self)
 
+    def supports_unaligned_mlp(self) -> bool:
+        return True
+
     def get_scaled_act_names(self) -> list[str]:
         return []
 

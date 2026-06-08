@@ -9,7 +9,6 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
@@ -34,7 +33,6 @@ logger = init_logger(__name__)
 LoadFormats = Literal[
     "auto",
     "hf",
-    "bitsandbytes",
     "dummy",
     "fastsafetensors",
     "gguf",
@@ -52,7 +50,6 @@ LoadFormats = Literal[
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
     "hf": DefaultModelLoader,
-    "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
     "gguf": GGUFModelLoader,
@@ -153,7 +150,6 @@ __all__ = [
     "get_model_cls",
     "register_model_loader",
     "BaseModelLoader",
-    "BitsAndBytesModelLoader",
     "GGUFModelLoader",
     "ModelExpressModelLoader",
     "DefaultModelLoader",

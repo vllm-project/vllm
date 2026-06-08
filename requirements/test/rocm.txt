@@ -76,8 +76,6 @@ backoff==2.2.1
     # via
     #   -r requirements/test/rocm.in
     #   schemathesis
-bitsandbytes==0.49.2
-    # via -r requirements/test/rocm.in
 black==26.3.1
     # via datamodel-code-generator
 blake3==1.0.8
@@ -577,7 +575,6 @@ numpy==2.2.6
     #   -r requirements/test/rocm.in
     #   accelerate
     #   albumentations
-    #   bitsandbytes
     #   bm25s
     #   contourpy
     #   cupy-cuda12x
@@ -709,7 +706,6 @@ packaging==26.0
     # via
     #   -c requirements/rocm.txt
     #   accelerate
-    #   bitsandbytes
     #   black
     #   datasets
     #   evaluate

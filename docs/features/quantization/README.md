@@ -8,7 +8,7 @@ Quantization trades off model precision for smaller memory footprint, allowing l
 The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
-- [BitsAndBytes](bnb.md)
+- [BitsAndBytes (plugin)](bnb.md)
 - [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
@@ -56,7 +56,7 @@ th:not(:first-child) {
 | llm-compressor INT8 (W8A8)| ❌    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ✅︎      | ✅︎      |
 | llm-compressor INT8 (W4A8)| ❌    | ❌     | ❌     | ❌  | ❌     | ❌      | ❌        | ❌      | ✅︎      |
 | llm-compressor FP8 (W8A8) | ❌    | ❌     | ❌     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      | ❌      |
-| bitsandbytes              | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
+| bitsandbytes (plugin)     | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
 | DeepSpeedFP               | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      | ❌      |
 | GGUF                      | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      | ❌      |
 
@@ -77,6 +77,9 @@ th:not(:first-child) {
 ## Out-of-Tree Quantization Plugins
 
 vLLM supports registering custom, out-of-tree quantization methods using the `@register_quantization_config` decorator. This allows you to implement and use your own quantization schemes without modifying the vLLM codebase.
+
+The official BitsAndBytes support now ships as the out-of-tree
+[`vllm-bnb-plugin`](https://github.com/vllm-project/vllm-bnb-plugin).
 
 ### Registering a Custom Quantization Method
 
