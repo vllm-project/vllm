@@ -65,7 +65,7 @@ SecondaryTierFactory.register_tier(
 )
 
 SecondaryTierFactory.register_tier(
-    "pd_connector",
+    "p2p_connector",
     "vllm.v1.kv_offload.tiering.p2p.manager",
     "P2PSecondaryTierManager",
 )
