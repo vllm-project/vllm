@@ -319,12 +319,16 @@ class Base(
             for mapping in get_model_conversion_mapping(self.model):
                 # Handle weights which have been renamed in Transformers
                 if isinstance(mapping, WeightRenaming):
-                    # Recompile using regex (Transformers used re)
-                    compiled_sources = re.compile(
-                        mapping.compiled_sources.pattern, mapping.compiled_sources.flags
-                    )
+                    # WeightRenaming is always one-to-one
+                    source_pattern = mapping.source_patterns[0]
                     target_pattern = mapping.target_patterns[0]
-                    orig_to_new_regex[compiled_sources] = target_pattern
+                    # Handle scope_prefix if it exists
+                    scope_prefix: str | None = getattr(mapping, "scope_prefix", None)
+                    if source_pattern.startswith("^") and scope_prefix:
+                        source_pattern = rf"^{scope_prefix}\.{source_pattern[1:]}"
+                        target_pattern = rf"{scope_prefix}.{target_pattern}"
+                    # Recompile using regex (Transformers used re)
+                    orig_to_new_regex[re.compile(source_pattern)] = target_pattern
                 # TODO: Handle WeightConverter to enable layer merging
         else:
             # Replace legacy suffixes used for norms
@@ -369,6 +373,9 @@ class Base(
         # Handle lm_head which was saved inside the base model
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
+
+        for orig, new in orig_to_new_regex.items():
+            print(f"Mapping checkpoint weights matching {orig.pattern} to {new}")
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
