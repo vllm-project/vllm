@@ -29,14 +29,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
-    convert_to_humming_moe_kernel_format,
-    get_humming_moe_quant_config,
-    input_schema_to_quant_key,
-    make_humming_moe_kernel,
-    select_humming_moe_experts,
-    weight_schema_to_quant_key,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -63,6 +55,14 @@ if has_humming() and current_platform.is_cuda():
     )
     from humming.utils.weight import quantize_weight
 
+    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        convert_to_humming_moe_kernel_format,
+        get_humming_moe_quant_config,
+        input_schema_to_quant_key,
+        make_humming_moe_kernel,
+        select_humming_moe_experts,
+        weight_schema_to_quant_key,
+    )
 
 if TYPE_CHECKING:
     from humming.schema import (
