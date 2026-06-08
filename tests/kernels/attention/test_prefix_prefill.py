@@ -207,19 +207,11 @@ def test_contexted_kv_attention(
             cur_ctx += block_size
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = (
-        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
-        .permute(0, 2, 3, 1, 4)
-        .contiguous()
-    )
+    # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
+    k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
     # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = (
-        v_cache.view(-1, block_size, num_kv_heads, head_size)
-        .permute(0, 2, 3, 1)
-        .contiguous()
-    )
+    # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
+    v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
@@ -450,19 +442,11 @@ def test_contexted_kv_attention_alibi(
             cur_ctx += block_size
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = (
-        k_cache.view(-1, block_size, num_kv_heads, head_size // 8, 8)
-        .permute(0, 2, 3, 1, 4)
-        .contiguous()
-    )
+    # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
+    k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
     # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = (
-        v_cache.view(-1, block_size, num_kv_heads, head_size)
-        .permute(0, 2, 3, 1)
-        .contiguous()
-    )
+    # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
+    v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
