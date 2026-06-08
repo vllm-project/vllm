@@ -9,7 +9,7 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.13"
+ARG AITER_BRANCH="v0.1.13.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 # MoRI is installed from a prebuilt wheel published on ROCm's GitHub releases.
 # Leave MORI_WHEEL_URL empty to auto-construct the URL from MORI_VERSION and the
