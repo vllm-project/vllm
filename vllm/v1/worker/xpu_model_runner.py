@@ -5,7 +5,12 @@ from contextlib import contextmanager
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.torch_utils import supports_xpu_graph
+from vllm.utils.torch_utils import (
+    current_stream,
+    make_current_stream_tracking_context,
+    make_current_stream_tracking_setter,
+    supports_xpu_graph,
+)
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
 )
@@ -43,11 +48,11 @@ def _torch_cuda_wrapper():
     # replace cuda APIs with xpu APIs, this should work by default
     torch.cuda.Stream = torch.xpu.Stream
     torch.cuda.default_stream = torch.xpu.current_stream
-    torch.cuda.current_stream = torch.xpu.current_stream
-    torch.cuda.stream = torch.xpu.stream
+    torch.cuda.current_stream = current_stream
+    torch.cuda.stream = make_current_stream_tracking_context(torch.xpu.set_stream)
     torch.cuda.mem_get_info = torch.xpu.mem_get_info
     torch.cuda.Event = torch.Event
-    torch.cuda.set_stream = torch.xpu.set_stream
+    torch.cuda.set_stream = make_current_stream_tracking_setter(torch.xpu.set_stream)
     if supports_xpu_graph():
         torch.cuda.graph = torch.xpu.graph
         torch.cuda.CUDAGraph = torch.xpu.XPUGraph
