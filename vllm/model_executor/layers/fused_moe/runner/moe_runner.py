@@ -514,12 +514,18 @@ class MoERunner(MoERunnerInterface):
         )
 
         if self._quant_method.is_monolithic:
+            routing_replay_out = self._get_routing_replay_buf(
+                hidden_states, layer
+            )
             fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                routing_replay_out=routing_replay_out,
             )
+            if routing_replay_out is not None:
+                self._capture_monolithic_routing(routing_replay_out, layer)
         else:
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
@@ -547,6 +553,27 @@ class MoERunner(MoERunnerInterface):
             self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
         )
+
+    @staticmethod
+    def _get_routing_replay_buf(
+        hidden_states: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor | None:
+        buf = getattr(layer, "_routing_replay_out", None)
+        if buf is None:
+            return None
+        return buf[: hidden_states.shape[0]]
+
+    @staticmethod
+    def _capture_monolithic_routing(
+        routing_replay_out: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> None:
+        capturer = getattr(layer, "_routing_replay_capturer", None)
+        if capturer is None:
+            return
+        topk_ids = routing_replay_out.to(torch.int32)
+        capturer.capture(layer.layer_id, topk_ids)
 
     def _sequence_parallel_context(self):
         """Return a context manager for sequence-parallel token

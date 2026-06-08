@@ -7398,9 +7398,16 @@ class GPUModelRunner(
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+            _get_num_experts_per_tok,
+        )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
+
+        hf_config = self.vllm_config.model_config.hf_text_config
+        top_k = _get_num_experts_per_tok(hf_config)
+        max_tokens = self.scheduler_config.max_num_batched_tokens
 
         for module in self.compilation_config.static_forward_context.values():
             if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
@@ -7410,6 +7417,24 @@ class GPUModelRunner(
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
+
+            if (
+                isinstance(module, FusedMoE)
+                and module.quant_method.is_monolithic
+                and module.quant_method.moe_kernel is not None
+                and getattr(
+                    module.quant_method.moe_kernel.impl.fused_experts,
+                    "_monolithic_writes_routing_replay",
+                    False,
+                )
+            ):
+                module._routing_replay_out = torch.zeros(
+                    max_tokens,
+                    top_k,
+                    dtype=torch.int16,
+                    device=self.device,
+                )
+                module._routing_replay_capturer = capturer
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
