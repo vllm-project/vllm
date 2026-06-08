@@ -191,3 +191,14 @@ fn factory_new_resolves_default_patterns() {
         None
     );
 }
+
+#[test]
+fn factory_new_registers_phi4_mini_json_by_name() {
+    // phi-4-mini is registered by explicit name only (matching Python's
+    // `--tool-call-parser phi4_mini_json`); it is intentionally not mapped to
+    // any model-name pattern.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::PHI4_MINI_JSON));
+    factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
+}
