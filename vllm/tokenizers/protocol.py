@@ -82,6 +82,10 @@ class TokenizerLike(Protocol):
     ) -> "BatchEncoding":
         raise NotImplementedError
 
+    @property
+    def added_tokens_decoder(self) -> dict[int, Any]:
+        raise NotImplementedError
+
     def get_vocab(self) -> dict[str, int]:
         raise NotImplementedError
 

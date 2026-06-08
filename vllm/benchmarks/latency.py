@@ -13,8 +13,9 @@ from tqdm import tqdm
 
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.sampling_params import BeamSearchParams
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def save_to_pytorch_benchmark_format(
@@ -30,7 +31,7 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument("--input-len", type=int, default=32)
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -111,8 +112,15 @@ def main(args: argparse.Namespace):
         if not args.use_beam_search:
             llm.generate(dummy_prompts, sampling_params=sampling_params, use_tqdm=False)
         else:
+            # beam_search expects list[TokensPrompt | TextPrompt], so convert
+            beam_prompts: list[TokensPrompt | TextPrompt] = []
+            for p in dummy_prompts:
+                if isinstance(p, dict) and "prompt_token_ids" in p:
+                    token_ids = p["prompt_token_ids"]  # type: ignore[typeddict-item]
+                    assert isinstance(token_ids, list)
+                    beam_prompts.append(TokensPrompt(prompt_token_ids=token_ids))
             llm.beam_search(
-                dummy_prompts,
+                beam_prompts,
                 BeamSearchParams(
                     beam_width=args.n,
                     max_tokens=args.output_len,
