@@ -61,9 +61,8 @@ class ObjAsyncLookupManager(AsyncLookupManager):
         self,
         tier: "ObjectStoreSecondaryTierManager",
         tier_type: str,
-        max_results: int = 1_000_000,
     ) -> None:
-        super().__init__(tier_type=tier_type, max_results=max_results)
+        super().__init__(tier_type=tier_type)
         self._tier = tier
 
     def batch_lookup(
@@ -135,7 +134,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._lookup_manager = ObjAsyncLookupManager(
             tier=self, tier_type=self.tier_type
         )
-        self._store_job_keys: dict[int, list[OffloadKey]] = {}
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -220,7 +218,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return self._lookup_manager.lookup(key, req_context)
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
@@ -231,6 +228,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
         )
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        self._lookup_manager.cleanup(req_context.req_id)
 
     def on_schedule_end(self) -> None:
         self._lookup_manager.flush()
@@ -260,9 +260,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._agent.release_xfer_handle(entry.xfer_handle)
             self._agent.release_dlist_handle(entry.obj_handle)
             self._agent.deregister_memory(entry.files_desc)
-            keys = self._store_job_keys.pop(job_id, None)
-            if keys is not None and success:
-                self._lookup_manager.update_cached_exists(keys)
             results.append(JobResult(job_id=job_id, success=success))
         return results
 
