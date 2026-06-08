@@ -151,6 +151,7 @@ class SiluAndMul(CustomOp):
         return self.forward_cuda(x)
 
 
+# --8<-- [start:silu_and_mul_with_clamp]
 @CustomOp.register("silu_and_mul_with_clamp")
 class SiluAndMulWithClamp(CustomOp):
     """SwiGLU activation with input clamping (used by some MoE shared experts).
@@ -167,6 +168,8 @@ class SiluAndMulWithClamp(CustomOp):
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
+
+    # --8<-- [end:silu_and_mul_with_clamp]
 
     def __init__(
         self,
