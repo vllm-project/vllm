@@ -67,6 +67,9 @@ class StatLoggerBase(ABC):
     def log(self):  # noqa
         pass
 
+    def record_engine_startup_time(self, startup_time: float):  # noqa
+        pass
+
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
@@ -400,6 +403,10 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
             per_engine_stat_logger.log_engine_initialized()
 
+    def record_engine_startup_time(self, startup_time: float):
+        for per_engine_stat_logger in self.per_engine_stat_loggers.values():
+            per_engine_stat_logger.record_engine_startup_time(startup_time)
+
 
 class PrometheusStatLogger(AggregateStatLoggerBase):
     _gauge_cls = Gauge
@@ -444,6 +451,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
         )
+
+        #
+        # Engine startup
+        #
+        gauge_engine_startup_time = self._gauge_cls(
+            name="vllm:engine_startup_time_seconds",
+            documentation=(
+                "Time spent initializing the vLLM engine core until it is ready."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=["model_name"],
+        )
+        self.gauge_engine_startup_time = gauge_engine_startup_time.labels(model_name)
 
         #
         # Scheduler state
@@ -1235,6 +1255,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
+    def record_engine_startup_time(self, startup_time: float):
+        self.gauge_engine_startup_time.set(startup_time)
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -1354,6 +1377,10 @@ class StatLoggerManager:
     def log(self):
         for logger in self.stat_loggers:
             logger.log()
+
+    def record_engine_startup_time(self, startup_time: float):
+        for logger in self.stat_loggers:
+            logger.record_engine_startup_time(startup_time)
 
     def log_engine_initialized(self):
         for agg_logger in self.stat_loggers:
