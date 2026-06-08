@@ -373,26 +373,41 @@ class Scheduler(SchedulerInterface):
             return False
         if num_computed_tokens is None:
             num_computed_tokens = request.num_computed_tokens
-        return (
-            request.num_prompt_tokens > self._very_long_prefill_threshold()
-            and num_computed_tokens < request.num_prompt_tokens
-        )
+        remaining_prefill = max(0, request.num_prompt_tokens - num_computed_tokens)
+        return remaining_prefill > self._very_long_prefill_threshold()
+
+    def _waiting_request_remaining_prefill(self, request: Request) -> int:
+        if request.num_computed_tokens > 0:
+            num_computed_tokens = request.num_computed_tokens
+        else:
+            _, num_computed_tokens = self.kv_cache_manager.get_computed_blocks(
+                request,
+                record_stats=False,
+            )
+        return max(0, request.num_prompt_tokens - num_computed_tokens)
 
     def _has_active_very_long_prefill(self) -> bool:
         return any(self._is_very_long_prefill(request) for request in self.running)
+
+    def _is_waiting_request_very_long_prefill(self, request: Request) -> bool:
+        return (
+            self._waiting_request_remaining_prefill(request)
+            > self._very_long_prefill_threshold()
+        )
+
+    def _waiting_prefill_competitor_count(self) -> int:
+        non_long_prefill_count = 0
+        for waiting_request in itertools.chain(self.waiting, self.skipped_waiting):
+            if not self._is_waiting_request_very_long_prefill(waiting_request):
+                non_long_prefill_count += 1
+        return non_long_prefill_count
 
     def _has_waiting_requests_for_running_prefill(self, request: Request) -> bool:
         if not (self.waiting or self.skipped_waiting):
             return False
         if not self._is_very_long_prefill(request):
             return True
-        return any(
-            not self._is_very_long_prefill(waiting_request)
-            for waiting_request in self.waiting
-        ) or any(
-            not self._is_very_long_prefill(waiting_request)
-            for waiting_request in self.skipped_waiting
-        )
+        return self._waiting_prefill_competitor_count() > 0
 
     def _limit_mixed_decode_prefill_chunk(
         self,
@@ -401,6 +416,7 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request],
         has_waiting_requests: bool = False,
         has_pending_decode: bool = False,
+        prefill_budget_partitions: int = 1,
     ) -> int:
         if (
             not self.scheduler_config.enable_chunked_prefill
@@ -411,7 +427,10 @@ class Scheduler(SchedulerInterface):
         has_decode_pressure = (
             self._has_scheduled_decode(scheduled_running_reqs) or has_pending_decode
         )
-        if not has_decode_pressure and not has_waiting_requests:
+        has_prefill_competition = (
+            has_waiting_requests or prefill_budget_partitions > 1
+        )
+        if not has_decode_pressure and not has_prefill_competition:
             return num_new_tokens
 
         remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
@@ -428,7 +447,11 @@ class Scheduler(SchedulerInterface):
             else:
                 mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 4)
         elif remaining_prefill > very_long_prefill_threshold:
-            mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 2)
+            mixed_prefill_budget = max(
+                1,
+                self.max_num_scheduled_tokens
+                // max(2, prefill_budget_partitions),
+            )
         else:
             mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)
         return min(num_new_tokens, mixed_prefill_budget)
@@ -511,6 +534,11 @@ class Scheduler(SchedulerInterface):
                 later_request.num_computed_tokens >= later_request.num_prompt_tokens
                 for later_request in self.running[req_index + 1 :]
             )
+            prefill_budget_partitions = (
+                1
+                + int(has_unscheduled_running_prefill)
+                + self._waiting_prefill_competitor_count()
+            )
             num_new_tokens = self._limit_mixed_decode_prefill_chunk(
                 request,
                 num_new_tokens,
@@ -518,6 +546,7 @@ class Scheduler(SchedulerInterface):
                 self._has_waiting_requests_for_running_prefill(request)
                 or has_unscheduled_running_prefill,
                 has_pending_running_decode,
+                prefill_budget_partitions,
             )
 
             # Make sure the input position does not exceed the max model len.
@@ -863,8 +892,25 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    scheduled_prefill_count = sum(
+                        scheduled_request.num_computed_tokens
+                        < scheduled_request.num_prompt_tokens
+                        for scheduled_request in itertools.chain(
+                            scheduled_running_reqs,
+                            scheduled_new_reqs,
+                            scheduled_resumed_reqs,
+                        )
+                    )
+                    prefill_budget_partitions = max(
+                        1,
+                        scheduled_prefill_count
+                        + self._waiting_prefill_competitor_count(),
+                    )
                     num_new_tokens = self._limit_mixed_decode_prefill_chunk(
-                        request, num_new_tokens, scheduled_running_reqs
+                        request,
+                        num_new_tokens,
+                        scheduled_running_reqs,
+                        prefill_budget_partitions=prefill_budget_partitions,
                     )
                     if num_new_tokens == 0:
                         break
