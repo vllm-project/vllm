@@ -2803,10 +2803,29 @@ class NixlConnectorWorker:
                 if bid not in bids_to_check:
                     bids_to_check.append(bid)
 
+        # Per-group block IDs: for correct spot-checking, each layer type
+        # should only check its own group's blocks.
+        # Groups: MambaSpec×N + MLAAttentionSpec×1
+        mamba_group_bids: list[int] = []
+        attn_group_bids: list[int] = []
+        for gi, bids in enumerate(block_ids):
+            if gi < len(self._group_spec_types) and _is_attention_spec(
+                self._group_spec_types[gi]
+            ):
+                attn_group_bids.extend(bids[:2])
+            else:
+                mamba_group_bids.extend(bids[:2])
+
         # Helper to spot-check one layer's transferred blocks
-        def _check_layer(label: str, name: str, t: torch.Tensor) -> None:
+        def _check_layer(
+            label: str,
+            name: str,
+            t: torch.Tensor,
+            group_bids: list[int] | None = None,
+        ) -> None:
+            check_bids = group_bids if group_bids else bids_to_check[:4]
             block_stats = ""
-            for bid in bids_to_check[:3]:
+            for bid in check_bids[:4]:
                 if bid < t.shape[0]:
                     blk = t[bid].float()
                     block_stats += (
@@ -2836,21 +2855,23 @@ class NixlConnectorWorker:
                     continue
                 if ".attn" in layer_name:
                     continue  # skip MLA entries here
-                _check_layer("SSM", layer_name, t)
+                _check_layer("SSM", layer_name, t, mamba_group_bids)
                 checked += 1
 
         # CRITICAL: Check ALL MLA layers (keys containing ".self_attn.attn")
+        # Use attn_group_bids so we check the MLA group's actual blocks,
+        # not the KDA group's blocks.
         mla_count = 0
         for layer_name, cache_val in self.device_kv_caches.items():
             if ".attn" not in layer_name:
                 continue
             if isinstance(cache_val, torch.Tensor):
-                _check_layer("MLA", layer_name, cache_val)
+                _check_layer("MLA", layer_name, cache_val, attn_group_bids)
                 mla_count += 1
             elif isinstance(cache_val, (tuple, list)):
                 for i, c in enumerate(cache_val):
                     if isinstance(c, torch.Tensor):
-                        _check_layer(f"MLA[{i}]", layer_name, c)
+                        _check_layer(f"MLA[{i}]", layer_name, c, attn_group_bids)
                         mla_count += 1
 
         if checked == 0 and mla_count == 0:
