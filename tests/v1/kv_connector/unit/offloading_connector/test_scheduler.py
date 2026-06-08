@@ -1414,17 +1414,20 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
 
     # New request with identical tokens but skip_reading_prefix_cache=True.
-    # The offloading connector must not load anything from CPU.
+    # The offloading connector must not load anything from CPU, but must
+    # still offload the freshly computed blocks (state management intact).
     runner.new_request(
         token_ids=[0] * offloaded_block_size,
         skip_reading_prefix_cache=True,
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output([])
+        generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_loaded=(),  # no CPU loads must happen
+        expected_loaded=(),       # no CPU loads must happen
+        expected_stored=(0, 1, 2),  # tokens still offloaded to CPU
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # The external lookup must have been completely skipped.
