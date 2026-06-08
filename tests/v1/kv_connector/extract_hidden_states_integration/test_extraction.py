@@ -6,7 +6,6 @@ import tempfile
 
 import pytest
 import torch
-from safetensors import safe_open
 
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, ModelRegistry, SamplingParams
@@ -19,25 +18,18 @@ def get_and_check_output(output, expected_shape):
     assert output.kv_transfer_params is not None
     hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
     assert hidden_states_path is not None
-    assert os.path.exists(hidden_states_path)
 
-    # Load and verify the saved tensors
-    with safe_open(hidden_states_path, "pt") as f:
-        # Check that token_ids and hidden_states are present
-        tensor_names = f.keys()
-        assert "token_ids" in tensor_names
-        assert "hidden_states" in tensor_names
+    obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+    token_ids = obj["token_ids"]
+    hidden_states = obj["hidden_states"]
 
-        token_ids = f.get_tensor("token_ids")
-        hidden_states = f.get_tensor("hidden_states")
+    prompt_token_ids = output.prompt_token_ids
+    assert torch.equal(token_ids, torch.tensor(prompt_token_ids))
 
-        prompt_token_ids = output.prompt_token_ids
-        assert torch.equal(token_ids, torch.tensor(prompt_token_ids))
+    assert hidden_states.shape == expected_shape
 
-        assert hidden_states.shape == expected_shape
-
-        # Verify hidden_states are not all zeros (i.e., they were actually computed)
-        assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+    # Verify hidden_states are not all zeros (i.e., they were actually computed)
+    assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
     return token_ids, hidden_states
 
@@ -299,7 +291,6 @@ def test_extract_hidden_states_per_request_options(
     # Second output: prompt + output tokens, custom path
     out1 = outputs[1]
     assert out1.kv_transfer_params["hidden_states_path"] == custom_path
-    assert os.path.exists(custom_path)
     obj1 = example_hidden_states_connector.load_hidden_states(custom_path)
     token_ids = obj1["token_ids"]
     hidden_states = obj1["hidden_states"]
@@ -357,11 +348,10 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         assert output.kv_transfer_params is not None
         hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
         assert hidden_states_path is not None
-        assert os.path.exists(hidden_states_path)
 
-        with safe_open(hidden_states_path, "pt") as f:
-            token_ids = f.get_tensor("token_ids")
-            hidden_states = f.get_tensor("hidden_states")
+        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+        token_ids = obj["token_ids"]
+        hidden_states = obj["hidden_states"]
 
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
@@ -410,11 +400,10 @@ def test_extract_hidden_states_tp2():
         assert output.kv_transfer_params is not None
         hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
         assert hidden_states_path is not None
-        assert os.path.exists(hidden_states_path)
 
-        with safe_open(hidden_states_path, "pt") as f:
-            token_ids = f.get_tensor("token_ids")
-            hidden_states = f.get_tensor("hidden_states")
+        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+        token_ids = obj["token_ids"]
+        hidden_states = obj["hidden_states"]
 
         assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
         assert hidden_states.shape == (
