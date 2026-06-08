@@ -19,6 +19,8 @@ pub struct PreparedRequest {
     pub include_usage: bool,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+    /// Whether the caller requested prompt-only echo via `max_tokens=0`.
+    pub prompt_only: bool,
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
@@ -56,14 +58,21 @@ pub(crate) fn prepare_completion_request(
         })?),
         None => None,
     };
-    let prompt_logprobs = request.prompt_logprobs.or(if request.echo && !request.stream {
-        logprobs
-    } else {
-        None
-    });
+    let prompt_only = request.echo && request.max_tokens == Some(0);
+    let prompt_logprobs =
+        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
+            logprobs
+        } else {
+            None
+        });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let max_tokens = if prompt_only {
+        Some(1)
+    } else {
+        request.max_tokens
+    };
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -78,7 +87,7 @@ pub(crate) fn prepare_completion_request(
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
-            max_tokens: request.max_tokens,
+            max_tokens,
             min_tokens: request.min_tokens,
             logprobs,
             prompt_logprobs,
@@ -118,6 +127,7 @@ pub(crate) fn prepare_completion_request(
         response_model,
         include_usage,
         text_request,
+        prompt_only,
         echo,
         return_token_ids: request.return_token_ids.unwrap_or(false),
         return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
@@ -252,6 +262,57 @@ mod tests {
 
         assert_eq!(prepared.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert!(!prepared.prompt_only);
+    }
+
+    #[test]
+    fn prepare_completion_request_lowers_prompt_only_echo_as_one_internal_token() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "echo": true,
+            "max_tokens": 0
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.prompt_only);
+        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
+    }
+
+    #[test]
+    fn prepare_completion_request_enables_prompt_logprobs_for_stream_prompt_only_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "echo": true,
+            "stream": true,
+            "max_tokens": 0,
+            "logprobs": 3
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.prompt_only);
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.text_request.sampling_params.prompt_logprobs,
+            Some(3)
+        );
     }
 
     #[test]
