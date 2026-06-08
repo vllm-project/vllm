@@ -11,7 +11,11 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProbs,
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
@@ -230,6 +234,14 @@ class DerenderChatRequest(BaseModel):
     len(GenerateRequest.token_ids) from the render step.
     """
 
+    chat_request: ChatCompletionRequest | None = None
+    """The original (post-adjust_request) ChatCompletionRequest from /render.
+
+    Required by the parsing so that tool/reasoning parsers can receive the full
+    request context they expect (request.tools, request.tool_choice,
+    request._grammar_from_tool_parser, etc.).
+    """
+
 
 class DerenderCompletionRequest(BaseModel):
     """Request for the /v1/completions/derender endpoint.
@@ -245,6 +257,13 @@ class DerenderCompletionRequest(BaseModel):
     """One prompt token count per response; each defaults to 0 if omitted.
 
     If provided, len(prompt_tokens) must equal len(generate_responses).
+    """
+
+    completion_request: CompletionRequest | None = None
+    """The original (post-adjust_request) CompletionRequest from /render.
+
+    Mirrors chat_request on DerenderChatRequest. Required by the parsing
+    so parsers receive the full request context.
     """
 
     @model_validator(mode="after")
