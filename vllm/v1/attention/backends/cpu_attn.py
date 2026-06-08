@@ -93,7 +93,7 @@ class CPUAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return 2, num_blocks, num_kv_heads, block_size, head_size
+        return num_blocks, num_kv_heads, block_size, 2 * head_size
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
@@ -308,7 +308,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, num_kv_heads, block_size, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -338,8 +338,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         # For decoder and cross-attention, use KV cache, size are
-        # [num_blocks, num_kv_heads, block_size, head_size]
-        key_cache, value_cache = kv_cache.unbind(0)
+        # [num_blocks, num_kv_heads, block_size, 2 * head_size]
+        # Make a view [num_blocks, num_kv_heads, block_size * 2, head_size]
+        # Then slice KV at dim 2
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
