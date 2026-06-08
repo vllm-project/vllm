@@ -68,8 +68,8 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     _DIM4_B,
     _DIM4_H,
@@ -81,6 +81,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     num_states_for,
 )
+
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -99,119 +100,46 @@ def build_region_meta(
     block_stride_bytes: int,
     region_content_bytes: int,
     virtually_split: bool,
-    num_heads_override: int | None = None,
 ) -> list[torch.Tensor]:
     """Build 4D ``[B, H, N, C]`` meta tensors for one KV cache region.
 
-    Returns one meta tensor per transfer part (e.g. 2 for virtually-split
-    K/V, 1 otherwise).  When virtually_split is True, the second (V) meta
-    has storage_offset encoding the V start position so that
-    _view_to_descriptors picks it up automatically — no caller branching.
-
-    H dimension encodes heads so that fa_head_slice can narrow along H to
-    produce the correct storage_offset for heterogeneous TP:
-
-    - AttentionSpec: H = region heads (derived from head_size), C = head_size
-    - MLA: H = 1, C = full content (no head sharding)
-    - Mamba structural placeholder (num_heads_override): H = override, C derived
-
-    Args:
-        num_heads_override: forces H to this value (for Mamba structural
-            placeholder in FA remote path).
+    Computes a flat ``(B, 1, N, total_C)`` shape from *region_content_bytes*,
+    delegates to ``spec.transfer_shapes`` for spec-specific decomposition
+    (head split, K/V split), then materialises meta tensors with the
+    correct layout permutation and block-stride override.
     """
     dtype = getattr(spec, "dtype", torch.int8)
     elem = get_dtype_size(dtype)
     N = num_states_for(block_size, spec.tokens_per_state)
 
-    num_parts = 2 if virtually_split else 1
-    content_per_part = region_content_bytes // num_parts
+    flat_C = region_content_bytes // (N * elem)
+    flat_shape = (num_blocks, 1, N, flat_C)
 
-    if num_heads_override is not None:
-        H = num_heads_override
-        C = content_per_part // (N * H * elem)
-        if C == 0:
-            C = 1
-    else:
-        head_size = getattr(spec, "head_size", None)
-        if head_size is not None and isinstance(spec, AttentionSpec):
-            C = head_size
-            C_bytes = head_size * elem
-            H = content_per_part // (N * C_bytes)
-            if H == 0:
-                H = 1
-                C = content_per_part // (N * elem)
-        else:
-            H = 1
-            C = content_per_part // (N * elem)
-            if C == 0:
-                C = 1
+    shapes = spec.transfer_shapes(flat_shape, virtually_split)
 
     order = layout.layer_stride_order
     inv = [list(order).index(i) for i in range(4)]
 
     metas: list[torch.Tensor] = []
-    for p in range(num_parts):
-        logical_4d = (num_blocks, H, N, C)
-        phys_shape = tuple(logical_4d[o] for o in order)
+    offset_elems = 0
+    for shape in shapes:
+        phys_shape = tuple(shape[o] for o in order)
         phys_strides = list(
             torch.empty(phys_shape, device="meta").stride())
         phys_strides[inv[_DIM4_B]] = block_stride_bytes // elem
-
-        part_offset_elems = p * content_per_part // elem
 
         meta = torch.as_strided(
             torch.empty(1, dtype=dtype, device="meta"),
             size=phys_shape,
             stride=tuple(phys_strides),
-            storage_offset=part_offset_elems,
+            storage_offset=offset_elems,
         )
         metas.append(meta.permute(*inv))
+        offset_elems += shape[1] * shape[2] * shape[3]
 
     return metas
 
 
-def fa_head_slice(
-    meta: torch.Tensor,
-    my_tp: int,
-    my_rank: int,
-    other_tp: int,
-    other_rank: int,
-    total_num_kv_heads: int,
-) -> torch.Tensor:
-    """Narrow a 4D [B, H, N, C] meta along H for FA TP transfer.
-
-    Spec-independent head-based narrowing: computes the overlap between
-    my local heads and the remote rank's heads, then narrows along H.
-    The resulting storage_offset encodes the byte offset into the remote
-    block for heterogeneous TP.
-
-    For H=1 (MLA): returns unchanged (offset=0).
-    For H=total_kv_heads (Attention/structural placeholder): correct offset.
-    """
-    H = meta.shape[_DIM4_H]
-    if H <= 1 or my_tp <= other_tp:
-        return meta
-
-    if total_num_kv_heads >= my_tp:
-        my_start = my_rank * total_num_kv_heads // my_tp
-        my_end = (my_rank + 1) * total_num_kv_heads // my_tp
-    else:
-        my_start, my_end = 0, total_num_kv_heads
-
-    if total_num_kv_heads >= other_tp:
-        other_start = other_rank * total_num_kv_heads // other_tp
-        other_end = (other_rank + 1) * total_num_kv_heads // other_tp
-    else:
-        other_start, other_end = 0, total_num_kv_heads
-
-    overlap_start = max(my_start, other_start)
-    overlap_end = min(my_end, other_end)
-    if overlap_start >= overlap_end:
-        return meta.narrow(_DIM4_H, 0, 0)
-
-    local_h_start = overlap_start - other_start
-    local_h_len = overlap_end - overlap_start
-    return meta.narrow(_DIM4_H, local_h_start, local_h_len)
 
 
 class NixlConnectorWorker:
@@ -1258,12 +1186,7 @@ class NixlConnectorWorker:
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
-        """Build local FA descriptors for all layers.
-
-        Pure meta-tensor approach: build_region_meta absorbs virtually_split
-        (V offset encoded in storage_offset). After construction,
-        _view_to_descriptors extracts descriptors uniformly.
-        """
+        """Build local FA descriptors for all layers."""
         assert self.transfer_topo is not None
         num_blocks = self.num_blocks * block_size_ratio
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
@@ -1319,13 +1242,7 @@ class NixlConnectorWorker:
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
     ) -> list[tuple[int, int, int]]:
-        """Build remote FA descriptors for all layers.
-
-        Pure meta-tensor approach: build_region_meta absorbs all per-layer
-        complexity (spec type, virtually_split, head count).  After
-        construction, fa_head_slice + _view_to_descriptors extract
-        descriptors uniformly — no conditionals.
-        """
+        """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
         total_num_kv_heads = self.transfer_topo.total_num_kv_heads
         my_tp = self.transfer_topo.tp_size
@@ -1342,38 +1259,26 @@ class NixlConnectorWorker:
             spec = self.spec_per_region[i]
             page_size = nixl_agent_meta.block_lens[i]
 
-            # Remote's full content per block for this layer.
-            # For non-vsplit (FA): page = K region only.
-            # For vsplit (FlashInfer): page = K+V interleaved.
-            # build_region_meta splits internally when virtually_split=True.
-            # fa_head_slice narrows to local heads → correct payload.
-            remote_content = page_size
-
-            # Structural placeholder: Mamba in FA path uses attention H
-            # so fa_head_slice gives the correct proportional TP offset.
-            h_override = (
-                total_num_kv_heads if isinstance(spec, MambaSpec) else None
-            )
-
             metas = build_region_meta(
                 spec=spec,
                 num_blocks=num_blocks,
                 block_size=nixl_agent_meta.block_size,
                 layout=layout,
                 block_stride_bytes=page_size,
-                region_content_bytes=remote_content,
+                region_content_bytes=page_size,
                 virtually_split=virtually_split,
-                num_heads_override=h_override,
             )
 
             for meta in metas:
-                sliced = fa_head_slice(
+                sliced_list = spec.slice_for_tp_transfer(
                     meta, my_tp, my_rank,
                     remote_tp_size, remote_tp_rank,
                     total_num_kv_heads,
                 )
-                result.extend(
-                    self._view_to_descriptors(sliced, base_addr, device_id))
+                for sliced in sliced_list:
+                    result.extend(
+                        self._view_to_descriptors(
+                            sliced, base_addr, device_id))
 
         return result
 
