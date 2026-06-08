@@ -308,8 +308,11 @@ class MiMoV2MTP(nn.Module):
                 if name_rewritten not in params_dict:
                     continue
                 param = params_dict[name_rewritten]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader", None)
+                if weight_loader is not None:
+                    weight_loader(param, loaded_weight, shard_id)
+                else:
+                    default_weight_loader(param, loaded_weight)
                 loaded_params.add(name_rewritten)
                 stacked_matched = True
                 break
@@ -331,8 +334,8 @@ class MiMoV2MTP(nn.Module):
                     0, tp_rank * heads_per_rank, heads_per_rank
                 )
 
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
+            wl = getattr(param, "weight_loader", default_weight_loader)
+            wl(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params

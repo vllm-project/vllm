@@ -226,7 +226,7 @@ class GlmOcrVisionBlock(Glm4vVisionBlock):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = GlmOcrVisionAttention(
+        self.attn = GlmOcrVisionAttention(  # type: ignore[assignment]
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,

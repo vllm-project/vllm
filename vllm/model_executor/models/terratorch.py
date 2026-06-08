@@ -283,7 +283,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_list = []
         model_buffers = dict(self.named_buffers())
-        loaded_buffers = []
+        loaded_buffers: list[str] = []
         for key, value in weights:
             if isinstance(value, (dict, OrderedDict)):
                 if key == "state_dict":

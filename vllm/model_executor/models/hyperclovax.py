@@ -224,7 +224,7 @@ class HyperCLOVAXDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False)
 
         self.self_attn = HyperCLOVAXAttention(
-            config=config,
+            config=config,  # type: ignore[arg-type]
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(

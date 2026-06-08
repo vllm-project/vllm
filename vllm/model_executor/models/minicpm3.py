@@ -188,7 +188,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
         self.input_layernorm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
-        self.self_attn = MiniCPM3Attention(
+        self.self_attn = MiniCPM3Attention(  # type: ignore[assignment]
             config=self.config,
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
