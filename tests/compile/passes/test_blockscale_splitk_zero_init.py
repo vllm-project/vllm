@@ -64,7 +64,7 @@ def test_registries_module_importable():
 # ---------------------------------------------------------------------------
 
 
-M = 8  # token count; small + K-skinny (K >= 2048 passes the K-gate)
+M = 8  # token count; small + K-skinny (default K-gate accepts K >= 2048)
 K = 8192  # hidden dim
 N = 4096  # output dim of the blockscale GEMM
 GROUP_SIZE = 128
@@ -546,7 +546,7 @@ def test_per_pair_attribution_counts(monkeypatch: pytest.MonkeyPatch):
     reason="ROCm + AITER required",
 )
 def test_pass_no_match_when_extra_check_rejects(monkeypatch: pytest.MonkeyPatch):
-    """When K is below the static K-gate (too small for SplitK to pay off),
+    """When K is below the configured K-gate (too small for SplitK to pay off),
     the fusion's extra_check must reject the match and NOT rewrite the chain."""
     torch._dynamo.reset()
     vllm_config = _build_vllm_config()
@@ -562,7 +562,7 @@ def test_pass_no_match_when_extra_check_rejects(monkeypatch: pytest.MonkeyPatch)
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-        small_K = 512  # below the static K-gate (K < 2048)
+        small_K = 512  # below the default configured K-gate (K < 2048)
         model = _GroupQuantModule(small_K, N)
         x = torch.randn(M, small_K, dtype=torch.bfloat16)
 
@@ -572,3 +572,45 @@ def test_pass_no_match_when_extra_check_rejects(monkeypatch: pytest.MonkeyPatch)
             "Fusion should be skipped when SplitK doesn't pay off, but "
             f"matched_count={fusion_pass.matched_count}"
         )
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="ROCm + AITER required",
+)
+def test_pass_respects_min_k_env_override(monkeypatch: pytest.MonkeyPatch):
+    """Lowering the configured K-gate allows otherwise-rejected small-K GEMMs."""
+    torch._dynamo.reset()
+
+    with monkeypatch.context() as m:
+        small_K = 512
+        m.setenv(
+            "VLLM_ROCM_AITER_BLOCKSCALE_SPLITK_ZERO_INIT_MIN_K",
+            str(small_K),
+        )
+        vllm_config = _build_vllm_config()
+
+        pass_config = vllm_config.compilation_config.pass_config
+        assert pass_config.blockscale_splitk_zero_init_min_k == small_K
+
+        with vllm.config.set_current_vllm_config(vllm_config):
+            torch.set_default_device("cuda")
+            torch.set_default_dtype(torch.bfloat16)
+            torch.manual_seed(0)
+
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+
+            model = _GroupQuantModule(small_K, N)
+            x = torch.randn(M, small_K, dtype=torch.bfloat16)
+
+            backend, fusion_pass = _run_pass_on_module(model, (x,), vllm_config)
+
+            assert fusion_pass.matched_count == 1, (
+                "Fusion should honor the configured K threshold, but "
+                f"matched_count={fusion_pass.matched_count}"
+            )
+
+            counts = fusion_pass._count_per_pair(backend.graph_post_pass)
+            ck_key = "aiter_group_fp8_quant__x__aiter_gemm_a8w8_blockscale"
+            assert counts.get(ck_key, 0) == 1

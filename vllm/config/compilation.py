@@ -156,6 +156,12 @@ class PassConfig:
     the standalone Y.zero_() fill kernel that otherwise precedes a SplitK
     blockscale GEMM. ROCm/AITER only -- the dispatching producer and GEMM
     custom ops live in vllm/_aiter_ops.py."""
+    blockscale_splitk_zero_init_min_k: int = Field(
+        default_factory=lambda: envs.VLLM_ROCM_AITER_BLOCKSCALE_SPLITK_ZERO_INIT_MIN_K,
+        ge=0,
+    )
+    """Minimum GEMM K dimension required for blockscale SplitK zero-init
+    fusion. Set to 0 to allow all statically known K values."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.

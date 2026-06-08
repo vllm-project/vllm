@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_AITER_BLOCKSCALE_SPLITK_ZERO_INIT_MIN_K: int = 2048
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1161,6 +1162,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
+    ),
+    # Minimum GEMM K dimension required for blockscale SplitK zero-init fusion.
+    # Set to 0 to allow all statically known K values.
+    "VLLM_ROCM_AITER_BLOCKSCALE_SPLITK_ZERO_INIT_MIN_K": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_BLOCKSCALE_SPLITK_ZERO_INIT_MIN_K", "2048")
     ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.

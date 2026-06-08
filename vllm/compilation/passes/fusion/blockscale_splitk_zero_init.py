@@ -337,10 +337,10 @@ def _concrete_int(dim: object) -> int | None:
         return None
 
 
-def _make_extra_check(gemm: GemmSpec) -> Callable[[pm.Match], bool]:
+def _make_extra_check(gemm: GemmSpec, min_k: int) -> Callable[[pm.Match], bool]:
     """Build the per-match shape-driven gate.
 
-    Returns True iff the GEMM's K is large enough for SplitK to be worth
+    Returns True iff the GEMM's K satisfies the configured SplitK threshold.
     attempting. The actual SplitK count is deferred to AITER's runtime CSV
     (the fusion bakes ``split_k=0``), so the gate reads only the statically
     known K from the weight tensor and never touches the symbolic batch dim
@@ -370,12 +370,12 @@ def _make_extra_check(gemm: GemmSpec) -> Callable[[pm.Match], bool]:
             # surprising. Fall back to "allow" so we don't accidentally
             # disable the fusion on an edge case we didn't anticipate.
             return True
-        # Small-K GEMMs never benefit from SplitK, so the static K bound is
-        # the only filter we apply. ``y_is_zeroed=True`` stays safe even when
-        # AITER doesn't use SplitK at a given M: the GEMM just overwrites a
-        # buffer the producer pre-zeroed (at most one extra M*N*sizeof(out)
-        # write).
-        return K >= 2048
+        # Small-K GEMMs usually do not benefit from SplitK, so the configured
+        # K bound is the only filter we apply. ``y_is_zeroed=True`` stays safe
+        # even when AITER doesn't use SplitK at a given M: the GEMM just
+        # overwrites a buffer the producer pre-zeroed (at most one extra
+        # M*N*sizeof(out) write).
+        return K >= min_k
 
     return extra_check
 
@@ -393,6 +393,7 @@ def _make_2_input_producer_pattern(
     producer: ProducerSpec,
     gemm: GemmSpec,
     output_dtype: torch.dtype,
+    min_k: int,
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Build (pattern, replacement, example_inputs, extra_check) for a
     producer that takes exactly two tensor inputs (x, weight) plus
@@ -465,7 +466,7 @@ def _make_2_input_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(gemm),
+        _make_extra_check(gemm, min_k),
     )
 
 
@@ -473,6 +474,7 @@ def _make_2_input_with_residual_producer_pattern(
     producer: ProducerSpec,
     gemm: GemmSpec,
     output_dtype: torch.dtype,
+    min_k: int,
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Builder for residual-add + RMSNorm + group-quant producers.
 
@@ -552,7 +554,7 @@ def _make_2_input_with_residual_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(gemm),
+        _make_extra_check(gemm, min_k),
     )
 
 
@@ -560,6 +562,7 @@ def _make_act_mul_group_quant_producer_pattern(
     producer: ProducerSpec,
     gemm: GemmSpec,
     output_dtype: torch.dtype,
+    min_k: int,
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Builder for `rocm_aiter_act_mul_and_fp8_group_quant(x, group_size)`.
 
@@ -618,7 +621,7 @@ def _make_act_mul_group_quant_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(gemm),
+        _make_extra_check(gemm, min_k),
     )
 
 
@@ -626,6 +629,7 @@ def _make_group_quant_producer_pattern(
     producer: ProducerSpec,
     gemm: GemmSpec,
     output_dtype: torch.dtype,
+    min_k: int,
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Builder for `rocm_aiter_group_fp8_quant(x, group_size)` producers.
 
@@ -682,7 +686,7 @@ def _make_group_quant_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(gemm),
+        _make_extra_check(gemm, min_k),
     )
 
 
@@ -690,6 +694,7 @@ def _make_gated_producer_pattern(
     producer: ProducerSpec,
     gemm: GemmSpec,
     output_dtype: torch.dtype,
+    min_k: int,
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Builder for gated producers: `(x, z, weight, eps, group_size)`.
 
@@ -750,7 +755,7 @@ def _make_gated_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(gemm),
+        _make_extra_check(gemm, min_k),
     )
 
 
@@ -802,6 +807,9 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             self._debug_dump_path = None
 
         producers, gemms = build_default_registries()
+        min_k = (
+            config.compilation_config.pass_config.blockscale_splitk_zero_init_min_k
+        )
         self._registered = 0
         # Per-(producer, gemm) attribution. Populated alongside pattern
         # registration; consumed by ``__call__`` to walk the post-apply
@@ -832,7 +840,7 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
                 continue
             for gemm in gemms:
                 pattern, replacement, inputs, extra_check = builder(
-                    producer, gemm, output_dtype
+                    producer, gemm, output_dtype, min_k
                 )
                 pm.register_replacement(
                     pattern,
@@ -854,10 +862,11 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
         # producer/gemm registries actually shipped with the build.
         _logger.info(
             "BlockScaleSplitKZeroInitFusionPass: registered %d patterns "
-            "(producers=%d, gemms=%d)",
+            "(producers=%d, gemms=%d, min_k=%d)",
             self._registered,
             len(producers),
             len(gemms),
+            min_k,
         )
 
         self.dump_patterns(config, self.patterns)
