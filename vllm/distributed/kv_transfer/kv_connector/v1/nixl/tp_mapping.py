@@ -119,8 +119,8 @@ def compute_tp_mapping(
         for r in all_ranks
     }
 
-    # RFC #42082 (PR #42374): rank_offset_factor removed — head offset
-    # is now computed by spec.slice_for_tp_transfer() in _build_fa_remote.
+    # Head offset is computed by fa_head_slice() in _build_fa_remote via
+    # meta tensor narrowing (no rank_offset_factor needed).
 
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,
