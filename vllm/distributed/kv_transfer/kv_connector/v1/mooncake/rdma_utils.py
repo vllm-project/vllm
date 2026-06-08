@@ -160,9 +160,7 @@ def _first_roce_v2_ipv4_gid(device_path: Path) -> ipaddress.IPv4Address | None:
     for port_path in port_paths:
         try:
             gid_paths = sorted(
-                path
-                for path in (port_path / "gids").iterdir()
-                if path.name.isdigit()
+                path for path in (port_path / "gids").iterdir() if path.name.isdigit()
             )
         except OSError:
             continue
