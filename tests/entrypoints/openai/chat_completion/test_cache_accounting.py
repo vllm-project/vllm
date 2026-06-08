@@ -21,7 +21,7 @@ def chat_server_with_prefix_caching(request):
         "0.3",
     ]
     with RemoteOpenAIServer(
-        "Qwen/Qwen3-0.6B", args
+        "Qwen/Qwen3-0.6B", args, auto_port=True
     ) as remote_server:
         yield remote_server
 

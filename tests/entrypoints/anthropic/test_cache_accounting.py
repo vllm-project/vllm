@@ -18,7 +18,7 @@ def server():
         "--served-model-name",
         "claude-3-7-sonnet-latest",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, auto_port=True) as remote_server:
         yield remote_server
 
 
