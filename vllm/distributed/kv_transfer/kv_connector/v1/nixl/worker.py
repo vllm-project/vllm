@@ -95,7 +95,7 @@ class NixlConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
-        num_ssm_regions = len(self.block_len_per_layer) * 4 if self._has_mamba else 0
+        num_ssm_regions = sum(self._is_ssm_region) * 4 if self._has_mamba else 0
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -365,6 +365,10 @@ class NixlConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
+        # Per-region flag: True if the region is an SSM/Mamba layer.
+        # Populated during register_kv_caches; used to route FA descriptors
+        # to attention regions and Mamba descriptors to SSM regions.
+        self._is_ssm_region: list[bool] = []
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -844,6 +848,7 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
+        self._is_ssm_region = list[bool]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -898,8 +903,10 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
+                is_ssm = isinstance(layer_spec, MambaSpec)
+                self._is_ssm_region.append(is_ssm)
                 # Only record non-Mamba page sizes.
-                if isinstance(layer_spec, MambaSpec):
+                if is_ssm:
                     self.block_len_per_layer.append(
                         physical_page_size // self._physical_blocks_per_logical_kv_block
                     )
@@ -941,7 +948,14 @@ class NixlConnectorWorker:
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
-        self.num_regions = len(caches_data)
+        # FA regions count only attention layers.  SSM/Mamba regions are
+        # served by Mamba descriptors, not FA descriptors, and must be
+        # excluded here so that FA descriptor IDs do not reference them.
+        # (For hybrid MLA+GDN models, building FA descriptors for the GDN
+        # region with virtual K/V split would produce out-of-bounds addresses
+        # under heterogeneous TP, failing NIXL prepXferDlist.)
+        num_attention_base = len(caches_data) - sum(self._is_ssm_region)
+        self.num_regions = num_attention_base
 
         if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
@@ -1030,6 +1044,12 @@ class NixlConnectorWorker:
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
+            # Only build Mamba descriptors for SSM/Mamba regions.
+            # Attention/MLA regions do not contain conv or temporal state;
+            # building Mamba descriptors for them would reference addresses
+            # outside their registered memory, causing prepXferDlist failures.
+            if not self._is_ssm_region[i]:
+                continue
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = (
@@ -1081,6 +1101,10 @@ class NixlConnectorWorker:
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            # Only build Mamba descriptors for SSM/Mamba regions.
+            # Attention/MLA regions do not contain conv or temporal state.
+            if i < len(self._is_ssm_region) and not self._is_ssm_region[i]:
+                continue
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
@@ -1106,6 +1130,10 @@ class NixlConnectorWorker:
         num_blocks = self.num_blocks * block_size_ratio
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
+            # Only build FA descriptors for attention regions.
+            # SSM/Mamba regions are served by Mamba descriptors.
+            if i < len(self._is_ssm_region) and self._is_ssm_region[i]:
+                continue
             kv_block_len = (
                 self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
@@ -1147,6 +1175,10 @@ class NixlConnectorWorker:
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            # Only build FA descriptors for attention regions.
+            # SSM/Mamba regions are served by Mamba descriptors.
+            if i < len(self._is_ssm_region) and self._is_ssm_region[i]:
+                continue
             # Read our whole local region size from remote..
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
@@ -1367,9 +1399,12 @@ class NixlConnectorWorker:
         plan = self.tp_mappings[engine_id]
 
         ### (Optional) Register local agent memory regions. MLA is not split.
+        # For hybrid MLA+GDN models, SSM state is TP-sharded and must be split
+        # to assemble data from multiple remote P ranks even when MLA
+        # attention is replicated.
         if (
             tp_ratio < 0
-            and not self.use_mla
+            and (not self.use_mla or self._has_mamba)
             and tp_ratio not in self.src_xfer_handles_by_tp_ratio
         ):
             # Remote tp_size > local tp_size: read from multiple remote ranks.
@@ -2087,7 +2122,10 @@ class NixlConnectorWorker:
         # D may have to perform multiple reads from different remote ranks.
         # MLA opt: when P TP > D TP, only a single read is executed for
         # the first remote rank (cache is duplicated)..
-        if self.use_mla and tp_ratio < 0:
+        # For hybrid MLA+GDN models, SSM state is TP-sharded, so multiple
+        # remote ranks are still needed for the SSM group even when MLA
+        # attention only needs one rank.
+        if self.use_mla and tp_ratio < 0 and not self._has_mamba:
             assert len(read_specs) == 1
 
         for i, spec in enumerate(read_specs):
@@ -2101,7 +2139,11 @@ class NixlConnectorWorker:
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and not self.use_mla:
+            # For hybrid MLA+GDN with tp_ratio < 0, SSM needs split handles to
+            # assemble data from multiple remote ranks. MLA attention reads
+            # use the full region (replicated, single rank) but the split
+            # handle applies offset 0 + full chunk for FA when fa_num_splits=1.
+            if tp_ratio < 0 and (not self.use_mla or self._has_mamba):
                 assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
