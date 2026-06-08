@@ -139,7 +139,9 @@ class PassConfig:
     runtime (see `MiniMaxText01RMSNormTP.forward_qkv`). This flag is kept for
     backward compatibility and has no effect; it will be removed in v0.23."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    """Enable fused Qblock to fix this bug:
+
+**SEARCH:**K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
