@@ -87,3 +87,81 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     --decoder-hosts localhost \
     --decoder-ports 8200
 ```
+
+# CPU only setup
+### Build wheel from source for CPU
+ref: https://docs.vllm.ai/en/v0.17.1/getting_started/installation/cpu/#full-build
+we need to build with compilation (only takes a couple minutes) because the Clemson c4130 does not have AVX-512 so it fails if you run without compiling.
+```
+sudo apt-get update -y
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+```
+
+```
+uv venv --python 3.12 --seed --managed-python
+source .venv/bin/activate
+```
+
+```
+uv pip install -r requirements/cpu-build.txt --torch-backend cpu
+uv pip install -r requirements/cpu.txt --torch-backend cpu
+```
+
+```
+VLLM_TARGET_DEVICE=cpu uv pip install . --no-build-isolation
+```
+
+
+### setup environment for specific CPU
+Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to LD_PRELOAD: 
+```
+# install TCMalloc, Intel OpenMP is installed with vLLM CPU
+sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+
+# manually find the path
+sudo find / -iname *libtcmalloc_minimal.so.4
+sudo find / -iname *libiomp5.so
+TC_PATH=...
+IOMP_PATH=...
+
+# add them to LD_PRELOAD
+export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
+```
+
+for exmaple mine looks like:
+```
+echo $LD_PRELOAD
+/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/users/ctknab/villum/.venv/lib/libiomp5.so
+```
+
+ref: https://docs.vllm.ai/en/v0.6.0/getting_started/cpu-installation.html#related-runtime-environment-variables
+
+run `lscpu` to see the current architecture. on Clemson c4130, there are 2 NUMA nodes. So we should setup the CPU cores dedicated to the OpenMP threads. This is the NUMA node setup on this cpu:
+```
+NUMA:
+  NUMA node(s):              2
+  NUMA node0 CPU(s):         0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46
+  NUMA node1 CPU(s):         1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47
+```
+
+so, set
+```
+# Map worker threads exclusively to physical cores on Node 0 and Node 1
+export VLLM_CPU_OMP_THREADS_BIND="0,2,4,6,8,10,12,14,16,18,20,22|1,3,5,7,9,11,13,15,17,19,21,23"
+```
+
+### serving a model
+```
+VLLM_CPU_KVCACHE_SPACE=12 vllm serve allenai/OLMoE-1B-7B-0924     --dtype bfloat16     -tp 2     --distributed-executor-backend mp     --max-model-len 2048
+```
+
+then in a separate terminal, curl the endpoint
+```
+curl http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
+    "model": "allenai/OLMoE-1B-7B-0924",
+    "prompt": "The primary structural difference between a operating system process and a thread is that",
+    "max_tokens": 128,
+    "temperature": 0.5
+  }'
+```
