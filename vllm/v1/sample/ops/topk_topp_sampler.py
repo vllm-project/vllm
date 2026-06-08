@@ -111,20 +111,12 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
         ):
-            try:
-                import aiter.ops.sampling  # noqa: F401
-
-                self.aiter_ops = torch.ops.aiter
-                logger.info_once(
-                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
-                )
-                self.forward = self.forward_hip
-            except ImportError:
-                logger.warning_once(
-                    "aiter.ops.sampling is not available on ROCm. "
-                    "Falling back to forward_native implementation."
-                )
-                self.forward = self.forward_native
+            self.aiter_ops = None
+            self._aiter_ops_import_failed = False
+            logger.info_once(
+                "Using aiter sampler on ROCm (lazy import, sampling-only)."
+            )
+            self.forward = self.forward_hip
         else:
             self.forward = self.forward_native
 
@@ -211,6 +203,22 @@ class TopKTopPSampler(nn.Module):
 
         return sample_with_exponential_noise(probs, q), logits_to_return
 
+    def _get_aiter_ops(self):
+        if self._aiter_ops_import_failed:
+            return None
+        if self.aiter_ops is None:
+            try:
+                import aiter.ops.sampling  # noqa: F401
+            except ImportError:
+                self._aiter_ops_import_failed = True
+                logger.warning_once(
+                    "aiter.ops.sampling is not available on ROCm. "
+                    "Falling back to PyTorch-native implementation."
+                )
+                return None
+            self.aiter_ops = torch.ops.aiter
+        return self.aiter_ops
+
     def forward_hip(
         self,
         logits: torch.Tensor,
@@ -232,7 +240,10 @@ class TopKTopPSampler(nn.Module):
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
-        return self.aiter_sample(logits, k, p, generators), None
+        aiter_ops = self._get_aiter_ops()
+        if aiter_ops is None:
+            return self.forward_native(logits, generators, k, p)
+        return self.aiter_sample(logits, k, p, generators, aiter_ops), None
 
     def aiter_sample(
         self,
@@ -240,6 +251,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
         generators: dict[int, torch.Generator],
+        aiter_ops,
     ) -> torch.Tensor:
         """Sample from logits using aiter ops."""
         use_top_k = k is not None
@@ -247,7 +259,7 @@ class TopKTopPSampler(nn.Module):
         # Joint k+p path
         if use_top_p and use_top_k:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = self.aiter_ops.top_k_top_p_sampling_from_probs(
+            next_token_ids = aiter_ops.top_k_top_p_sampling_from_probs(
                 probs,
                 None,
                 *_to_tensor_scalar_tuple(k),
@@ -258,14 +270,14 @@ class TopKTopPSampler(nn.Module):
         # Top-p only path
         elif use_top_p:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
+            next_token_ids = aiter_ops.top_p_sampling_from_probs(
                 probs, None, *_to_tensor_scalar_tuple(p), deterministic=True
             )
             return next_token_ids.view(-1)
         # Top-k only path
         elif use_top_k:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
-            renorm_probs = self.aiter_ops.top_k_renorm_probs(
+            renorm_probs = aiter_ops.top_k_renorm_probs(
                 probs, *_to_tensor_scalar_tuple(k)
             )
             return torch.multinomial(renorm_probs, num_samples=1).view(-1)
