@@ -2248,6 +2248,13 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
+        from vllm.platforms.rocm import on_gfx950
+
+        # On gfx950 (MI350), the AITER CK / CK-tile a8w8 blockscale path is
+        # better tuned than the Triton path for these DeepSeek-V3 shapes
+        # (fused qkv_a_proj and MLA o_proj), so route them to CK.
+        if on_gfx950() and (n, k) in {(2112, 7168), (7168, 2048)}:
+            return False
         return (n, k) in [
             (1024, 8192),
             (2112, 7168),
