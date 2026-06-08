@@ -135,6 +135,19 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
+    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+        """Per-head content sizes for each transfer part.
+
+        Returns a list of byte sizes, one per logical transfer part.
+        The connector iterates over parts to build one descriptor set each.
+
+        Args:
+            virtually_split: True when K/V are interleaved in one region
+                and must be addressed as separate halves (FlashInfer
+                blocks-first layout).
+        """
+        raise NotImplementedError
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
@@ -399,6 +412,14 @@ class AttentionSpec(KVCacheSpec):
         local_h_len = overlap_end - overlap_start
         return [tensor.narrow(_DIM4_H, local_h_start, local_h_len)]
 
+    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+        if self.kv_quant_mode.is_nvfp4:
+            return [self.state_content_size_bytes]
+        per_part = self.head_size * get_dtype_size(self.dtype)
+        if virtually_split:
+            return [per_part, per_part]
+        return [per_part]
+
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
@@ -656,6 +677,12 @@ class MLAAttentionSpec(FullAttentionSpec):
     ) -> list[torch.Tensor]:
         return [tensor]
 
+    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+        if virtually_split:
+            half = self.state_content_size_bytes // 2
+            return [half, half]
+        return [self.state_content_size_bytes]
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -880,6 +907,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     ) -> list[torch.Tensor]:
         return [tensor]
 
+    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+        if virtually_split:
+            half = self.state_content_size_bytes // 2
+            return [half, half]
+        return [self.state_content_size_bytes]
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -987,6 +1020,12 @@ class MambaSpec(KVCacheSpec):
         total_num_kv_heads: int,
     ) -> list[torch.Tensor]:
         return [tensor]
+
+    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+        if virtually_split:
+            half = self.state_content_size_bytes // 2
+            return [half, half]
+        return [self.state_content_size_bytes]
 
     @property
     def page_size_bytes(self) -> int:

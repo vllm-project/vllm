@@ -76,6 +76,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
     KVCacheLayout,
+    KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
     num_states_for,
@@ -88,6 +89,129 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+
+def build_region_meta(
+    spec: KVCacheSpec,
+    num_blocks: int,
+    block_size: int,
+    layout: KVCacheLayout,
+    block_stride_bytes: int,
+    region_content_bytes: int,
+    virtually_split: bool,
+    num_heads_override: int | None = None,
+) -> list[torch.Tensor]:
+    """Build 4D ``[B, H, N, C]`` meta tensors for one KV cache region.
+
+    Returns one meta tensor per transfer part (e.g. 2 for virtually-split
+    K/V, 1 otherwise).  When virtually_split is True, the second (V) meta
+    has storage_offset encoding the V start position so that
+    _view_to_descriptors picks it up automatically — no caller branching.
+
+    H dimension encodes heads so that fa_head_slice can narrow along H to
+    produce the correct storage_offset for heterogeneous TP:
+
+    - AttentionSpec: H = region heads (derived from head_size), C = head_size
+    - MLA: H = 1, C = full content (no head sharding)
+    - Mamba structural placeholder (num_heads_override): H = override, C derived
+
+    Args:
+        num_heads_override: forces H to this value (for Mamba structural
+            placeholder in FA remote path).
+    """
+    dtype = getattr(spec, "dtype", torch.int8)
+    elem = get_dtype_size(dtype)
+    N = num_states_for(block_size, spec.tokens_per_state)
+
+    num_parts = 2 if virtually_split else 1
+    content_per_part = region_content_bytes // num_parts
+
+    if num_heads_override is not None:
+        H = num_heads_override
+        C = content_per_part // (N * H * elem)
+        if C == 0:
+            C = 1
+    else:
+        head_size = getattr(spec, "head_size", None)
+        if head_size is not None and isinstance(spec, AttentionSpec):
+            C = head_size
+            C_bytes = head_size * elem
+            H = content_per_part // (N * C_bytes)
+            if H == 0:
+                H = 1
+                C = content_per_part // (N * elem)
+        else:
+            H = 1
+            C = content_per_part // (N * elem)
+            if C == 0:
+                C = 1
+
+    order = layout.layer_stride_order
+    inv = [list(order).index(i) for i in range(4)]
+
+    metas: list[torch.Tensor] = []
+    for p in range(num_parts):
+        logical_4d = (num_blocks, H, N, C)
+        phys_shape = tuple(logical_4d[o] for o in order)
+        phys_strides = list(
+            torch.empty(phys_shape, device="meta").stride())
+        phys_strides[inv[_DIM4_B]] = block_stride_bytes // elem
+
+        part_offset_elems = p * content_per_part // elem
+
+        meta = torch.as_strided(
+            torch.empty(1, dtype=dtype, device="meta"),
+            size=phys_shape,
+            stride=tuple(phys_strides),
+            storage_offset=part_offset_elems,
+        )
+        metas.append(meta.permute(*inv))
+
+    return metas
+
+
+def fa_head_slice(
+    meta: torch.Tensor,
+    my_tp: int,
+    my_rank: int,
+    other_tp: int,
+    other_rank: int,
+    total_num_kv_heads: int,
+) -> torch.Tensor:
+    """Narrow a 4D [B, H, N, C] meta along H for FA TP transfer.
+
+    Spec-independent head-based narrowing: computes the overlap between
+    my local heads and the remote rank's heads, then narrows along H.
+    The resulting storage_offset encodes the byte offset into the remote
+    block for heterogeneous TP.
+
+    For H=1 (MLA): returns unchanged (offset=0).
+    For H=total_kv_heads (Attention/structural placeholder): correct offset.
+    """
+    H = meta.shape[_DIM4_H]
+    if H <= 1 or my_tp <= other_tp:
+        return meta
+
+    if total_num_kv_heads >= my_tp:
+        my_start = my_rank * total_num_kv_heads // my_tp
+        my_end = (my_rank + 1) * total_num_kv_heads // my_tp
+    else:
+        my_start, my_end = 0, total_num_kv_heads
+
+    if total_num_kv_heads >= other_tp:
+        other_start = other_rank * total_num_kv_heads // other_tp
+        other_end = (other_rank + 1) * total_num_kv_heads // other_tp
+    else:
+        other_start, other_end = 0, total_num_kv_heads
+
+    overlap_start = max(my_start, other_start)
+    overlap_end = min(my_end, other_end)
+    if overlap_start >= overlap_end:
+        return meta.narrow(_DIM4_H, 0, 0)
+
+    local_h_start = overlap_start - other_start
+    local_h_len = overlap_end - overlap_start
+    return meta.narrow(_DIM4_H, local_h_start, local_h_len)
 
 
 class NixlConnectorWorker:
@@ -857,9 +981,12 @@ class NixlConnectorWorker:
         # under layouts that interleave layers within a block (BLHNC/BHLNC)
         # or use page_size_padded (MLA alignment).
         self.block_stride_per_layer = list[int]()
+
+        # Per-region KVCacheSpec for _reshape_region and slice_for_tp_transfer.
+        self.spec_per_region = list[KVCacheSpec]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
-            # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
+            # that of FI, with K/V (or conv/ssm) interleaved within each block.
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
@@ -932,6 +1059,7 @@ class NixlConnectorWorker:
                     self.block_stride_per_layer.append(
                         cache.stride(0) * cache.element_size()
                     )
+                self.spec_per_region.append(layer_spec)
 
                 if cache.shape[0] != num_blocks:
                     raise AssertionError(
@@ -1132,91 +1260,36 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build local FA descriptors for all layers.
 
-        RFC #42082 (PR #42374): uses _build_region_meta_4d +
-        _view_to_descriptors, matching the remote descriptor path.
+        Pure meta-tensor approach: build_region_meta absorbs virtually_split
+        (V offset encoded in storage_offset). After construction,
+        _view_to_descriptors extracts descriptors uniformly.
         """
         assert self.transfer_topo is not None
         num_blocks = self.num_blocks * block_size_ratio
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-
-        fa_spec = self._find_fa_spec()
         layout = KVCacheLayout.from_layout_string(self.kv_cache_layout)
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
-            block_len = self.block_len_per_layer[i]
-            region_len = block_len // 2 if virtually_split else block_len
+            spec = self.spec_per_region[i]
 
-            meta_4d = self._build_region_meta_4d(
+            metas = build_region_meta(
+                spec=spec,
                 num_blocks=num_blocks,
-                num_heads=fa_spec.num_heads,
                 block_size=self.block_size,
-                tokens_per_state=fa_spec.tokens_per_state,
-                block_len_bytes=region_len // block_size_ratio,
-                block_stride_bytes=(self.block_stride_per_layer[i] // block_size_ratio),
-                dtype=fa_spec.dtype,
                 layout=layout,
+                block_stride_bytes=(
+                    self.block_stride_per_layer[i] // block_size_ratio),
+                region_content_bytes=(
+                    self.block_len_per_layer[i] // block_size_ratio),
+                virtually_split=virtually_split,
             )
 
-            result.extend(self._view_to_descriptors(meta_4d, base_addr, self.device_id))
+            for meta in metas:
+                result.extend(self._view_to_descriptors(
+                    meta, base_addr, self.device_id))
 
-            if virtually_split:
-                v_base = base_addr + block_len // 2
-                result.extend(
-                    self._view_to_descriptors(meta_4d, v_base, self.device_id)
-                )
         return result
-
-    def _find_fa_spec(self) -> AttentionSpec:
-        """Return the first AttentionSpec from the layer specs."""
-        for spec in self._layer_specs.values():
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                inner = next(iter(spec.kv_cache_specs.values()))
-                if isinstance(inner, AttentionSpec):
-                    return inner
-            elif isinstance(spec, AttentionSpec):
-                return spec
-        raise AssertionError("No AttentionSpec found")
-
-    @staticmethod
-    def _build_region_meta_4d(
-        num_blocks: int,
-        num_heads: int,
-        block_size: int,
-        tokens_per_state: int,
-        block_len_bytes: int,
-        block_stride_bytes: int,
-        dtype: torch.dtype,
-        layout: KVCacheLayout,
-    ) -> torch.Tensor:
-        """Build a 4D ``[B, H, N, C]`` meta tensor for one KV cache region.
-
-        RFC #42082 (PR #42374): uses KVCacheLayout.layer_stride_order and
-        num_states_for — the same canonical vocabulary as reshape_kv_cache.
-
-        This is used in place of reshape_kv_cache for per-region descriptors
-        because FLASH_ATTN registers K and V as separate regions (C = hs),
-        while reshape_kv_cache's C is tied to spec.state_content_size_bytes
-        (which includes both K and V, C = 2*hs). The C here is derived from
-        block_len_bytes so it matches the actual region size.
-        """
-        elem = get_dtype_size(dtype)
-        n_states = num_states_for(block_size, tokens_per_state)
-        c_elems = block_len_bytes // (num_heads * n_states * elem)
-
-        logical_4d = (num_blocks, num_heads, n_states, c_elems)
-        layer_order = layout.layer_stride_order
-        phys_shape = tuple(logical_4d[p] for p in layer_order)
-        phys_strides = list(torch.empty(phys_shape, device="meta").stride())
-        inv = [list(layer_order).index(i) for i in range(4)]
-        phys_strides[inv[_DIM4_B]] = block_stride_bytes // elem
-
-        meta = torch.as_strided(
-            torch.empty(1, dtype=dtype, device="meta"),
-            size=phys_shape,
-            stride=tuple(phys_strides),
-        )
-        return meta.permute(*inv)
 
     @staticmethod
     def _view_to_descriptors(
@@ -1243,94 +1316,65 @@ class NixlConnectorWorker:
         plan: TPMapping,
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
-        remote_tp_rank: int,
-        remote_tp_size: int,
+        remote_tp_rank: int = 0,
+        remote_tp_size: int = 1,
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for all layers.
 
-        RFC #42082 (PR #42374): uses slice_for_tp_transfer to determine
-        the head overlap, replacing manual rank_offset_factor * kv_block_len
-        byte arithmetic with tensor.narrow on the H dim.
+        Pure meta-tensor approach: build_region_meta absorbs all per-layer
+        complexity (spec type, virtually_split, head count).  After
+        construction, fa_head_slice + _view_to_descriptors extract
+        descriptors uniformly — no conditionals.
         """
         assert self.transfer_topo is not None
-        topo = self.transfer_topo
-        total_kv_heads = topo.total_num_kv_heads
-        local_tp = topo.tp_size
-        local_rank = topo.tp_rank
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+        my_tp = self.transfer_topo.tp_size
+        my_rank = self.transfer_topo.tp_rank
 
-        fa_spec = self._find_fa_spec()
-
-        # Remote per-rank head count.
-        if self.use_mla:
-            remote_num_heads = fa_spec.num_heads
-        elif total_kv_heads >= remote_tp_size:
-            remote_num_heads = total_kv_heads // remote_tp_size
-        else:
-            remote_num_heads = total_kv_heads
-
-        layout = KVCacheLayout.from_layout_string(nixl_agent_meta.kv_cache_layout)
+        layout = KVCacheLayout.from_layout_string(
+            nixl_agent_meta.kv_cache_layout)
         num_blocks = nixl_agent_meta.num_blocks
         device_id = nixl_agent_meta.device_id
-
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
+
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            block_len = nixl_agent_meta.block_lens[i]
-            # For virtually_split, block_len covers K+V; use half for
-            # the meta tensor since K and V occupy separate halves.
-            region_len = block_len // 2 if virtually_split else block_len
+            spec = self.spec_per_region[i]
+            page_size = nixl_agent_meta.block_lens[i]
 
-            meta_4d = self._build_region_meta_4d(
+            # Remote's full content per block for this layer.
+            # For non-vsplit (FA): page = K region only.
+            # For vsplit (FlashInfer): page = K+V interleaved.
+            # build_region_meta splits internally when virtually_split=True.
+            # fa_head_slice narrows to local heads → correct payload.
+            remote_content = page_size
+
+            # Structural placeholder: Mamba in FA path uses attention H
+            # so fa_head_slice gives the correct proportional TP offset.
+            h_override = (
+                total_num_kv_heads if isinstance(spec, MambaSpec) else None
+            )
+
+            metas = build_region_meta(
+                spec=spec,
                 num_blocks=num_blocks,
-                num_heads=remote_num_heads,
                 block_size=nixl_agent_meta.block_size,
-                tokens_per_state=fa_spec.tokens_per_state,
-                block_len_bytes=region_len,
-                block_stride_bytes=nixl_agent_meta.block_strides[i],
-                dtype=fa_spec.dtype,
                 layout=layout,
+                block_stride_bytes=page_size,
+                region_content_bytes=remote_content,
+                virtually_split=virtually_split,
+                num_heads_override=h_override,
             )
 
-            slices = fa_spec.slice_for_tp_transfer(
-                meta_4d,
-                my_tp=remote_tp_size,
-                my_rank=remote_tp_rank,
-                other_tp=local_tp,
-                other_rank=local_rank,
-                total_num_kv_heads=total_kv_heads,
-            )
-            if not slices:
-                continue
-
-            view = slices[0]
-            if block_size_ratio > 1:
-                view = torch.as_strided(
-                    torch.empty(1, dtype=view.dtype, device="meta"),
-                    size=(
-                        view.shape[_DIM4_B] * block_size_ratio,
-                        view.shape[_DIM4_H],
-                        view.shape[2] // block_size_ratio,
-                        view.shape[3],
-                    ),
-                    stride=(
-                        view.stride(_DIM4_B) // block_size_ratio,
-                        view.stride(_DIM4_H)
-                        if view.stride(_DIM4_H) <= view.stride(2)
-                        else view.stride(_DIM4_H) // block_size_ratio,
-                        view.stride(2),
-                        view.stride(3),
-                    ),
-                    storage_offset=view.storage_offset(),
+            for meta in metas:
+                sliced = fa_head_slice(
+                    meta, my_tp, my_rank,
+                    remote_tp_size, remote_tp_rank,
+                    total_num_kv_heads,
                 )
+                result.extend(
+                    self._view_to_descriptors(sliced, base_addr, device_id))
 
-            # K descriptors (or full K+V when not virtually split).
-            result.extend(self._view_to_descriptors(view, base_addr, device_id))
-
-            if virtually_split:
-                # V occupies the second half of each block, starting at
-                # base_addr + block_len // 2 within each block.
-                v_base = base_addr + block_len // 2
-                result.extend(self._view_to_descriptors(view, v_base, device_id))
         return result
 
     def register_local_xfer_handler(
@@ -1361,7 +1405,11 @@ class NixlConnectorWorker:
             self.device_id,
         )
         if self._has_mamba:
-            assert self.num_descs == len(blocks_data)
+            assert self.num_descs == len(blocks_data), (
+                f"num_descs={self.num_descs} != len(blocks_data)="
+                f"{len(blocks_data)}, num_regions={self.num_regions}, "
+                f"num_blocks={self.num_blocks}, ratio={block_size_ratio}"
+            )
             # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
             # is unnecessary — a single conv desc per block suffices.  Consider
             # adding a fast path that falls back to the standard 2-region
@@ -2551,49 +2599,6 @@ class NixlConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
         return result
-
-    def get_backend_aware_kv_block_len(
-        self, layer_idx: int, first_split: bool = True, mamba_view: bool = False
-    ) -> int:
-        """
-        Get the block length for one K/V element (K and V have the same size).
-
-        For FA and other backends, this is equal to the length of the whole
-        block, as K and V are in separate regions.
-        For FlashInfer, this is half the length of the whole block, as K and V
-        share the same region.
-        Similarly, for SSM-based models, state and conv are interleaved, but crucially
-        the their size differs.
-        Reference diagram:
-                            KVCacheTensor (Shared)
-                               /       \\
-                              /         \\
-                             /           \\
-        Attention (FlashInfer) View      Mamba View
-                  |                          |
-                  |                          |
-           +-------------------+         +-------------------+
-           | KVCacheTensor     |         | KVCacheTensor      |
-           |                   |         |                    |
-           |<----- page ------>|         |<----- page ------->|
-           |       size        |         |       size         |
-           |  Key 0  |  Val 0  |         |Conv 0  |   SSM 0   |
-           |  Key 1  |  Val 1  |         |Conv 1  |   SSM 1   |
-           |   ...   |   ...   |         |  ...   |    ...    |
-           | Key N-2 | Val N-2 |         |Conv N-2|   SSM N-2 |
-           | Key N-1 | Val N-1 |         |Conv N-1|   SSM N-1 |
-           +-------------------+         +--------------------+
-           |1st_split-2nd_split|         |1st_split-2nd_split |
-        """
-        assert self.transfer_topo is not None
-        if self.transfer_topo.virtually_split_kv_in_blocks:
-            if mamba_view:
-                block_len = self._mamba_ssm_size[not first_split]
-            else:
-                block_len = self.block_len_per_layer[layer_idx] // 2
-        else:
-            block_len = self.block_len_per_layer[layer_idx]
-        return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
