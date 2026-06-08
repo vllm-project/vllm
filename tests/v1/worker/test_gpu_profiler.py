@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
 import pytest
 
-from vllm.config import ProfilerConfig
+from vllm.config import CUDAGraphMode, ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import WorkerProfiler
+from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
