@@ -528,7 +528,7 @@ class ModelConfig:
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")
-            if not self.enable_cumem_allocator:
+            if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
                 logger.info_once(
                     "Enabling cumem allocator because sleep mode requires it."
                 )

@@ -695,6 +695,59 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def moe_gptq_gemm_rdna3(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    torch.ops._rocm_C.moe_gptq_gemm_rdna3(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna3")
+    def _moe_gptq_gemm_rdna3_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
     @register_fake("_C::allspark_w8a16_gemm")
@@ -868,9 +921,10 @@ def cutlass_scaled_mm_azp(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    :param azp_adj: In the per-tensor case, this should include the azp.
-    Always per-channel.
-    :param azp: Only set in the per-token case. Per-token if set.
+    Args:
+        azp_adj: In the per-tensor case, this should include the azp.
+            Always per-channel.
+        azp: Only set in the per-token case. Per-token if set.
     """
     assert b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
@@ -2758,7 +2812,9 @@ def swap_blocks_batch(
     Batch version of swap_blocks: submit all copies in a single driver call.
 
     Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
-    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    of sizes[i] bytes. All three tensors must be CPU tensors with the
+    platform-appropriate pointer dtype: int64 on CUDA/ROCm (required by
+    cache_kernels.cu) and uint64 on XPU (required by the XPU DMA engine).
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
 
@@ -2768,9 +2824,12 @@ def swap_blocks_batch(
         writing to the source. Defaults to False (STREAM ordering), which
         is always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(
-        src_ptrs, dst_ptrs, sizes, is_src_access_order_any
-    )
+    if current_platform.is_xpu():
+        torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    else:
+        torch.ops._C_cache_ops.swap_blocks_batch(
+            src_ptrs, dst_ptrs, sizes, is_src_access_order_any
+        )
 
 
 def convert_fp8(
@@ -3478,10 +3537,11 @@ class CPUDNNLGEMMHandler:
         self.handler_tensor: torch.Tensor | None = None
         self.n = -1
         self.k = -1
+        self.dtor = torch.ops._C.release_dnnl_matmul_handler
 
     def __del__(self):
         if self.handler_tensor is not None:
-            torch.ops._C.release_dnnl_matmul_handler(self.handler_tensor.item())
+            self.dtor(self.handler_tensor.item())
 
 
 _supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
@@ -3886,9 +3946,12 @@ def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     Note that sylvester hadamard transforms are also symmetric, which means that
     this function is also applies the (transpose <=> inverse) transform.
 
-    :param x: value to be transformed inplace
-    :param inplace: modify value in place
-    :return: value after transformation
+    Args:
+        x: value to be transformed inplace
+        inplace: modify value in place
+
+    Returns:
+        value after transformation
     """
     return torch.ops._C.hadacore_transform(x, inplace)
 

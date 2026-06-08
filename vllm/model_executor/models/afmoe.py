@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -640,7 +641,7 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.num_moe_layers = config.num_hidden_layers - config.num_dense_layers
         self.num_expert_groups = config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):

@@ -42,6 +42,8 @@ _CPU_ARCH_PREFER_MIXED_BATCH = (
 
 
 class CPUAttentionBackend(AttentionBackend):
+    forward_includes_kv_cache_update: bool = False
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -106,7 +108,6 @@ class CPUAttentionBackend(AttentionBackend):
 
 @dataclass
 class CPUAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -217,7 +218,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
 
         attn_metadata = CPUAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -345,26 +345,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            ops.cpu_attn_reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                attn_metadata.isa,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                kv_cache_dtype=self.kv_cache_dtype,
-            )
-
         if attn_metadata.use_sdpa_prefill:
             assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
             num_decode_tokens = attn_metadata.num_decode_tokens
@@ -400,6 +380,35 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
+        isa = _get_attn_isa(
+            key.dtype, key_cache.shape[2], self.head_size, self.kv_cache_dtype
+        )
+        ops.cpu_attn_reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            isa,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
     def _run_sdpa_forward(
         self,

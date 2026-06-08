@@ -653,7 +653,8 @@ class EplbState:
             )
 
         for ls in layer_states:
-            ls.should_record_tensor = self.should_record_tensor
+            if ls is not None:
+                ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,
