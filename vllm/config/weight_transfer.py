@@ -9,5 +9,7 @@ from vllm.config.utils import config
 class WeightTransferConfig:
     """Configuration for weight transfer during RL training."""
 
-    backend: Literal["nccl", "ipc"] = "nccl"
-    """The backend to use for weight transfer."""
+    backend: Literal["nccl", "ipc"] | str = "nccl"
+    """The backend to use for weight transfer. Validated against the
+    `WeightTransferEngineFactory` registry at engine creation time.
+    """

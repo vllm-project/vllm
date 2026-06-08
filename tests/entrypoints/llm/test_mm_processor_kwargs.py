@@ -11,7 +11,9 @@ from vllm import LLM, SamplingParams
 
 def _make_mock_llm() -> LLM:
     llm = object.__new__(LLM)
-    llm.model_config = SimpleNamespace(runner_type="generate")
+    llm.model_config = SimpleNamespace(
+        runner_type="generate", enable_prompt_embeds=False
+    )
     return llm
 
 
@@ -70,6 +72,51 @@ def test_chat_forwards_mm_processor_kwargs() -> None:
 
     assert outputs == ["ok"]
     assert llm._run_chat.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
+
+
+def test_enqueue_chat_forwards_mm_processor_kwargs() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"do_pan_and_scan": True}
+    sampling_params = SamplingParams(max_tokens=1)
+    messages = [{"role": "user", "content": "hello"}]
+
+    llm._add_chat_requests = Mock(return_value=["req-0"])
+
+    request_ids = llm.enqueue_chat(
+        messages,
+        sampling_params=sampling_params,
+        use_tqdm=False,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert request_ids == ["req-0"]
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
+
+
+def test_run_chat_forwards_mm_processor_kwargs() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"num_crops": 8}
+    sampling_params = SamplingParams(max_tokens=1)
+    messages = [{"role": "user", "content": "hello"}]
+    sentinel_output = ["done"]
+
+    llm._add_chat_requests = Mock()
+    llm._run_engine = Mock(return_value=sentinel_output)
+
+    outputs = llm._run_chat(
+        messages=messages,
+        params=sampling_params,
+        output_type=object,
+        use_tqdm=False,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert outputs == sentinel_output
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
@@ -145,7 +192,7 @@ def test_preprocess_cmpl_applies_mm_processor_kwargs_to_renderer(
     llm.renderer = renderer
 
     monkeypatch.setattr(
-        "vllm.entrypoints.llm.parse_model_prompt",
+        "vllm.entrypoints.offline_utils.parse_model_prompt",
         lambda _model_config, parsed_prompt: parsed_prompt,
     )
 
@@ -179,7 +226,7 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
     llm.renderer = renderer
 
     monkeypatch.setattr(
-        "vllm.entrypoints.llm.parse_model_prompt",
+        "vllm.entrypoints.offline_utils.parse_model_prompt",
         lambda _model_config, parsed_prompt: parsed_prompt,
     )
 

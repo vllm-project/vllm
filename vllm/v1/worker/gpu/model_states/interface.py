@@ -17,6 +17,24 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
+class ModelSpecificAttnMetadata:
+    """Base class for model-specific attention metadata."""
+
+    def get_extra_common_attn_kwargs(
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {}
+
+    def get_extra_attn_kwargs(
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {}
+
+
 class ModelState(ABC):
     @abstractmethod
     def __init__(
@@ -38,12 +56,14 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def postprocess_state(
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+    ) -> None:
+        return None
+
     @abstractmethod
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> torch.Tensor | None:
         raise NotImplementedError
 

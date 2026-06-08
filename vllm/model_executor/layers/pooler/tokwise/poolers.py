@@ -118,7 +118,7 @@ def pooler_for_token_classify(
     pooling: TokenPoolingMethod | TokenPoolingFn | None = None,
     classifier: ClassifierFn | None = None,
     act_fn: PoolerActivation | None = None,
-):
+) -> TokenPooler:
     if pooling is None:
         pooling = get_tok_pooling_method(pooler_config.get_tok_pooling_type())
 
