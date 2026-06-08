@@ -79,6 +79,9 @@ class EagleMistralLarge3Model(DeepseekV2Model):
             getattr(config, dim, 0) == 0
             for dim in ("qk_nope_head_dim", "qk_rope_head_dim")
         )
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
