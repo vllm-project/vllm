@@ -7,19 +7,13 @@ import openai
 import pytest
 import pytest_asyncio
 
+from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.utils import encode_image_url
 
 # Use a small vision model for testing
 MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
 MAXIMUM_IMAGES = 2
-# Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_ASSETS = [
-    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-    "Grayscale_8bits_palette_sample_image.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/Grayscale_8bits_palette_sample_image.png",
-    "1280px-Venn_diagram_rgb.svg.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/1280px-Venn_diagram_rgb.svg.png",
-    "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
-]
 
 
 @pytest.fixture(scope="module")
