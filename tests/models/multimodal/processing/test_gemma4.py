@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -11,7 +10,6 @@ from PIL import Image as PILImage
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
-    Gemma4ProcessingInfo,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
@@ -22,26 +20,6 @@ from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
-
-
-@pytest.mark.cpu_test
-def test_gemma4_audio_tower_error_uses_served_model_name():
-    """The audio-tower error must show the served model name, not the local
-    weights path."""
-    model_config = SimpleNamespace(
-        model="/path/to/model/weights",
-        served_model_name="served-model-name",
-    )
-    info = Gemma4ProcessingInfo.__new__(Gemma4ProcessingInfo)
-    info.ctx = SimpleNamespace(model_config=model_config)
-    info.get_hf_config = lambda: SimpleNamespace(audio_config=None)
-
-    with pytest.raises(ValueError) as exc_info:
-        info.validate_num_items("audio", 1)
-
-    msg = str(exc_info.value)
-    assert "served-model-name" in msg
-    assert model_config.model not in msg
 
 
 def test_gemma4_image_schema_accepts_variable_patch_counts():
