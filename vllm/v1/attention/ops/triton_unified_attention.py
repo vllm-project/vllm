@@ -469,6 +469,10 @@ def kernel_unified_attention(
         K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
         V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
+        if USE_TD:
+            K = tl.where(tile_mask[None, :], K, 0.0)
+            V = tl.where(tile_mask[:, None], V, 0.0)
+            
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
             scale_idx = (
