@@ -49,7 +49,6 @@ logger = init_logger(__name__)
 
 @triton.jit
 def fused_moe_nvfp4_emulation_kernel(
-    # Pointers to matrices
     a_ptr,
     b_ptr,
     c_ptr,
@@ -59,7 +58,6 @@ def fused_moe_nvfp4_emulation_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
-    # Matrix dimensions
     N: tl.constexpr,
     K: tl.constexpr,
     EM,
@@ -79,7 +77,6 @@ def fused_moe_nvfp4_emulation_kernel(
     stride_bsk,
     stride_bsn,
     block_k_diviable: tl.constexpr,
-    # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -333,17 +330,9 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
         GROUP_SIZE_M=config["GROUP_SIZE_M"],
-        # Triton HIP defaults: num_warps=4, num_stages=2,
-        # waves_per_eu=0, matrix_instr_nonkdim=0, kpack=1
-        num_warps=config.get("num_warps", 4),
-        num_stages=config.get("num_stages", 2),
-        waves_per_eu=config.get("waves_per_eu", 0),
-        matrix_instr_nonkdim=config.get("matrix_instr_nonkdim", 0),
-        kpack=config.get("kpack", 1),
     )
 
 
-# TODO: There is actually no support for tuning of the underlying triton hyperparameters in benchmarks/kernels/benchmark_moe.py, to be added.
 class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     """
     Extension of TritonExperts to support emulated NVFP4 MoE experts.
@@ -444,6 +433,8 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         if global_num_experts == -1:
             global_num_experts = E
 
+        # TODO: There is actually no support for tuning of the underlying triton
+        # hyperparameters in benchmarks/kernels/benchmark_moe.py, to be added.
         config = try_get_optimal_moe_config(
             w1.size(),
             w2.size(),
