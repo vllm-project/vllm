@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import (
@@ -38,6 +39,25 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """Return content token IDs, stripping any re-emitted end tokens."""
+        if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
+            return []
+        after_end = input_ids[input_ids.index(self.end_token_id) + 1:]
+        return [tid for tid in after_end if tid != self.end_token_id]
+
+    def extract_reasoning(
+        self,
+        model_output: str,
+        request: "ChatCompletionRequest | ResponsesRequest",
+    ) -> tuple[str | None, str | None]:
+        if self.end_token not in model_output:
+            return model_output, None
+        reasoning, _, content = model_output.partition(self.end_token)
+        # Strip any subsequent </think> the model re-emits in the content block
+        content = content.replace(self.end_token, "")
+        return reasoning, content or None
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -60,8 +80,10 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
         # Check if end token has already appeared in previous tokens
         # meaning we're past the reasoning phase
         if self.end_token_id in previous_token_ids:
-            # We're past the reasoning phase, this is content
-            return DeltaMessage(content=delta_text)
+            # Strip any re-emitted </think> tokens (model sometimes re-generates
+            # the end token in a multi-token delta, bypassing the single-token guard)
+            text = delta_text.replace(self.end_token, "")
+            return DeltaMessage(content=text if text else None)
 
         # Check if end token is in delta tokens
         if self.end_token_id in delta_token_ids:
