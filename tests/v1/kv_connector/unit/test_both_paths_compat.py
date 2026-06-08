@@ -28,8 +28,8 @@ from vllm.v1.kv_cache_interface import (
     get_dtype_size,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-    build_region_meta,
     NixlConnectorWorker,
+    build_region_meta,
 )
 
 
@@ -52,16 +52,24 @@ class FakeSpec:
             return self.state_content_size_bytes_val
         return self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+        mamba_view: bool = False,
+    ) -> list[tuple[int, int, int, int]]:
         if self.is_mamba:
             if virtually_split:
-                half = self.state_content_size_bytes // 2
-                return [half, half]
-            return [self.state_content_size_bytes]
-        per_part = self.head_size * get_dtype_size(self.dtype)
+                B, _, N, flat_C = shape
+                half = flat_C // 2
+                return [(B, 1, N, half), (B, 1, N, half)]
+            return [shape]
+        B, _, N, flat_C = shape
         if virtually_split:
-            return [per_part, per_part]
-        return [per_part]
+            H = flat_C // (2 * self.head_size)
+            return [(B, H, N, self.head_size), (B, H, N, self.head_size)]
+        H = flat_C // self.head_size
+        return [(B, H, N, self.head_size)]
 
     def slice_for_tp_transfer(
         self, tensor, my_tp, my_rank, other_tp, other_rank, total_num_kv_heads
@@ -151,12 +159,9 @@ def new_build_fa_local(
             virtually_split=virtually_split,
         )
 
-        part_stride = block_len // len(metas) if len(metas) > 1 else 0
-        part_offset = 0
         for meta in metas:
             result.extend(NixlConnectorWorker._view_to_descriptors(
-                meta, base_addr + part_offset, device_id))
-            part_offset += part_stride
+                meta, base_addr, device_id))
     return result
 
 
@@ -240,8 +245,6 @@ def new_build_fa_remote(
             virtually_split=virtually_split,
         )
 
-        part_stride = block_len // len(metas) if len(metas) > 1 else 0
-        part_offset = 0
         for meta in metas:
             slices = spec.slice_for_tp_transfer(
                 meta,
@@ -274,9 +277,7 @@ def new_build_fa_remote(
                         storage_offset=view.storage_offset(),
                     )
                 result.extend(NixlConnectorWorker._view_to_descriptors(
-                    view, base_addr + part_offset, device_id))
-
-            part_offset += part_stride
+                    view, base_addr, device_id))
     return result
 
 

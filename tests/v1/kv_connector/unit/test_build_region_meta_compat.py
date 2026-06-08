@@ -18,10 +18,10 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     num_states_for,
 )
-
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     build_region_meta,
 )
+
 
 # ── ORIGINAL upstream _build_fa_local (verbatim manual byte loop) ──
 
@@ -121,12 +121,8 @@ def new_build_fa_local_from_build_region_meta(
             region_content_bytes=block_len // block_size_ratio,
             virtually_split=virtually_split,
         )
-        part_stride = block_len // len(metas) if len(metas) > 1 else 0
-        part_offset = 0
         for meta in metas:
-            result.extend(view_to_descriptors(
-                meta, base_addr + part_offset, device_id))
-            part_offset += part_stride
+            result.extend(view_to_descriptors(meta, base_addr, device_id))
     return result
 
 

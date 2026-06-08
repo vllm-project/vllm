@@ -134,18 +134,36 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
-        """Per-head content sizes for each transfer part.
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+        mamba_view: bool = False,
+    ) -> list[tuple[int, int, int, int]]:
+        """Decompose a flat region shape into per-transfer-part 4D shapes.
 
-        Returns a list of byte sizes, one per logical transfer part.
-        The connector iterates over parts to build one descriptor set each.
+        Called by ``build_region_meta`` in the NIXL worker.  The input
+        *shape* is ``(B, 1, N, flat_C)`` where *flat_C* is the total
+        content per block in elements.  The method returns one
+        ``(B, H, N, C)`` shape per transfer part.
+
+        ``AttentionSpec`` overrides this to split heads out of *flat_C*
+        and optionally halve K/V when *virtually_split* is True.
+        ``MambaSpec`` overrides this to split conv/ssm when
+        *virtually_split* is True.
+        Other specs (MLA) use the default halving as a structural
+        placeholder.
 
         Args:
-            virtually_split: True when K/V are interleaved in one region
-                and must be addressed as separate halves (FlashInfer
-                blocks-first layout).
+            mamba_view: reserved for future use — when True, MambaSpec
+                returns the 3-read sub-projection decomposition (4 parts)
+                instead of the 2-part conv/ssm FA placeholder.
         """
-        raise NotImplementedError
+        if virtually_split:
+            B, _, N, flat_C = shape
+            half = flat_C // 2
+            return [(B, 1, N, half), (B, 1, N, half)]
+        return [shape]
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -392,17 +410,26 @@ class AttentionSpec(KVCacheSpec):
             if my_rank != canonical:
                 return []
 
-        local_h_start = overlap_start - my_start
-        local_h_len = overlap_end - overlap_start
-        return [tensor.narrow(_DIM4_H, local_h_start, local_h_len)]
+        h_start = overlap_start - other_start
+        h_len = overlap_end - overlap_start
+        return [tensor.narrow(_DIM4_H, h_start, h_len)]
 
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+        mamba_view: bool = False,
+    ) -> list[tuple[int, int, int, int]]:
+        B, _, N, flat_C = shape
         if self.kv_quant_mode.is_nvfp4:
-            return [self.state_content_size_bytes]
-        per_part = self.head_size * get_dtype_size(self.dtype)
+            nvfp4_dim = nvfp4_kv_cache_full_dim(self.head_size)
+            H = flat_C // nvfp4_dim
+            return [(B, H, N, nvfp4_dim)]
         if virtually_split:
-            return [per_part, per_part]
-        return [per_part]
+            H = flat_C // (2 * self.head_size)
+            return [(B, H, N, self.head_size), (B, H, N, self.head_size)]
+        H = flat_C // self.head_size
+        return [(B, H, N, self.head_size)]
 
     @property
     def page_size_bytes(self) -> int:
@@ -661,12 +688,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     ) -> list[torch.Tensor]:
         return [tensor]
 
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
-        if virtually_split:
-            half = self.state_content_size_bytes // 2
-            return [half, half]
-        return [self.state_content_size_bytes]
-
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -873,12 +894,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     ) -> list[torch.Tensor]:
         return [tensor]
 
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
-        if virtually_split:
-            half = self.state_content_size_bytes // 2
-            return [half, half]
-        return [self.state_content_size_bytes]
-
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -964,7 +979,8 @@ class MambaSpec(KVCacheSpec):
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
-    # Mamba: recurrent state, no head concept — always return full tensor.
+    # Mamba: recurrent state is TP-sharded proportionally along C.
+    # When my_tp > other_tp, narrow to local rank's portion.
     def slice_for_tp_transfer(
         self,
         tensor: torch.Tensor,
@@ -974,13 +990,12 @@ class MambaSpec(KVCacheSpec):
         other_rank: int,
         total_num_kv_heads: int,
     ) -> list[torch.Tensor]:
-        return [tensor]
-
-    def transfer_content_parts_bytes(self, virtually_split: bool) -> list[int]:
-        if virtually_split:
-            half = self.state_content_size_bytes // 2
-            return [half, half]
-        return [self.state_content_size_bytes]
+        if my_tp <= other_tp:
+            return [tensor]
+        C = tensor.shape[_DIM4_C]
+        chunk = C // my_tp
+        start = my_rank * chunk - other_rank * (C // other_tp)
+        return [tensor.narrow(_DIM4_C, start, chunk)]
 
     @property
     def page_size_bytes(self) -> int:
