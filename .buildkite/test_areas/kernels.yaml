@@ -215,6 +215,34 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
+- label: Kernels (MI355)
+  key: kernels-mi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 180
+  device: mi355_1
+  soft_fail: true
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
+  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  commands:
+  - amd-smi
+  - python3 examples/basic/offline_inference/chat.py
+  - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - pytest -v -s tests/kernels/quantization/test_rocm_aiter_fp4.py
+  - pytest -v -s tests/kernels/quantization/test_rocm_skinny_gemms.py
+
 - label: Kernels Helion Test
   key: kernels-helion-test
   timeout_in_minutes: 30
@@ -225,7 +253,6 @@ steps:
   commands:
     - pip install helion==1.0.0
     - pytest -v -s kernels/helion/
-
  
 - label: Kernels FP8 MoE Test (1 H100)
   key: kernels-fp8-moe-test-1-h100
@@ -266,6 +293,33 @@ steps:
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
 
+- label: Kernels FP4 MoE Test (MI355)
+  key: kernels-fp4-moe-test-mi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 180
+  device: mi355_1
+  soft_fail: true
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - csrc/moe/
+  - csrc/rocm/
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/moe/test_rocm_aiter_moe.py
+  - tests/kernels/moe/test_modular_oai_triton_moe.py
+  - tests/kernels/moe/test_gpt_oss_triton_kernels.py
+  - tests/kernels/utils.py
+  commands:
+  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k "mxfp4"
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+  - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+  - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py -k "not tp2_qwen15_moe_mxfp4 and not tp4_llama31_mxfp6 and not tp8_deepseek_r1_3_layers_mxfp4"
 
 - label: Kernels FusedMoE Layer Test (2 H100s)
   key: kernels-fusedmoe-layer-test-2-h100s
