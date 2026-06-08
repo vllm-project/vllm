@@ -59,6 +59,68 @@ def test_resolve_tokenizer_args_idempotent(runner_type):
     )
 
 
+def test_resolve_tokenizer_args_remote_gguf_base_tokenizer(monkeypatch):
+    from vllm.tokenizers import registry
+
+    def fake_resolve_gguf_tokenizer_source(tokenizer_name, revision=None):
+        assert tokenizer_name == "org/model-GGUF:UD-IQ4_NL"
+        assert revision == "gguf-rev"
+        return "org/base"
+
+    monkeypatch.setattr(
+        registry,
+        "resolve_gguf_tokenizer_source",
+        fake_resolve_gguf_tokenizer_source,
+    )
+
+    tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
+        "org/model-GGUF:UD-IQ4_NL",
+        revision="gguf-rev",
+    )
+
+    assert tokenizer_mode == "hf"
+    assert tokenizer_name == "org/base"
+    assert args == ()
+    assert "gguf_file" not in kwargs
+    assert kwargs["revision"] is None
+
+
+def test_resolve_tokenizer_args_local_gguf_base_tokenizer(monkeypatch):
+    from vllm.tokenizers import registry
+
+    def fake_resolve_gguf_tokenizer_source(tokenizer_name, revision=None):
+        assert tokenizer_name == "/models/qwen.gguf"
+        assert revision == "local-rev"
+        return "org/base"
+
+    monkeypatch.setattr(
+        registry,
+        "is_gguf",
+        lambda tokenizer_name: tokenizer_name == "/models/qwen.gguf",
+    )
+    monkeypatch.setattr(
+        registry,
+        "check_gguf_file",
+        lambda tokenizer_name: tokenizer_name == "/models/qwen.gguf",
+    )
+    monkeypatch.setattr(
+        registry,
+        "resolve_gguf_tokenizer_source",
+        fake_resolve_gguf_tokenizer_source,
+    )
+
+    tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
+        "/models/qwen.gguf",
+        revision="local-rev",
+    )
+
+    assert tokenizer_mode == "hf"
+    assert tokenizer_name == "org/base"
+    assert args == ()
+    assert "gguf_file" not in kwargs
+    assert kwargs["revision"] is None
+
+
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 

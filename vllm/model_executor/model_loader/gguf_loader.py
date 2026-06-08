@@ -35,6 +35,104 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+_GEMMA4_PATCH_EMBEDDER_INPUT_PROJ = (
+    "model.vision_tower.patch_embedder.input_proj.weight"
+)
+
+
+def _gguf_name_with_suffix(gguf_name: str, suffix: str) -> str:
+    return f"{gguf_name}.{suffix}" if suffix else gguf_name
+
+
+def _add_gemma4_gguf_mappings(
+    gguf_to_hf_name_map: dict[str, str],
+    text_config,
+    vision_config,
+) -> None:
+    """Add Gemma4 GGUF tensor names missing from gguf-py's generic map."""
+    for idx in range(text_config.num_hidden_layers):
+        layer_prefix = f"model.language_model.layers.{idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"blk.{idx}.layer_output_scale.weight": (
+                    f"{layer_prefix}.layer_scalar"
+                ),
+                f"blk.{idx}.ffn_gate_inp.scale": f"{layer_prefix}.router.scale",
+                f"blk.{idx}.ffn_down_exps.scale": (
+                    f"{layer_prefix}.router.per_expert_scale"
+                ),
+                f"blk.{idx}.ffn_gate_up_exps.weight": (
+                    f"{layer_prefix}.experts.gate_up_proj.weight"
+                ),
+                f"blk.{idx}.ffn_down_exps.weight": (
+                    f"{layer_prefix}.experts.down_proj.weight"
+                ),
+            }
+        )
+
+    vision_num_layers = getattr(vision_config, "num_hidden_layers", None)
+    if vision_num_layers is None:
+        vision_num_layers = vision_config.depth
+
+    gguf_to_hf_name_map.update(
+        {
+            "v.std_bias": "model.vision_tower.std_bias",
+            "v.std_scale": "model.vision_tower.std_scale",
+            "v.patch_embd.weight": _GEMMA4_PATCH_EMBEDDER_INPUT_PROJ,
+            "v.position_embd.weight": (
+                "model.vision_tower.patch_embedder.position_embedding_table"
+            ),
+            "mm.input_projection.weight": (
+                "model.embed_vision.embedding_projection.weight"
+            ),
+        }
+    )
+
+    for idx in range(vision_num_layers):
+        layer_prefix = f"model.vision_tower.encoder.layers.{idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"v.blk.{idx}.attn_q.weight": (
+                    f"{layer_prefix}.self_attn.q_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_k.weight": (
+                    f"{layer_prefix}.self_attn.k_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_v.weight": (
+                    f"{layer_prefix}.self_attn.v_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_out.weight": (
+                    f"{layer_prefix}.self_attn.o_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.attn_q_norm.weight": (
+                    f"{layer_prefix}.self_attn.q_norm.weight"
+                ),
+                f"v.blk.{idx}.attn_k_norm.weight": (
+                    f"{layer_prefix}.self_attn.k_norm.weight"
+                ),
+                f"v.blk.{idx}.ffn_gate.weight": (
+                    f"{layer_prefix}.mlp.gate_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ffn_up.weight": (
+                    f"{layer_prefix}.mlp.up_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ffn_down.weight": (
+                    f"{layer_prefix}.mlp.down_proj.linear.weight"
+                ),
+                f"v.blk.{idx}.ln1.weight": (f"{layer_prefix}.input_layernorm.weight"),
+                f"v.blk.{idx}.attn_post_norm.weight": (
+                    f"{layer_prefix}.post_attention_layernorm.weight"
+                ),
+                f"v.blk.{idx}.ln2.weight": (
+                    f"{layer_prefix}.pre_feedforward_layernorm.weight"
+                ),
+                f"v.blk.{idx}.ffn_post_norm.weight": (
+                    f"{layer_prefix}.post_feedforward_layernorm.weight"
+                ),
+            }
+        )
+
+
 class GGUFModelLoader(BaseModelLoader):
     """
     Model loader that can load GGUF files. This is useful for loading models
@@ -121,6 +219,7 @@ class GGUFModelLoader(BaseModelLoader):
         # models, this returns config itself.
         text_config = config.get_text_config()
         model_type = config.model_type
+        orig_model_type = model_type
         is_multimodal = (
             hasattr(config, "vision_config") and config.vision_config is not None
         )
@@ -133,6 +232,8 @@ class GGUFModelLoader(BaseModelLoader):
             # Gemma3 models use "gemma3_text" in HuggingFace but
             # "gemma3" in GGUF architecture naming
             model_type = "gemma3"
+        if model_type == "qwen3_5":
+            model_type = "qwen35"
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
@@ -156,26 +257,59 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
-        if model_type in ("qwen2_moe", "qwen3_moe"):
+        if model_type in ("qwen2_moe", "qwen3_moe", "qwen3_5_moe"):
             model_type = model_type.replace("_", "")
             # GGUF layer map assumes that we will have a merged expert weights
             # so we need to map them manually
-            for idx in range(config.num_hidden_layers):
+            moe_layer_prefix = (
+                "model.language_model.layers"
+                if orig_model_type == "qwen3_5_moe" and is_multimodal
+                else "model.layers"
+            )
+            escaped_moe_layer_prefix = re.escape(moe_layer_prefix)
+            for idx in range(text_config.num_hidden_layers):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                    f"{moe_layer_prefix}.{idx}.mlp.experts.0.down_proj.weight"
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                    f"{moe_layer_prefix}.{idx}.mlp.experts.0.gate_proj.weight"
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
-                    f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                    f"{moe_layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
                 )
                 sideload_params.append(
                     re.compile(
-                        f"model\\.layers\\.{idx}"
+                        f"{escaped_moe_layer_prefix}\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if orig_model_type in ("qwen3_5", "qwen3_5_moe"):
+            layer_prefix = (
+                "model.language_model.layers" if is_multimodal else "model.layers"
+            )
+            for idx, layer_type in enumerate(text_config.layer_types):
+                if layer_type == "linear_attention":
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"{layer_prefix}.{idx}.linear_attn.dt_bias"
+                    )
+            if is_multimodal:
+                gguf_to_hf_name_map.update(
+                    {
+                        "mm.0.weight": "model.visual.merger.linear_fc1.weight",
+                        "mm.0.bias": "model.visual.merger.linear_fc1.bias",
+                        "mm.2.weight": "model.visual.merger.linear_fc2.weight",
+                        "mm.2.bias": "model.visual.merger.linear_fc2.bias",
+                    }
+                )
+                sideload_params.append(
+                    re.compile(r"model\.visual\.merger\.norm\.(weight|bias)")
+                )
+        if orig_model_type == "gemma4" and is_multimodal:
+            _add_gemma4_gguf_mappings(
+                gguf_to_hf_name_map,
+                text_config,
+                config.vision_config,
+            )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
             # GGUF layer map assumes merged expert weights
@@ -212,7 +346,9 @@ class GGUFModelLoader(BaseModelLoader):
 
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_num_layers = config.vision_config.num_hidden_layers
+            vision_num_layers = getattr(config.vision_config, "num_hidden_layers", None)
+            if vision_num_layers is None:
+                vision_num_layers = config.vision_config.depth
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
@@ -312,7 +448,7 @@ class GGUFModelLoader(BaseModelLoader):
             if gguf_name is None:
                 return None
 
-            return gguf_name + "." + suffix
+            return _gguf_name_with_suffix(gguf_name, suffix)
 
         # Build mapping and track unmapped parameters
         unmapped_params = []
@@ -393,17 +529,20 @@ class GGUFModelLoader(BaseModelLoader):
             assert mmproj_file is not None, (
                 "Could not find mm_proj file for multimodal GGUF model"
             )
-            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
+            for name, weight in gguf_quant_weights_iterator(
+                mmproj_file, gguf_to_hf_name_map
+            ):
+                yield name, weight
 
         gguf_files = self._get_all_gguf_files(model_name_or_path)
         if len(gguf_files) > 1:
-            yield from gguf_quant_weights_iterator_multi(
-                gguf_files, gguf_to_hf_name_map
-            )
+            weights = gguf_quant_weights_iterator_multi(gguf_files, gguf_to_hf_name_map)
         else:
-            yield from gguf_quant_weights_iterator(
+            weights = gguf_quant_weights_iterator(
                 model_name_or_path, gguf_to_hf_name_map
             )
+        for name, weight in weights:
+            yield name, weight
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)

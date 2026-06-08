@@ -40,9 +40,11 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -91,6 +93,21 @@ logger = init_logger(__name__)
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _gemma4_patch_embed_weight_loader(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    if (
+        param.dim() == 2
+        and loaded_weight.dim() == 4
+        and param.shape[0] == loaded_weight.shape[0]
+        and param.shape[1]
+        == loaded_weight.shape[1] * loaded_weight.shape[2] * loaded_weight.shape[3]
+    ):
+        loaded_weight = loaded_weight.flatten(1)
+
+    default_weight_loader(param, loaded_weight)
 
 
 def _get_max_soft_tokens(
@@ -1049,6 +1066,10 @@ class Gemma4ForConditionalGeneration(
                 self.vision_tower,
                 tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            set_weight_attrs(
+                self.vision_tower.patch_embedder.input_proj.weight,
+                {"weight_loader": _gemma4_patch_embed_weight_loader},
             )
 
         # ---- Audio tower (variants with audio_config) ----

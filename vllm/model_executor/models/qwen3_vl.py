@@ -69,6 +69,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -148,6 +149,23 @@ logger = init_logger(__name__)
 # We use 2048 dummy video frames that would generate vision embeddings
 # of the maximum size.
 DUMMY_VIDEO_NUM_FRAMES = 2048
+
+
+def _qwen3_vl_patch_embed_weight_loader(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    if (
+        param.dim() == 5
+        and loaded_weight.dim() == 4
+        and param.shape[:2] == loaded_weight.shape[:2]
+        and param.shape[3:] == loaded_weight.shape[2:]
+    ):
+        temporal_patch_size = param.shape[2]
+        loaded_weight = loaded_weight.unsqueeze(2).expand(param.shape).contiguous()
+        loaded_weight = loaded_weight / temporal_patch_size
+
+    default_weight_loader(param, loaded_weight)
+
 
 # ---------------------------------------------------------------------------
 # Triton kernel: fused bilinear position-embedding interpolation
@@ -365,6 +383,10 @@ class Qwen3_VisionPatchEmbed(nn.Module):
             kernel_size=kernel_size,
             stride=kernel_size,
             bias=True,
+        )
+        set_weight_attrs(
+            self.proj.weight,
+            {"weight_loader": _qwen3_vl_patch_embed_weight_loader},
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

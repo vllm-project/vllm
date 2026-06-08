@@ -36,8 +36,10 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
+    resolve_gguf_config_source,
     split_remote_gguf,
 )
 from .repo_utils import (
@@ -627,6 +629,7 @@ def maybe_override_with_speculators(
     tokenizer: str | None,
     trust_remote_code: bool,
     revision: str | None = None,
+    hf_config_path: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
     hf_token: bool | str | None = None,
     **kwargs,
@@ -649,16 +652,46 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     if check_gguf_file(model):
-        kwargs["gguf_file"] = Path(model).name
-        gguf_model_repo = Path(model).parent
+        if hf_config_path is None:
+            gguf_repo = Path(model).parent
+            gguf_model_repo = resolve_gguf_config_source(
+                model,
+                revision=revision,
+            )
+            if gguf_model_repo != gguf_repo:
+                # The local GGUF parent has no usable HF config.  Revisions for
+                # the local GGUF file do not apply to its metadata base model.
+                revision = None
+            elif not file_or_path_exists(
+                gguf_repo,
+                HF_CONFIG_NAME,
+                revision=revision,
+            ):
+                # Preserve the previous fallback for local GGUF files that rely
+                # on Transformers' GGUF metadata parser for supported arches.
+                kwargs["gguf_file"] = Path(model).name
+        else:
+            gguf_model_repo = Path(model).parent
     elif is_remote_gguf(model):
-        repo_id, _ = split_remote_gguf(model)
-        gguf_model_repo = Path(repo_id)
+        repo_id, quant_type = split_remote_gguf(model)
+        gguf_model_repo = resolve_gguf_config_source(model, revision=revision)
+        if gguf_model_repo != repo_id:
+            # A GGUF repo revision does not apply to the referenced base model.
+            revision = None
+        elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision):
+            kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+                repo_id,
+                quant_type,
+                revision=revision,
+            )
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+    config_source = hf_config_path or (
+        model if gguf_model_repo is None else gguf_model_repo
+    )
     config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
+        config_source,
         revision=revision,
         token=hf_token,
         **without_trust_remote_code(kwargs),
@@ -703,13 +736,39 @@ def get_config(
     if _is_gguf:
         if check_gguf_file(model):
             # Local GGUF file
-            kwargs["gguf_file"] = Path(model).name
-            model = Path(model).parent
+            gguf_path = Path(model)
+            gguf_repo = gguf_path.parent
+            model = resolve_gguf_config_source(model, revision=revision)
+            if model != gguf_repo:
+                # The local GGUF file points at a verified HF base model.  Do
+                # not pass gguf_file, or Transformers will parse the unsupported
+                # GGUF architecture instead of the base config.
+                revision = None
+            elif file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision=revision):
+                model = gguf_repo
+            else:
+                # Preserve the previous fallback for local GGUF files that rely
+                # on Transformers' GGUF metadata parser for supported arches.
+                kwargs["gguf_file"] = gguf_path.name
+                model = gguf_repo
         elif _is_remote_gguf:
             # Remote GGUF - extract repo_id from repo_id:quant_type format
             # The actual GGUF file will be downloaded later by GGUFModelLoader
-            # Keep model as repo_id:quant_type for download, but use repo_id for config
-            model, _ = split_remote_gguf(model)
+            # Keep model as repo_id:quant_type for download, but use the GGUF
+            # repo or its verified HF base model for config.
+            remote_gguf_repo, quant_type = split_remote_gguf(model)
+            model = resolve_gguf_config_source(model, revision=revision)
+            if model != remote_gguf_repo:
+                # A GGUF repo revision does not apply to the referenced base
+                # model. Use the base model's default revision unless users
+                # pass an explicit hf_config_path.
+                revision = None
+            elif not file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
+                kwargs["gguf_file"] = get_gguf_file_path_from_hf(
+                    remote_gguf_repo,
+                    quant_type,
+                    revision=revision,
+                )
 
     if config_format == "auto":
         try:
@@ -721,25 +780,10 @@ def get_config(
                 model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
             ):
                 config_format = "mistral"
-            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
-            ):
+            elif (
+                _is_gguf and (not _is_remote_gguf or "gguf_file" in kwargs)
+            ) or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
                 config_format = "hf"
-            # Remote GGUF models must have config.json in repo,
-            # otherwise the config can't be parsed correctly.
-            # FIXME(Isotr0py): Support remote GGUF repos without config.json
-            elif _is_remote_gguf and not file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
-            ):
-                err_msg = (
-                    "Could not find config.json for remote GGUF model repo. "
-                    "To load remote GGUF model through `<repo_id>:<quant_type>`, "
-                    "ensure your model has config.json (HF format) file. "
-                    "Otherwise please specify --hf-config-path <original_repo> "
-                    "in engine args to fetch config from unquantized hf model."
-                )
-                logger.error(err_msg)
-                raise ValueError(err_msg)
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
@@ -796,7 +840,7 @@ def get_config(
             apply_gguf_default("norm_topk_prob", True)
 
     # Special architecture mapping check for GGUF models
-    if _is_gguf:
+    if _is_gguf and not config.architectures:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]

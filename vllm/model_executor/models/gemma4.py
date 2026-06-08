@@ -89,6 +89,33 @@ def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
 
+def _load_gemma4_gguf_fused_moe_qweight_type(
+    name: str,
+    loaded_weight: torch.Tensor,
+    params_dict: dict[str, torch.Tensor],
+) -> str | None:
+    if name.endswith(".moe.gate_up_proj.qweight_type"):
+        param_name = name.replace(
+            ".moe.gate_up_proj.qweight_type",
+            ".moe.experts.w13_qweight_type",
+        )
+    elif name.endswith(".moe.down_proj.qweight_type"):
+        param_name = name.replace(
+            ".moe.down_proj.qweight_type",
+            ".moe.experts.w2_qweight_type",
+        )
+    else:
+        return None
+
+    param = params_dict.get(param_name)
+    if param is None or not getattr(param, "is_gguf_weight_type", False):
+        return None
+
+    param.weight_type = loaded_weight.item()
+    param.data.copy_(loaded_weight.view(param.shape))
+    return param_name
+
+
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
@@ -1479,6 +1506,15 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     loaded_params.add(moe_name)
                     break
                 else:
+                    remapped_name = _load_gemma4_gguf_fused_moe_qweight_type(
+                        name,
+                        loaded_weight,
+                        params_dict,
+                    )
+                    if remapped_name is not None:
+                        loaded_params.add(remapped_name)
+                        continue
+
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     name = maybe_remap_kv_scale_name(name, params_dict)
