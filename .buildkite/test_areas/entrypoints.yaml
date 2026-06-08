@@ -28,7 +28,6 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      soft_fail: true
       depends_on:
       - image-build-amd
 
@@ -45,8 +44,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
   mirror:
     amd:
-      device: mi325_1
-      soft_fail: true
+      device: mi300_1
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -68,8 +66,7 @@ steps:
   - pytest -v -s tool_use
   mirror:
     amd:
-      device: mi325_1
-      soft_fail: true
+      device: mi300_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -89,7 +86,6 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      soft_fail: true
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -108,8 +104,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   mirror:
     amd:
-      device: mi325_1
-      soft_fail: true
+      device: mi300_1
       depends_on:
       - image-build-amd
 
@@ -155,3 +150,21 @@ steps:
   - vllm/entrypoints/openai/
   commands: # LMEval
   - pytest -s entrypoints/openai/correctness/
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/entrypoints/openai/
+      - vllm/model_executor/models/whisper.py
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/model_loader/
+      commands:
+      - bash ../tools/install_torchcodec_rocm.sh || exit 1
+      - pytest -s entrypoints/openai/correctness/
