@@ -24,10 +24,10 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-#ifndef USE_ROCM
 torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
                                    torch::stable::Tensor const& perm);
 
+#ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);

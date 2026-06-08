@@ -692,6 +692,38 @@ impl EngineCoreClient {
         Ok(())
     }
 
+    /// Pause the scheduler so generation can be halted
+    pub async fn pause_scheduler(&self, mode: &str, clear_cache: bool) -> Result<()> {
+        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+        Ok(())
+    }
+
+    /// Resume the scheduler after a pause
+    pub async fn resume_scheduler(&self) -> Result<()> {
+        self.call_utility::<(), _>("resume_scheduler", ()).await?;
+        Ok(())
+    }
+
+    /// Return whether the scheduler is currently in any pause state.
+    pub async fn is_scheduler_paused(&self) -> Result<bool> {
+        let results: Vec<bool> = self.call_utility("is_scheduler_paused", ()).await?;
+        // `engine_count >= 1` is enforced during startup handshake, so `results`
+        // is normally non-empty; fall back to a fail-loud error rather than
+        // indexing in case that invariant is ever bypassed.
+        let first = *results.first().ok_or_else(|| Error::InconsistentUtilityResults {
+            method: "is_scheduler_paused".to_string(),
+            values: "[]".to_string(),
+        })?;
+        if results.iter().all(|&v| v == first) {
+            Ok(first)
+        } else {
+            Err(Error::InconsistentUtilityResults {
+                method: "is_scheduler_paused".to_string(),
+                values: format!("{results:?}"),
+            })
+        }
+    }
+
     /// Shut down local client tasks and close transport state.
     pub async fn shutdown(self) -> Result<()> {
         let Self {

@@ -854,8 +854,13 @@ class HfRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        from tests.utils import wait_for_rocm_memory_to_settle
+
         del self.model
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so a runner started right after this HF
+        # model exits does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
 
 @pytest.fixture(scope="session")
@@ -1248,25 +1253,13 @@ class VllmRunner:
         return self
 
     def _wait_for_rocm_memory_release(self, gpu_memory_utilization: float) -> None:
-        from tests.utils import wait_for_gpu_memory_to_clear
-        from vllm.platforms import current_platform
-
-        if not current_platform.is_rocm():
-            return
-
-        num_gpus = torch.accelerator.device_count()
-        if num_gpus == 0:
-            return
+        from tests.utils import wait_for_rocm_memory_to_settle
 
         # V1 startup requires free_memory >= total * gpu_memory_utilization.
         # Wait for the complementary used-memory ratio so the next runner does
-        # not fail the startup guard immediately after this runner exits. Bound
-        # the wait so cleanup failures fail this test instead of hanging.
-        wait_for_gpu_memory_to_clear(
-            devices=list(range(num_gpus)),
-            threshold_ratio=1.0 - gpu_memory_utilization,
-            timeout_s=120,
-        )
+        # not fail the startup guard immediately after this runner exits. The
+        # wait is bounded so cleanup failures fail this test instead of hanging.
+        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
@@ -1276,8 +1269,16 @@ class VllmRunner:
         gpu_memory_utilization = (
             self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
         )
+        from vllm.platforms import current_platform
+
         try:
-            self.llm.llm_engine.engine_core.shutdown()
+            # Give the engine core time to run its own graceful shutdown
+            # (model_executor teardown + empty_cache + process-group destroy)
+            # before the process manager SIGKILLs it at the default 5s. On ROCm
+            # a hard kill leaves the whole allocation for the driver's slow async
+            # VRAM reclamation, which starves the next test's startup.
+            shutdown_timeout = 60.0 if current_platform.is_rocm() else None
+            self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
         except Exception:
             # Ignore shutdown errors as cleanup will still proceed
             pass
