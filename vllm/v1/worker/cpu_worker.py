@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
+from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -156,6 +157,9 @@ class CPUWorker(Worker):
         )
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+        # Init the workspace manager so modular MoE kernels can allocate CPU scratch.
+        init_workspace_manager(self.device, 1)
 
         # Construct the model runner
         if self.use_v2_model_runner:
