@@ -671,20 +671,6 @@ class Indexer(nn.Module):
             and self.head_dim == self.quant_block_size
             and getattr(config, "model_type", None) != "glm_moe_dsa"
         )
-        # Debug knob: bisect regressions by capping fusion to the first N
-        # indexer layers (parsed out of ``model.layers.<i>.self_attn.indexer``).
-        if self.use_qk_rope_cache_fusion:
-            import vllm.envs as envs
-
-            max_fused_layers = envs.VLLM_ROCM_DSV32_INDEXER_FUSION_MAX_LAYERS
-            if max_fused_layers >= 0:
-                layer_idx = -1
-                for part in prefix.split("."):
-                    if part.isdigit():
-                        layer_idx = int(part)
-                        break
-                if layer_idx < 0 or layer_idx >= max_fused_layers:
-                    self.use_qk_rope_cache_fusion = False
         # Folded into weights_out by the fused kernel alongside Q's per-token
         # scale; the unfused path applies it after Q quant.
         self._weights_scale = self.softmax_scale * self.n_head**-0.5

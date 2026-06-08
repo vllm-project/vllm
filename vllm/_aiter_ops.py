@@ -1524,7 +1524,6 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-    _DSV32_INDEXER_QK_FUSION_ENABLED = envs.VLLM_ROCM_USE_AITER_DSV32_INDEXER_FUSION
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -1558,9 +1557,6 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-        cls._DSV32_INDEXER_QK_FUSION_ENABLED = (
-            envs.VLLM_ROCM_USE_AITER_DSV32_INDEXER_FUSION
-        )
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str):
@@ -1756,9 +1752,9 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_dsv32_indexer_qk_fusion_enabled(cls) -> bool:
-        """True iff aiter is enabled, the env flag is set, and the running
-        aiter build exposes ``indexer_qk_rope_quant_and_cache``."""
-        if not (cls._AITER_ENABLED and cls._DSV32_INDEXER_QK_FUSION_ENABLED):
+        """True iff aiter is enabled and the running aiter build exposes
+        ``indexer_qk_rope_quant_and_cache``."""
+        if not cls._AITER_ENABLED:
             return False
         if cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT is None:
             try:

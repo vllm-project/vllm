@@ -469,6 +469,7 @@ class SparseAttnIndexer(CustomOp):
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
+        **fusion_kwargs,
     ):
         # FP8 path: single tensor (per-token scale is folded into `weights`).
         # FP4 path: (values, scales) tuple with scales required by the kernel.
@@ -501,6 +502,7 @@ class SparseAttnIndexer(CustomOp):
         q_fp8: torch.Tensor,
         k: torch.Tensor,
         weights: torch.Tensor,
+        **fusion_kwargs,
     ):
         return self.forward_cuda(hidden_states, q_fp8, k, weights)
 

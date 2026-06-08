@@ -25,49 +25,6 @@ else:
     _ON_GFX950 = False
 
 
-# Module-level workspace for the fused indexer outputs. Per-call torch.empty
-# returned addresses that differed between cudagraph capture and replay,
-# which the downstream rocm_fp8_*_mqa_logits then read as garbage.
-_FUSED_INDEXER_Q_FP8_BUF: torch.Tensor | None = None
-_FUSED_INDEXER_WEIGHTS_OUT_BUF: torch.Tensor | None = None
-
-
-def _get_fused_indexer_workspace(
-    num_tokens: int,
-    n_head: int,
-    head_dim: int,
-    fp8_dtype: torch.dtype,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Stable-address workspace for ``q_fp8`` and ``weights_out``, grown to
-    the next power of two above ``num_tokens``."""
-    global _FUSED_INDEXER_Q_FP8_BUF, _FUSED_INDEXER_WEIGHTS_OUT_BUF
-    need_realloc = (
-        _FUSED_INDEXER_Q_FP8_BUF is None
-        or _FUSED_INDEXER_Q_FP8_BUF.size(0) < num_tokens
-        or _FUSED_INDEXER_Q_FP8_BUF.size(1) != n_head
-        or _FUSED_INDEXER_Q_FP8_BUF.size(2) != head_dim
-        or _FUSED_INDEXER_Q_FP8_BUF.device != device
-        or _FUSED_INDEXER_Q_FP8_BUF.dtype != fp8_dtype
-    )
-    if need_realloc:
-        new_max = max(64, 1 << max(0, num_tokens - 1).bit_length())
-        _FUSED_INDEXER_Q_FP8_BUF = torch.empty(
-            (new_max, n_head, head_dim),
-            dtype=fp8_dtype,
-            device=device,
-        )
-        _FUSED_INDEXER_WEIGHTS_OUT_BUF = torch.empty(
-            (new_max, n_head),
-            dtype=torch.float32,
-            device=device,
-        )
-    q_fp8_buf = _FUSED_INDEXER_Q_FP8_BUF
-    weights_buf = _FUSED_INDEXER_WEIGHTS_OUT_BUF
-    assert q_fp8_buf is not None and weights_buf is not None
-    return q_fp8_buf[:num_tokens], weights_buf[:num_tokens]
-
-
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
@@ -452,7 +409,6 @@ def rocm_fp8_paged_mqa_logits(
     from vllm._aiter_ops import rocm_aiter_ops
 
     aiter_paged_mqa_logits_module = None
-    # if rocm_aiter_ops.is_enabled():
     batch_size, next_n = q_fp8.shape[:2]
     block_size = kv_cache_fp8.shape[1]
 
@@ -465,10 +421,14 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
+            # torch.full avoids workspace: workspace offset-0 aliases q_fp8,
+            # so a workspace-backed fill_(-inf) would corrupt q_fp8.
+            out_logits = torch.full(
+                (batch_size * next_n, max_model_len),
+                float("-inf"),
+                device=q_fp8.device,
+                dtype=torch.float32,
             )
-            out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -487,10 +447,12 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        (out_qk,) = current_workspace_manager().get_simultaneous(
-            ((heads, batch_size * next_n, max_model_len), torch.float32),
+        out_qk = torch.full(
+            (heads, batch_size * next_n, max_model_len),
+            float("-inf"),
+            device=q_fp8.device,
+            dtype=torch.float32,
         )
-        out_qk.fill_(float("-inf"))
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -668,8 +630,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     is_neox_style: bool = True,
     use_qk_rope_cache_fusion: bool = False,
 ) -> torch.Tensor:
-    # NOTE(Chen): allocate the max possible flattened_kv so profile_run
-    # sees the correct peak memory.
+    # Allocate for the full total_seq_lens so profiling captures peak memory.
     device = hidden_states.device if k is None else k.device
     _flattened_kv = torch.empty(
         [total_seq_lens, head_dim + 4], device=device, dtype=torch.uint8
@@ -706,49 +667,31 @@ def rocm_aiter_sparse_attn_indexer(
     is_neox_style: bool = True,
     use_qk_rope_cache_fusion: bool = False,
 ) -> torch.Tensor:
-    # ``q_input`` is fp8 Q on the unfused path, raw bf16/fp16 Q on the fused
-    # path (the fused kernel quantizes inside this op).
-    # careful! this will be None in dummy run
+    # q_input is fp8 Q on the unfused path; raw bf16/fp16 on the fused path.
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     from vllm import _custom_ops as ops
     from vllm.utils.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
-    # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
-        # Profiling early-exit: reserve memory to account for runtime
-        # allocations. Must be in the real impl, not the fake impl —
-        # torch.compile calls the fake impl under FakeTensor mode where
-        # workspace manager operations on the locked real workspace
-        # would corrupt PyTorch's dispatch state.
+        # Reserve workspace here during profiling; the fake impl runs under
+        # FakeTensor where touching real workspace corrupts dispatch state.
         workspace_manager = current_workspace_manager()
-
-        # Prefill k_fp8 and k_scale buffers, used by
-        # rocm_aiter_sparse_attn_indexer's prefill path
-        workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
-        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
-        if _ON_GFX942 or _ON_GFX950:
+        if use_qk_rope_cache_fusion:
+            num_tok_prof, n_head_prof, head_dim_q_prof = q_input.shape
             workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+                ((num_tok_prof, n_head_prof, head_dim_q_prof), fp8_dtype),
+                ((num_tok_prof, n_head_prof), torch.float32),
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
             )
         else:
             workspace_manager.get_simultaneous(
-                (
-                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
-                    torch.float32,
-                ),
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
             )
-        # Transient logits tensor peak memory, produced by
-        # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
-        # (decode). Prefill logits are bounded by
-        # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
-        # split_indexer_prefill_chunks; decode logits are smaller.
+        # Decode logits use torch.full (not workspace), no reservation needed.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
@@ -803,12 +746,9 @@ def rocm_aiter_sparse_attn_indexer(
             )
         import aiter
 
-        # indexer_qk_rope_quant_and_cache asserts k.stride(0) == head_dim and
-        # k.stride(1) == 1. The upstream .contiguous() on the wk_weights_proj
-        # column-split is a no-op for size(0)==1 views (PyTorch treats them
-        # as contiguous regardless of stride), so for decode-batch-1
-        # cudagraphs we rewrite the metadata via as_strided; otherwise the
-        # column-split is already physically contiguous.
+        # Kernel asserts k.stride(0)==head_dim, k.stride(1)==1.
+        # .contiguous() is a no-op for size(0)==1 views, so fix strides via
+        # as_strided; fall back to a copy for larger tensors.
         if k.stride(-1) != 1 or k.stride(0) != k.size(-1):
             if k.size(0) == 1:
                 k = k.as_strided(k.size(), (k.size(-1), 1))
@@ -824,13 +764,24 @@ def rocm_aiter_sparse_attn_indexer(
             f"shape={tuple(k.shape)} stride={tuple(k.stride())}"
         )
 
-        q_fp8, weights_out = _get_fused_indexer_workspace(
-            num_tokens=q_bf16.size(0),
-            n_head=q_bf16.size(1),
-            head_dim=q_bf16.size(2),
-            fp8_dtype=fp8_dtype,
-            device=q_bf16.device,
-        )
+        num_tokens, n_head, head_dim_q = q_bf16.shape
+        # Prefill: allocate all four buffers together — independent calls
+        # both start at offset 0 and would alias each other.
+        if has_prefill:
+            q_fp8, weights_out, _k_fp8_prefill, _k_scale_prefill = (
+                current_workspace_manager().get_simultaneous(
+                    ((num_tokens, n_head, head_dim_q), fp8_dtype),
+                    ((num_tokens, n_head), torch.float32),
+                    ((total_seq_lens, head_dim), fp8_dtype),
+                    ((total_seq_lens, 4), torch.uint8),
+                )
+            )
+        else:
+            _k_fp8_prefill = _k_scale_prefill = None
+            q_fp8, weights_out = current_workspace_manager().get_simultaneous(
+                ((num_tokens, n_head, head_dim_q), fp8_dtype),
+                ((num_tokens, n_head), torch.float32),
+            )
         aiter.indexer_qk_rope_quant_and_cache(
             q_bf16,
             q_fp8,
@@ -848,15 +799,14 @@ def rocm_aiter_sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
             weights_scale,
-            # Required when block_size > 1 (vLLM uses 64): downstream
-            # cp_gather_indexer_k_quant_cache_triton and
-            # rocm_fp8_paged_mqa_logits read the cache in MFMA 16x16
-            # SHUFFLE layout, matching the unfused triton K-quant write.
+            # SHUFFLE layout required for block_size > 1 to match the
+            # unfused triton K-cache write expected by paged_mqa_logits.
             preshuffle=True,
             is_neox=is_neox_style,
         )
         weights = weights_out
     else:
+        _k_fp8_prefill = _k_scale_prefill = None
         q_fp8 = q_input
         if not skip_k_cache_insert:
             if _ON_GFX942:
@@ -880,12 +830,15 @@ def rocm_aiter_sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
-
-        workspace_manager = current_workspace_manager()
-        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
-        )
+        if _k_fp8_prefill is not None:
+            # Pre-allocated together with q_fp8/weights_out above (avoid aliasing).
+            k_fp8_full = _k_fp8_prefill
+            k_scale_full = _k_scale_prefill
+        else:
+            k_fp8_full, k_scale_full = current_workspace_manager().get_simultaneous(
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
+            )
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
