@@ -1,0 +1,44 @@
+name: Sync main with upstream
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-main-with-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset main to upstream/main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          UPSTREAM_REPO: vllm-project/vllm
+          BRANCH: main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          upstream_sha="$(gh api "repos/${UPSTREAM_REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha')"
+          current_sha="$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha')"
+
+          if [[ "${current_sha}" == "${upstream_sha}" ]]; then
+            echo "${BRANCH} already matches ${UPSTREAM_REPO}:${BRANCH} (${upstream_sha})."
+            exit 0
+          fi
+
+          gh api \
+            --method PATCH \
+            "repos/${REPO}/git/refs/heads/${BRANCH}" \
+            -f sha="${upstream_sha}" \
+            -F force=true
+
+          echo "Reset ${REPO}:${BRANCH} to ${UPSTREAM_REPO}:${BRANCH} (${upstream_sha})."
+
