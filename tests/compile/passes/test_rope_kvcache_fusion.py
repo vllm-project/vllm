@@ -382,7 +382,7 @@ def test_rope_kvcache_fusion(
         torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
         # Cannot compare fp8_* directly here, cast to model dtype instead
-        # @TODO(charlifu): switch back to ATOL, RTOL after aiter fix is merged.
+        # TODO(charlifu): switch back to ATOL, RTOL after aiter fix is merged.
         torch.testing.assert_close(
             kv_cache_unfused.to(dtype),
             kv_cache_fused.to(dtype),
