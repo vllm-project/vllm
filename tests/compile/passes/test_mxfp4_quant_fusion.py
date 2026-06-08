@@ -617,46 +617,65 @@ class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
 
 
 @_NEEDS_MXFP4_STANDALONE
-def test_mxfp4_patterns_fire_on_model():
-    """Prove both MXFP4 patterns fire on a compiled model.
-    Checks: matched_count==2, standalone quant==0, fused ops==2.
-    Analogous to PR#42864's distributed AR+RMS+quant test."""
-    from unittest.mock import MagicMock
-
-    import torch.fx as fx
-
+def test_mxfp4_patterns_fire_on_model(monkeypatch):
+    """Prove both MXFP4 patterns fire on a compiled model with two norm sites.
+    Checks: matched_count==2, both fused ops appear, standalone quant absent.
+    Analogous to PR#42864's distributed AR+RMS+quant test but without
+    distributed setup — RocmAiterRMSNormQuantFusionPass is not AR-gated."""
+    import vllm.config
+    from tests.compile.backend import TestBackend
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
         RocmAiterRMSNormQuantFusionPass,
     )
+    from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+    from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+    from vllm.config import CompilationConfig, CompilationMode, VllmConfig
 
-    config = MagicMock()
-    config.compilation_config.is_custom_op_enabled.return_value = True
-    pass_ = RocmAiterRMSNormQuantFusionPass(config)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
 
-    model = _AiterRMSNormMXFP4QuantModel(hidden_size=256)
-    traced = fx.symbolic_trace(model)
+    hidden_size = 256
+    num_tokens = 16
+    eps = 1e-6
 
-    # Before: 2 standalone quant nodes
-    before = sum(1 for n in traced.graph.nodes
-                 if "rocm_aiter_dynamic_mxfp4_quant" in str(n.target))
-    assert before == 2, f"Expected 2 standalone quant nodes, got {before}"
-
-    pass_(traced)
-
-    # After: 0 standalone, 2 fused
-    after_standalone = sum(1 for n in traced.graph.nodes
-                           if "rocm_aiter_dynamic_mxfp4_quant" in str(n.target))
-    after_fused = sum(1 for n in traced.graph.nodes
-                      if "rocm_aiter_rmsnorm_mxfp4_quant" in str(n.target))
-
-    assert after_standalone == 0, (
-        f"Standalone quant nodes must be 0 after fusion, got {after_standalone}"
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm"],
+        ),
     )
-    assert after_fused == 2, (
-        f"Expected 2 fused nodes (one per site), got {after_fused}"
+    with vllm.config.set_current_vllm_config(vllm_config):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(torch.bfloat16)
+        torch.manual_seed(42)
+
+        model = _AiterRMSNormMXFP4QuantModel(
+            hidden_size=hidden_size, eps=eps
+        ).cuda()
+
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+
+        x = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        )
+        residual = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        )
+        torch._dynamo.mark_dynamic(x, 0)
+        torch._dynamo.maybe_mark_dynamic(residual, 0)
+
+        compiled = torch.compile(model, backend=backend)
+        compiled(x, residual)
+
+    # Both fused ops must appear; standalone quant must be gone
+    backend.check_after_ops([
+        rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op(),
+        rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op(),
+    ])
+    assert fusion_pass.matched_count == 2, (
+        f"matched_count must be 2 (one per site), got {fusion_pass.matched_count}"
     )
-    assert pass_.matched_count == 2, (
-        f"matched_count must be 2, got {pass_.matched_count}"
-    )
-    print(f"PASS: {after_fused} fused ops, {after_standalone} standalone, "
-          f"matched_count={pass_.matched_count}")
+    print(f"PASS: matched_count={fusion_pass.matched_count}")
