@@ -569,3 +569,94 @@ def test_functional_fused_matches_unfused_output(
     assert scale_diff <= 2, (
         f"eps={eps}: scale E8M0 max diff={scale_diff} exceeds tolerance of 2 ULP"
     )
+
+
+# ─── UNIT TESTS: both patterns fire on a symbolic FX graph ───────────────────
+
+
+class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
+    """Exercises F2 patterns in RocmAiterRMSNormQuantFusionPass.
+
+    Two rms_norm sites covering both registered patterns:
+
+    * norm[0]: rms_norm → dynamic_mxfp4_quant (no residual)
+               → AiterRMSNormMXFP4QuantPattern
+
+    * norm[1]: fused_add_rms_norm → dynamic_mxfp4_quant (with residual)
+               → AiterFusedAddRMSNormMXFP4QuantPattern
+
+    Analogous to TestAiterAllReduceRMSNormGroupQuantFP8Model in PR#42864's
+    test_fusion_all_reduce.py. Does not require distributed setup since
+    RocmAiterRMSNormQuantFusionPass is not AR-gated.
+    """
+
+    def __init__(self, hidden_size=256, eps=1e-6,
+                 dtype=torch.bfloat16):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm_weight_0 = torch.nn.Parameter(
+            torch.ones(hidden_size, dtype=dtype)
+        )
+        self.norm_weight_1 = torch.nn.Parameter(
+            torch.ones(hidden_size, dtype=dtype)
+        )
+
+    def forward(self, x: torch.Tensor, residual: torch.Tensor):
+        # Site 0: no-residual — exercises AiterRMSNormMXFP4QuantPattern
+        normed_0 = torch.ops.vllm_ir.rms_norm(x, self.norm_weight_0, self.eps)
+        quant_0, scale_0 = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant(normed_0)
+
+        # Site 1: with-residual — exercises AiterFusedAddRMSNormMXFP4QuantPattern
+        normed_1, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+            x, residual, self.norm_weight_1, self.eps
+        )
+        quant_1, scale_1 = torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant(normed_1)
+
+        return quant_0, scale_0, quant_1, scale_1, residual_out
+
+
+@_NEEDS_MXFP4_STANDALONE
+def test_mxfp4_patterns_fire_on_model():
+    """Prove both MXFP4 patterns fire on a compiled model.
+    Checks: matched_count==2, standalone quant==0, fused ops==2.
+    Analogous to PR#42864's distributed AR+RMS+quant test."""
+    from unittest.mock import MagicMock
+
+    import torch.fx as fx
+
+    from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+        RocmAiterRMSNormQuantFusionPass,
+    )
+
+    config = MagicMock()
+    config.compilation_config.is_custom_op_enabled.return_value = True
+    pass_ = RocmAiterRMSNormQuantFusionPass(config)
+
+    model = _AiterRMSNormMXFP4QuantModel(hidden_size=256)
+    traced = fx.symbolic_trace(model)
+
+    # Before: 2 standalone quant nodes
+    before = sum(1 for n in traced.graph.nodes
+                 if "rocm_aiter_dynamic_mxfp4_quant" in str(n.target))
+    assert before == 2, f"Expected 2 standalone quant nodes, got {before}"
+
+    pass_(traced)
+
+    # After: 0 standalone, 2 fused
+    after_standalone = sum(1 for n in traced.graph.nodes
+                           if "rocm_aiter_dynamic_mxfp4_quant" in str(n.target))
+    after_fused = sum(1 for n in traced.graph.nodes
+                      if "rocm_aiter_rmsnorm_mxfp4_quant" in str(n.target))
+
+    assert after_standalone == 0, (
+        f"Standalone quant nodes must be 0 after fusion, got {after_standalone}"
+    )
+    assert after_fused == 2, (
+        f"Expected 2 fused nodes (one per site), got {after_fused}"
+    )
+    assert pass_.matched_count == 2, (
+        f"matched_count must be 2, got {pass_.matched_count}"
+    )
+    print(f"PASS: {after_fused} fused ops, {after_standalone} standalone, "
+          f"matched_count={pass_.matched_count}")

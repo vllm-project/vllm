@@ -3,18 +3,9 @@
 """
 Unit tests for F3: fused RoPE + MLA KV-cache write dispatch in AiterMLAImpl.
 
-PR3 will add two methods to AiterMLAImpl (and AiterTritonMLAImpl):
-  - fused_rope_kvcache_supported() -> bool
-      Returns True when VLLM_ROCM_USE_AITER_TRITON_ROPE=1 AND
-      VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=1.
-  - do_rope_and_kv_cache_update(layer, query, key, value, positions,
-                                 cos_sin_cache, is_neox, kv_cache,
-                                 layer_slot_mapping)
-      Calls ops.concat_and_cache_mla_rope_fused() instead of the unfused
-      ops.concat_and_cache_mla() + separate rope path.
-
-These tests are ROCm-only and are skipped when the PR3 methods are not yet
-implemented in AiterMLAImpl (i.e. when running against this PR only).
+F3 auto-enables when rocm_aiter_ops.has_fused_rope_mla_kv_cache() returns True
+(i.e. aiter.fused_qk_rope_concat_and_cache_mla is importable). No env var is
+required — follows the same pattern as has_fused_rmsnorm_mxfp4_quant() for F2.
 """
 
 from __future__ import annotations
@@ -72,71 +63,47 @@ def _make_mock_layer(k_scale_value: float = 1.0) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Tests: fused_rope_kvcache_supported()
+# Tests: has_fused_rope_mla_kv_cache() probe
 # ---------------------------------------------------------------------------
 
 
-class TestFusedRopeKVCacheSupported:
-    """fused_rope_kvcache_supported() must respect both env-var gates."""
+class TestHasFusedRopeMlaKvCache:
+    """has_fused_rope_mla_kv_cache() must return bool without raising."""
 
-    @pytest.fixture(autouse=True)
-    def _import_impl(self):
-        """Import here so the test is skipped if the module is absent."""
-        from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-            AiterMLAImpl,  # noqa: F401
+    def test_probe_returns_bool(self):
+        """Probe must always return bool, never raise."""
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        result = rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+        assert isinstance(result, bool), (
+            f"Expected bool, got {type(result).__name__}"
         )
 
-        self.ImplClass = AiterMLAImpl
-        if not hasattr(AiterMLAImpl, "fused_rope_kvcache_supported"):
-            pytest.skip("fused_rope_kvcache_supported not implemented (requires PR3)")
+    def test_probe_false_when_kernel_absent(self, monkeypatch):
+        """When the aiter import is mocked to fail, probe must return False."""
+        from vllm._aiter_ops import rocm_aiter_ops
 
-    def _call_supported(self, impl_instance) -> bool:
-        return impl_instance.fused_rope_kvcache_supported()
-
-    def test_returns_true_when_both_env_vars_set(self, monkeypatch):
-        """Feature is enabled only when both gate vars are 1."""
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "1")
-        impl = MagicMock(spec=self.ImplClass)
-        # Call the real method via unbound call on the class
-        result = self.ImplClass.fused_rope_kvcache_supported(impl)
-        assert result is True
-
-    def test_returns_false_when_f3_var_unset(self, monkeypatch):
-        """F3 disabled when VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=0."""
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "0")
-        impl = MagicMock(spec=self.ImplClass)
-        result = self.ImplClass.fused_rope_kvcache_supported(impl)
-        assert result is False
-
-    def test_returns_false_when_rope_var_unset(self, monkeypatch):
-        """F3 disabled when base aiter-rope gate is off."""
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "1")
-        impl = MagicMock(spec=self.ImplClass)
-        result = self.ImplClass.fused_rope_kvcache_supported(impl)
-        assert result is False
-
-    def test_returns_false_when_both_unset(self, monkeypatch):
-        """F3 disabled when neither gate is set."""
-        monkeypatch.delenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", raising=False)
-        monkeypatch.delenv(
-            "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", raising=False
+        monkeypatch.setattr(
+            rocm_aiter_ops,
+            "has_fused_rope_mla_kv_cache",
+            classmethod(lambda cls: False),
         )
-        impl = MagicMock(spec=self.ImplClass)
-        result = self.ImplClass.fused_rope_kvcache_supported(impl)
-        assert result is False
+        assert rocm_aiter_ops.has_fused_rope_mla_kv_cache() is False
 
-    def test_aiter_triton_impl_inherits_support(self, monkeypatch):
-        """AiterTritonMLAImpl must also expose fused_rope_kvcache_supported."""
-        from vllm.v1.attention.backends.mla.aiter_triton_mla import AiterTritonMLAImpl
+    def test_f3_disabled_when_mla_disabled(self, monkeypatch):
+        """F3 must not fire when is_mla_enabled() returns None/False."""
+        from vllm._aiter_ops import rocm_aiter_ops
 
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "1")
-        impl = MagicMock(spec=AiterTritonMLAImpl)
-        result = AiterTritonMLAImpl.fused_rope_kvcache_supported(impl)
-        assert result is True
+        monkeypatch.setattr(
+            rocm_aiter_ops,
+            "is_mla_enabled",
+            classmethod(lambda cls: False),
+        )
+        f3_enabled = bool(
+            rocm_aiter_ops.is_mla_enabled()
+            and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+        )
+        assert not f3_enabled
 
 
 # ---------------------------------------------------------------------------

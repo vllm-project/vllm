@@ -118,16 +118,16 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.prefix = prefix
 
         # F3: fused RoPE + MLA KV-cache write gate (ROCm + aiter only).
-        # Checked once at init; uses is_fusion_rope_mla_kv_cache_enabled()
-        # which is decorated with @if_aiter_supported so it returns None/False
-        # on non-ROCm platforms.
+        # Auto-enables when AITER has fused_qk_rope_concat_and_cache_mla.
+        # No env var required — follows has_fused_rmsnorm_mxfp4_quant() pattern.
         self._f3_fusion_enabled: bool = False
         if current_platform.is_rocm():
             try:
                 from vllm._aiter_ops import rocm_aiter_ops
 
                 self._f3_fusion_enabled = bool(
-                    rocm_aiter_ops.is_fusion_rope_mla_kv_cache_enabled()
+                    rocm_aiter_ops.is_mla_enabled()
+                    and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
                 )
             except Exception:
                 pass  # aiter not available; stay False
