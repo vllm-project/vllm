@@ -852,8 +852,11 @@ class NixlConnectorWorker:
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
             layer_spec = self._layer_specs.get(layer_name)
             if layer_spec is None:
-                logger.debug(f"Skipping layer {layer_name} as no KVCache spec is \
-                present. This is likely because the layer is sharing its KV cache")
+                logger.debug(
+                    "Skipping layer %s as no KVCache spec is present. "
+                    "This is likely because the layer is sharing its KV cache",
+                    layer_name,
+                )
                 continue
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
