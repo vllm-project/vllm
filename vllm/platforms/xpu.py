@@ -110,6 +110,13 @@ class XPUPlatform(Platform):
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
+        if dtype == torch.float32:
+            logger.warning_once(
+                "Flash Attention on XPU does not support float32 dtype. "
+                "Falling back to Triton Attention backend for vit attention."
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention. "
@@ -197,24 +204,25 @@ class XPUPlatform(Platform):
             )
 
         # Disable fusion passes not yet supported on XPU.
+        from vllm.config.compilation import CompilationMode
+
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
             "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
-            "fuse_norm_quant": "RMSNorm + quant fusion",
-            "fuse_act_quant": "Activation + quant fusion",
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
         }
-        for flag, feature_name in fusion_passes_to_disable.items():
-            if getattr(pass_config, flag):
-                logger.warning(
-                    "Feature %r is not yet supported on XPU and will be disabled.",
-                    feature_name,
-                )
-                setattr(pass_config, flag, False)
+        if compilation_config.mode != CompilationMode.NONE:
+            for flag, feature_name in fusion_passes_to_disable.items():
+                if getattr(pass_config, flag):
+                    logger.warning(
+                        "Feature %r is not yet supported on XPU and will be disabled.",
+                        feature_name,
+                    )
+                    setattr(pass_config, flag, False)
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

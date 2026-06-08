@@ -102,23 +102,26 @@ def _quant_flags_to_group_shape(
 class RoutingMethodType(IntEnum):
     # Default: Softmax -> TopK
     Default = (0,)
-    # Renormalize: TopK -> Softmax/Sigmoid
+    # Renormalize: TopK -> Softmax
     Renormalize = (1,)
     # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
     # -> Top8 experts from the Top4 groups
     DeepSeekV3 = (2,)
     # Llama4: Top1 -> Sigmoid
     Llama4 = (3,)
-    # RenormalizeNaive: Softmax/Sigmoid -> TopK -> Renormalize
+    # RenormalizeNaive: Softmax -> TopK -> Renormalize
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
+    # (routeScale=1.0, epsilon=1e-20)
     MiniMax2 = (7,)
+    # Sigmoid: Sigmoid -> TopK (no renormalization)
+    Sigmoid = (8,)
     # Unspecified
-    Unspecified = (8,)
+    Unspecified = (9,)
     # other routing types (not passed to FlashInfer kernels)
     # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
     DeepseekV4 = (100,)
@@ -132,6 +135,7 @@ def get_routing_method_type(
     renormalize: bool,
     num_expert_group: int | None,
     has_e_score_bias: bool,
+    routed_scaling_factor: float | None = 1.0,
 ) -> RoutingMethodType:
     if scoring_func == "sqrtsoftplus":
         # DeepSeek V4 uses sqrtsoftplus routing with optional routing bias
@@ -142,20 +146,21 @@ def get_routing_method_type(
             return RoutingMethodType.Unspecified
 
     if has_e_score_bias:
-        if (num_expert_group or 0) > 0 and scoring_func == "sigmoid":
-            return RoutingMethodType.DeepSeekV3
-        elif scoring_func == "sigmoid":
-            return RoutingMethodType.MiniMax2
+        if scoring_func == "sigmoid":
+            if not renormalize:
+                return RoutingMethodType.Unspecified
+            if (num_expert_group or 0) > 0:
+                return RoutingMethodType.DeepSeekV3
+            if routed_scaling_factor in (None, 1.0):
+                return RoutingMethodType.MiniMax2
+            return RoutingMethodType.Unspecified
         else:
             return RoutingMethodType.Unspecified
 
     if scoring_func == "sigmoid":
-        if top_k == 1:
-            return RoutingMethodType.Llama4
-        elif renormalize:
+        if renormalize:
             return RoutingMethodType.SigmoidRenorm
-        else:
-            return RoutingMethodType.Unspecified
+        return RoutingMethodType.Sigmoid
 
     if scoring_func == "softmax":
         if renormalize:
@@ -869,19 +874,23 @@ def nvfp4_w4a16_moe_quant_config(
 def int4_w4a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int4 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
+        _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
+        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -922,19 +931,21 @@ def fp8_w8a16_moe_quant_config(
 def int8_w8a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int8 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
+        _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
     )
@@ -962,47 +973,6 @@ def int4_w4afp8_moe_quant_config(
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
         weight_dtype="int4",  # weight dtype for weights
-    )
-
-
-def awq_marlin_moe_quant_config(
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
-    weight_bits: int,
-    group_size: int,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-    a1_gscale: torch.Tensor | None = None,
-    a2_gscale: torch.Tensor | None = None,
-) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for awq marlin quantization.
-
-    a1_gscale / a2_gscale are optional global scales applied to activation
-    quantization scales when Marlin runs with 8-bit activations.
-    """
-    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-
-    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
-
-    # Activations are NOT quantized for AWQ (fp16/bf16)
-    a_shape = w_shape  # Same as weight shape for alignment
-
-    # Determine weight dtype
-    if weight_bits == 4:
-        weight_dtype = "int4"
-    elif weight_bits == 8:
-        weight_dtype = torch.int8
-    else:
-        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
-
-    return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a1_gscale),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a2_gscale),
-        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -1295,6 +1265,8 @@ class FusedMoEConfig:
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
+
+    max_capture_size: int = 0
 
     def __post_init__(self):
         if self.dp_size > 1:
