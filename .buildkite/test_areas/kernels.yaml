@@ -38,6 +38,28 @@ steps:
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
+- label: Deepseek V4 Kernel Test (H100)
+  key: deepseek-v4-kernel-test-h100
+  timeout_in_minutes: 15
+  device: h100
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  commands:
+    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+
+- label: Deepseek V4 Kernel Test (B200)
+  key: deepseek-v4-kernel-test-b200
+  timeout_in_minutes: 15
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  commands:
+    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+
 - label: Kernels Attention Test %N
   key: kernels-attention-test
   timeout_in_minutes: 35
@@ -62,6 +84,19 @@ steps:
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi300_1
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/model_executor/layers/quantization
+      - tests/kernels/quantization
+      - tests/kernels/quantization/test_rocm_skinny_gemms.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/kernels/
+      depends_on:
+      - image-build-amd
 
 - label: Kernels MoE Test %N
   key: kernels-moe-test
@@ -137,9 +172,12 @@ steps:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
@@ -172,6 +210,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py

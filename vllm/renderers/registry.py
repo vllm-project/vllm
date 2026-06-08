@@ -22,7 +22,6 @@ logger = init_logger(__name__)
 _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
-    "fastokens": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
     "hf": ("hf", "HfRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
