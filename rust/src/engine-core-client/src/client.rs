@@ -12,7 +12,7 @@ use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
-use crate::protocol::utility::EngineCoreUtilityRequest;
+use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
 
@@ -680,7 +680,7 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: &str) -> Result<()> {
+    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
         self.call_utility::<(), _>("sleep", (level, mode)).await?;
         Ok(())
     }
@@ -693,7 +693,7 @@ impl EngineCoreClient {
     }
 
     /// Pause the scheduler so generation can be halted
-    pub async fn pause_scheduler(&self, mode: &str, clear_cache: bool) -> Result<()> {
+    pub async fn pause_scheduler(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
         self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
         Ok(())
     }
