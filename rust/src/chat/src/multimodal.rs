@@ -115,28 +115,20 @@ impl ResolvedMultimodalSpec {
         // image
         let image_token =
             raw.placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
-        let image_marker_token_id = tokenizer
-            .token_to_id(&image_token)
-            .ok_or_else(|| {
-                multimodal!(
-                    "placeholder token `{image_token}` is not in the tokenizer vocabulary"
-                )
-            })?;
+        let image_marker_token_id = tokenizer.token_to_id(&image_token).ok_or_else(|| {
+            multimodal!("placeholder token `{image_token}` is not in the tokenizer vocabulary")
+        })?;
         let image_embed_token_id =
             raw.placeholder_token_id(&metadata).map_err(|error| multimodal!("{error}"))? as u32;
         // video
         let video_token =
             raw.video_placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
-        let video_marker_token_id = tokenizer
-            .token_to_id(&video_token)
-            .ok_or_else(|| {
-                multimodal!(
-                    "placeholder token `{video_token}` is not in the tokenizer vocabulary"
-                )
-            })?;
-        let video_embed_token_id =
-            raw.video_placeholder_token_id(&metadata)
-                .map_err(|error| multimodal!("{error}"))? as u32;
+        let video_marker_token_id = tokenizer.token_to_id(&video_token).ok_or_else(|| {
+            multimodal!("placeholder token `{video_token}` is not in the tokenizer vocabulary")
+        })?;
+        let video_embed_token_id = raw
+            .video_placeholder_token_id(&metadata)
+            .map_err(|error| multimodal!("{error}"))? as u32;
 
         Ok(Self {
             raw,
@@ -504,7 +496,17 @@ impl MultimodalModelInfo {
         &self,
         media_parts: Vec<MediaContentPart>,
     ) -> Result<Vec<FetchedMediaItem>> {
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
+        let preprocessor_config = self
+            .video_processor
+            .as_ref()
+            .map(|vp| &vp.config)
+            .unwrap_or(&self.image_processor.config);
+        let mut tracker = AsyncMultiModalTracker::for_model(
+            Arc::clone(&self.media_connector),
+            &self.context.metadata(),
+            preprocessor_config,
+        )
+        .map_err(|error| multimodal!("{error}"))?;
         for part in &media_parts {
             tracker.push_part(part.clone()).map_err(|error| multimodal!("{error}"))?;
         }
