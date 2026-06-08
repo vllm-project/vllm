@@ -1424,9 +1424,12 @@ class SpecDecodeBaseProposer:
                 target_embed_tokens = inner_model.embed_tokens
             elif hasattr(inner_model, "embedding"):
                 target_embed_tokens = inner_model.embedding
+            elif hasattr(inner_model, "word_embeddings"):
+                target_embed_tokens = inner_model.word_embeddings
             else:
                 raise AttributeError(
-                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
+                    "Target model does not have 'embed_tokens', 'embedding', "
+                    "or 'word_embeddings' attribute"
                 )
 
             share_embeddings = False
@@ -1547,17 +1550,25 @@ class SpecDecodeBaseProposer:
                             "Shared target model lm_head with MTP shared_head.head."
                         )
 
-        if hasattr(target_language_model.model, "topk_indices_buffer"):
-            target_buffer = target_language_model.model.topk_indices_buffer
-            if hasattr(self.model.model, "topk_indices_buffer"):
-                del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = target_buffer
+        target_inner_model = getattr(target_language_model, "model", None)
+        draft_inner_model = getattr(self.model, "model", None)
+        if (
+            target_inner_model is not None
+            and draft_inner_model is not None
+            and hasattr(target_inner_model, "topk_indices_buffer")
+        ):
+            target_buffer = target_inner_model.topk_indices_buffer
+            if hasattr(draft_inner_model, "topk_indices_buffer"):
+                del draft_inner_model.topk_indices_buffer
+            draft_inner_model.topk_indices_buffer = target_buffer
             # Also share at per-module level so that the indexer and
             # sparse-attention backends in each MTP layer read from
             # the target model's buffer.
-            for _, module in self.model.model.named_modules():
-                if hasattr(module, "topk_indices_buffer"):
-                    module.topk_indices_buffer = target_buffer
+            named_modules = getattr(draft_inner_model, "named_modules", None)
+            if named_modules is not None:
+                for _, module in named_modules():
+                    if hasattr(module, "topk_indices_buffer"):
+                        module.topk_indices_buffer = target_buffer
             logger.info(
                 "Detected MTP model with topk_indices_buffer. "
                 "Sharing target model topk_indices_buffer with the draft model."

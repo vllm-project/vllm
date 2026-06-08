@@ -368,17 +368,22 @@ class BailingMoELinearAttention(LinearAttention):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
+        decode_state_indices = getattr(attn_metadata, "state_indices_tensor_d", None)
+        if decode_state_indices is None:
+            decode_state_indices = state_indices_tensor
         hidden = linear_attention_decode(
             q,
             k,
             v,
             kv_cache,
             self.tp_slope,
-            state_indices_tensor,
+            decode_state_indices,
             q_start=0,
             q_end=attn_metadata.num_decode_tokens,
             slot_start=0,
             slot_end=attn_metadata.num_decodes,
             block_size=32,
+            num_accepted_tokens=getattr(attn_metadata, "num_accepted_tokens", None),
+            query_start_loc=getattr(attn_metadata, "query_start_loc_d", None),
         )
         return hidden

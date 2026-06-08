@@ -46,8 +46,10 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     # Skip embedding sharing under PP — each rank owns its own embedding.
     if get_pp_group().world_size == 1:
-        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
-            target_inner, "embedding", None
+        target_embed = (
+            getattr(target_inner, "embed_tokens", None)
+            or getattr(target_inner, "embedding", None)
+            or getattr(target_inner, "word_embeddings", None)
         )
         # If the target's embedding is LoRA-wrapped, share the underlying base
         # layer. The draft is not part of the LoRA adapter; sharing the wrapper
@@ -65,6 +67,8 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
             draft_inner.embed_tokens = target_embed
 
     target_lm_head = getattr(target_model, "lm_head", None)
+    if target_lm_head is None:
+        target_lm_head = getattr(target_language_model, "lm_head", None)
     draft_lm_head = getattr(eagle_model, "lm_head", None)
     if target_lm_head is not None and _should_share(
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
