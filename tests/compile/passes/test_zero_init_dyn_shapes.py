@@ -51,7 +51,7 @@ def _compile_and_check(fn, *args):
     return out
 
 
-def test_p1_group_quant_dynamic_M():
+def test_group_quant_dynamic_M():
     op = rocm_aiter_ops.get_group_quant_with_zero_init_op()
 
     def fn(x, y):
@@ -64,7 +64,7 @@ def test_p1_group_quant_dynamic_M():
     _compile_and_check(fn, x, y)
 
 
-def test_p2_rmsnorm_quant_dynamic_M():
+def test_rmsnorm_group_quant_dynamic_M():
     op = rocm_aiter_ops.get_rmsnorm_fp8_group_quant_with_zero_init_op()
 
     def fn(x, y, w):
@@ -84,7 +84,7 @@ def test_p2_rmsnorm_quant_dynamic_M():
     _compile_and_check(fn, x, y, w)
 
 
-def test_p2add_rmsnorm_add_quant_dynamic_M():
+def test_rmsnorm_with_add_group_quant_dynamic_M():
     op = rocm_aiter_ops.get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op()
 
     def fn(x, y, r, w):
@@ -106,7 +106,7 @@ def test_p2add_rmsnorm_add_quant_dynamic_M():
     _compile_and_check(fn, x, y, r, w)
 
 
-def test_p4_act_mul_dynamic_M():
+def test_act_mul_group_quant_dynamic_M():
     op = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_with_zero_init_op()
 
     def fn(x, y):

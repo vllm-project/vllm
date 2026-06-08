@@ -19,7 +19,7 @@ the SplitK GEMM skips its internal hipMemsetAsync, and only one
 level, so no model code has to change to thread the preallocated output
 buffer through the producer.
 
-Generic-ness comes from two registries:
+The pass is organized around two registries:
 
 * ``ZERO_INIT_PRODUCERS`` -- maps each functional producer op to a
   :class:`ProducerSpec` that names its mutating ``_with_zero_init`` twin
@@ -28,10 +28,9 @@ Generic-ness comes from two registries:
   :class:`GemmSpec` that names its mutating ``_splitk`` twin plus the
   SplitK picker (typically a tuned-CSV lookup).
 
-Adding a new fusable producer or GEMM backend is then a one-entry registry
-change; the fusion-pass body iterates the registries and registers one
-pattern per ``(producer, gemm)`` pair via the standard Inductor pattern
-matcher.
+Adding a producer or GEMM backend that matches an existing builder is a
+registry entry; new FX call shapes can add a small builder and reuse the same
+registration loop.
 """
 
 from __future__ import annotations
@@ -233,10 +232,9 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
     except AttributeError:
         pass
 
-    # The two HIP fused-RMSNorm producers above (gemma/gated) are kept in
-    # the registry for future-proofing -- current Qwen3-Next-class models
-    # never emit them into the FX graph, but registering them is cheap and
-    # lets the fusion cover those producers if a model starts using them.
+    # Gemma and gated RMSNorm producers use AITER kernels that already support
+    # a zero-init prologue. Registering them lets the pass cover future model
+    # graphs that feed these producers directly into blockscale GEMM.
 
     try:
         splitk_op = rocm_aiter_ops.get_gemm_a8w8_blockscale_splitk_op()
@@ -385,7 +383,7 @@ def _make_extra_check(gemm: GemmSpec) -> Callable[[pm.Match], bool]:
 # vLLM passes split_k=0 to the SplitK GEMM op; the value is ignored by the
 # AITER side (the dispatcher always consults its tuned CSV for both splitK
 # *and* kernelName, which is keyed on Python-resolved string lookup in the
-# current AITER cktile dispatch). The fusion's value is in plumbing the
+# current AITER cktile dispatch). The fusion's value is in threading the
 # zero-init buffer + y_is_zeroed=True, not in picking SplitK or the kernel
 # -- those decisions stay with AITER's per-shape tuning data.
 _SPLIT_K_SENTINEL = 0
@@ -959,8 +957,8 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
         ``__call__`` is free in production. We don't rely on
         ``VllmInductorPass.dump_graph`` because that method constructs a
         ``LazyString`` and discards it -- it relies on PyTorch's TORCH_LOGS
-        plumbing to capture, which is not in effect for vLLM's standard
-        server boot.
+        handling to capture the graph, which is not always enabled in vLLM's
+        standard compilation path.
         """
         debug_dump_path = self._debug_dump_path
         if debug_dump_path is None:

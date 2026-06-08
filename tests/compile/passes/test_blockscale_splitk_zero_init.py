@@ -83,8 +83,8 @@ def _fp8_dtype() -> torch.dtype:
     return current_platform.fp8_dtype()
 
 
-class _BaseP2Module(torch.nn.Module):
-    """P2: Gemma RMSNorm + FP8 group quant -> blockscale GEMM."""
+class _GemmaRMSNormGroupQuantModule(torch.nn.Module):
+    """Gemma RMSNorm + FP8 group quant -> blockscale GEMM."""
 
     def __init__(self, K: int, N: int):
         super().__init__()
@@ -109,8 +109,8 @@ class _BaseP2Module(torch.nn.Module):
         )
 
 
-class _BaseP3Module(torch.nn.Module):
-    """P3: gated RMSNorm + FP8 group quant -> blockscale GEMM.
+class _GatedRMSNormGroupQuantModule(torch.nn.Module):
+    """Gated RMSNorm + FP8 group quant -> blockscale GEMM.
 
     The AITER ``gated_rmsnorm_fp8_group_quant`` kernel only supports
     ``head_dim == 128`` and expects 3D ``[T, H, D]`` inputs with a weight of
@@ -121,7 +121,9 @@ class _BaseP3Module(torch.nn.Module):
     def __init__(self, K: int, N: int):
         super().__init__()
         self._fp8 = _fp8_dtype()
-        assert K % GROUP_SIZE == 0, "K must be a multiple of head_dim=128 for P3"
+        assert K % GROUP_SIZE == 0, (
+            "K must be a multiple of head_dim=128 for gated RMSNorm group quant"
+        )
         self._num_heads = K // GROUP_SIZE
         self._head_dim = GROUP_SIZE
         self.weight = torch.nn.Parameter(
@@ -149,16 +151,17 @@ class _BaseP3Module(torch.nn.Module):
 
 # ---------------------------------------------------------------------------
 # Per-producer test modules for the *new* registered ProducerSpec entries.
-# These exercise the producer plumbing (P1 HIP per-1x128, P2 / P2-add Triton
-# rmsnorm-quant, P4 silu+mul + quant). Each module
+# These exercise the producer-to-GEMM rewrite coverage for per-group quant,
+# RMSNorm group quant, residual-add RMSNorm group quant, and silu+mul group
+# quant. Each module
 # emits the *same* keyword-style call that the upstream producer fusion
 # pass produces in the real Qwen3-Next FX graph, so the pattern matcher
 # sees an FX node whose arg layout matches what we register.
 # ---------------------------------------------------------------------------
 
 
-class _NewP1GroupQuantModule(torch.nn.Module):
-    """Upstream P1 producer: `rocm_aiter_group_fp8_quant(x, group_size)`.
+class _GroupQuantModule(torch.nn.Module):
+    """Upstream producer: `rocm_aiter_group_fp8_quant(x, group_size)`.
 
     HIP per-1x128 group FP8 quant -- the producer that actually fires in
     Qwen3-Next-class models on gfx950.
@@ -182,8 +185,8 @@ class _NewP1GroupQuantModule(torch.nn.Module):
         )
 
 
-class _NewP2RMSNormGroupQuantModule(torch.nn.Module):
-    """Upstream P2 producer: `rocm_aiter_rmsnorm_fp8_group_quant`.
+class _RMSNormGroupQuantModule(torch.nn.Module):
+    """Upstream producer: `rocm_aiter_rmsnorm_fp8_group_quant`.
 
     Calls the op with the all-kwargs convention that the upstream
     `AiterRMSFp8GroupQuantPattern` emits in the FX graph.
@@ -215,8 +218,8 @@ class _NewP2RMSNormGroupQuantModule(torch.nn.Module):
         )
 
 
-class _NewP2AddRMSNormGroupQuantModule(torch.nn.Module):
-    """Upstream P2-add producer: `rocm_aiter_rmsnorm_with_add_fp8_group_quant`.
+class _RMSNormWithAddGroupQuantModule(torch.nn.Module):
+    """Upstream producer: `rocm_aiter_rmsnorm_with_add_fp8_group_quant`.
 
     Returns three outputs (fp8, residual, scales); the fusion pass must
     preserve the residual SSA edge in the rewrite.
@@ -254,8 +257,8 @@ class _NewP2AddRMSNormGroupQuantModule(torch.nn.Module):
         return gemm + res.sum()
 
 
-class _NewP4ActMulModule(torch.nn.Module):
-    """Upstream P4 producer: `rocm_aiter_act_mul_and_fp8_group_quant`.
+class _ActMulGroupQuantModule(torch.nn.Module):
+    """Upstream producer: `rocm_aiter_act_mul_and_fp8_group_quant`.
 
     Takes x with last dim 2*K (gate_up_proj output) and applies silu*mul
     + group quant to give (M, K) FP8 feeding down_proj.
@@ -324,9 +327,9 @@ def _run_pass_on_module(
 @pytest.mark.parametrize(
     "module_cls,extra_inputs",
     [
-        (_BaseP2Module, ()),
-        # P3 takes an extra `z` input for the gate.
-        (_BaseP3Module, ("z",)),
+        (_GemmaRMSNormGroupQuantModule, ()),
+        # The gated RMSNorm producer takes an extra `z` input for the gate.
+        (_GatedRMSNormGroupQuantModule, ("z",)),
     ],
 )
 def test_pass_rewrites_producer_gemm_chain(
@@ -358,7 +361,7 @@ def test_pass_rewrites_producer_gemm_chain(
         # works under dynamic shapes too.
         inputs: list[torch.Tensor] = [x]
         if extra_inputs:
-            # P3 expects the gate `z` with the same shape as x.
+            # The gated RMSNorm producer expects `z` with the same shape as x.
             z = torch.randn(M, K, dtype=torch.bfloat16)
             inputs.append(z)
 
@@ -400,22 +403,22 @@ def test_pass_rewrites_producer_gemm_chain(
     "module_cls,extra_inputs,expected_replaced_op",
     [
         (
-            _NewP1GroupQuantModule,
+            _GroupQuantModule,
             (),
             "rocm_aiter_group_fp8_quant_with_zero_init",
         ),
         (
-            _NewP2RMSNormGroupQuantModule,
+            _RMSNormGroupQuantModule,
             (),
             "rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
         ),
         (
-            _NewP2AddRMSNormGroupQuantModule,
+            _RMSNormWithAddGroupQuantModule,
             ("residual",),
             "rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
         ),
         (
-            _NewP4ActMulModule,
+            _ActMulGroupQuantModule,
             ("gate_up_2k",),  # special-cased input: x has 2*K cols
             "rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
         ),
@@ -455,7 +458,7 @@ def test_pass_rewrites_new_producer_specs(
         if "z" in extra_inputs:
             inputs.append(torch.randn(M, K, dtype=torch.bfloat16))
         if "gate_up_2k" in extra_inputs:
-            # P4: replace x with (M, 2*K) input (silu+mul halves it back to K).
+            # silu+mul consumes (M, 2*K) and halves the last dim back to K.
             inputs = [torch.randn(M, 2 * K, dtype=torch.bfloat16)]
 
         backend, fusion_pass = _run_pass_on_module(model, tuple(inputs), vllm_config)
@@ -517,7 +520,7 @@ def test_per_pair_attribution_counts(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
-        model = _NewP1GroupQuantModule(K, N)
+        model = _GroupQuantModule(K, N)
         x = torch.randn(M, K, dtype=torch.bfloat16)
         backend, fusion_pass = _run_pass_on_module(model, (x,), vllm_config)
 
@@ -560,7 +563,7 @@ def test_pass_no_match_when_extra_check_rejects(monkeypatch: pytest.MonkeyPatch)
         rocm_aiter_ops.refresh_env_variables()
 
         small_K = 512  # below the static K-gate (K < 2048)
-        model = _NewP1GroupQuantModule(small_K, N)
+        model = _GroupQuantModule(small_K, N)
         x = torch.randn(M, small_K, dtype=torch.bfloat16)
 
         backend, fusion_pass = _run_pass_on_module(model, (x,), vllm_config)
