@@ -290,6 +290,19 @@ def test_qwen3_patch_embed_compact_image_matches_duplicated_temporal(
         in_channels=3,
         hidden_size=5,
     )
+    with torch.no_grad():
+        patch_embed.proj.weight.copy_(
+            torch.arange(
+                patch_embed.proj.weight.numel(),
+                dtype=torch.float32,
+            ).reshape_as(patch_embed.proj.weight)
+        )
+        patch_embed.proj.bias.copy_(
+            torch.arange(
+                patch_embed.proj.bias.numel(),
+                dtype=torch.float32,
+            )
+        )
     compact_pixel_values = torch.arange(36, dtype=torch.float32).reshape(3, 12)
     duplicated_pixel_values = (
         compact_pixel_values.view(3, 3, 2, 2)
