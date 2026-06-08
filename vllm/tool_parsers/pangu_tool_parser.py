@@ -45,14 +45,8 @@ class PanguToolParser(ToolParser):
             str
         ] = []  # map what has been streamed for each tool so far to a list
 
-        self.tool_call_start_token: str = (
-            "<|tool_call_start|>"
-            if self.vocab.get("<|tool_call_start|>")
-            else "[unused11]"
-        )
-        self.tool_call_end_token: str = (
-            "<|tool_call_end|>" if self.vocab.get("<|tool_call_end|>") else "[unused12]"
-        )
+        self.tool_call_start_token: str = "<|tool_call_start|>"
+        self.tool_call_end_token: str = "<|tool_call_end|>"
         self.pattern = (
             re.escape(self.tool_call_start_token)
             + "(.*?)"
