@@ -1406,12 +1406,7 @@ class GPUModelRunner(
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
             self.input_batch.add_request(request)
-            req_id = request.req_id
-            req_index = self.input_batch.req_id_to_index[req_id]
-
-            # Place spec tokens at the (now-correct) num_tokens_no_spec offset.
-            self.input_batch.update_req_spec_token_ids(
-                request, scheduled_spec_tokens)
+            self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
 
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
