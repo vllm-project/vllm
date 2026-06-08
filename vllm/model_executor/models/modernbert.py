@@ -32,14 +32,6 @@ from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
-def _get_sliding_window(config: ModernBertConfig) -> int:
-    sliding_window = getattr(config, "sliding_window", None)
-    if sliding_window is not None:
-        # Transformers treats the local attention boundary as inclusive.
-        return sliding_window + 1
-    return config.local_attention // 2
-
-
 class ModernBertEmbeddings(nn.Module):
     def __init__(self, config: ModernBertConfig):
         super().__init__()
@@ -102,12 +94,14 @@ class ModernBertAttention(nn.Module):
             rope_parameters = config.rope_parameters[layer_type]
             sliding_window: int | None = None
             if layer_type == "sliding_attention":
-                sliding_window = _get_sliding_window(config)
+                # Treats the local attention boundary as inclusive
+                sliding_window = config.sliding_window + 1
         else:
             # Transformers v4
             sliding_window = None
             if layer_id % config.global_attn_every_n_layers != 0:
-                sliding_window = _get_sliding_window(config)
+                # ModernBertConfig does not expose sliding_window
+                sliding_window = config.local_attention // 2
                 rope_theta = (
                     config.local_rope_theta
                     if config.local_rope_theta is not None
