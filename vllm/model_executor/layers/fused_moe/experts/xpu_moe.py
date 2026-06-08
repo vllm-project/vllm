@@ -213,7 +213,7 @@ class XPUExpertsFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMxfp8(XPUExpertsFp8):
+class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -305,7 +305,7 @@ class XPUExpertsWNA16(XPUExperts):
         return (weight_key, activation_key) == (kInt4Static, None)
 
 
-class XPUExpertsMXFp4(XPUExperts):
+class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
