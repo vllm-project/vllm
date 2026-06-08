@@ -401,9 +401,6 @@ def kernel_unified_attention(
         physical_block_idx = tl.load(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
-
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
         
         if USE_TD:
             # All TILE_SIZE slots within a single KV tile map to one
