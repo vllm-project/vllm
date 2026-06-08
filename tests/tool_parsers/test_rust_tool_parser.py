@@ -28,40 +28,77 @@ class DeepSeekV4RustToolParser(RustToolParser):
     tool_call_start_token = TC_START
 
 
-def sample_tool() -> ChatCompletionToolsParam:
-    return ChatCompletionToolsParam(
-        type="function",
-        function={
-            "name": "create_order",
-            "description": "Create an order",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {"type": "integer"},
-                    "shipping": {
-                        "type": "object",
-                        "properties": {
-                            "city": {"type": "string"},
-                            "zip": {"type": "integer"},
-                        },
+def sample_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "description": "Get weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                        "date": {"type": "string"},
                     },
                 },
             },
-        },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "add",
+                "description": "Add two integers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                    },
+                },
+            },
+        ),
+    ]
+
+
+EXPECTED_CALLS = [
+    ("get_weather", {"location": "SF", "date": "2024-01-16"}),
+    ("add", {"x": 3, "y": 5}),
+]
+
+
+def build_invoke(
+    function_name: str,
+    params: Sequence[tuple[str, str, bool]],
+) -> str:
+    param_text = "\n".join(
+        f'{PARAM_START}{name}" string="{str(is_string).lower()}">'
+        f"{value}{PARAM_END}"
+        for name, value, is_string in params
+    )
+    return (
+        f'{INV_START}{function_name}">\n'
+        f"{param_text}\n"
+        f"{INV_END}\n"
     )
 
 
 def build_tool_call() -> str:
-    return (
-        f"{TC_START}\n"
-        f'{INV_START}create_order">\n'
-        f'{PARAM_START}user_id" string="false">42{PARAM_END}\n'
-        f'{PARAM_START}shipping" string="false">'
-        f'{{"city":"Singapore","zip":18956}}'
-        f"{PARAM_END}\n"
-        f"{INV_END}\n"
-        f"{TC_END}"
+    weather = build_invoke(
+        "get_weather",
+        [
+            ("location", "SF", True),
+            ("date", "2024-01-16", True),
+        ],
     )
+    add = build_invoke(
+        "add",
+        [
+            ("x", "3", False),
+            ("y", "5", False),
+        ],
+    )
+    return f"{TC_START}\n{weather}{add}{TC_END}"
 
 
 def parse_streaming(
@@ -116,13 +153,16 @@ def collect_streamed_arguments(deltas: Sequence, tool_index: int = 0) -> str:
 
 
 def test_rust_tool_parser_extension_typed_api() -> None:
-    tool = _rust_tool_parser.Tool(
-        "create_order",
-        "Create an order",
-        sample_tool().function.parameters,
-        None,
-    )
-    parser = _rust_tool_parser.ToolParser("DeepSeekV4ToolParser", [tool])
+    tools = [
+        _rust_tool_parser.Tool(
+            tool.function.name,
+            tool.function.description,
+            tool.function.parameters,
+            None,
+        )
+        for tool in sample_tools()
+    ]
+    parser = _rust_tool_parser.ToolParser("DeepSeekV4ToolParser", tools)
     output = _rust_tool_parser.ToolParserOutput()
 
     parser.parse_into(build_tool_call(), output)
@@ -131,36 +171,31 @@ def test_rust_tool_parser_extension_typed_api() -> None:
 
     assert parser.preserve_special_tokens()
     assert output.normal_text == ""
-    assert len(output.calls) == 1
-    assert output.calls[0].name == "create_order"
-    assert json.loads(output.calls[0].arguments) == {
-        "user_id": 42,
-        "shipping": {"city": "Singapore", "zip": 18956},
-    }
+    assert len(output.calls) == 2
+    for call, (name, arguments) in zip(output.calls, EXPECTED_CALLS):
+        assert call.name == name
+        assert json.loads(call.arguments) == arguments
 
 
 def test_rust_tool_parser_adapter_extracts_complete_output() -> None:
-    tool = sample_tool()
-    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[tool])
+    tools = sample_tools()
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=tools)
 
     result = parser.extract_tool_calls(
         "Let me create it. " + build_tool_call(),
-        ChatCompletionRequest(messages=[], model="m", tools=[tool]),
+        ChatCompletionRequest(messages=[], model="m", tools=tools),
     )
 
     assert result.tools_called
     assert result.content == "Let me create it. "
-    assert len(result.tool_calls) == 1
-    tool_call = result.tool_calls[0]
-    assert tool_call.function.name == "create_order"
-    assert json.loads(tool_call.function.arguments) == {
-        "user_id": 42,
-        "shipping": {"city": "Singapore", "zip": 18956},
-    }
+    assert len(result.tool_calls) == 2
+    for tool_call, (name, arguments) in zip(result.tool_calls, EXPECTED_CALLS):
+        assert tool_call.function.name == name
+        assert json.loads(tool_call.function.arguments) == arguments
 
 
-def test_rust_tool_parser_adapter_streaming_flushes_final_call() -> None:
-    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[sample_tool()])
+def test_rust_tool_parser_adapter_streaming_handles_multiple_calls() -> None:
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
 
     deltas = parse_streaming(parser, build_tool_call(), chunk_size=5)
 
@@ -170,15 +205,13 @@ def test_rust_tool_parser_adapter_streaming_flushes_final_call() -> None:
         for tool_call in delta.tool_calls or []
         if tool_call.function is not None and tool_call.function.name is not None
     ]
-    assert names == ["create_order"]
-    assert json.loads(collect_streamed_arguments(deltas)) == {
-        "user_id": 42,
-        "shipping": {"city": "Singapore", "zip": 18956},
-    }
+    assert names == [name for name, _ in EXPECTED_CALLS]
+    for index, (_, arguments) in enumerate(EXPECTED_CALLS):
+        assert json.loads(collect_streamed_arguments(deltas, index)) == arguments
 
 
 def test_rust_tool_parser_adapter_ignores_midstream_empty_delta() -> None:
-    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[sample_tool()])
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
     text = build_tool_call()
     split_at = len(TC_START) + 8
     deltas = []
@@ -205,20 +238,18 @@ def test_rust_tool_parser_adapter_ignores_midstream_empty_delta() -> None:
         for tool_call in delta.tool_calls or []
         if tool_call.function is not None and tool_call.function.name is not None
     ]
-    assert names == ["create_order"]
-    assert json.loads(collect_streamed_arguments(deltas)) == {
-        "user_id": 42,
-        "shipping": {"city": "Singapore", "zip": 18956},
-    }
+    assert names == [name for name, _ in EXPECTED_CALLS]
+    for index, (_, arguments) in enumerate(EXPECTED_CALLS):
+        assert json.loads(collect_streamed_arguments(deltas, index)) == arguments
 
 
 def test_rust_tool_parser_adapter_adjust_request_is_opaque() -> None:
-    tool = sample_tool()
-    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[tool])
+    tools = sample_tools()
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=tools)
     request = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=[tool],
+        tools=tools,
         tool_choice="required",
         skip_special_tokens=True,
     )
