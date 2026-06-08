@@ -148,12 +148,19 @@ These are mostly enablement and tuning changes; they are easy to overlook during
 
 ## 8) compressed_tensors_moe (MoE scheme matching + W4A8 load path)
 
-Upstream v0.21 split MoE dispatch into
+Upstream v0.21 split MoE dispatch into the package
 `compressed_tensors/compressed_tensors_moe/` (router in
-`compressed_tensors_moe.py`, WNA16 Marlin in
-`compressed_tensors_moe_wna16_marlin.py`). Cohere-specific logic from the
-legacy monolithic `compressed_tensors_moe.py` must be ported into those
-package files on every upstream sync — not only the top-level shim.
+`compressed_tensors_moe/compressed_tensors_moe.py`, WNA16 Marlin in
+`compressed_tensors_moe/compressed_tensors_moe_wna16_marlin.py`). Cohere-specific
+logic lives in those package files and must be ported there on every upstream
+sync.
+
+> **Regression trap (v0.21 nightly int4 failures).** The fork previously kept a
+> legacy monolithic `compressed_tensors/compressed_tensors_moe.py` alongside the
+> package. Because a package directory shadows a sibling module of the same name,
+> that file was dead code: the fixes lived in the wrong copy and never ran, which
+> reintroduced the GPTQ/AWQ MoE crashes below. The dead file has been **deleted** —
+> never resurrect it; edit the package files directly.
 
 ### MoE quantization scheme equality
 
@@ -178,6 +185,23 @@ fail the “All MoE projections need to have same quantization scheme” check.
 derives an effective Marlin `group_size` of 16 (`size_k / num_groups`) that
 the kernel does not support — server startup fails with
 `Invalid thread config ... group_size = 16, is_k_full = 0`.
+
+This rule is isolated in the pure static helper
+`CompressedTensorsWNA16MarlinMoEMethod._w2_scale_sharding(actorder, group_size,
+intermediate_size_per_partition, intermediate_size_full)` (returns
+`(load_full_w2, w2_scales_size, is_k_full)`) so it stays GPU-free testable and
+self-documenting across rebases.
+
+### Tests
+
+GPU-free unit tests pin all three fixes in
+`tests/cohere/cpu/test_int4_moe_regressions.py`: `_w2_scale_sharding`
+(Marlin TP sharding), `_normalize_weight_actorder` (mixed AWQ+GPTQ scheme
+equality), and `Cohere2VisionForConditionalGeneration.load_weights`
+(`lm_head` skip). The file lives under `tests/cohere/cpu/` so it is
+auto-discovered by `run_cpu_tests` (the `cpu_check` group run by daily CI via
+`nightly-benchmark.yaml`); `tests/cohere/unit/` is **not** collected by the
+runner. Run `pytest tests/cohere/cpu/test_int4_moe_regressions.py`.
 
 ### W4A8 weight post-processing
 
@@ -291,8 +315,9 @@ that `df1e30e74` depends on are not yet in this fork:
 - **vllm-project/vllm#39187** (CT MoE "Oracle Structure" package split).
   Upstream places the new MoE method at
   `compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py`.
-  This fork still has `compressed_tensors_moe.py` as a single file, so
-  `CompressedTensorsW8A8Mxfp8MoEMethod` is appended in-place instead.
+  The fork now follows this package layout (the legacy single-file
+  `compressed_tensors_moe.py` has been removed), and
+  `CompressedTensorsW8A8Mxfp8MoEMethod` lives in that package submodule.
 
 **Drop condition.** Once this fork merges upstream past `df1e30e74` (which
 requires `#39187` and `#39205`), delete this port and take upstream's version.
@@ -307,7 +332,8 @@ by upstream's `compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py`.
   linear scheme. Loads `float8_e4m3fn` weights + `uint8` scales, swizzles the
   scale for FlashInfer-CUTLASS in `process_weights_after_loading`, and dispatches
   to `Mxfp8LinearOp.apply`.
-- `compressed_tensors_moe.py` — appends `CompressedTensorsW8A8Mxfp8MoEMethod`
+- `compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py` — defines
+  `CompressedTensorsW8A8Mxfp8MoEMethod`
   (structurally a twin of `CompressedTensorsW8A8Fp8MoEMethod`; reuses the
   already-present `select_mxfp8_moe_backend` / `make_fp8_moe_kernel` /
   `convert_to_fp8_moe_kernel_format` oracle helpers from `#665`).
