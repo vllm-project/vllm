@@ -101,6 +101,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
+from ...utils.torch_utils import async_tensor_h2d
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -1714,8 +1715,8 @@ class Qwen3VLForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
-        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
-            return None
+        if num_tokens > self.deepstack_input_embeds[0].size(0):
+            self._resize_deepstack_input_embeds(num_tokens)
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1727,6 +1728,17 @@ class Qwen3VLForConditionalGeneration(
             }
         )
 
+    def _resize_deepstack_input_embeds(self, num_tokens: int) -> None:
+        self.deepstack_input_embeds = [
+            torch.zeros(
+                num_tokens,
+                self.config.text_config.hidden_size,
+                device=self.deepstack_input_embeds[0].device,
+                dtype=self.deepstack_input_embeds[0].dtype,
+            )
+            for _ in range(self.deepstack_num_level)
+        ]
+
     def _set_deepstack_input_embeds(self, deepstack_input_embeds: torch.Tensor) -> None:
         if not getattr(self, "deepstack_input_embeds", None):
             return
@@ -1734,15 +1746,7 @@ class Qwen3VLForConditionalGeneration(
         # set deepstack_input_embeds to buffer
         num_tokens = deepstack_input_embeds.size(1)
         if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    num_tokens,
-                    self.config.text_config.hidden_size,
-                    device=self.deepstack_input_embeds[0].device,
-                    dtype=self.deepstack_input_embeds[0].dtype,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
+            self._resize_deepstack_input_embeds(num_tokens)
         for idx in range(self.deepstack_num_level):
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
@@ -1775,13 +1779,13 @@ class Qwen3VLForConditionalGeneration(
         # disable CUDA graph for all modalities when pruning is on.
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
+        # Compute max_frames_per_video for budget sizing.
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "pos_embeds",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
@@ -1790,6 +1794,7 @@ class Qwen3VLForConditionalGeneration(
                 "sequence_lengths",
             ],
             out_hidden_size=self.visual.out_hidden_size,
+            max_frames_per_video=max_frames,
         )
 
     def get_input_modality(
@@ -1798,7 +1803,9 @@ class Qwen3VLForConditionalGeneration(
     ) -> str:
         if "image_grid_thw" in mm_kwargs:
             return "image"
-        return "video"
+        elif "video_grid_thw" in mm_kwargs:
+            return "video"
+        raise AssertionError("This line should be unreachable.")
 
     def get_max_frames_per_video(self) -> int:
         mm_registry = MULTIMODAL_REGISTRY
@@ -1829,11 +1836,12 @@ class Qwen3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        if self.get_input_modality(mm_kwargs) == "image":
-            pixel_values = mm_kwargs["pixel_values"]
-        else:
-            pixel_values = mm_kwargs["pixel_values_videos"]
-        return pixel_values
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            return mm_kwargs["pixel_values"]
+        elif modality == "video":
+            return mm_kwargs["pixel_values_videos"]
+        raise AssertionError("This line should be unreachable.")
 
     def _get_grid_thw_by_modality(
         self,
@@ -1845,26 +1853,21 @@ class Qwen3VLForConditionalGeneration(
             grid_thw = grid_thw.tolist()
         return grid_thw
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         m = self.visual.spatial_merge_size
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * (h // m) * (w // m) for t, h, w in grid_thw]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return [t * h * w for t, h, w in grid_thw]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in grid_thw
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -1972,7 +1975,7 @@ class Qwen3VLForConditionalGeneration(
         # so the capture value must cover any replay scenario.
         # Worst case: 1 item consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1982,14 +1985,12 @@ class Qwen3VLForConditionalGeneration(
 
         # Just use image-modality dummy input_buffer for capturing, since it's also
         # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -2002,26 +2003,30 @@ class Qwen3VLForConditionalGeneration(
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
-        else:
-            buffers = self.visual.prepare_encoder_metadata(
+        elif modality == "video":
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
+        else:
+            raise AssertionError("This line should be unreachable.")
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
@@ -2157,7 +2162,9 @@ class Qwen3VLForConditionalGeneration(
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
-                positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+                positions = compute_mrope_for_media(size, merge_size).to(
+                    emb.device, non_blocking=True
+                )
                 positions = torch.cat(
                     [
                         positions,
@@ -2262,6 +2269,8 @@ class Qwen3VLForConditionalGeneration(
         input_embeds for the LLM.
         """
 
+        device = video_embeddings.device
+
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized
         # special tokens to ensure consistent tokenization regardless of
@@ -2276,10 +2285,8 @@ class Qwen3VLForConditionalGeneration(
             select_token_id=self.is_multimodal_pruning_enabled,
         )
 
-        repl_token_ids = torch.tensor(video_repl.full)
-        embed_token_id = _cached_tensor(
-            self.config.video_token_id, repl_token_ids.device
-        )
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
         is_video_embed = torch.isin(repl_token_ids, embed_token_id)
 
         # Get text embeddings for indicator tokens (has only `visual_dim``).
@@ -2388,7 +2395,7 @@ class Qwen3VLForConditionalGeneration(
                 input_tokens=unpruned_token_ids,
                 mm_features=[mm_feature],
             )[0]
-            .to(device)
+            .to(device, non_blocking=True)
             .permute(1, 0)
         )
         full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
@@ -2636,7 +2643,7 @@ class Qwen3VLForConditionalGeneration(
         )
 
         # Tensors
-        input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
+        input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
 
         mm_embeddings_out = []
         mm_embeddings_pos = []

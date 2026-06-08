@@ -8,6 +8,7 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
@@ -15,6 +16,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
@@ -107,6 +109,7 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -118,7 +121,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "SHUFFLE",
+        layout,
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -144,35 +147,57 @@ def _cp_gather_indexer_quant_cache_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
+    NUM_TOKENS: tl.constexpr,
+    NUM_BATCHES: tl.constexpr,
+    BLOCK_TABLE_WIDTH: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
 ):
     tid = tl.program_id(0)
     offset = tl.arange(0, HEAD_DIM)
-    batch_id = tl.load(token_to_seq_ptr + tid)
-    batch_start = tl.load(cu_seqlen_ptr + batch_id)
-    batch_end = tl.load(cu_seqlen_ptr + batch_id + 1)
+    valid_tid = tid < NUM_TOKENS
+    batch_id = tl.load(token_to_seq_ptr + tid, mask=valid_tid, other=-1)
+    valid_batch = (batch_id >= 0) & (batch_id < NUM_BATCHES)
+    safe_batch_id = tl.where(valid_batch, batch_id, 0)
+    batch_start = tl.load(cu_seqlen_ptr + safe_batch_id, mask=valid_batch, other=0)
+    batch_end = tl.load(cu_seqlen_ptr + safe_batch_id + 1, mask=valid_batch, other=0)
     batch_offset = tid - batch_start
-    if tid >= batch_end:
+    valid_token = valid_tid & valid_batch & (tid >= batch_start) & (tid < batch_end)
+    if not valid_token:
         return
     block_table_id = batch_offset // block_size
     block_offset = batch_offset % block_size
-    block_table_offset = batch_id * block_table_stride + block_table_id
-    block_id = tl.load(block_table_ptr + block_table_offset)
-    tiled_block_id = block_offset // BLOCK_TILE_SIZE
-    tiled_block_offset = block_offset % BLOCK_TILE_SIZE
+    valid_block_table = (
+        valid_token
+        & (block_table_id >= 0)
+        & (block_table_id < BLOCK_TABLE_WIDTH)
+        & (block_offset >= 0)
+        & (block_offset < block_size)
+    )
+    safe_block_table_id = tl.where(valid_block_table, block_table_id, 0)
+    block_table_offset = safe_batch_id * block_table_stride + safe_block_table_id
+    block_id = tl.load(
+        block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
+    )
+    valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
+    safe_block_id = tl.where(valid_block, block_id, 0)
+    safe_block_offset = tl.where(valid_block, block_offset, 0)
+    tiled_block_offset = safe_block_offset % BLOCK_TILE_SIZE
     if LAYOUT == "SHUFFLE":
         src_cache_offset = (
-            block_id * kv_cache_stride
-            + tiled_block_id * HEAD_DIM * BLOCK_TILE_SIZE
+            safe_block_id * kv_cache_stride
+            + (safe_block_offset // BLOCK_TILE_SIZE) * HEAD_DIM * BLOCK_TILE_SIZE
             + tiled_block_offset * HEAD_TILE_SIZE
         )
     else:
-        src_cache_offset = block_id * kv_cache_stride + block_offset * HEAD_DIM
-    src_scale_offset = block_id * kv_cache_scale_stride + block_offset
+        src_cache_offset = (
+            safe_block_id * kv_cache_stride + safe_block_offset * HEAD_DIM
+        )
+    src_scale_offset = safe_block_id * kv_cache_scale_stride + safe_block_offset
     dst_offset = tid * HEAD_DIM
     src_scale_ptr = kv_cache_scale_ptr + src_scale_offset
     src_cache_ptr = kv_cache_ptr + src_cache_offset
     dst_k_ptr = k_fp8_ptr + dst_offset
-    scale_val = tl.load(src_scale_ptr)
+    scale_val = tl.load(src_scale_ptr, mask=valid_block, other=0.0)
     tl.store(k_scale_ptr + tid, scale_val)
     if LAYOUT == "SHUFFLE":
         tiled_src_offset = (
@@ -182,7 +207,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     else:
         tiled_src_offset = offset
     val = tl.load(src_cache_ptr + tiled_src_offset)
-    tl.store(dst_k_ptr + offset, val)
+    tl.store(dst_k_ptr + offset, val, mask=valid_block)
 
 
 def cp_gather_indexer_k_quant_cache_triton(
@@ -207,6 +232,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     _cp_gather_indexer_quant_cache_kernel[grid](
         k_cache_value,
         k_cache_scale,
@@ -219,10 +245,14 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "SHUFFLE",
+        layout,
         head_dim,
         block_tile_size,
         head_tile_size,
+        num_tokens,
+        cu_seqlen.shape[0] - 1,
+        block_table.shape[1],
+        num_blocks,
     )
 
 
@@ -380,8 +410,8 @@ def rocm_fp8_paged_mqa_logits(
 
     aiter_paged_mqa_logits_module = None
     # if rocm_aiter_ops.is_enabled():
-    batch_size, next_n, heads, head_dim = q_fp8.shape
-    num_blocks, block_size, _, _ = kv_cache_fp8.shape
+    batch_size, next_n = q_fp8.shape[:2]
+    block_size = kv_cache_fp8.shape[1]
 
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
@@ -392,12 +422,10 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            out_logits = torch.full(
-                [batch_size * next_n, max_model_len],
-                float("-inf"),
-                device="cuda",
-                dtype=torch.float32,
+            (out_logits,) = current_workspace_manager().get_simultaneous(
+                ((batch_size * next_n, max_model_len), torch.float32),
             )
+            out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -407,7 +435,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size == 64,
+                Preshuffle=block_size > 1,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -416,12 +444,10 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
+        (out_qk,) = current_workspace_manager().get_simultaneous(
+            ((heads, batch_size * next_n, max_model_len), torch.float32),
         )
+        out_qk.fill_(float("-inf"))
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -468,12 +494,13 @@ def fp8_mqa_logits_torch(
     seq_len_kv = k_fp8.shape[0]
     k = k_fp8.to(torch.bfloat16)
     q = q.to(torch.bfloat16)
+    device = q.device
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -618,6 +645,43 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Profiling early-exit: reserve memory to account for runtime
+        # allocations. Must be in the real impl, not the fake impl —
+        # torch.compile calls the fake impl under FakeTensor mode where
+        # workspace manager operations on the locked real workspace
+        # would corrupt PyTorch's dispatch state.
+        workspace_manager = current_workspace_manager()
+
+        # Prefill k_fp8 and k_scale buffers, used by
+        # rocm_aiter_sparse_attn_indexer's prefill path
+        workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+
+        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        if _ON_GFX942 or _ON_GFX950:
+            workspace_manager.get_simultaneous(
+                ((hidden_states.shape[0], max_model_len), torch.float32),
+            )
+        else:
+            workspace_manager.get_simultaneous(
+                (
+                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    torch.float32,
+                ),
+            )
+        # Transient logits tensor peak memory, produced by
+        # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
+        # (decode). Prefill logits are bounded by
+        # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
+        # split_indexer_prefill_chunks; decode logits are smaller.
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
+
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -642,7 +706,6 @@ def rocm_aiter_sparse_attn_indexer(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
-    device = hidden_states.device if k is None else k.device
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
@@ -674,17 +737,15 @@ def rocm_aiter_sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
+
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=device,
-                dtype=torch.uint8,
-            )
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
             if _ON_GFX942:
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
@@ -702,7 +763,6 @@ def rocm_aiter_sparse_attn_indexer(
                     chunk.cu_seq_lens,
                     token_to_seq=chunk.token_to_seq,
                 )
-
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -942,8 +1002,9 @@ def _pack_dense_prefix_to_ragged_kernel(
         return
 
     mask = offsets < row_len
+    safe_offsets = tl.where(offsets < row_width, offsets, 0)
     vals = tl.load(
-        indices_ptr + row_idx * indices_stride0 + offsets,
+        indices_ptr + row_idx * indices_stride0 + safe_offsets,
         mask=mask & (offsets < row_width),
         other=-1,
     ).to(tl.int32)
@@ -968,15 +1029,16 @@ def build_ragged_indices_from_dense(
     max_width = indices.shape[1] if indices.ndim == 2 else 0
     lengths = lengths.clamp(min=0, max=max_width).contiguous()
 
-    indptr = torch.empty(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
-    indptr[0] = 0
+    indptr = torch.zeros(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
 
     if indices.numel() == 0:
         flat = torch.empty(0, dtype=torch.int32, device=indices.device)
     else:
         flat = torch.empty(
-            int(indptr[-1].item()), dtype=torch.int32, device=indices.device
+            indices.shape[0] * max_width,
+            dtype=torch.int32,
+            device=indices.device,
         )
         if flat.numel() > 0:
             block_size = 128
@@ -1059,9 +1121,12 @@ def _sparse_attn_prefill_ragged_kernel(
         in_range = k_pos < kv_len
         slot = tl.load(kv_indices_ptr + kv_start + k_pos, mask=in_range, other=-1)
         valid = in_range & (slot >= 0) & (slot < num_kv)
+        safe_slot = tl.where(valid, slot, 0)
 
         kv = tl.load(
-            kv_ptr + slot[:, None] * kv_stride_n + dim_offsets[None, :] * kv_stride_d,
+            kv_ptr
+            + safe_slot[:, None] * kv_stride_n
+            + dim_offsets[None, :] * kv_stride_d,
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
@@ -1355,7 +1420,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
     assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
     assert indptr.ndim == 1, f"expected indptr=[sq+1], got {indptr.shape}"
-    assert q.is_cuda and kv.is_cuda and indices.is_cuda and indptr.is_cuda
+    assert not q.is_cpu and not kv.is_cpu and not indices.is_cpu and not indptr.is_cpu
 
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
@@ -1459,10 +1524,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     )
     assert main_indptr.ndim == 1, f"expected main_indptr=[b+1], got {main_indptr.shape}"
     assert (
-        q.is_cuda
-        and main_cache.is_cuda
-        and main_indices.is_cuda
-        and main_indptr.is_cuda
+        not q.is_cpu
+        and not main_cache.is_cpu
+        and not main_indices.is_cpu
+        and not main_indptr.is_cpu
     )
 
     main_indices = _as_int32_contiguous_1d(main_indices)

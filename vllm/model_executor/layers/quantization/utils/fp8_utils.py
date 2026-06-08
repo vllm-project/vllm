@@ -255,7 +255,7 @@ def silu_mul_quant_fp8_packed_triton(
     if output_q is None:
         output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=input.device)
 
-    output_scale_packed = torch.zeros(
+    output_scale_packed = torch.empty(
         (num_packed_groups, tma_aligned_M),
         dtype=torch.int32,
         device=input.device,
@@ -573,9 +573,11 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    # prefer CUDA kernel if available
+    # prefer CUDA/XPU kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
-    if current_platform.is_cuda() and x.is_contiguous():
+    if (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    ) and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,
@@ -664,8 +666,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min, fp8_max = finfo.min, finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     # compute DeepGEMM-style packed scale tensor shape.
     hidden_dim = x.shape[-1]
@@ -681,10 +682,10 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         dtype=torch.int32,
     )
 
-    # CUDA kernel path only (DeepGEMM + E8M0 is CUDA-specific).
-    assert current_platform.is_cuda(), (
-        "per_token_group_quant_fp8_packed_for_deepgemm is only valid on CUDA "
-        "platforms using DeepGEMM."
+    # Native kernel (libtorch stable); used with DeepGEMM on CUDA and
+    # available on ROCm for the same packed UE8M0 scale layout.
+    assert current_platform.is_cuda_alike(), (
+        "per_token_group_quant_fp8_packed_for_deepgemm requires a CUDA or ROCm GPU."
     )
 
     x_contiguous = x.contiguous()
@@ -861,7 +862,7 @@ def w8a8_triton_block_scaled_mm(
     # Triton cannot currently bind E8M0 scale tensors directly. On ROCm,
     # DeepSeek-V4 checkpoints store block scales in exponent-only E8M0 format,
     # so decode them to fp32 before launching the kernel.
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() or current_platform.is_xpu():
         if As.dtype == torch.float8_e8m0fnu:
             As = _upcast_e8m0_to_fp32(As).contiguous()
         if Bs.dtype == torch.float8_e8m0fnu:

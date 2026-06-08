@@ -3,7 +3,10 @@
 
 import pytest
 
-from vllm.tool_parsers.utils import coerce_to_schema_type
+from vllm.tool_parsers.utils import (
+    coerce_to_schema_type,
+    extract_types_from_schema,
+)
 
 
 class TestCoerceToSchemaType:
@@ -146,3 +149,66 @@ class TestCoerceToSchemaType:
 
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
+
+
+class TestExtractTypesFromSchema:
+    def test_direct_type_string(self):
+        assert extract_types_from_schema({"type": "string"}) == ["string"]
+
+    def test_direct_type_integer(self):
+        assert extract_types_from_schema({"type": "integer"}) == ["integer"]
+
+    def test_type_array(self):
+        result = set(extract_types_from_schema({"type": ["string", "null"]}))
+        assert result == {"string", "null"}
+
+    def test_anyof(self):
+        schema = {"anyOf": [{"type": "object"}, {"type": "null"}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"object", "null"}
+
+    def test_oneof(self):
+        schema = {"oneOf": [{"type": "integer"}, {"type": "string"}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "string"}
+
+    def test_allof(self):
+        schema = {"allOf": [{"type": "object"}]}
+        assert extract_types_from_schema(schema) == ["object"]
+
+    def test_enum_infers_types(self):
+        schema = {"enum": [1, "a", None]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "string", "null"}
+
+    def test_enum_with_bool(self):
+        schema = {"enum": [True, False]}
+        assert extract_types_from_schema(schema) == ["boolean"]
+
+    def test_enum_with_float(self):
+        schema = {"enum": [1.5, 2.5]}
+        assert extract_types_from_schema(schema) == ["number"]
+
+    def test_enum_with_list_and_dict(self):
+        schema = {"enum": [[1, 2], {"a": 1}]}
+        result = set(extract_types_from_schema(schema))
+        assert result == {"array", "object"}
+
+    def test_none_schema_defaults_to_string(self):
+        assert extract_types_from_schema(None) == ["string"]
+
+    def test_non_dict_schema_defaults_to_string(self):
+        assert extract_types_from_schema("string") == ["string"]
+
+    def test_empty_dict_defaults_to_string(self):
+        assert extract_types_from_schema({}) == ["string"]
+
+    def test_nested_anyof(self):
+        schema = {
+            "anyOf": [
+                {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                {"type": "string"},
+            ]
+        }
+        result = set(extract_types_from_schema(schema))
+        assert result == {"integer", "null", "string"}

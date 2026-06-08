@@ -73,9 +73,14 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # determines the SWA block size of 64 tokens per block.
         # TODO(yifan): make SWA block size automatically determined and configurable.
         self.block_size = 64
-        assert self.dtype == torch.uint8
+        # uint8: legacy FlashMLA UE8M0 paged layout. bfloat16 / float8_e4m3fn:
+        # FlashInfer contiguous full-cache layout.
+        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # FlashMLA's UE8M0 paged layout needs 576B alignment; FlashInfer's
+        # contiguous bf16/fp8 cache uses the natural element-size page.
+        is_flashmla = self.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -83,7 +88,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=576 if is_flashmla else None,
             model_version="deepseek_v4",
         )
 
@@ -113,7 +118,7 @@ class DeepseekSparseSWABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
         if current_platform.is_rocm():
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+            from vllm.models.deepseek_v4.amd.rocm import (
                 DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
             )
 
@@ -367,7 +372,11 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             _LAYER_TYPE_C4A: None,
             _LAYER_TYPE_C128A: None,
         }
-        if num_decode_tokens == 0 or current_platform.is_rocm():
+        if (
+            num_decode_tokens == 0
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        ):
             return out
         for layer_type in self._layer_types:
             # get_mla_metadata() is the official FlashMLA entry point that

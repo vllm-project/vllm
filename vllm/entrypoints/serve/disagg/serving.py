@@ -8,12 +8,12 @@ import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
+import msgspec
 import numpy as np
 import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -37,7 +37,8 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateStreamResponse,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -125,6 +126,18 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        sampling_params = request.sampling_params
+        max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+        if sampling_params.n > max_num_seqs:
+            return self.create_error_response(
+                f"sampling_params.n must be at most the server's max_num_seqs "
+                f"({max_num_seqs}), got {sampling_params.n}."
+            )
+        try:
+            msgspec.msgpack.encode(sampling_params)
+        except (OverflowError, TypeError, ValueError) as e:
+            return self.create_error_response(e)
+
         engine_input: EngineInput
         if features := request.features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
@@ -164,7 +177,6 @@ class ServingTokens(OpenAIServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        sampling_params = request.sampling_params
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
@@ -197,6 +209,9 @@ class ServingTokens(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         result_generator = self.engine_client.generate(
             engine_input,
             sampling_params,
@@ -204,6 +219,7 @@ class ServingTokens(OpenAIServing):
             lora_request=lora_request,
             trace_headers=trace_headers,
             priority=request.priority,
+            data_parallel_rank=data_parallel_rank,
         )
 
         assert result_generator is not None
@@ -460,10 +476,12 @@ class ServingTokens(OpenAIServing):
                         logprob=max(step_token.logprob, -9999.0),
                         top_logprobs=[
                             ChatCompletionLogProb(
-                                token=token,
-                                logprob=max(p[1].logprob, -9999.0),
+                                token=f"token_id:{token_id}",
+                                logprob=max(logprob.logprob, -9999.0),
                             )
-                            for i, p in enumerate(step_top_logprobs.items())
+                            for i, (token_id, logprob) in enumerate(
+                                step_top_logprobs.items()
+                            )
                             if num_output_top_logprobs is not None
                             and i < max(num_output_top_logprobs, 1)
                         ],
