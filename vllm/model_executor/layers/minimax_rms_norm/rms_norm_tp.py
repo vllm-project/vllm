@@ -111,8 +111,12 @@ direct_register_custom_op(
 )
 
 
+# --8<-- [start:minimax_text01_rmsnorm_tp]
 @CustomOp.register("minimax_text01_rmsnorm_tp")
 class MiniMaxText01RMSNormTP(CustomOp):
+    """MiniMax Text01 RMSNormTP CustomOp."""
+
+    # --8<-- [end:minimax_text01_rmsnorm_tp]
     def __init__(
         self,
         hidden_size: int,

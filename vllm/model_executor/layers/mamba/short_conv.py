@@ -7,7 +7,7 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -30,8 +30,8 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadat
 
 
 # --8<-- [start:short_conv]
-@CustomOp.register("short_conv")
-class ShortConv(MambaBase, CustomOp):
+@PluggableLayer.register("short_conv")
+class ShortConv(MambaBase, PluggableLayer):
     # --8<-- [end:short_conv]
 
     def __init__(
@@ -84,13 +84,6 @@ class ShortConv(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        return
 
     def forward(
         self,

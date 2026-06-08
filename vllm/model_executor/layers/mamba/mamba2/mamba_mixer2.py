@@ -21,9 +21,8 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba2.base import Mamba2Base
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
@@ -53,7 +52,6 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -231,7 +229,7 @@ def mamba_v2_sharded_weight_loader(
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
 @PluggableLayer.register("mamba_mixer2")
-class MambaMixer2(MambaBase, PluggableLayer):
+class MambaMixer2(Mamba2Base, PluggableLayer):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -263,8 +261,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
-        super().__init__()
-
         # For TP, the sharding plan is as follows:
         # - for the conv modules, since
         #   conv_dim = intermediate_size * 2 * n_groups * ssm_state_size,
@@ -279,35 +275,42 @@ class MambaMixer2(MambaBase, PluggableLayer):
         #   may be replicated to follow the head shard.
         # - NOTE: currently for the world size DOES NOT divide groups
         #   case, we only support the case when n_groups == 1
-        self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
 
-        assert num_heads % self.tp_size == 0, (
+        assert num_heads % tp_size == 0, (
             "Tensor parallel world size must divide num heads."
         )
 
-        assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
+        assert (n_groups % tp_size) == 0 or n_groups == 1, (
             "If tensor parallel world size does not divide num_groups, "
             "then num_groups must equal 1."
         )
 
-        self.ssm_state_size = ssm_state_size
-        self.conv_kernel_size = conv_kernel_size
-        self.activation = activation
-
-        self.intermediate_size = intermediate_size
-        self.head_dim = head_dim
-        self.num_heads = num_heads
-
-        self.n_groups = n_groups
-        if n_groups % self.tp_size != 0:
-            # - for TP we shard conv_dim by sharding on n_groups,
-            # - but if n_groups cannot divide tp_size, we need to
-            #   extend some extra groups
+        adjusted_n_groups = n_groups
+        if n_groups % tp_size != 0:
             groups = MambaStateShapeCalculator.extra_groups_for_head_shards(
-                n_groups, self.tp_size
+                n_groups, tp_size
             )
-            self.n_groups = n_groups + groups
+            adjusted_n_groups = n_groups + groups
+
+        vllm_config = get_current_vllm_config()
+        num_spec = vllm_config.num_speculative_tokens
+
+        super().__init__(
+            ssm_state_size=ssm_state_size,
+            conv_kernel_size=conv_kernel_size,
+            intermediate_size=intermediate_size,
+            head_dim=head_dim,
+            num_heads=num_heads,
+            n_groups=adjusted_n_groups,
+            model_config=model_config,
+            cache_config=cache_config,
+            prefix=prefix,
+            num_spec=num_spec,
+        )
+
+        self.activation = activation
+        tp_rank = get_tensor_model_parallel_rank()
 
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
@@ -489,19 +492,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dim=-1,
         )
 
-        vllm_config = get_current_vllm_config()
-        compilation_config = vllm_config.compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
-        self.kv_cache = (torch.tensor([]), torch.tensor([]))
-
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.prefix = prefix
-
-        self.num_spec = vllm_config.num_speculative_tokens
         if self.num_spec > 0:
             self.register_buffer(
                 "_decode_state_offsets",
@@ -1044,31 +1034,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
             )
-
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
-        assert self.model_config is not None
-        assert self.cache_config is not None
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
-            self.cache_config.mamba_ssm_cache_dtype,
-        )
-
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.mamba2_state_shape(
-            intermediate_size=self.intermediate_size,
-            tp_world_size=get_tensor_model_parallel_world_size(),
-            n_groups=self.n_groups,
-            num_heads=self.num_heads,
-            head_dim=self.head_dim,
-            state_size=self.ssm_state_size,
-            conv_kernel=self.conv_kernel_size,
-            num_spec=self.num_spec,
-        )
-
-    @property
-    def mamba_type(self) -> MambaAttentionBackendEnum:
-        return MambaAttentionBackendEnum.MAMBA2
 
 
 def mamba_mixer2(
