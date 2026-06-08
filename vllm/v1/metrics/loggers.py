@@ -1221,6 +1221,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
+            self.spec_decoding_prom.observe_finished_request(
+                spec_decode_stats=finished_request.spec_decode_stats,
+                engine_idx=engine_idx,
+            )
+
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
         discard_all = 0

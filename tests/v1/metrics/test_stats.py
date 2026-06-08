@@ -1,12 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from unittest.mock import MagicMock
+
+from vllm.config import SpeculativeConfig
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
 )
+from vllm.v1.spec_decode.metrics import (
+    SpecDecodeRequestStats,
+    SpecDecodingProm,
+)
+
+
+class MockCounter:
+    def __init__(self, *args, **kwargs):
+        self.children = {}
+
+    def labels(self, *labelvalues):
+        child = MagicMock()
+        self.children[labelvalues] = child
+        return child
+
+
+class MockHistogram(MockCounter):
+    pass
 
 
 def test_iteration_stats_repr():
@@ -120,6 +141,98 @@ def test_prefill_kv_computed_edge_cases():
     )
     assert prefill_kv_computed2 == 0  # All cached, nothing computed
     assert finished_req2.request_id == "test-req-004"
+
+
+def test_finished_request_includes_spec_decode_stats():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.5
+    req_stats.last_token_ts = 1.0
+
+    for output in (
+        EngineCoreOutput(
+            request_id="test-req-005",
+            new_token_ids=[1, 2],
+            spec_decode_stats=SpecDecodeRequestStats(
+                num_draft_tokens=4,
+                num_accepted_tokens=1,
+            ),
+        ),
+        EngineCoreOutput(
+            request_id="test-req-005",
+            new_token_ids=[3, 4, 5],
+            spec_decode_stats=SpecDecodeRequestStats(
+                num_draft_tokens=4,
+                num_accepted_tokens=2,
+            ),
+        ),
+    ):
+        iteration_stats.update_from_output(
+            output=output,
+            engine_core_timestamp=2.0,
+            is_prefilling=False,
+            req_stats=req_stats,
+            lora_states=MagicMock(),
+            lora_name=None,
+        )
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="test-req-005",
+        num_prompt_tokens=2000,
+        max_tokens_param=300,
+        req_stats=req_stats,
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.spec_decode_stats is not None
+    assert finished_req.spec_decode_stats.num_draft_tokens == 8
+    assert finished_req.spec_decode_stats.num_accepted_tokens == 3
+    assert finished_req.spec_decode_stats.acceptance_rate == 3 / 8
+
+
+def test_spec_decode_request_stats_merge():
+    stats = SpecDecodeRequestStats(
+        num_draft_tokens=4,
+        num_accepted_tokens=1,
+    ).merge(
+        SpecDecodeRequestStats(
+            num_draft_tokens=4,
+            num_accepted_tokens=2,
+        )
+    )
+
+    assert stats.num_draft_tokens == 8
+    assert stats.num_accepted_tokens == 3
+    assert stats.acceptance_rate == 3 / 8
+    assert stats.merge(None) is stats
+
+
+def test_request_spec_decode_acceptance_rate_observed():
+    class MockSpecDecodingProm(SpecDecodingProm):
+        _counter_cls = MockCounter
+        _histogram_cls = MockHistogram
+
+    prom = MockSpecDecodingProm(
+        speculative_config=SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=2,
+        ),
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["test-model", "0"]},
+    )
+
+    prom.observe_finished_request(
+        spec_decode_stats=SpecDecodeRequestStats(
+            num_draft_tokens=200,
+            num_accepted_tokens=10,
+        ),
+    )
+
+    prom.histogram_request_spec_decode_acceptance_rate[
+        0
+    ].observe.assert_called_once_with(0.05)
 
 
 def test_prompt_token_stats_all_computed():
