@@ -67,6 +67,11 @@ pub struct Config {
     pub enable_log_requests: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// Optional URL path prefix for reverse-proxy deployments (e.g., `/api`).
+    /// When set, all routes are duplicated under this prefix so the server
+    /// responds on both bare paths (`/v1/chat/completions`) and prefixed paths
+    /// (`/api/v1/chat/completions`).
+    pub root_path: Option<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,

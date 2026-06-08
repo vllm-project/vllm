@@ -131,6 +131,12 @@ where
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 
+    // When a root-path prefix is configured, duplicate all routes under the
+    // prefix so the server responds on both bare and prefixed paths. A reverse
+    // proxy that strips the prefix will hit the bare routes; one that forwards
+    // the prefix verbatim will hit the nested routes.
+    let app = apply_root_path_nesting(app, config.root_path.as_deref());
+
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before we start serving, rather than being deferred until
@@ -153,7 +159,11 @@ where
         None
     };
 
-    info!(%bind_address, %model, "starting OpenAI server");
+    if let Some(ref root_path) = config.root_path {
+        info!(%bind_address, %model, %root_path, "starting OpenAI server");
+    } else {
+        info!(%bind_address, %model, "starting OpenAI server");
+    }
 
     // Set TCP_NODELAY on accepted connections to reduce latency.
     // By `tap_io` we will do this on every accepted connection.
@@ -256,4 +266,31 @@ where
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     state.shutdown(shutdown_deadline).await
+}
+
+/// Duplicate all routes under `root_path` when it is set, so the server
+/// responds on both bare paths (`/v1/chat/completions`) and prefixed paths
+/// (`/api/v1/chat/completions`).
+///
+/// Trailing slashes are trimmed, and a leading `/` is ensured.  `None`, empty,
+/// and root-only (`/`) values are treated as a no-op.
+pub(crate) fn apply_root_path_nesting(app: Router, root_path: Option<&str>) -> Router {
+    match root_path {
+        Some(raw) => {
+            let prefix = raw.trim_end_matches('/');
+            if prefix.is_empty() {
+                app
+            } else {
+                // Ensure the prefix starts with '/' for Axum's nest().
+                let prefix = if prefix.starts_with('/') {
+                    prefix.to_owned()
+                } else {
+                    format!("/{prefix}")
+                };
+                let nested = Router::new().nest(&prefix, app.clone());
+                app.merge(nested)
+            }
+        }
+        None => app,
+    }
 }
