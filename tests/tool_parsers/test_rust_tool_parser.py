@@ -177,6 +177,41 @@ def test_rust_tool_parser_adapter_streaming_flushes_final_call() -> None:
     }
 
 
+def test_rust_tool_parser_adapter_ignores_midstream_empty_delta() -> None:
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[sample_tool()])
+    text = build_tool_call()
+    split_at = len(TC_START) + 8
+    deltas = []
+    previous_text = ""
+
+    for delta_text in (text[:split_at], "", text[split_at:], ""):
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[1],
+            request=MagicMock(),
+        )
+        previous_text = current_text
+        if delta is not None:
+            deltas.append(delta)
+
+    names = [
+        tool_call.function.name
+        for delta in deltas
+        for tool_call in delta.tool_calls or []
+        if tool_call.function is not None and tool_call.function.name is not None
+    ]
+    assert names == ["create_order"]
+    assert json.loads(collect_streamed_arguments(deltas)) == {
+        "user_id": 42,
+        "shipping": {"city": "Singapore", "zip": 18956},
+    }
+
+
 def test_rust_tool_parser_adapter_adjust_request_is_opaque() -> None:
     tool = sample_tool()
     parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=[tool])

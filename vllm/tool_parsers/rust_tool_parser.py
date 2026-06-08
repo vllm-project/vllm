@@ -65,7 +65,6 @@ class RustToolParser(ToolParser):
         super().__init__(tokenizer, tools)
         self._parser: Any | None = None
         self._error: Exception | None = None
-        self._finished = False
         self._tool_call_ids: dict[int, str] = {}
 
         if not self.model_tokenizer:
@@ -131,7 +130,6 @@ class RustToolParser(ToolParser):
         """Reset parser state for a new request on a reused parser instance."""
         self._parser = self._new_parser()
         self._error = None
-        self._finished = False
         self._tool_call_ids.clear()
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
@@ -279,16 +277,16 @@ class RustToolParser(ToolParser):
         delta_text: str,
         previous_token_ids: Sequence[int],  # pylint: disable=unused-argument
         current_token_ids: Sequence[int],  # pylint: disable=unused-argument
-        delta_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],  # pylint: disable=unused-argument
         request: ChatCompletionRequest,  # pylint: disable=unused-argument
     ) -> DeltaMessage | None:
         """Extract tool calls from streaming model output.
 
         The Rust parser owns the incremental buffer, so this adapter feeds only
-        the newest text delta. On EOS, it calls ``finish()`` once to flush any
-        complete buffered tool call. It returns an empty final content delta
-        after a tool call so the serving layer reaches its finish-reason path.
+        the newest text delta and lets the serving layer handle final empty
+        chunks.
         """
+        # TODO: Add a final-chunk hook if streaming needs to call Rust finish().
         if not previous_text:
             self._reset_streaming_state()
 
@@ -309,21 +307,4 @@ class RustToolParser(ToolParser):
         if delta_message is not None:
             return delta_message
 
-        if not delta_text and delta_token_ids and not self._finished:
-            try:
-                finish_output = self._get_parser().finish()
-                self._finished = True
-            except Exception as error:
-                self._error = error
-                logger.exception(
-                    "Error finishing %s streaming tool parser.",
-                    self.rust_parser_name,
-                )
-                finish_output = None
-            delta_message = self._delta_message_from_parser_output(finish_output)
-            if delta_message is not None:
-                return delta_message
-
-        if not delta_text and delta_token_ids and self.prev_tool_call_arr:
-            return DeltaMessage(content="")
         return None
