@@ -33,6 +33,10 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant,
+)
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
 
@@ -293,11 +297,32 @@ def moe_quantize_weights_2d(
             assert not per_token_quant
             w_amax = torch.abs(w).max().to(torch.float32)
             w_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / w_amax
-            w, w_s = ops.scaled_fp4_quant(w, w_gs)
+            if current_platform.is_rocm():
+                w, w_s = _scaled_fp4_quant_emulated(w, w_gs)
+            else:
+                w, w_s = ops.scaled_fp4_quant(w, w_gs)
         else:
             raise RuntimeError(f"Unsupported quant type {quant_dtype}")
 
     return w, w_s, w_gs
+
+
+def _pack_e2m1_fp4(fp4_values: torch.Tensor) -> torch.Tensor:
+    assert fp4_values.shape[-1] % 2 == 0
+
+    abs_values = fp4_values.abs()
+    codes = torch.empty_like(abs_values, dtype=torch.uint8)
+    for code, value in enumerate((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)):
+        codes[abs_values == value] = code
+    codes = codes | ((fp4_values < 0).to(torch.uint8) << 3)
+    return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
+
+def _scaled_fp4_quant_emulated(
+    w: torch.Tensor, w_gs: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp4_values, w_s = ref_nvfp4_quant(w, w_gs, block_size=16)
+    return _pack_e2m1_fp4(fp4_values), w_s.to(torch.float8_e4m3fn)
 
 
 def moe_quantize_weights(

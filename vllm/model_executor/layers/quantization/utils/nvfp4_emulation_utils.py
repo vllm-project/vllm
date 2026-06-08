@@ -338,7 +338,7 @@ def break_fp4_bytes(a, dtype):
     signs = (combined & 0x08).to(torch.bool)  # Sign bits
     abs_vals = (combined & 0x07).to(torch.long)
 
-    kE2M1 = kE2M1ToFloat_handle.val
+    kE2M1 = kE2M1ToFloat_handle.val.to(device=a.device)
     # Device-aware lookup and sign application
     values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
     # Reshape to final form

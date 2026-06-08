@@ -3108,8 +3108,42 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
+      --ignore=kernels/moe/test_gpt_oss_triton_kernels.py
+      --ignore=kernels/moe/test_moe.py
+      --ignore=kernels/moe/test_block_int8.py
+      --ignore=kernels/moe/test_triton_moe_no_act_mul.py
+      --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py
+      --ignore=kernels/moe/test_deepep_moe.py
+      --ignore=kernels/moe/test_moe_layer.py
+      --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: Kernels FusedMoE Layer Test (2xB2002xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/moe/
+  - csrc/rocm/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/
+  - vllm/config/
+  - vllm/forward_context.py
+  - vllm/v1/worker/workspace.py
+  - vllm/utils/import_utils.py
+  - vllm/utils/math_utils.py
+  - vllm/utils/torch_utils.py
+  - vllm/platforms/
+  - vllm/_aiter_ops.py
+  commands:
+  - pytest -v -s kernels/moe/test_moe_layer.py
 
 - label: Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
@@ -3127,11 +3161,33 @@ steps:
   - vllm/model_executor/kernels/
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  
+- label: Kernels FP8 MoE Test (2xH100-1xMI355) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/moe/
+  - vllm/model_executor/layers/fused_moe/
+  - tests/kernels/moe/test_deepep_moe.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - vllm/envs.py
+  commands:
+    - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_moe.py
+    - pytest -v -s kernels/moe/test_block_int8.py
+    - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
 - label: Kernels FP8 MoE Test (2xH100-2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/moe/

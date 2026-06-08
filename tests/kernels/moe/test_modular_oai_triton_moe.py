@@ -6,6 +6,7 @@ Test modular OAI Triton MoE
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from tests.utils import wait_for_gpu_memory_to_clear
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
 from .utils import make_dummy_moe_config, shuffle_weight
@@ -73,13 +75,30 @@ def make_weights(dtype, k, n, e):
     w1_tri = shuffle_weight(w1_tri)
     w1_bias_tri = shuffle_weight(w1_bias_tri)
 
+    if current_platform.is_rocm():
+        k_align, n2_align = 256, 512
+    else:
+        k_align, n2_align = 64, 128
+
+    w1_bottom_pad = round_up(w1_tri.shape[1], k_align) - w1_tri.shape[1]
+    w1_right_pad = round_up(w1_tri.shape[2], n2_align) - w1_tri.shape[2]
+    w2_bottom_pad = w1_right_pad // 2
+    w2_right_pad = w1_bottom_pad
+
+    w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0))
+    w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0))
+    w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0))
+    w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0))
+
     # quant triton_weights
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
     w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, dtype, axis=1)
+    w1 = w1[..., :k, : 2 * n]
     w1 = unshuffle_weight(w1)
 
     w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
     w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, dtype, axis=1)
+    w2 = w2[..., :n, :k]
 
     num_warps = 8
     w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
@@ -119,6 +138,7 @@ def make_weights(dtype, k, n, e):
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
+        w1_bottom_pad,
     )
 
 
@@ -206,7 +226,7 @@ def oai_triton_moe_impl(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not current_platform.is_cuda_alike(), reason="Requires CUDA-alike platform."
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
@@ -225,6 +245,7 @@ def test_oai_triton_moe(
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
     set_random_seed(0)
+
     (
         w1,
         w2,
@@ -236,9 +257,11 @@ def test_oai_triton_moe(
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
+        x_pad,
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
@@ -247,7 +270,7 @@ def test_oai_triton_moe(
         out_ref = torch_moe_impl(x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids)
 
         out = oai_triton_moe_impl(
-            x,
+            x_tri,
             w1_tri,
             w2_tri,
             w1_precision_config,
@@ -259,5 +282,6 @@ def test_oai_triton_moe(
             topk_ids,
             unfused,
         )
+        out = out[..., :k]
 
     assert_close(ref=out_ref, tri=out, maxtol=0.025, rmstol=0.005)

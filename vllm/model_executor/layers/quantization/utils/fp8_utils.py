@@ -1359,4 +1359,7 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    # Triton MoE kernels load tensor-wise activation scales through pointers.
+    # Keep the reduced scales as rank-1 tensors so they are not treated as
+    # compile-time scalar constants.
+    return w13_input_scale.max().reshape(1), w2_input_scale.max().reshape(1)
