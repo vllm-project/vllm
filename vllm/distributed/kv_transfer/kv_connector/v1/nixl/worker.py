@@ -2172,21 +2172,24 @@ class NixlConnectorWorker:
             )
 
         if self.use_mla and tp_ratio < 0 and read_specs:
-            # ..but we still need to notify the other remote ranks that we
-            # have the blocks we need so they can update the request state.
-            # Only notify ranks that we actually read from (all_source_ranks),
-            # not all remote ranks — ranks we didn't read from don't track
-            # this request and would log "unrecognized request" errors.
-            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify in plan.all_source_ranks:
-                if (
-                    rank_to_notify != read_specs[0].remote_rank
-                    and rank_to_notify in remote_agents
-                ):
-                    self.nixl_wrapper.send_notif(
-                        remote_agents[rank_to_notify], notif_msg=notif_id
-                    )
+            # MLA attention KV is replicated across P ranks. D reads from
+            # one P rank, but other P ranks also hold the same KV and need
+            # to be notified so they can release blocks early (vs. timeout).
+            #
+            # For hybrid MLA+GDN models, skip MLA notification entirely.
+            # MLA attention has only one source rank (replicated), so no
+            # *other* MLA source needs notifying.  SSM source ranks are
+            # already notified via the NIXL read's built-in notif_msg, and
+            # sending extra MLA notifications to them causes "unrecognized
+            # request" errors because the P-side request tracking dicts
+            # (_reqs_to_send / _reqs_to_process) are only populated on the
+            # decode side.
+            if not self._has_mamba:
+                notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+                remote_agents = self._remote_agents[meta.remote.engine_id]
+                for rank_to_notify, agent in remote_agents.items():
+                    if rank_to_notify != read_specs[0].remote_rank:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
         self,
