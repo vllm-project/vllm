@@ -10,13 +10,11 @@ import torch
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
     RoutedExperts,
     SharedExperts,
-)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -43,12 +41,10 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
-
-
-try:
+if has_humming() and current_platform.is_cuda():
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
@@ -65,15 +61,16 @@ try:
         HummingIndexedExperts,
         get_humming_moe_gemm_type,
     )
-except ModuleNotFoundError:
-    HummingMethod = None
 
-
-def assert_humming_available():
-    assert HummingMethod is not None, (
-        "humming is not available, please run "
-        "'pip install git+https://github.com/inclusionAI/humming' to install it."
+if TYPE_CHECKING:
+    from humming.schema import (
+        BaseInputSchema,
+        BaseWeightSchema,
+        HummingInputSchema,
+        HummingWeightSchema,
     )
+
+    from vllm.model_executor.models.utils import WeightsMapper
 
 
 def prepare_padded_shape(shape, x):
@@ -186,7 +183,6 @@ class HummingConfig(QuantizationConfig):
     packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, full_config: dict[str, Any] | None = None):
-        assert_humming_available()
         self.full_config: dict[str, Any] = full_config or {}
 
     @classmethod
@@ -813,8 +809,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     param = torch.nn.Parameter(tensor, requires_grad=False)
                     setattr(layer, name, param)
 
-                layer.weight_schemas[sublayer_name] = weight_schema
-                layer.input_schemas[sublayer_name] = input_schema
+            layer.weight_schemas[sublayer_name] = weight_schema
+            layer.input_schemas[sublayer_name] = input_schema
 
             # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
             assert isinstance(weight_schema, HummingWeightSchema)
@@ -868,6 +864,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         # use moe modular
         experts: HummingIndexedExperts | HummingGroupedExperts
+        layer.ensure_moe_quant_config_init()
         assert self.moe_quant_config is not None
         if get_humming_moe_gemm_type() == "indexed":
             experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
