@@ -2657,14 +2657,22 @@ class NixlConnectorWorker:
             [ids[:3] for ids in meta.local_physical_block_ids],
         )
 
-        # Check the actual tensor values for the first few cache entries
+        # Memory-efficient spot check: only examine transferred blocks,
+        # not the full tensor (which can be >100 GB and cause OOM).
+        block_ids = meta.local_physical_block_ids
+
+        # Collect unique block IDs to check (across all groups)
+        bids_to_check: list[int] = []
+        for bids in block_ids[:4]:
+            for bid in bids[:2]:
+                if bid not in bids_to_check:
+                    bids_to_check.append(bid)
+
         checked = 0
-        for layer_name, cache_val in list(self.device_kv_caches.items())[:4]:
+        for layer_name, cache_val in list(self.device_kv_caches.items())[:8]:
             if isinstance(cache_val, torch.Tensor):
                 t = cache_val
             elif isinstance(cache_val, (tuple, list)):
-                # Could be (conv_state, recurrent_state) for Mamba or
-                # (k_cache, v_cache) for attention
                 t = cache_val[0] if len(cache_val) > 0 else None
                 if t is None:
                     continue
@@ -2674,70 +2682,30 @@ class NixlConnectorWorker:
             if not isinstance(t, torch.Tensor):
                 continue
 
-            has_nan = torch.isnan(t).any().item()
-            has_inf = torch.isinf(t).any().item()
-            mean_val = t.float().mean().item()
-            std_val = t.float().std().item()
-            first_vals = t.flatten()[:4].tolist()
-
+            is_mla = ".attn" in layer_name
+            # Check only transferred blocks — one block is tiny (~18 KB)
+            block_stats = ""
+            for bid in bids_to_check[:3]:
+                if bid < t.shape[0]:
+                    blk = t[bid].float()
+                    block_stats += (
+                        f" blk[{bid}]:mean={blk.mean():.6f}"
+                        f",std={blk.std():.6f}"
+                        f",nan={torch.isnan(blk).any().item()}"
+                        f",inf={torch.isinf(blk).any().item()}"
+                        f",f4={blk.flatten()[:4].tolist()}"
+                    )
             logger.warning(
-                "[DESC-DEBUG]   layer=%s shape=%s dtype=%s "
-                "mean=%.6f std=%.6f nan=%s inf=%s first_vals=%s",
+                "[DESC-DEBUG]   %s layer=%s shape=%s dtype=%s%s",
+                "MLA" if is_mla else "SSM",
                 layer_name,
                 tuple(t.shape),
                 t.dtype,
-                mean_val,
-                std_val,
-                has_nan,
-                has_inf,
-                first_vals,
+                block_stats,
             )
             checked += 1
 
-        # Explicitly check MLA attention layers (key contains '.attn')
-        # These are critical — if their data is zero/garbage after transfer,
-        # MLA attention will produce garbage output.
-        block_ids = meta.local_physical_block_ids
-        mla_layers = [
-            (k, v) for k, v in self.device_kv_caches.items()
-            if ".attn" in k and isinstance(v, torch.Tensor)
-        ]
-        for layer_name, t in mla_layers[:4]:
-            has_nan = torch.isnan(t).any().item()
-            has_inf = torch.isinf(t).any().item()
-            mean_val = t.float().mean().item()
-            std_val = t.float().std().item()
-            first_vals = t.flatten()[:4].tolist()
-            # Check specific blocks that were transferred
-            block_stats = ""
-            if block_ids:
-                for _, bids in enumerate(
-                    block_ids[:1]
-                ):
-                    for bid in bids[:2]:
-                        if bid < t.shape[0]:
-                            blk = t[bid].float()
-                            block_stats += (
-                                f" block[{bid}]:mean={blk.mean():.4f}"
-                                f",std={blk.std():.4f}"
-                                f",first4={blk.flatten()[:4].tolist()}"
-                            )
-            logger.warning(
-                "[DESC-DEBUG]   MLA layer=%s shape=%s dtype=%s "
-                "global_mean=%.6f global_std=%.6f nan=%s inf=%s "
-                "first_vals=%s%s",
-                layer_name,
-                tuple(t.shape),
-                t.dtype,
-                mean_val,
-                std_val,
-                has_nan,
-                has_inf,
-                first_vals,
-                block_stats,
-            )
-
-        if checked == 0 and not mla_layers:
+        if checked == 0:
             logger.warning(
                 "[DESC-DEBUG]   No torch.Tensor found in device_kv_caches. Types: %s",
                 {
