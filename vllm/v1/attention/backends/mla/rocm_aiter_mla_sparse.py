@@ -713,7 +713,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         if isinstance(q, tuple):
             ql_nope, q_pe = q
             if fp8_attention:
-                q = layer._decode_concat_quant_fp8_op(ql_nope, q_pe, layer._q_scale)
+                q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                    ql_nope, q_pe, layer._q_scale
+                )  # type: ignore[attr-defined]
             else:
                 q = self.q_concat_buffer[: ql_nope.shape[0]]
                 ops.concat_mla_q(ql_nope, q_pe, q)
