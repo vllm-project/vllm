@@ -563,11 +563,10 @@ class OffloadingConnectorScheduler:
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
-        num_hit_tokens = (
-            0
-            if request.skip_reading_prefix_cache
-            else self._lookup(req_status)
-        )
+        if request.skip_reading_prefix_cache:
+            num_hit_tokens = 0
+        else:
+            num_hit_tokens = self._lookup(req_status)
         req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
