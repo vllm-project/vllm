@@ -403,6 +403,11 @@ class NixlConnectorWorker:
         # dual-purpose (both flags True).
         self._is_ssm_region: list[bool] = []
         self._is_attn_region: list[bool] = []
+        # For HMA dual-purpose regions: maps region_idx to the attention
+        # spec's physical page size (bytes).  When KDA (MambaSpec) and MLA
+        # (AttentionSpec) share the same backing tensor, block_len_per_layer
+        # stores KDA's stride.  FA descriptors need MLA's stride instead.
+        self._attn_block_len: dict[int, int] = {}
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -884,6 +889,7 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         self._is_ssm_region = list[bool]()
         self._is_attn_region = list[bool]()
+        self._attn_block_len = dict[int, int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -963,6 +969,22 @@ class NixlConnectorWorker:
                     idx = seen_base_addresses.index(base_addr)
                     self._is_ssm_region[idx] = self._is_ssm_region[idx] or is_ssm
                     self._is_attn_region[idx] = self._is_attn_region[idx] or is_attn
+                    # Record the attention spec's stride so that FA descriptors
+                    # use MLA's page size instead of KDA's for dual-purpose
+                    # regions.
+                    if is_attn:
+                        self._attn_block_len[idx] = physical_page_size
+                        if _DESC_DEBUG:
+                            ssm_stride = self.block_len_per_layer[idx]
+                            logger.warning(
+                                "[DESC-DEBUG] DUAL-PURPOSE region %d: "
+                                "ssm_block_len=%d, attn_block_len=%d, "
+                                "stride_mismatch=%s",
+                                idx,
+                                ssm_stride,
+                                physical_page_size,
+                                ssm_stride != physical_page_size,
+                            )
                     if _DESC_DEBUG:
                         logger.warning(
                             "[DESC-DEBUG] SKIP layer=%s: base=0x%x already seen "
@@ -1033,16 +1055,26 @@ class NixlConnectorWorker:
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
 
         if _DESC_DEBUG:
+            dual_purpose = [
+                i
+                for i in range(len(self._is_ssm_region))
+                if i < len(self._is_attn_region)
+                and self._is_ssm_region[i]
+                and self._is_attn_region[i]
+            ]
             logger.warning(
                 "[DESC-DEBUG] register_kv_caches summary: "
                 "num_unique_regions=%d, is_ssm_region=%s, "
-                "block_len_per_layer=%s, group_spec_types=%s, "
+                "block_len_per_layer=%s, attn_block_len=%s, "
+                "dual_purpose_regions=%s, group_spec_types=%s, "
                 "has_mamba=%s, use_mla=%s, "
                 "physical_blocks_per_logical=%s, logical_num_blocks=%s, "
                 "num_blocks=%s",
                 len(seen_base_addresses),
                 self._is_ssm_region,
                 self.block_len_per_layer,
+                self._attn_block_len,
+                dual_purpose,
                 [t.__name__ for t in self._group_spec_types],
                 self._has_mamba,
                 self.use_mla,
@@ -1050,6 +1082,36 @@ class NixlConnectorWorker:
                 self._logical_num_blocks,
                 self.num_blocks,
             )
+
+        # Expand NIXL registration size for dual-purpose regions.  KDA
+        # registers first with its stride (542720 bytes/block), but the
+        # physical allocation uses max(KDA, MLA) = 552960 bytes/block.
+        # Without this, the registered region is too small for FA descriptors
+        # that address MLA data at the larger stride.
+        for idx in range(len(caches_data)):
+            if (
+                idx < len(self._is_ssm_region)
+                and self._is_ssm_region[idx]
+                and idx < len(self._is_attn_region)
+                and self._is_attn_region[idx]
+            ):
+                max_page = max(
+                    self.block_len_per_layer[idx],
+                    self._attn_block_len.get(idx, 0),
+                )
+                old_size = caches_data[idx][1]
+                new_size = self.num_blocks * max_page
+                if old_size != new_size:
+                    base, _, device, label = caches_data[idx]
+                    caches_data[idx] = (base, new_size, device, label)
+                    if _DESC_DEBUG:
+                        logger.warning(
+                            "[DESC-DEBUG] DUAL-PURPOSE registration size: "
+                            "region %d, original=%d, expanded=%d",
+                            idx,
+                            old_size,
+                            new_size,
+                        )
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         # FA regions count only attention layers.  SSM/Mamba regions are
@@ -1300,13 +1362,33 @@ class NixlConnectorWorker:
                         base_addr,
                     )
                 continue
-            kv_block_len = (
-                self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=True, mamba_view=False
+            # For dual-purpose regions (HMA), block_len_per_layer stores the
+            # KDA/SSM stride.  FA descriptors must use the attention spec's
+            # stride instead so they address MLA data correctly.
+            if i in self._attn_block_len:
+                attn_stride = self._attn_block_len[i]
+                if self.transfer_topo.virtually_split_kv_in_blocks:
+                    kv_block_len = attn_stride // 2
+                else:
+                    kv_block_len = attn_stride
+                kv_block_len = kv_block_len // block_size_ratio
+                page_stride = attn_stride // block_size_ratio
+                if _DESC_DEBUG:
+                    logger.warning(
+                        "[DESC-DEBUG] _build_fa_local: DUAL-PURPOSE region %d, "
+                        "using attn_stride=%d (ssm_stride=%d)",
+                        i,
+                        page_stride,
+                        self.block_len_per_layer[i] // block_size_ratio,
+                    )
+            else:
+                kv_block_len = (
+                    self.get_backend_aware_kv_block_len(
+                        layer_idx=i, first_split=True, mamba_view=False
+                    )
+                    // block_size_ratio
                 )
-                // block_size_ratio
-            )
-            page_stride = self.block_len_per_layer[i] // block_size_ratio
+                page_stride = self.block_len_per_layer[i] // block_size_ratio
             if _DESC_DEBUG:
                 logger.warning(
                     "[DESC-DEBUG] _build_fa_local: BUILD region %d "
@@ -1328,9 +1410,12 @@ class NixlConnectorWorker:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
-                )
+                if i in self._attn_block_len:
+                    second_split = self._attn_block_len[i] // 2
+                else:
+                    second_split = self.get_backend_aware_kv_block_len(
+                        layer_idx=i, first_split=False, mamba_view=False
+                    )
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_stride
                     addr = base_addr + block_offset
@@ -1382,9 +1467,26 @@ class NixlConnectorWorker:
                     num_attn_reads,
                 )
             # Read our whole local region size from remote..
-            local_block_len = self.get_backend_aware_kv_block_len(
-                layer_idx=i, first_split=True, mamba_view=False
-            )
+            # For dual-purpose regions, use the attention spec's stride instead
+            # of block_len_per_layer (which stores KDA's stride).
+            if i in self._attn_block_len:
+                attn_stride = self._attn_block_len[i]
+                if self.transfer_topo.virtually_split_kv_in_blocks:
+                    local_block_len = attn_stride // 2
+                else:
+                    local_block_len = attn_stride
+                if _DESC_DEBUG:
+                    logger.warning(
+                        "[DESC-DEBUG] _build_fa_remote: DUAL-PURPOSE region %d, "
+                        "using attn_stride=%d (remote_block_lens=%d)",
+                        i,
+                        attn_stride,
+                        nixl_agent_meta.block_lens[i],
+                    )
+            else:
+                local_block_len = self.get_backend_aware_kv_block_len(
+                    layer_idx=i, first_split=True, mamba_view=False
+                )
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 # ..using remote kv_block_len as transfer unit
@@ -1393,7 +1495,15 @@ class NixlConnectorWorker:
             local_block_len = local_block_len // num_attn_reads
             rank_offset = plan.rank_offset_factor * remote_kv_block_len
 
-            page_size = nixl_agent_meta.block_lens[i]
+            # For dual-purpose regions, use the attention stride as page size
+            # so descriptors step through remote memory at MLA's stride.
+            # NOTE: This assumes homogeneous TP where both sides have the same
+            # attention spec stride.  For heterogeneous TP, the remote's attn
+            # stride must be propagated via metadata.
+            if i in self._attn_block_len:
+                page_size = self._attn_block_len[i]
+            else:
+                page_size = nixl_agent_meta.block_lens[i]
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
                 # For each block, grab the kv heads chunk belonging to current local
@@ -1403,15 +1513,23 @@ class NixlConnectorWorker:
 
             if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
-                )
+                if i in self._attn_block_len:
+                    second_split = self._attn_block_len[i] // 2
+                else:
+                    second_split = self.get_backend_aware_kv_block_len(
+                        layer_idx=i, first_split=False, mamba_view=False
+                    )
                 second_split = second_split // num_attn_reads
+                v_stride = (
+                    self._attn_block_len[i]
+                    if i in self._attn_block_len
+                    else nixl_agent_meta.block_lens[i]
+                )
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
                     # Hop over the first split of remote page, K, to read V.
-                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                    v_addr = addr + v_stride // 2
                     result.append((v_addr, second_split, nixl_agent_meta.device_id))
         return result
 
@@ -2672,9 +2790,7 @@ class NixlConnectorWorker:
                 all_keys_info.append(f"{k}=({','.join(parts)})")
             else:
                 all_keys_info.append(f"{k}={type(v).__name__}")
-        logger.warning(
-            "[DESC-DEBUG]   device_kv_caches keys: %s", all_keys_info
-        )
+        logger.warning("[DESC-DEBUG]   device_kv_caches keys: %s", all_keys_info)
 
         # Memory-efficient spot check: only examine transferred blocks,
         # not the full tensor (which can be >100 GB and cause OOM).
@@ -2702,7 +2818,11 @@ class NixlConnectorWorker:
                     )
             logger.warning(
                 "[DESC-DEBUG]   %s layer=%s shape=%s dtype=%s%s",
-                label, name, tuple(t.shape), t.dtype, block_stats,
+                label,
+                name,
+                tuple(t.shape),
+                t.dtype,
+                block_stats,
             )
 
         # Check first 2 KDA layers (conv state from tuple)
