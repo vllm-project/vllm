@@ -2812,7 +2812,9 @@ def swap_blocks_batch(
     Batch version of swap_blocks: submit all copies in a single driver call.
 
     Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
-    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    of sizes[i] bytes. All three tensors must be CPU tensors with the
+    platform-appropriate pointer dtype: int64 on CUDA/ROCm (required by
+    cache_kernels.cu) and uint64 on XPU (required by the XPU DMA engine).
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
 
@@ -2822,9 +2824,12 @@ def swap_blocks_batch(
         writing to the source. Defaults to False (STREAM ordering), which
         is always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(
-        src_ptrs, dst_ptrs, sizes, is_src_access_order_any
-    )
+    if current_platform.is_xpu():
+        torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    else:
+        torch.ops._C_cache_ops.swap_blocks_batch(
+            src_ptrs, dst_ptrs, sizes, is_src_access_order_any
+        )
 
 
 def convert_fp8(
@@ -3532,10 +3537,11 @@ class CPUDNNLGEMMHandler:
         self.handler_tensor: torch.Tensor | None = None
         self.n = -1
         self.k = -1
+        self.dtor = torch.ops._C.release_dnnl_matmul_handler
 
     def __del__(self):
         if self.handler_tensor is not None:
-            torch.ops._C.release_dnnl_matmul_handler(self.handler_tensor.item())
+            self.dtor(self.handler_tensor.item())
 
 
 _supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
