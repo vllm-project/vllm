@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.v1.attention.backends.triton_attn as triton_attn_backend
+import vllm.v1.attention.ops.triton_unified_attention as triton_unified_attention_ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import (
@@ -492,6 +493,85 @@ def test_triton_attn_nvfp4_spec_verify_and_chunked_prefill_raw_current_gate(
     assert called["max_seqlen_q"] == max(query_lens)
     assert called["raw_k"] is (key if expects_raw else None)
     assert called["raw_v"] is (value if expects_raw else None)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@torch.inference_mode()
+def test_triton_unified_attn_nvfp4_spec_verify_uses_bytewise_decode(
+    monkeypatch,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+
+    query_lens = [2, 2]
+    kv_lens = [16, 16]
+    num_query_heads = 8
+    num_kv_heads = 2
+    head_size = 128
+    block_size = 16
+    num_blocks = 2
+    dtype = torch.bfloat16
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    output = torch.empty_like(query)
+    key_cache = torch.empty(
+        num_blocks, block_size, num_kv_heads, full_dim, dtype=torch.uint8
+    )
+    value_cache = torch.empty_like(key_cache)
+    (key_data_cache,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+    (value_data_cache,), (value_scale_cache,) = nvfp4_kv_cache_split_views(value_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0)
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+    block_tables = torch.zeros((len(query_lens), 1), dtype=torch.int32)
+    scale = torch.tensor(1.0, dtype=torch.float32)
+    captured = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            captured["grid"] = grid
+
+            def launch(**kwargs):
+                captured.update(kwargs)
+
+            return launch
+
+    monkeypatch.setattr(
+        triton_unified_attention_ops, "kernel_unified_attention", FakeKernel()
+    )
+
+    unified_attention(
+        q=query,
+        k=key_data_cache,
+        v=value_data_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=scale,
+        v_descale=scale,
+        seq_threshold_3D=8,
+        num_par_softmax_segments=16,
+        softmax_segm_output=torch.empty(
+            (8, num_query_heads, 16, head_size), dtype=torch.float32
+        ),
+        softmax_segm_max=torch.empty((8, num_query_heads, 16), dtype=torch.float32),
+        softmax_segm_expsum=torch.empty((8, num_query_heads, 16), dtype=torch.float32),
+        kv_quant_mode=KVQuantMode.NVFP4,
+        k_scale_cache=key_scale_cache.view(torch.uint8),
+        v_scale_cache=value_scale_cache.view(torch.uint8),
+    )
+
+    assert captured["IS_3D"] is False
+    assert captured["USE_RAW_CURRENT_KV"] is False
+    assert captured["USE_NVFP4_BYTEWISE_DECODE"] is True
+    assert captured["USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE"] is True
 
 
 def ref_paged_attn(
