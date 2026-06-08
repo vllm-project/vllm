@@ -269,14 +269,15 @@ class RejectionSampler(nn.Module):
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
+        if len(discard_req_indices) > 0:
+            valid_mask[discard_req_indices] = False
+
         output_logprobs = None
         if logprobs_tensors is not None:
             cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
             filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
             output_logprobs = filtered_tensors.tolists(cu_num_tokens)
 
-        if len(discard_req_indices) > 0:
-            valid_mask[discard_req_indices] = False
         outputs = [
             row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
