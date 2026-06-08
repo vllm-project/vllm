@@ -134,7 +134,7 @@ class AsyncLookupManager(ABC):
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = True  # TODO: testing
+            self._need_to_drain = True  # TODO: results might not be ready yet
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
@@ -179,7 +179,6 @@ class AsyncLookupManager(ABC):
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
-        return  # TODO: testing
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
