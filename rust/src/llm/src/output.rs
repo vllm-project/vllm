@@ -14,6 +14,17 @@ use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 use crate::error::Result;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
+/// Token usage metadata for one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Number of prompt tokens sent to the engine.
+    pub prompt_token_count: usize,
+    /// Number of output tokens generated.
+    pub output_token_count: usize,
+    /// Number of prompt tokens served from cache.
+    pub cached_token_count: usize,
+}
+
 /// Final raw token output plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectedGenerateOutput {
@@ -23,8 +34,7 @@ pub struct CollectedGenerateOutput {
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
-    /// Number of prompt tokens served from cache.
-    pub cached_token_count: usize,
+    pub usage: TokenUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -341,7 +351,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,
-                        cached_token_count,
+                        usage: TokenUsage {
+                            prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
+                            output_token_count: 0,
+                            cached_token_count,
+                        },
                         kv_transfer_params: None,
                     });
                 }
@@ -349,7 +363,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                 if let Some(finish_reason) = output.finish_reason {
                     let mut collected = collected.expect("terminal output must exist");
                     collected.finish_reason = finish_reason;
-                    collected.cached_token_count = cached_token_count;
+                    collected.usage = TokenUsage {
+                        prompt_token_count: collected.prompt_token_ids.len(),
+                        output_token_count: collected.token_ids.len(),
+                        cached_token_count,
+                    };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     return Ok(collected);
                 }

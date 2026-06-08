@@ -4,6 +4,7 @@ use std::slice;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_llm::TokenUsage;
 
 // ============================================================================
 // Constants
@@ -333,6 +334,16 @@ impl Usage {
             prompt_tokens_details: (cached_tokens > 0)
                 .then_some(PromptTokenUsageInfo { cached_tokens }),
         }
+    }
+}
+
+impl From<TokenUsage> for Usage {
+    fn from(usage: TokenUsage) -> Self {
+        Self::from_counts(
+            usage.prompt_token_count,
+            usage.output_token_count,
+            usage.cached_token_count,
+        )
     }
 }
 

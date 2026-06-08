@@ -159,11 +159,7 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
-    let usage = Usage::from_counts(
-        collected.prompt_token_ids.len(),
-        collected.token_ids.len(),
-        collected.cached_token_count,
-    );
+    let usage = Usage::from(collected.usage);
 
     if log_request {
         info!(
@@ -280,8 +276,8 @@ async fn completion_chunk_stream(
                         info!(
                             stream = true,
                             model = %response_model,
-                            prompt_tokens = finished.prompt_token_count,
-                            output_tokens = finished.output_token_count,
+                            prompt_tokens = finished.usage.prompt_token_count,
+                            output_tokens = finished.usage.output_token_count,
                             finish_reason = finished.finish_reason.as_str(),
                             "completion finished"
                         );
@@ -299,11 +295,7 @@ async fn completion_chunk_stream(
                             &request_id,
                             &response_model,
                             created,
-                            Usage::from_counts(
-                                finished.prompt_token_count,
-                                finished.output_token_count,
-                                finished.cached_token_count,
-                            ),
+                            Usage::from(finished.usage),
                         )))
                         .await;
                     }
@@ -514,9 +506,11 @@ mod tests {
                     }],
                 }),
                 finished: Some(Finished {
-                    prompt_token_count: 5,
-                    output_token_count: 2,
-                    cached_token_count: 3,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 5,
+                        output_token_count: 2,
+                        cached_token_count: 3,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),

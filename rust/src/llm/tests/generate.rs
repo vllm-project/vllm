@@ -381,7 +381,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
-    assert_eq!(collected.cached_token_count, 1);
+    assert_eq!(collected.usage.cached_token_count, 1);
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),

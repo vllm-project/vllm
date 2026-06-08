@@ -19,7 +19,7 @@ use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
+    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -29,7 +29,7 @@ use self::types::{
 };
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
-use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
+use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::resolve_request_context;
@@ -123,9 +123,8 @@ async fn generate_chunk_stream(
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
-    let mut prompt_tokens: Option<usize> = None;
-    let mut output_tokens = 0_usize;
-    let mut cached_token_count = 0_usize;
+    let mut prompt_tokens = None;
+    let mut usage = TokenUsage::default();
 
     while let Some(next) = stream.next().await {
         match next {
@@ -134,11 +133,11 @@ async fn generate_chunk_stream(
                     prompt_tokens =
                         output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
                 }
-                let usage_prompt_tokens = prompt_tokens.unwrap_or_default();
-                cached_token_count = cached_token_count.max(output.cached_token_count);
+                usage.prompt_token_count = prompt_tokens.unwrap_or_default();
+                usage.cached_token_count = usage.cached_token_count.max(output.cached_token_count);
 
                 let token_ids = output.token_ids;
-                output_tokens = output_tokens.saturating_add(token_ids.len());
+                usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
                 if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
@@ -150,8 +149,8 @@ async fn generate_chunk_stream(
                 {
                     info!(
                         stream = true,
-                        prompt_tokens = usage_prompt_tokens,
-                        output_tokens,
+                        prompt_tokens = usage.prompt_token_count,
+                        output_tokens = usage.output_token_count,
                         finish_reason = finish_reason.as_str(),
                         "generate finished"
                     );
@@ -180,9 +179,7 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
                     }],
-                    usage: include_continuous_usage.then(|| {
-                        Usage::from_counts(usage_prompt_tokens, output_tokens, cached_token_count)
-                    }),
+                    usage: include_continuous_usage.then(|| usage.into()),
                 })
                 .await;
             }
@@ -200,11 +197,7 @@ async fn generate_chunk_stream(
         y.yield_ok(GenerateStreamResponse {
             request_id,
             choices: Vec::new(),
-            usage: Some(Usage::from_counts(
-                prompt_tokens.unwrap_or_default(),
-                output_tokens,
-                cached_token_count,
-            )),
+            usage: Some(usage.into()),
         })
         .await;
     }
