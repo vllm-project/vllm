@@ -9,13 +9,13 @@ backend based on device capabilities and configuration.
 from functools import cache
 from typing import TYPE_CHECKING, NamedTuple
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import VllmConfig
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
@@ -30,7 +30,7 @@ class MLAPrefillSelectorConfig(NamedTuple):
     VllmConfig into a hashable form for caching.
     """
 
-    dtype: torch.dtype
+    dtype: "torch.dtype"
     is_r1_compatible: bool
 
 

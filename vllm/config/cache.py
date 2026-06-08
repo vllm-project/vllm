@@ -9,10 +9,6 @@ from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import (
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_head_scales,
-)
 
 logger = init_logger(__name__)
 
@@ -258,6 +254,11 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        from vllm.utils.torch_utils import (
+            is_quantized_kv_cache,
+            kv_cache_uses_per_token_head_scales,
+        )
+
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "

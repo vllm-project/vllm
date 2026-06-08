@@ -5,8 +5,6 @@ from dataclasses import field
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
-from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
 
 
 @config
@@ -61,6 +59,9 @@ class ReasoningConfig:
 
     def initialize_token_ids(self, model_config: ModelConfig) -> None:
         """Initialize reasoning token IDs from strings using the tokenizer."""
+        from vllm.reasoning import ReasoningParserManager
+        from vllm.tokenizers import cached_tokenizer_from_config
+
         if (
             self._reasoning_start_token_ids is not None
             and self._reasoning_end_token_ids is not None

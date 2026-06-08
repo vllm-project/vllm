@@ -9,6 +9,7 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
+from vllm.entrypoints.cli import cli_env_setup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -21,10 +22,7 @@ def main():
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
-    from vllm.entrypoints.serve.utils.api_utils import (
-        VLLM_SUBCMD_PARSER_EPILOG,
-        cli_env_setup,
-    )
+    from vllm.entrypoints.cli.types import CLISubcommand
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
@@ -36,7 +34,7 @@ def main():
         vllm.entrypoints.cli.run_batch,
     ]
 
-    cli_env_setup()
+    cli_env_setup(logger)
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:
@@ -72,7 +70,7 @@ def main():
 
         parser = FlexibleArgumentParser(
             description="vLLM CLI",
-            epilog=VLLM_SUBCMD_PARSER_EPILOG.format(subcmd="[subcommand]"),
+            epilog=CLISubcommand.SUBCMD_EPILOG.format(subcmd="[subcommand]"),
         )
         parser.add_argument(
             "-v",
@@ -82,10 +80,22 @@ def main():
         )
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
+        cli_subcommand = next(
+            (arg for arg in sys.argv[1:] if not arg.startswith("-")), None
+        )
         for cmd_module in CMD_MODULES:
             new_cmds = cmd_module.cmd_init()
             for cmd in new_cmds:
-                cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
+                if cli_subcommand == cmd.name:
+                    subparser = cmd.subparser_init(subparsers)
+                else:
+                    subparser = subparsers.add_parser(
+                        cmd.name,
+                        help=cmd.help,
+                        description=cmd.description,
+                        usage=cmd.usage,
+                    )
+                subparser.set_defaults(dispatch_function=cmd.cmd)
                 cmds[cmd.name] = cmd
         args = parser.parse_args()
         if args.subparser in cmds:

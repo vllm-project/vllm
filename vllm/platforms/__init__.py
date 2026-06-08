@@ -3,13 +3,13 @@
 import logging
 import os
 import traceback
+from functools import cache
 from itertools import chain
 from typing import TYPE_CHECKING
 
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -31,6 +31,23 @@ def vllm_version_matches_substr(substr: str) -> bool:
         )
         raise e
     return substr in vllm_version
+
+
+@cache
+def is_cpu_platform() -> bool:
+    """Cheap check for whether the selected platform is CPU."""
+    if cpu_platform_plugin() is None:
+        return False
+
+    platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
+    for func in platform_plugins.values():
+        try:
+            if func() is not None:
+                return False
+        except Exception:
+            pass
+
+    return True
 
 
 def tpu_platform_plugin() -> str | None:
@@ -134,6 +151,8 @@ def xpu_platform_plugin() -> str | None:
     logger.debug("Checking if XPU platform is available.")
     try:
         import torch
+
+        from vllm.utils.torch_utils import supports_xccl
 
         if supports_xccl():
             dist_backend = "xccl"
@@ -299,6 +318,7 @@ __all__ = [
     "Platform",
     "PlatformEnum",
     "current_platform",
+    "is_cpu_platform",
     "CpuArchEnum",
     "_init_trace",
     "_is_amd_zen_cpu",

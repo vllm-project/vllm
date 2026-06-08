@@ -1,48 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Any
+from functools import cache
+from typing import TYPE_CHECKING, Annotated, Any
 
 from pydantic import Field, GetPydanticSchema, ValidationInfo, field_validator
 from pydantic_core import core_schema
 
 from vllm.config.utils import config
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
-    kFp8DynamicTokenSym,
-    kFp8Static128BlockSym,
-    kFp8StaticTensorSym,
-    kInt8StaticChannelSym,
-    kMxfp4Dynamic,
-    kMxfp8Dynamic,
-)
 
-# User-facing names addressable from quantization_config.
-QUANT_KEY_NAMES: dict[str, QuantKey] = {
-    "fp8_per_tensor_static": kFp8StaticTensorSym,
-    "fp8_per_tensor_dynamic": kFp8DynamicTensorSym,
-    "fp8_per_token": kFp8DynamicTokenSym,
-    "fp8_per_block_static": kFp8Static128BlockSym,
-    "fp8_per_block_dynamic": kFp8Dynamic128Sym,
-    "mxfp8": kMxfp8Dynamic,
-    "mxfp4": kMxfp4Dynamic,
-    "int8_per_channel_static": kInt8StaticChannelSym,
-}
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+else:
+    QuantKey = object
+
+
+@cache
+def QUANT_KEY_NAMES() -> dict[str, QuantKey]:
+    """User-facing names addressable from quantization_config."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kFp8DynamicTensorSym,
+        kFp8DynamicTokenSym,
+        kFp8Static128BlockSym,
+        kFp8StaticTensorSym,
+        kInt8StaticChannelSym,
+        kMxfp4Dynamic,
+        kMxfp8Dynamic,
+    )
+
+    return {
+        "fp8_per_tensor_static": kFp8StaticTensorSym,
+        "fp8_per_tensor_dynamic": kFp8DynamicTensorSym,
+        "fp8_per_token": kFp8DynamicTokenSym,
+        "fp8_per_block_static": kFp8Static128BlockSym,
+        "fp8_per_block_dynamic": kFp8Dynamic128Sym,
+        "mxfp8": kMxfp8Dynamic,
+        "mxfp4": kMxfp4Dynamic,
+        "int8_per_channel_static": kInt8StaticChannelSym,
+    }
 
 
 def _coerce_quant_key(v: Any) -> QuantKey | None:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        QuantKey,
+    )
+
     if v is None or isinstance(v, QuantKey):
         return v
     if not isinstance(v, str):
         raise TypeError(f"expected str or QuantKey, got {type(v).__name__}")
     try:
-        return QUANT_KEY_NAMES[v]
+        return QUANT_KEY_NAMES()[v]
     except KeyError:
         raise ValueError(
             f"unknown quantization name {v!r}; "
-            f"expected one of {sorted(QUANT_KEY_NAMES)}"
+            f"expected one of {sorted(QUANT_KEY_NAMES())}"
         ) from None
 
 
@@ -97,8 +110,8 @@ class QuantizationConfigArgs:
             return v
         field_name = info.field_name
         assert field_name is not None
-        if v in _ONLINE_SHORTHANDS:
-            spec = getattr(_ONLINE_SHORTHANDS[v], field_name)
+        if v in _ONLINE_SHORTHANDS():
+            spec = getattr(_ONLINE_SHORTHANDS()[v], field_name)
             if spec is None:
                 raise ValueError(
                     f"online shorthand {v!r} does not define a {field_name} spec"
@@ -107,33 +120,46 @@ class QuantizationConfigArgs:
         return QuantSpec(weight=_coerce_quant_key(v))
 
 
-# CLI shorthands accepted by `--quantization`. Each desugars to a full
-# QuantizationConfigArgs; activation overrides go through quantization_config.
-_ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
-    "fp8_per_tensor": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kFp8StaticTensorSym),
-        moe=QuantSpec(weight=kFp8StaticTensorSym),
-    ),
-    "fp8_per_block": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kFp8Static128BlockSym),
-        moe=QuantSpec(weight=kFp8Static128BlockSym),
-    ),
-    "mxfp8": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kMxfp8Dynamic),
-        moe=QuantSpec(weight=kMxfp8Dynamic),
-    ),
-    # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
-    "int8_per_channel_weight_only": QuantizationConfigArgs(
-        moe=QuantSpec(weight=kInt8StaticChannelSym),
-    ),
-}
+@cache
+def _ONLINE_SHORTHANDS() -> dict[str, QuantizationConfigArgs]:
+    """
+    CLI shorthands accepted by `--quantization`. Each desugars to a full
+    QuantizationConfigArgs; activation overrides go through quantization_config.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Static128BlockSym,
+        kFp8StaticTensorSym,
+        kInt8StaticChannelSym,
+        kMxfp8Dynamic,
+    )
+
+    return {
+        "fp8_per_tensor": QuantizationConfigArgs(
+            linear=QuantSpec(weight=kFp8StaticTensorSym),
+            moe=QuantSpec(weight=kFp8StaticTensorSym),
+        ),
+        "fp8_per_block": QuantizationConfigArgs(
+            linear=QuantSpec(weight=kFp8Static128BlockSym),
+            moe=QuantSpec(weight=kFp8Static128BlockSym),
+        ),
+        "mxfp8": QuantizationConfigArgs(
+            linear=QuantSpec(weight=kMxfp8Dynamic),
+            moe=QuantSpec(weight=kMxfp8Dynamic),
+        ),
+        # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+        "int8_per_channel_weight_only": QuantizationConfigArgs(
+            moe=QuantSpec(weight=kInt8StaticChannelSym),
+        ),
+    }
 
 
-# Names accepted by `--quantization`; "online" means "use quantization_config".
-ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
-    *_ONLINE_SHORTHANDS.keys(),
-    "online",
-)
+@cache
+def ONLINE_QUANT_SHORTHAND_NAMES() -> tuple[str, ...]:
+    """Names accepted by `--quantization`; "online" means "use quantization_config"."""
+    return (
+        *_ONLINE_SHORTHANDS().keys(),
+        "online",
+    )
 
 
 def resolve_quantization_config(
@@ -148,16 +174,16 @@ def resolve_quantization_config(
     object. When both are given, fields explicitly set in `quantization_config`
     take precedence over the shorthand.
     """
-    if quantization is not None and quantization not in ONLINE_QUANT_SHORTHAND_NAMES:
+    if quantization is not None and quantization not in ONLINE_QUANT_SHORTHAND_NAMES():
         if quantization_config is not None:
             raise ValueError(
                 f"quantization_config is only supported when quantization is "
-                f"one of {sorted(ONLINE_QUANT_SHORTHAND_NAMES)}, "
+                f"one of {sorted(ONLINE_QUANT_SHORTHAND_NAMES())}, "
                 f"got quantization={quantization!r}"
             )
         return None
 
-    base = _ONLINE_SHORTHANDS.get(quantization) if quantization else None
+    base = _ONLINE_SHORTHANDS().get(quantization) if quantization else None
 
     if quantization_config is None:
         return base

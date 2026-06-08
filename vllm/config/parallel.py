@@ -7,26 +7,26 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
-import torch
 from pydantic import Field, field_validator, model_validator
-from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
+    from torch.distributed import ProcessGroup, Store
 
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
     Executor = Any
+    ProcessGroup = Any
+    Store = Any
 
 logger = init_logger(__name__)
 _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
@@ -457,6 +457,8 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
+            from vllm.platforms import current_platform
+
             if not current_platform.is_cuda_alike():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
@@ -670,6 +672,9 @@ class ParallelConfig:
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
+        import torch
+        from torch.distributed import ReduceOp
+
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
@@ -697,6 +702,9 @@ class ParallelConfig:
         Returns:
             (has_unfinished_global, pause_consensus)
         """
+        import torch
+        from torch.distributed import ReduceOp
+
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
@@ -708,6 +716,9 @@ class ParallelConfig:
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
+        import torch
+        from torch.distributed import ReduceOp
+
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
         tensor = torch.tensor([kv_cache_memory], dtype=torch.int64, device="cpu")
@@ -846,6 +857,7 @@ class ParallelConfig:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
+            from vllm.platforms import current_platform
             from vllm.v1.executor import ray_utils
 
             backend: DistributedExecutorBackend = "mp"
@@ -933,6 +945,7 @@ class ParallelConfig:
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
+        from vllm.platforms import current_platform
         from vllm.v1.executor import Executor
 
         # Enable batch invariance settings if requested

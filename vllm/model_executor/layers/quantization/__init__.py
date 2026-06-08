@@ -170,7 +170,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # Register online shorthands as quantization methods so the user can
     # specify "LLM(..., quantization='fp8_per_tensor')" as shorthand for
     # creating a more complicated online quant config object.
-    for shorthand in _ONLINE_SHORTHANDS:
+    for shorthand in _ONLINE_SHORTHANDS():
         assert shorthand not in method_to_config, (
             f"Online quant shorthand {shorthand!r} conflicts with an "
             f"existing quantization method"

@@ -13,21 +13,17 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
-from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.utils.import_utils import has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
-    import vllm.model_executor.layers.quantization as me_quant
+    from vllm.model_executor.layers.quantization import QuantizationMethods
 else:
     PretrainedConfig = Any
-
-    me_quant = LazyLoader(
-        "model_executor", globals(), "vllm.model_executor.layers.quantization"
-    )
+    QuantizationMethods = str
 
 logger = init_logger(__name__)
 
@@ -99,7 +95,7 @@ class SpeculativeConfig:
     warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
-    quantization: me_quant.QuantizationMethods | str | None = None
+    quantization: QuantizationMethods | str | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
@@ -929,6 +925,8 @@ class SpeculativeConfig:
         EagleConfig and ExtractHiddenStatesConfig update architectures, so update all
         architectures-related fields in self.draft_model_config
         """
+        from vllm.transformers_utils.config import get_hf_text_config
+
         self.draft_model_config.hf_text_config = get_hf_text_config(
             self.draft_model_config.hf_config
         )

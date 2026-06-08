@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import torch
 from pydantic import ConfigDict, SkipValidation
 
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
+
+if TYPE_CHECKING:
+    import torch
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
@@ -17,7 +19,7 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Device | torch.device | None] = "auto"
+    device: "SkipValidation[Device | torch.device | None]" = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be
     removed in a future release.
@@ -47,6 +49,8 @@ class DeviceConfig:
         return hash_str
 
     def __post_init__(self):
+        import torch
+
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform

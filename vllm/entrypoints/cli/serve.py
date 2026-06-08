@@ -10,25 +10,8 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import (
-    run_dp_supervisor,
-)
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import get_tcp_uri
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
-from vllm.v1.executor import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (
-    APIServerProcessManager,
-    RustFrontendProcessManager,
-    wait_for_completion_or_failure,
-)
 
 logger = init_logger(__name__)
 
@@ -45,6 +28,11 @@ class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI."""
 
     name = "serve"
+    help = (
+        "Launch a local OpenAI-compatible API server to serve LLM completions via HTTP."
+    )
+    description = DESCRIPTION
+    usage = "vllm serve [model_tag] [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -137,17 +125,23 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 1
 
         if is_multi_port:
+            from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
             run_multi_api_server(args)
         else:
+            from vllm.entrypoints.openai.api_server import run_server
+
             # Single API server (this process).
             args.api_server_count = None
             uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
@@ -155,14 +149,15 @@ class ServeSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
             self.name,
-            help="Launch a local OpenAI-compatible API server to serve LLM "
-            "completions via HTTP.",
-            description=DESCRIPTION,
-            usage="vllm serve [model_tag] [options]",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
 
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         serve_parser = make_arg_parser(serve_parser)
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+        serve_parser.epilog = self.SUBCMD_EPILOG.format(subcmd=self.name)
         return serve_parser
 
 
@@ -171,6 +166,12 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.utils.network_utils import get_tcp_uri
+    from vllm.v1.engine.utils import CoreEngineProcManager
+    from vllm.v1.executor import Executor
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
@@ -255,6 +256,17 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
+    from vllm.entrypoints.openai.api_server import setup_server
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.engine.utils import launch_core_engines
+    from vllm.v1.executor import Executor
+    from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
+    from vllm.v1.utils import (
+        APIServerProcessManager,
+        RustFrontendProcessManager,
+        wait_for_completion_or_failure,
+    )
+
     assert not args.headless
     rust_frontend_path = envs.VLLM_RUST_FRONTEND_PATH
     num_api_servers: int = args.api_server_count

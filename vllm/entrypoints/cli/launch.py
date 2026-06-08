@@ -6,19 +6,7 @@ import signal
 
 import uvloop
 
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (
-    build_and_serve_renderer,
-    setup_server,
-)
-from vllm.entrypoints.openai.cli_args import (
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -39,6 +27,8 @@ class LaunchSubcommandBase(CLISubcommand):
         By default, adds the standard vLLM serving arguments.
         Subclasses can override to add component-specific arguments.
         """
+        from vllm.entrypoints.openai.cli_args import make_arg_parser
+
         make_arg_parser(parser)
 
     @staticmethod
@@ -65,6 +55,9 @@ class LaunchSubcommand(CLISubcommand):
     """
 
     name = "launch"
+    help = DESCRIPTION
+    description = DESCRIPTION
+    usage = "vllm launch <component> [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -74,6 +67,8 @@ class LaunchSubcommand(CLISubcommand):
         args.launch_command(args)
 
     def validate(self, args: argparse.Namespace) -> None:
+        from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
+
         validate_parsed_serve_args(args)
 
     def subparser_init(
@@ -81,10 +76,11 @@ class LaunchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         launch_parser = subparsers.add_parser(
             self.name,
-            help=DESCRIPTION,
-            description=DESCRIPTION,
-            usage=f"vllm {self.name} <component> [options]",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
+
         launch_subparsers = launch_parser.add_subparsers(
             required=True, dest="launch_component"
         )
@@ -98,7 +94,7 @@ class LaunchSubcommand(CLISubcommand):
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
-            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            cmd_subparser.epilog = self.SUBCMD_EPILOG.format(
                 subcmd=f"{self.name} {cmd_cls.name}"
             )
 
@@ -118,6 +114,14 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         raise KeyboardInterrupt("terminated")
 
     signal.signal(signal.SIGTERM, _interrupt_init)
+
+    from vllm import envs
+    from vllm.config import VllmConfig
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.entrypoints.openai.api_server import (
+        build_and_serve_renderer,
+        setup_server,
+    )
 
     # 1. Socket binding
     listen_address, sock = setup_server(args)

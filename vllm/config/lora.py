@@ -3,22 +3,27 @@
 
 from typing import TYPE_CHECKING, Any, Literal
 
-import torch
 from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import ModelConfig
     from vllm.config.cache import CacheConfig
 else:
     ModelConfig = Any
     CacheConfig = Any
+
+    class _TorchNamespace:
+        dtype = Any
+
+    torch = _TorchNamespace()
 
 logger = init_logger(__name__)
 
@@ -107,6 +112,8 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        from vllm.platforms import current_platform
+
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
@@ -125,6 +132,8 @@ class LoRAConfig:
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):
+        import torch
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

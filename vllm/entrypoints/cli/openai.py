@@ -7,12 +7,12 @@ import signal
 import sys
 from typing import TYPE_CHECKING
 
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
-
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
+    from openai import OpenAI
+    from openai.types.chat import ChatCompletionMessageParam
+
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = argparse.ArgumentParser
@@ -26,7 +26,9 @@ def _register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
+def _interactive_cli(args: argparse.Namespace) -> "tuple[str, OpenAI]":
+    from openai import OpenAI
+
     _register_signal_handlers()
 
     base_url = args.url
@@ -66,7 +68,7 @@ def _print_completion_stream(stream) -> str:
     return output
 
 
-def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
+def chat(system_prompt: str | None, model_name: str, client: "OpenAI") -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
@@ -122,6 +124,9 @@ class ChatCommand(CLISubcommand):
     """The `chat` subcommand for the vLLM CLI."""
 
     name = "chat"
+    help = "Generate chat completions via the running API server."
+    description = help
+    usage = "vllm chat [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -182,10 +187,10 @@ class ChatCommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
-            "chat",
-            help="Generate chat completions via the running API server.",
-            description="Generate chat completions via the running API server.",
-            usage="vllm chat [options]",
+            self.name,
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
         return ChatCommand.add_cli_args(parser)
 
@@ -194,6 +199,12 @@ class CompleteCommand(CLISubcommand):
     """The `complete` subcommand for the vLLM CLI."""
 
     name = "complete"
+    help = (
+        "Generate text completions based on the given prompt "
+        "via the running API server."
+    )
+    description = help
+    usage = "vllm complete [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -242,16 +253,10 @@ class CompleteCommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
-            "complete",
-            help=(
-                "Generate text completions based on the given prompt "
-                "via the running API server."
-            ),
-            description=(
-                "Generate text completions based on the given prompt "
-                "via the running API server."
-            ),
-            usage="vllm complete [options]",
+            self.name,
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
         return CompleteCommand.add_cli_args(parser)
 

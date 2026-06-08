@@ -18,14 +18,11 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
-import torch
 from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.transformers_utils.runai_utils import is_runai_obj_uri
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
@@ -524,6 +521,8 @@ class VllmConfig:
         if not self._is_default_v2_model_runner_model():
             return False
 
+        from vllm.triton_utils import HAS_TRITON
+
         if not HAS_TRITON:
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
@@ -846,6 +845,7 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
+        import torch
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
@@ -1038,6 +1038,8 @@ class VllmConfig:
             )
 
         from vllm.platforms import current_platform
+
+        self.compilation_config.apply_platform_defaults(current_platform)
 
         if (
             self.model_config is not None
@@ -1791,6 +1793,8 @@ class VllmConfig:
         """
         Set the compile ranges for the compilation config.
         """
+        import torch
+
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 
@@ -1907,6 +1911,8 @@ class VllmConfig:
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
 
             SequenceClassificationConfig.verify_and_update_config(self)
+
+        from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 
         if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
             self.model_config.model_weights
@@ -2061,6 +2067,8 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
+        from vllm.triton_utils import HAS_TRITON
+
         if not HAS_TRITON:
             raise ValueError("Model Runner V2 requires Triton.")
 

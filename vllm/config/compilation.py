@@ -11,21 +11,21 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
     get_hash_factors,
     hash_factors,
+    lazy_platform,
 )
+from vllm.env_override import is_torch_equal_or_newer
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.platforms import Platform
     from vllm.v1.attention.backend import AttentionCGSupport
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
@@ -266,31 +266,31 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + padding fusion might not work"
                 )
-        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+        if self.enable_qk_norm_rope_fusion and not lazy_platform().is_cuda_alike():
             logger.warning_once(
                 "QK Norm + RoPE fusion enabled but the current platform is not "
                 "CUDA or ROCm. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
-        if self.fuse_act_padding and not current_platform.is_rocm():
+        if self.fuse_act_padding and not lazy_platform().is_rocm():
             logger.warning_once(
                 "Padding fusion enabled but the current platform is not ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
-        if self.fuse_mla_dual_rms_norm and not current_platform.is_rocm():
+        if self.fuse_mla_dual_rms_norm and not lazy_platform().is_rocm():
             logger.warning_once(
                 "MLA dual RMS norm fusion requires ROCm/AITER. "
                 "The fusion will be disabled."
             )
             self.fuse_mla_dual_rms_norm = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not lazy_platform().is_rocm():
             logger.warning_once(
                 "KV cache fusion currently only enabled on ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
-        if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
+        if self.fuse_rope_kvcache_cat_mla and not lazy_platform().is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
@@ -827,6 +827,17 @@ class CompilationConfig:
         config = TypeAdapter(CompilationConfig).dump_python(
             self, exclude=exclude, exclude_unset=True
         )
+        if config.get("backend") == "":
+            from vllm.platforms.interface import Platform
+
+            config["backend"] = Platform.simple_compile_backend
+
+        inductor_compile_config = config.get("inductor_compile_config")
+        if isinstance(inductor_compile_config, dict):
+            from vllm.platforms import is_cpu_platform
+
+            if not is_cpu_platform():
+                CompilationConfig._set_combo_kernel_defaults(inductor_compile_config)
 
         return str(config)
 
@@ -931,22 +942,32 @@ class CompilationConfig:
             ):
                 self.inductor_compile_config.setdefault(key, enable_asserts)
 
-        for k, v in self.inductor_passes.items():
-            if not isinstance(v, str):
-                assert callable(v), f"pass {k} should be callable or a qualified name"
-                self.inductor_compile_config[k] = (
-                    v if isinstance(v, InductorPass) else CallableInductorPass(v)
-                )
-                continue
-
-            # resolve function from qualified name
-            names = v.split(".")
-            module = ".".join(names[:-1])
-            func_name = names[-1]
-            func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = (
-                func if isinstance(func, InductorPass) else CallableInductorPass(func)
+        if self.inductor_passes:
+            from vllm.compilation.passes.inductor_pass import (
+                CallableInductorPass,
+                InductorPass,
             )
+
+            for k, v in self.inductor_passes.items():
+                if not isinstance(v, str):
+                    assert callable(v), (
+                        f"pass {k} should be callable or a qualified name"
+                    )
+                    self.inductor_compile_config[k] = (
+                        v if isinstance(v, InductorPass) else CallableInductorPass(v)
+                    )
+                    continue
+
+                # resolve function from qualified name
+                names = v.split(".")
+                module = ".".join(names[:-1])
+                func_name = names[-1]
+                func = __import__(module).__dict__[func_name]
+                self.inductor_compile_config[k] = (
+                    func
+                    if isinstance(func, InductorPass)
+                    else CallableInductorPass(func)
+                )
 
         if (
             self.pass_config.enable_qk_norm_rope_fusion
@@ -962,18 +983,6 @@ class CompilationConfig:
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
-
-        if (
-            is_torch_equal_or_newer("2.9.0.dev")
-            and "combo_kernels" not in self.inductor_compile_config
-            and "benchmark_combo_kernel" not in self.inductor_compile_config
-            # (fixme @boyuan) combo kernel does not support cpu yet.
-            and not current_platform.is_cpu()
-        ):
-            # use horizontal fusion, which is useful for fusing qk-norm and
-            # qk-rope when query and key have different shapes.
-            self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
@@ -1031,6 +1040,23 @@ class CompilationConfig:
                 f"got {self.encoder_cudagraph_token_budgets}"
             )
 
+    @staticmethod
+    def _set_combo_kernel_defaults(inductor_compile_config: dict[str, Any]) -> None:
+        if (
+            is_torch_equal_or_newer("2.9.0.dev")
+            and "combo_kernels" not in inductor_compile_config
+            and "benchmark_combo_kernel" not in inductor_compile_config
+        ):
+            # use horizontal fusion, which is useful for fusing qk-norm and
+            # qk-rope when query and key have different shapes.
+            inductor_compile_config["combo_kernels"] = True
+            inductor_compile_config["benchmark_combo_kernel"] = True
+
+    def apply_platform_defaults(self, current_platform: "Platform"):
+        # (fixme @boyuan) combo kernel does not support cpu yet.
+        if not current_platform.is_cpu():
+            self._set_combo_kernel_defaults(self.inductor_compile_config)
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
@@ -1050,6 +1076,9 @@ class CompilationConfig:
         Returns:
             The backend for the compilation config.
         """
+        from vllm.platforms import current_platform
+
+        self.apply_platform_defaults(current_platform)
         if self.mode is None:
             raise ValueError(
                 "No compilation mode is set. This method should only be "
@@ -1522,4 +1551,4 @@ class CompilationConfig:
         if self.compile_ranges_endpoints is None:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
-        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]  # type: ignore[call-arg]
