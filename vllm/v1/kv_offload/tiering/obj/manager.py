@@ -249,7 +249,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
-        self._lookup_manager.drain_results()
         results: list[JobResult] = self._failed_jobs
         self._failed_jobs = []
         for job_id, entry in list(self._transfers.items()):

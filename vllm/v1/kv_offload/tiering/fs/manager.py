@@ -182,7 +182,6 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect completed jobs and update the lookup cache for stores."""
-        self._lookup_manager.drain_results()
         results: list[JobResult] = []
         for job_id, success in self._pool.get_finished():
             keys = self._store_job_keys.pop(job_id, None)

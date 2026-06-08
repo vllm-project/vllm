@@ -200,8 +200,6 @@ class TieringOffloadingManager(OffloadingManager):
         3. For completed loads (secondary→primary): calls primary.complete_write()
            to make blocks available
         """
-        if not self.secondary_tiers:
-            return
         for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
@@ -256,23 +254,18 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_hit is None:
             return None
 
-        if not self.secondary_tiers:
-            return False
-
-        # Fan out: call all tiers so each can queue the key internally.
-        # Then sweep in priority order — the first True wins, and a
-        # higher-priority None blocks acting on any lower-priority result
-        # until that tier resolves.
-        results = [tier.lookup(key, req_context) for tier in self.secondary_tiers]
-        for i, result in enumerate(results):
-            if result is None:
-                return None
+        any_none = False
+        for tier in self.secondary_tiers:
+            result = tier.lookup(key, req_context)
             if result is True:
-                if not self._initiate_promotion(
-                    self.secondary_tiers[i], key, req_context
-                ):
-                    return False
-                return None
+                if not self._initiate_promotion(tier, key, req_context):
+                    return False  # primary full, block unavailable
+                return None  # promotion started, retry later
+            if result is None:
+                any_none = True
+
+        if any_none:
+            return None
         return False
 
     def _initiate_promotion(
@@ -591,26 +584,6 @@ class TieringOffloadingManager(OffloadingManager):
         Yields:
             New OffloadingEvents collected since the last call.
         """
-        # TODO: Move _flush_pending_promotions() to a dedicated end_of_batch()
-        # hook once one exists. For now, take_events() serves as the flush
-        # point under the assumption that it is called at the end of each
-        # engine step (Scheduler.update_from_output() → connector.take_events()).
-        # When the dedicated hook is added, update tests that rely on
-        # take_events() to signal end of step.
-
-        self._maybe_process_finished_jobs()
-
-        self._flush_pending_promotions()
-
-        # Notify tiers of end-of-step so they can flush any buffered work
-        # (e.g. in tests that call take_events() directly without
-        # on_schedule_end()).
-        for tier in self.secondary_tiers:
-            tier.on_schedule_end()
-
-        # Reset the per-step gate so next step's first call does real work.
-        self._processed_jobs_this_step = False
-
         if self.events is not None:
             yield from self.events
             self.events.clear()

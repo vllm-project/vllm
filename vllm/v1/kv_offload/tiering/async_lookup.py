@@ -95,8 +95,7 @@ class AsyncLookupManager(ABC):
         self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int]]] = (
             queue.SimpleQueue()
         )
-
-        self._pending_drain_count: int = 0
+        self._need_to_drain: bool = False  # need to drain the _pending_results?
 
         self._thread = threading.Thread(
             target=self._worker,
@@ -128,13 +127,14 @@ class AsyncLookupManager(ABC):
         """
         Non-blocking lookup called from the scheduler thread.
 
-        drain_results() must have been called earlier in the same step.
-
         Returns:
             FOUND     — block is present in this tier.
             NOT_FOUND — block is not present in this tier.
             None      — result not yet available; retry next step.
         """
+        if self._need_to_drain:
+            self.drain_results()
+            self._need_to_drain = False
         status = self._lookup_state.get(key, _IN_FLIGHT)
         if status == _IN_FLIGHT:
             if key not in self._lookup_state:
@@ -156,7 +156,7 @@ class AsyncLookupManager(ABC):
         if self._lookup_batch:
             self._lookup_queue.put(self._lookup_batch)
             self._lookup_batch = []
-            self._pending_drain_count += 1
+            self._need_to_drain = True
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
@@ -166,14 +166,11 @@ class AsyncLookupManager(ABC):
         that a subsequent update_cached_exists() can correctly upgrade a
         worker NOT_FOUND to FOUND when a store completes in the same step.
         """
-        if not self._pending_drain_count:
-            return
         while True:
             try:
                 batch = self._pending_results.get_nowait()
             except queue.Empty:
                 break
-            self._pending_drain_count -= 1
             for key, status in batch:
                 # Only apply if the key is still _IN_FLIGHT.  A FOUND written
                 # by update_cached_exists() during the worker's lookup takes
