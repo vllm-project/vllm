@@ -58,6 +58,16 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         self.projector = projector
         self.activation = activation
 
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.projector is not None:
+            attrs.append("projector=True")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed"}
 
@@ -109,6 +119,20 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         self.logit_sigma = logit_sigma
         self.head_dtype = head_dtype
         self.activation = activation
+
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.classifier is not None:
+            attrs.append("classifier=True")
+        if self.logit_mean is not None:
+            attrs.append(f"logit_mean={self.logit_mean}")
+        if self.logit_sigma is not None:
+            attrs.append(f"logit_sigma={self.logit_sigma}")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_classify"}
