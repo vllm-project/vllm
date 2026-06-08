@@ -17,7 +17,7 @@ Two main reasons:
 
 ## Usage example
 
-Please refer to [examples/disaggregated/disaggregated_prefill.sh](../../examples/disaggregated/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
+Refer to the connector-specific examples below for disaggregated prefilling usage.
 
 Now supports 9 types of connectors:
 
@@ -48,10 +48,6 @@ Now supports 9 types of connectors:
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
-
-## Benchmarks
-
-Please refer to [benchmarks/disagg_benchmarks](../../benchmarks/disagg_benchmarks) for disaggregated prefilling benchmarks.
 
 ## Development
 
