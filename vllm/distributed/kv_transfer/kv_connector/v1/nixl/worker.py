@@ -397,10 +397,12 @@ class NixlConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
-        # Per-region flag: True if the region is an SSM/Mamba layer.
-        # Populated during register_kv_caches; used to route FA descriptors
-        # to attention regions and Mamba descriptors to SSM regions.
+        # Per-region flags: True if the region has ANY SSM/Mamba layers
+        # or ANY attention/MLA layers, respectively.  HMA may back both
+        # layer types with the same physical tensor, making a region
+        # dual-purpose (both flags True).
         self._is_ssm_region: list[bool] = []
+        self._is_attn_region: list[bool] = []
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -881,6 +883,7 @@ class NixlConnectorWorker:
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
         self._is_ssm_region = list[bool]()
+        self._is_attn_region = list[bool]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -899,7 +902,9 @@ class NixlConnectorWorker:
                     parts = []
                     for c in cache_or_caches:
                         if isinstance(c, torch.Tensor):
-                            parts.append(f"Tensor(shape={tuple(c.shape)}, ptr=0x{c.data_ptr():x})")
+                            parts.append(
+                                f"Tensor(shape={tuple(c.shape)}, ptr=0x{c.data_ptr():x})"
+                            )
                         else:
                             parts.append(type(c).__name__)
                     cache_info = f"({', '.join(parts)})"
@@ -947,19 +952,26 @@ class NixlConnectorWorker:
             # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                is_ssm = isinstance(layer_spec, MambaSpec)
+                is_attn = not is_ssm
                 if base_addr in seen_base_addresses:
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
                     # across groups. This results in skipping all tensors but the ones
-                    # pointed to by group0. Also, generally we will have more blocks
-                    # per tensor but fewer regions.
+                    # pointed to by group0.  However, the same physical tensor may
+                    # back both SSM and attention layers.  Accumulate both flags so
+                    # that the region can be dual-purpose.
+                    idx = seen_base_addresses.index(base_addr)
+                    self._is_ssm_region[idx] = self._is_ssm_region[idx] or is_ssm
+                    self._is_attn_region[idx] = self._is_attn_region[idx] or is_attn
                     if _DESC_DEBUG:
                         logger.warning(
                             "[DESC-DEBUG] SKIP layer=%s: base=0x%x already seen "
-                            "(spec=%s, is_ssm=%s)",
+                            "(spec=%s, is_ssm=%s, is_attn=%s)",
                             layer_name,
                             base_addr,
                             type(layer_spec).__name__,
-                            isinstance(layer_spec, MambaSpec),
+                            is_ssm,
+                            is_attn,
                         )
                     continue
                 if _DESC_DEBUG:
@@ -975,7 +987,9 @@ class NixlConnectorWorker:
                     )
                 seen_base_addresses.append(base_addr)
                 is_ssm = isinstance(layer_spec, MambaSpec)
+                is_attn = not is_ssm
                 self._is_ssm_region.append(is_ssm)
+                self._is_attn_region.append(is_attn)
                 # Only record non-Mamba page sizes.
                 if is_ssm:
                     self.block_len_per_layer.append(
@@ -1044,7 +1058,8 @@ class NixlConnectorWorker:
         # (For hybrid MLA+GDN models, building FA descriptors for the GDN
         # region with virtual K/V split would produce out-of-bounds addresses
         # under heterogeneous TP, failing NIXL prepXferDlist.)
-        num_attention_base = len(caches_data) - sum(self._is_ssm_region)
+        # HMA dual-purpose regions (both SSM and attn) are counted here.
+        num_attention_base = sum(self._is_attn_region)
         self.num_regions = num_attention_base
 
         if _DESC_DEBUG:
@@ -1149,6 +1164,7 @@ class NixlConnectorWorker:
             # Attention/MLA regions do not contain conv or temporal state;
             # building Mamba descriptors for them would reference addresses
             # outside their registered memory, causing prepXferDlist failures.
+            # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if not self._is_ssm_region[i]:
                 if _DESC_DEBUG:
                     logger.warning(
@@ -1275,10 +1291,11 @@ class NixlConnectorWorker:
         for i, base_addr in enumerate(base_addresses):
             # Only build FA descriptors for attention regions.
             # SSM/Mamba regions are served by Mamba descriptors.
-            if i < len(self._is_ssm_region) and self._is_ssm_region[i]:
+            # Dual-purpose regions (HMA) get both FA and Mamba descs.
+            if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 if _DESC_DEBUG:
                     logger.warning(
-                        "[DESC-DEBUG] _build_fa_local: SKIP region %d (SSM), base=0x%x",
+                        "[DESC-DEBUG] _build_fa_local: SKIP region %d (not attn), base=0x%x",
                         i,
                         base_addr,
                     )
@@ -1338,11 +1355,12 @@ class NixlConnectorWorker:
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             # Only build FA descriptors for attention regions.
             # SSM/Mamba regions are served by Mamba descriptors.
-            if i < len(self._is_ssm_region) and self._is_ssm_region[i]:
+            # Dual-purpose regions (HMA) get both FA and Mamba descs.
+            if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 if _DESC_DEBUG:
                     logger.warning(
                         "[DESC-DEBUG] _build_fa_remote: SKIP region %d "
-                        "(SSM), remote_base=0x%x",
+                        "(not attn), remote_base=0x%x",
                         i,
                         base_addr,
                     )
