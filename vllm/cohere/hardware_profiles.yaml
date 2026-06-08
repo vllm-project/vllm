@@ -41,6 +41,9 @@ profiles:
     when: server.type == "vllm" && matches(gpu.name, "gb200")
     args:
       attention-backend: "FLASHINFER"
+      # v0.21 auto-selects VLLM_CUTLASS for C4 FP8 MoE; v0.19 GB200 TTFT was ~45%
+      # faster at mc=1/1k. Prefer FlashInfer TRTLLM on SM100 (SigmoidRenorm routing).
+      moe-backend: "flashinfer_trtllm"
     env:
       VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE: "true"
 
