@@ -29,6 +29,8 @@ logger = init_logger(__name__)
 
 
 class KimiK2ToolParser(ToolParser):
+    supports_required_and_named = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
