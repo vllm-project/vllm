@@ -6,14 +6,24 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
+import httpx
+import requests
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 _T = TypeVar("_T", bound=TokenizerLike)
+logger = init_logger(__name__)
+
+_HF_HUB_TRANSPORT_ERRORS = (
+    httpx.TransportError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -157,6 +167,14 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     return cached_tokenizer
 
 
+def _should_retry_tokenizer_from_cache(
+    path_or_repo_id: str | Path, kwargs: dict
+) -> bool:
+    if kwargs.get("local_files_only", False):
+        return False
+    return not Path(path_or_repo_id).expanduser().exists()
+
+
 class CachedHfTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
@@ -177,6 +195,32 @@ class CachedHfTokenizer(TokenizerLike):
                 cache_dir=download_dir,
                 **kwargs,
             )
+        except _HF_HUB_TRANSPORT_ERRORS as e:
+            if not _should_retry_tokenizer_from_cache(path_or_repo_id, kwargs):
+                raise
+
+            logger.warning(
+                "Retrying tokenizer load for %s from local cache after "
+                "transient Hugging Face Hub transport error: %r",
+                path_or_repo_id,
+                e,
+            )
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["local_files_only"] = True
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    path_or_repo_id,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    cache_dir=download_dir,
+                    **retry_kwargs,
+                )
+            except Exception as cache_error:
+                raise RuntimeError(
+                    "Failed to load tokenizer from the Hugging Face Hub, and "
+                    "the tokenizer was not fully available in the local cache."
+                ) from cache_error
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
