@@ -186,14 +186,10 @@ AWQ_MODELS = [
     reason="auto_awq is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model_id", AWQ_MODELS)
-def test_auto_awq_quantization_method(vllm_runner, model_id: str):
-    """Test that quantization='auto_awq' loads and runs correctly.
+def test_auto_awq_quantization_method(vllm_runner, model_id: str, monkeypatch):
+    """Test that quantization='auto_awq' loads and runs correctly."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    This verifies that:
-    1. AutoAWQConfig.override_quantization_method() correctly detects AWQ models
-    2. The model loads with auto_awq quantization and uses the appropriate kernel
-    3. Generation produces valid output
-    """
     with vllm_runner(
         model_id,
         dtype=torch.float16,
