@@ -1212,14 +1212,21 @@ def launch_core_engines(
                 "Engine core startup failed; shutting down engine "
                 "processes to release GPU memory."
             )
+            # Grace period MUST exceed MultiprocExecutor._ensure_worker_termination's
+            # worst case (4 s wait + SIGTERM + 4 s wait + SIGKILL ~= 8 s). Otherwise
+            # the launcher will SIGKILL the engine core process mid-teardown,
+            # cutting off the worker-subprocess SIGKILL step and orphaning GPU
+            # workers we are trying to reap. 15 s gives the engine core enough
+            # time to finish its escalating teardown plus modest overhead.
+            STARTUP_SHUTDOWN_GRACE_S = 15.0
             if local_engine_manager is not None:
                 try:
-                    local_engine_manager.shutdown()
+                    local_engine_manager.shutdown(timeout=STARTUP_SHUTDOWN_GRACE_S)
                 except Exception:
                     logger.exception("Error while shutting down engine cores")
             if coordinator is not None:
                 try:
-                    coordinator.shutdown()
+                    coordinator.shutdown(timeout=STARTUP_SHUTDOWN_GRACE_S)
                 except Exception:
                     logger.exception("Error while shutting down DP coordinator")
             raise
