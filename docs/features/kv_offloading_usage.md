@@ -82,7 +82,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `fs`. |
-| `root_dir` | yes | — | Base directory; suffixed per-rank as `<root_dir>_r<rank>/`. |
+| `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 
@@ -90,19 +90,21 @@ Each thread group prefers its own queue but pulls from the other when its primar
 
 #### On-Disk Layout
 
-Under `root_dir`, blocks are sharded across hash-prefix subdirectories to limit directory fan-out:
+Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
+
+Inside that subdirectory, blocks are sharded across hash-prefix subdirectories to limit directory fan-out:
 
 ```text
-<root_dir>_r<rank>/
-  <hhh>/
-    <hh>_g<group_idx>/
-      <hash_hex>.bin
-  config.json
+<root_dir>/
+  <model>_<digest>/
+    config.json
+  <model>_<digest>_r<rank>/
+    <hhh>/                    # first 3 hex chars of the block hash
+      <hh>_g<group_idx>/      # next 2 hex chars + KV cache group index
+        <hash_hex>.bin        # full block hash (in hex)
 ```
 
-A `config.json` describing the run (block size, number of KV groups, etc.) is written on first start.
-
-The directory must be writable by every rank. Because the per-rank suffix is added automatically, multiple ranks can safely share the same `root_dir` value.
+`config.json` records the run (block size, number of KV groups, etc.) and is written on first start. Each rank writes blocks under its own `_r<rank>` sibling directory, so multiple ranks can safely share the same `root_dir`.
 
 #### Cross-Process Sharing
 
@@ -117,4 +119,4 @@ PYTHONHASHSEED=0 vllm serve ...
 - `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. Leave headroom for the rest of the host workload.
 - `block_size`: larger offloaded blocks reduce per-block bookkeeping overhead but increase the granularity of lookups. Must be a multiple of the GPU block size.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
-- Sharing `root_dir` across runs: the tier reuses files matching the current run's `config.json`. Changing `block_size` or model topology invalidates older files; clean the directory between incompatible runs.
+- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
