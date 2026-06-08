@@ -139,6 +139,9 @@ class BaseRenderer(ABC, Generic[_T]):
                 config.observability_config
             )
 
+    def get_executor(self) -> Executor:
+        return self._executor
+
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
         if tokenizer is None:
