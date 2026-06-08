@@ -387,7 +387,7 @@ def triton_reshape_and_cache_flash(
         torch.float8_e4m3fnuz,
     ], (
         "unsupported dtype of KV cache tensor, got "
-        "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
+        f"{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
         "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
     )
 
@@ -563,7 +563,7 @@ def triton_reshape_and_cache_flash_diffkv(
         torch.float8_e4m3fnuz,
     ], (
         "unsupported dtype of KV cache tensor, got "
-        "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
+        f"{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
         "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
     )
 
