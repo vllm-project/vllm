@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Descriptor-by-descriptor comparison of OLD (upstream) vs NEW (build_region_meta)
 for BOTH _build_fa_local and _build_fa_remote.
@@ -10,7 +12,6 @@ Run:
 from __future__ import annotations
 
 import sys
-from math import prod
 from dataclasses import dataclass
 
 import torch
@@ -20,16 +21,15 @@ import torch
 # ---------------------------------------------------------------------------
 sys.path.insert(0, ".")
 
-from vllm.v1.kv_cache_interface import (
-    KVCacheLayout,
-    num_states_for,
-    _DIM4_B,
-    _DIM4_H,
-    get_dtype_size,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
     build_region_meta,
+)
+from vllm.v1.kv_cache_interface import (
+    _DIM4_B,
+    _DIM4_H,
+    KVCacheLayout,
+    get_dtype_size,
 )
 
 
@@ -39,18 +39,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
 @dataclass
 class FakeSpec:
     """Minimal KVCacheSpec-like object for testing."""
+
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
     tokens_per_state: int = 1
     is_mamba: bool = False
-    state_content_size_bytes_val: int | None = None
-
-    @property
-    def state_content_size_bytes(self) -> int:
-        if self.state_content_size_bytes_val is not None:
-            return self.state_content_size_bytes_val
-        return self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
     def transfer_shapes(
         self,
@@ -160,8 +154,9 @@ def new_build_fa_local(
         )
 
         for meta in metas:
-            result.extend(NixlConnectorWorker._view_to_descriptors(
-                meta, base_addr, device_id))
+            result.extend(
+                NixlConnectorWorker._view_to_descriptors(meta, base_addr, device_id)
+            )
     return result
 
 
@@ -276,8 +271,9 @@ def new_build_fa_remote(
                         ),
                         storage_offset=view.storage_offset(),
                     )
-                result.extend(NixlConnectorWorker._view_to_descriptors(
-                    view, base_addr, device_id))
+                result.extend(
+                    NixlConnectorWorker._view_to_descriptors(view, base_addr, device_id)
+                )
     return result
 
 
@@ -292,14 +288,13 @@ def make_attention_spec(num_kv_heads, head_size, dtype=torch.bfloat16):
     )
 
 
-def make_mamba_spec(state_content_size_bytes):
+def make_mamba_spec(page_size_bytes_unused=0):
     return FakeSpec(
         num_kv_heads=1,
         head_size=1,
         dtype=torch.int8,
         tokens_per_state=-1,
         is_mamba=True,
-        state_content_size_bytes_val=state_content_size_bytes,
     )
 
 
@@ -314,16 +309,20 @@ def compare_descriptors(old, new, label):
             mismatches.append((idx, o, n))
 
     if mismatches:
-        print(f"  FAIL [{label}]: {len(mismatches)} descriptor mismatches "
-              f"(of {len(old)} total)")
+        print(
+            f"  FAIL [{label}]: {len(mismatches)} descriptor mismatches "
+            f"(of {len(old)} total)"
+        )
         for idx, o, n in mismatches[:5]:
             print(f"    idx={idx}: old={o} new={n}")
             # Show which field differs
             addr_match = o[0] == n[0]
             len_match = o[1] == n[1]
             dev_match = o[2] == n[2]
-            print(f"      addr_match={addr_match} len_match={len_match} "
-                  f"dev_match={dev_match}")
+            print(
+                f"      addr_match={addr_match} len_match={len_match} "
+                f"dev_match={dev_match}"
+            )
         if len(mismatches) > 5:
             print(f"    ... and {len(mismatches) - 5} more")
         return False
@@ -353,10 +352,20 @@ def test_local_attention_basic():
     layout = KVCacheLayout.from_layout_string("HND")
 
     old = old_build_fa_local(
-        base_addresses, 1, num_blocks, block_len_per_layer, False, 0)
+        base_addresses, 1, num_blocks, block_len_per_layer, False, 0
+    )
     new = new_build_fa_local(
-        base_addresses, 1, num_blocks, block_size, block_len_per_layer,
-        block_stride_per_layer, specs, False, layout, 0)
+        base_addresses,
+        1,
+        num_blocks,
+        block_size,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        False,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_attention_basic")
 
@@ -378,10 +387,20 @@ def test_local_attention_virtually_split():
     layout = KVCacheLayout.from_layout_string("HND")
 
     old = old_build_fa_local(
-        base_addresses, 1, num_blocks, block_len_per_layer, True, 0)
+        base_addresses, 1, num_blocks, block_len_per_layer, True, 0
+    )
     new = new_build_fa_local(
-        base_addresses, 1, num_blocks, block_size, block_len_per_layer,
-        block_stride_per_layer, specs, True, layout, 0)
+        base_addresses,
+        1,
+        num_blocks,
+        block_size,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        True,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_attention_virtually_split")
 
@@ -399,10 +418,20 @@ def test_local_mamba_no_split():
     num_blocks = 100
 
     old = old_build_fa_local(
-        base_addresses, 1, num_blocks, block_len_per_layer, False, 0)
+        base_addresses, 1, num_blocks, block_len_per_layer, False, 0
+    )
     new = new_build_fa_local(
-        base_addresses, 1, num_blocks, 64, block_len_per_layer,
-        block_stride_per_layer, specs, False, layout, 0)
+        base_addresses,
+        1,
+        num_blocks,
+        64,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        False,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_mamba_no_split")
 
@@ -420,10 +449,20 @@ def test_local_mamba_virtually_split():
     num_blocks = 100
 
     old = old_build_fa_local(
-        base_addresses, 1, num_blocks, block_len_per_layer, True, 0)
+        base_addresses, 1, num_blocks, block_len_per_layer, True, 0
+    )
     new = new_build_fa_local(
-        base_addresses, 1, num_blocks, 64, block_len_per_layer,
-        block_stride_per_layer, specs, True, layout, 0)
+        base_addresses,
+        1,
+        num_blocks,
+        64,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        True,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_mamba_virtually_split")
 
@@ -443,20 +482,32 @@ def test_local_hybrid_no_split():
     num_attn_regions = 10
     num_mamba_regions = 2
 
-    base_addresses = [i * 10_000_000 for i in range(num_attn_regions + num_mamba_regions)]
-    block_len_per_layer = [attn_block_len] * num_attn_regions + [mamba_block_len] * num_mamba_regions
+    n_regions = num_attn_regions + num_mamba_regions
+    base_addresses = [i * 10_000_000 for i in range(n_regions)]
+    block_len_per_layer = [attn_block_len] * num_attn_regions + [
+        mamba_block_len
+    ] * num_mamba_regions
     block_stride_per_layer = list(block_len_per_layer)
-    specs = (
-        [make_attention_spec(num_kv_heads, head_size, dtype)] * num_attn_regions
-        + [make_mamba_spec(mamba_state_bytes)] * num_mamba_regions
-    )
+    specs = [make_attention_spec(num_kv_heads, head_size, dtype)] * num_attn_regions + [
+        make_mamba_spec(mamba_state_bytes)
+    ] * num_mamba_regions
     layout = KVCacheLayout.from_layout_string("HND")
 
     old = old_build_fa_local(
-        base_addresses, 1, num_blocks, block_len_per_layer, False, 0)
+        base_addresses, 1, num_blocks, block_len_per_layer, False, 0
+    )
     new = new_build_fa_local(
-        base_addresses, 1, num_blocks, block_size, block_len_per_layer,
-        block_stride_per_layer, specs, False, layout, 0)
+        base_addresses,
+        1,
+        num_blocks,
+        block_size,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        False,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_hybrid_no_split")
 
@@ -486,15 +537,33 @@ def test_remote_attention_homo_tp():
     rank_offset_factor = 0  # rank 0
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_len_per_layer, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_len_per_layer,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        block_size, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=remote_tp_size,
-        local_tp=local_tp, local_rank=0,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        block_size,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=remote_tp_size,
+        local_tp=local_tp,
+        local_rank=0,
         total_kv_heads=total_kv_heads,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_attention_homo_tp")
 
@@ -531,15 +600,33 @@ def test_remote_attention_hetero_tp():
     rank_offset_factor = 0  # local rank 0 → first half
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_len_per_layer, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_len_per_layer,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        block_size, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=remote_tp_size,
-        local_tp=local_tp, local_rank=0,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        block_size,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=remote_tp_size,
+        local_tp=local_tp,
+        local_rank=0,
         total_kv_heads=total_kv_heads,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_attention_hetero_tp_rank0")
 
@@ -571,15 +658,33 @@ def test_remote_attention_hetero_tp_rank1():
     rank_offset_factor = 1  # local rank 1 → second half of heads
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_len_per_layer, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_len_per_layer,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        block_size, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=remote_tp_size,
-        local_tp=local_tp, local_rank=1,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        block_size,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=remote_tp_size,
+        local_tp=local_tp,
+        local_rank=1,
         total_kv_heads=total_kv_heads,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_attention_hetero_tp_rank1")
 
@@ -613,15 +718,33 @@ def test_remote_attention_hetero_tp_d1p2():
     rank_offset_factor = 0
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_len_per_layer, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_len_per_layer,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        block_size, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=remote_tp_size,
-        local_tp=local_tp, local_rank=0,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        block_size,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=remote_tp_size,
+        local_tp=local_tp,
+        local_rank=0,
         total_kv_heads=total_kv_heads,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_attention_hetero_tp_d1p2")
 
@@ -643,15 +766,33 @@ def test_remote_mamba_homo_tp():
     rank_offset_factor = 0
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_len_per_layer, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_len_per_layer,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        64, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=2,
-        local_tp=2, local_rank=0,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        64,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=2,
+        local_tp=2,
+        local_rank=0,
         total_kv_heads=4,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_mamba_homo_tp")
 
@@ -672,29 +813,49 @@ def test_remote_hybrid_homo_tp():
     num_attn_regions = 10
     num_mamba_regions = 2
 
-    base_addresses = [i * 10_000_000 for i in range(num_attn_regions + num_mamba_regions)]
-    local_block_lens = [attn_block_len] * num_attn_regions + [mamba_block_len] * num_mamba_regions
+    n_regions = num_attn_regions + num_mamba_regions
+    base_addresses = [i * 10_000_000 for i in range(n_regions)]
+    local_block_lens = [attn_block_len] * num_attn_regions + [
+        mamba_block_len
+    ] * num_mamba_regions
     remote_block_lens = list(local_block_lens)
     remote_block_strides = list(local_block_lens)
-    specs = (
-        [make_attention_spec(num_kv_heads, head_size, dtype)] * num_attn_regions
-        + [make_mamba_spec(mamba_state_bytes)] * num_mamba_regions
-    )
+    specs = [make_attention_spec(num_kv_heads, head_size, dtype)] * num_attn_regions + [
+        make_mamba_spec(mamba_state_bytes)
+    ] * num_mamba_regions
     layout = KVCacheLayout.from_layout_string("HND")
 
     num_attn_reads = 1
     rank_offset_factor = 0
 
     old = old_build_fa_remote(
-        base_addresses, 1, local_block_lens, remote_block_lens,
-        num_blocks, num_attn_reads, rank_offset_factor, False, 0)
+        base_addresses,
+        1,
+        local_block_lens,
+        remote_block_lens,
+        num_blocks,
+        num_attn_reads,
+        rank_offset_factor,
+        False,
+        0,
+    )
     new = new_build_fa_remote(
-        base_addresses, 1, remote_block_lens, remote_block_strides,
-        block_size, num_blocks, specs,
-        remote_tp_rank=0, remote_tp_size=2,
-        local_tp=2, local_rank=0,
+        base_addresses,
+        1,
+        remote_block_lens,
+        remote_block_strides,
+        block_size,
+        num_blocks,
+        specs,
+        remote_tp_rank=0,
+        remote_tp_size=2,
+        local_tp=2,
+        local_rank=0,
         total_kv_heads=total_kv_heads,
-        virtually_split=False, layout=layout, device_id=0)
+        virtually_split=False,
+        layout=layout,
+        device_id=0,
+    )
 
     return compare_descriptors(old, new, "remote_hybrid_homo_tp")
 
@@ -717,10 +878,20 @@ def test_local_attention_ratio_gt1():
     layout = KVCacheLayout.from_layout_string("HND")
 
     old = old_build_fa_local(
-        base_addresses, block_size_ratio, num_blocks, block_len_per_layer, False, 0)
+        base_addresses, block_size_ratio, num_blocks, block_len_per_layer, False, 0
+    )
     new = new_build_fa_local(
-        base_addresses, block_size_ratio, num_blocks, block_size, block_len_per_layer,
-        block_stride_per_layer, specs, False, layout, 0)
+        base_addresses,
+        block_size_ratio,
+        num_blocks,
+        block_size,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        False,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_attention_ratio_gt1")
 
@@ -740,11 +911,19 @@ def test_local_attention_nhd_layout():
     specs = [make_attention_spec(num_kv_heads, head_size, dtype)]
     layout = KVCacheLayout.from_layout_string("NHD")
 
-    old = old_build_fa_local(
-        base_addresses, 1, 50, block_len_per_layer, False, 0)
+    old = old_build_fa_local(base_addresses, 1, 50, block_len_per_layer, False, 0)
     new = new_build_fa_local(
-        base_addresses, 1, 50, block_size, block_len_per_layer,
-        block_stride_per_layer, specs, False, layout, 0)
+        base_addresses,
+        1,
+        50,
+        block_size,
+        block_len_per_layer,
+        block_stride_per_layer,
+        specs,
+        False,
+        layout,
+        0,
+    )
 
     return compare_descriptors(old, new, "local_attention_nhd_layout")
 
@@ -781,10 +960,11 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  ERROR [{test.__name__}]: {e}")
             import traceback
+
             traceback.print_exc()
             failed += 1
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {passed} passed, {failed} failed (of {len(tests)} total)")
     if failed > 0:
         sys.exit(1)
