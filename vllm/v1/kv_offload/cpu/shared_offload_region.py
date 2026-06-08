@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import errno
 import mmap
 import os
 import time
@@ -10,6 +11,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
+_MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -23,6 +27,20 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+def _populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    """Pre-fault writable mmap pages, falling back for older Linux kernels."""
+    try:
+        mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+        return
+    except OSError as e:
+        if e.errno != errno.EINVAL:
+            raise
+
+    end = offset + length
+    for page_offset in range(offset, end, mmap.PAGESIZE):
+        mmap_obj[page_offset : page_offset + 1] = b"\0"
 
 
 class SharedOffloadRegion:
@@ -85,8 +103,6 @@ class SharedOffloadRegion:
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
 
-        # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
-        _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
         if rank is not None:
             # Populate only this worker's pages (one slot per block row).
             worker_offset = rank * cpu_page_size
@@ -97,9 +113,7 @@ class SharedOffloadRegion:
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
                 aligned_length = end - aligned_offset
-                self.mmap_obj.madvise(
-                    _MADV_POPULATE_WRITE, aligned_offset, aligned_length
-                )
+                _populate_write(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
                 num_blocks,
@@ -108,7 +122,7 @@ class SharedOffloadRegion:
         else:
             # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
-            self.mmap_obj.madvise(_MADV_POPULATE_WRITE, 0, self.total_size_bytes)
+            _populate_write(self.mmap_obj, 0, self.total_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )

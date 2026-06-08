@@ -3,6 +3,7 @@
 """Unit tests for SharedOffloadRegion."""
 
 import contextlib
+import errno
 import mmap
 import os
 import threading
@@ -402,6 +403,73 @@ def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
     with _region(iid, num_blocks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_madvise_einval_falls_back_for_ranked_region(iid, monkeypatch):
+    """Older kernels can reject MADV_POPULATE_WRITE with EINVAL."""
+    real_mmap = mmap.mmap
+
+    class EINVALMmap(real_mmap):
+
+        madvise_calls = []
+
+        def madvise(self, *args):
+            self.madvise_calls.append(args)
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr(mmap, "mmap", EINVALMmap)
+
+    with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
+        assert isinstance(r.mmap_obj, EINVALMmap)
+        assert len(EINVALMmap.madvise_calls) == 3
+
+
+def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
+    """The scheduler mmap path also works when MADV_POPULATE_WRITE is absent."""
+    real_mmap = mmap.mmap
+
+    class EINVALMmap(real_mmap):
+
+        madvise_calls = []
+
+        def madvise(self, *args):
+            self.madvise_calls.append(args)
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+    monkeypatch.setattr(mmap, "mmap", EINVALMmap)
+
+    region = SharedOffloadRegion(
+        instance_id=iid,
+        num_blocks=3,
+        rank=None,
+        kv_bytes_per_block=2 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+    )
+    try:
+        assert isinstance(region.mmap_obj, EINVALMmap)
+        assert len(EINVALMmap.madvise_calls) == 1
+    finally:
+        region.cleanup()
+        _cleanup_file(region.mmap_path)
+
+
+def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
+    """Only unsupported MADV_POPULATE_WRITE should use the fallback."""
+    real_mmap = mmap.mmap
+
+    class FailingMmap(real_mmap):
+
+        def madvise(self, *args):
+            raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(mmap, "mmap", FailingMmap)
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    with pytest.raises(OSError) as exc_info:
+        _make_region(iid)
+
+    assert exc_info.value.errno == errno.EIO
+    _cleanup_file(path)
 
 
 # ---------------------------------------------------------------------------
