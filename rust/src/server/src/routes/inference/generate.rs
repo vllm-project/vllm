@@ -54,9 +54,14 @@ pub async fn generate(
     );
 
     let log_request = state.enable_log_requests;
-    let include_logprobs = prepared.include_logprobs;
-    let include_prompt_logprobs = prepared.include_prompt_logprobs;
     let stream = prepared.stream;
+    let options = GenerateOptions {
+        log_request,
+        include_usage: prepared.include_usage,
+        include_continuous_usage: prepared.include_continuous_usage,
+        include_logprobs: prepared.include_logprobs,
+        include_prompt_logprobs: prepared.include_prompt_logprobs,
+    };
 
     let raw_stream = match state
         .chat
@@ -76,14 +81,7 @@ pub async fn generate(
     };
 
     if stream {
-        let chunk_stream = generate_chunk_stream(
-            raw_stream,
-            prepared.request_id,
-            log_request,
-            prepared.include_usage,
-            prepared.include_continuous_usage,
-            include_logprobs,
-        );
+        let chunk_stream = generate_chunk_stream(raw_stream, prepared.request_id, options);
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
 
         return Sse::new(sse_stream).into_response();
@@ -100,22 +98,7 @@ pub async fn generate(
         }
     };
 
-    if log_request {
-        info!(
-            parent: &request_span,
-            prompt_tokens = collected.prompt_token_ids.len(),
-            output_tokens = collected.token_ids.len(),
-            finish_reason = collected.finish_reason.as_str(),
-            "generate finished"
-        );
-    }
-
-    let response = match collect_generate(
-        collected,
-        prepared.request_id,
-        include_logprobs,
-        include_prompt_logprobs,
-    ) {
+    let response = match collect_generate(collected, prepared.request_id, options) {
         Ok(response) => response,
         Err(error) => return error.into_response(),
     };
@@ -123,14 +106,27 @@ pub async fn generate(
     Json(response).into_response()
 }
 
-#[try_stream]
-async fn generate_chunk_stream(
-    stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
-    request_id: String,
+#[derive(Debug, Clone, Copy, Default)]
+struct GenerateOptions {
     log_request: bool,
     include_usage: bool,
     include_continuous_usage: bool,
     include_logprobs: bool,
+    include_prompt_logprobs: bool,
+}
+
+#[try_stream]
+async fn generate_chunk_stream(
+    stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
+    request_id: String,
+    GenerateOptions {
+        log_request,
+        include_usage,
+        include_continuous_usage,
+        include_logprobs,
+        // Ignored: raw generate streaming has no prompt-logprobs wire shape.
+        include_prompt_logprobs: _,
+    }: GenerateOptions,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
@@ -222,8 +218,15 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
-    include_logprobs: bool,
-    include_prompt_logprobs: bool,
+    GenerateOptions {
+        log_request,
+        // Ignored: non-streaming raw generate responses do not include usage.
+        include_usage: _,
+        // Ignored: continuous usage is a streaming-only option.
+        include_continuous_usage: _,
+        include_logprobs,
+        include_prompt_logprobs,
+    }: GenerateOptions,
 ) -> Result<GenerateResponse, ApiError> {
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
@@ -246,13 +249,23 @@ fn collect_generate(
     } else {
         None
     };
+    let finish_reason = collected.finish_reason.as_str().to_string();
+
+    if log_request {
+        info!(
+            prompt_tokens = collected.prompt_token_ids.len(),
+            output_tokens = collected.token_ids.len(),
+            %finish_reason,
+            "generate finished"
+        );
+    }
 
     Ok(GenerateResponse {
         request_id,
         choices: vec![GenerateResponseChoice {
             index: 0,
             logprobs,
-            finish_reason: Some(collected.finish_reason.as_str().to_string()),
+            finish_reason: Some(finish_reason),
             token_ids: collected.token_ids,
         }],
         prompt_logprobs,
@@ -408,11 +421,18 @@ mod tests {
             }),
         ]);
 
-        let chunks: Vec<_> =
-            generate_chunk_stream(stream, "raw-stream".to_string(), false, true, true, false)
-                .try_collect()
-                .await
-                .expect("collect chunks");
+        let chunks: Vec<_> = generate_chunk_stream(
+            stream,
+            "raw-stream".to_string(),
+            GenerateOptions {
+                include_usage: true,
+                include_continuous_usage: true,
+                ..Default::default()
+            },
+        )
+        .try_collect()
+        .await
+        .expect("collect chunks");
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(

@@ -59,6 +59,15 @@ pub async fn completions(
     let created = unix_timestamp();
     let include_prompt_logprobs = prepared.text_request.sampling_params.prompt_logprobs.is_some();
     let log_request = state.enable_log_requests;
+    let options = CompletionOptions {
+        log_request,
+        include_usage: prepared.include_usage,
+        echo: prepared.echo,
+        requested_logprobs: logprobs,
+        include_prompt_logprobs,
+        return_token_ids: prepared.return_token_ids,
+        return_tokens_as_token_ids: prepared.return_tokens_as_token_ids,
+    };
 
     let text_stream = match state
         .chat
@@ -83,12 +92,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
-            prepared.include_usage,
-            prepared.echo,
-            logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            options,
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -99,11 +103,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.echo,
-            logprobs,
-            include_prompt_logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            options,
         )
         .instrument(request_span.clone())
         .await
@@ -112,20 +112,19 @@ pub async fn completions(
             Err(error) => return error.into_response(),
         };
 
-        if log_request {
-            let usage = response.usage.as_ref();
-            info!(
-                parent: &request_span,
-                model = %response.model,
-                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
-                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
-                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
-                "completion finished"
-            );
-        }
-
         Json(response).into_response()
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompletionOptions {
+    log_request: bool,
+    include_usage: bool,
+    echo: Option<String>,
+    requested_logprobs: Option<u32>,
+    include_prompt_logprobs: bool,
+    return_token_ids: bool,
+    return_tokens_as_token_ids: bool,
 }
 
 async fn collect_completion(
@@ -133,11 +132,16 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
-    echo: Option<String>,
-    requested_logprobs: Option<u32>,
-    include_prompt_logprobs: bool,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    CompletionOptions {
+        log_request,
+        // Ignored: non-streaming responses always include usage.
+        include_usage: _,
+        echo,
+        requested_logprobs,
+        include_prompt_logprobs,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: CompletionOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let collected = stream
         .collect_output()
@@ -175,6 +179,21 @@ async fn collect_completion(
         None => collected.text,
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
+    let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
+    let usage = Usage::from_counts(
+        collected.prompt_token_ids.len() as u32,
+        collected.token_ids.len() as u32,
+    );
+
+    if log_request {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            %finish_reason,
+            "completion finished"
+        );
+    }
 
     Ok(CompletionResponse {
         id: request_id,
@@ -185,16 +204,13 @@ async fn collect_completion(
             index: 0,
             text,
             logprobs,
-            finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
+            finish_reason: Some(finish_reason),
             stop_reason,
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
         }],
-        usage: Some(Usage::from_counts(
-            collected.prompt_token_ids.len() as u32,
-            collected.token_ids.len() as u32,
-        )),
+        usage: Some(usage),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
     })
@@ -207,12 +223,16 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
-    log_request: bool,
-    include_usage: bool,
-    echo: Option<String>,
-    requested_logprobs: Option<u32>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    CompletionOptions {
+        log_request,
+        include_usage,
+        echo,
+        requested_logprobs,
+        // Ignored: streaming prompt logprobs are rejected for Python parity.
+        include_prompt_logprobs: _,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: CompletionOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
@@ -432,7 +452,7 @@ mod tests {
         FinishReason, Finished,
     };
 
-    use super::{CompletionSseChunk, completion_chunk_stream, final_chunk};
+    use super::{CompletionOptions, CompletionSseChunk, completion_chunk_stream, final_chunk};
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
@@ -526,12 +546,10 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            None,
-            Some(1),
-            false,
-            false,
+            CompletionOptions {
+                requested_logprobs: Some(1),
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await;
