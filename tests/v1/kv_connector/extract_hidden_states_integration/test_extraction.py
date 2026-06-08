@@ -3,11 +3,13 @@
 
 import gc
 import os
+import tempfile
 
 import pytest
 import torch
 from safetensors import safe_open
 
+from tests.utils import multi_gpu_test
 from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
@@ -56,7 +58,7 @@ def predictable_llama_config_path(tmp_path_factory):
         num_hidden_layers=24,  # Enough layers to test various layer_ids
         num_attention_heads=4,
         num_key_value_heads=4,
-        max_position_embeddings=128,
+        max_position_embeddings=1024,
         architectures=["PredictableLlamaForCausalLM"],
     )
 
@@ -161,6 +163,80 @@ def test_extract_hidden_states_with_predictable_dummy_model(
                 f"Layer {layer_id} at position {idx} should output {float(layer_id)}, "
                 f"but got mean={layer_hidden.mean():.3f}, "
                 f"min={layer_hidden.min():.3f}, max={layer_hidden.max():.3f}"
+            )
+
+
+def test_extract_hidden_states_chunked_prefill(
+    predictable_llama_config_path, tmp_path, monkeypatch
+):
+    """Test that hidden states are correctly extracted under chunked prefill.
+
+    Sets max_num_batched_tokens to 128 and sends prompts with ~500 tokens
+    so that each prompt is split across multiple scheduler iterations.
+    Verifies that the hidden states are still correctly reassembled.
+    """
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
+    layer_ids = [5, 2, 10]
+    num_layers = len(layer_ids)
+    max_num_batched_tokens = 128
+
+    llm = LLM(
+        model=predictable_llama_config_path,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
+        },
+        max_model_len=1024,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enforce_eager=True,
+        trust_remote_code=True,
+        load_format="dummy",
+    )
+
+    # Build prompts with ~500 tokens each to force chunking across
+    # multiple iterations with max_num_batched_tokens=128.
+    long_prompt = " ".join(["word"] * 500)
+    prompts = [
+        long_prompt,
+        long_prompt + " extra tokens here",
+        "Short",
+    ]
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+    outputs = llm.generate(prompts, sampling_params)
+    del llm
+    gc.collect()
+
+    assert len(outputs) == len(prompts)
+
+    for output in outputs:
+        prompt_len = len(output.prompt_token_ids)
+        expected_shape = (prompt_len, num_layers, hidden_size)
+        _token_ids, hidden_states = get_and_check_output(output, expected_shape)
+
+        for idx, layer_id in enumerate(layer_ids):
+            layer_hidden = hidden_states[:, idx, :]
+            assert torch.allclose(
+                layer_hidden,
+                torch.full_like(layer_hidden, layer_id),
+                atol=1e-5,
+            ), (
+                f"Layer {layer_id} at position {idx} should output "
+                f"{float(layer_id)}, but got mean="
+                f"{layer_hidden.mean():.3f}, min="
+                f"{layer_hidden.min():.3f}, max="
+                f"{layer_hidden.max():.3f}. "
+                f"prompt_len={prompt_len}, "
+                f"max_num_batched_tokens={max_num_batched_tokens}"
             )
 
 
@@ -278,6 +354,60 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
             "kv_connector": "ExampleHiddenStatesConnector",
             "kv_role": "kv_producer",
             "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.4,
+        load_format="dummy",
+    )
+
+    prompts = ["Hello world", "Test prompt with several tokens"]
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    outputs = llm.generate(prompts, sampling_params)
+    del llm
+    gc.collect()
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert output.kv_transfer_params is not None
+        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+        assert hidden_states_path is not None
+        assert os.path.exists(hidden_states_path)
+
+        with safe_open(hidden_states_path, "pt") as f:
+            token_ids = f.get_tensor("token_ids")
+            hidden_states = f.get_tensor("hidden_states")
+
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+        assert hidden_states.shape == (
+            len(output.prompt_token_ids),
+            len(layer_ids),
+            hidden_size,
+        )
+
+
+@pytest.mark.timeout(60)
+@multi_gpu_test(num_gpus=2)
+def test_extract_hidden_states_tp2():
+    """Test that hidden states extraction works with tensor_parallel_size=2."""
+    tmp_dir = tempfile.mkdtemp()
+    layer_ids = [5, 11, 17]
+    hidden_size = 1024  # Qwen/Qwen3-0.6B hidden_size
+
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        tensor_parallel_size=2,
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": tmp_dir},
         },
         max_model_len=256,
         enforce_eager=True,
