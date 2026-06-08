@@ -28,6 +28,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -230,13 +231,18 @@ class RequestRunner:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
 
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             log_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
-            block_size=block_size,
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
 
         self.worker_connector = OffloadingConnector(

@@ -900,6 +900,7 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
+        self.manager.on_schedule_end()
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():

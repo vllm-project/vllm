@@ -49,10 +49,12 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
 
 def make_dummy_moe_config(
     num_experts: int = 1,
+    num_local_experts: int | None = None,
     experts_per_token: int = 1,
     hidden_dim: int = 1,
-    intermediate_size_per_partition: int = 1,
+    intermediate_size: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
+    max_num_tokens: int = 512,
 ) -> FusedMoEConfig:
     """
     This is a dummy config for the mk constructor interface
@@ -65,15 +67,17 @@ def make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size_per_partition,
-        num_local_experts=num_experts,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_local_experts
+        if num_local_experts is not None
+        else num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
-        max_num_tokens=512,
+        max_num_tokens=max_num_tokens,
     )
 
 
