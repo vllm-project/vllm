@@ -34,6 +34,7 @@ from transformers.models.gemma4.configuration_gemma4 import (
 )
 
 from vllm.config import VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -217,7 +218,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             and num_items > 0
             and self.get_hf_config().audio_config is None
         ):
-            model = self.ctx.model_config.model
+            model_config = self.ctx.model_config
+            model = get_served_model_name(
+                model_config.model, model_config.served_model_name
+            )
             raise ValueError(
                 f"Audio input was provided but the model "
                 f"'{model}' does not have an audio tower. "
