@@ -118,6 +118,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
+                num_groups=len(self.kv_cache_config.kv_cache_groups),
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,

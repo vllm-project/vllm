@@ -75,7 +75,9 @@ def verify_store_output(
     assert prepare_store_output.evicted_keys == to_keys(
         expected_prepare_store_output.evicted_keys
     )
-    store_spec = prepare_store_output.store_spec
+    # All test keys use group_idx=0 (via to_key()), so the data lives in store_specs[0].
+    assert len(prepare_store_output.store_specs) >= 1
+    store_spec = prepare_store_output.store_specs[0]
     assert isinstance(store_spec, CPULoadStoreSpec)
     expected_array = np.array(
         expected_prepare_store_output.store_block_ids, dtype=np.int64
@@ -84,11 +86,14 @@ def verify_store_output(
 
 
 def verify_load_output(
-    prepare_load_output: LoadStoreSpec, expected_prepare_load_output: list[int]
+    prepare_load_output: list[LoadStoreSpec], expected_prepare_load_output: list[int]
 ):
-    assert isinstance(prepare_load_output, CPULoadStoreSpec)
+    # All test keys use group_idx=0, so the data lives in the first spec.
+    assert len(prepare_load_output) >= 1
+    spec = prepare_load_output[0]
+    assert isinstance(spec, CPULoadStoreSpec)
     expected_array = np.array(expected_prepare_load_output, dtype=np.int64)
-    assert np.array_equal(expected_array, prepare_load_output.block_ids)
+    assert np.array_equal(expected_array, spec.block_ids)
 
 
 def verify_events(
@@ -349,15 +354,19 @@ def test_prepare_load_preserves_key_order():
     # Store all three keys and learn their block ID assignments
     store_output = manager.prepare_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
     assert store_output is not None
-    assert isinstance(store_output.store_spec, CPULoadStoreSpec)
+    assert len(store_output.store_specs) >= 1
+    assert isinstance(store_output.store_specs[0], CPULoadStoreSpec)
+    store_spec_g0 = store_output.store_specs[0]
     key_to_block_id = {
         k: int(bid)
-        for k, bid in zip(store_output.keys_to_store, store_output.store_spec.block_ids)
+        for k, bid in zip(store_output.keys_to_store, store_spec_g0.block_ids)
     }
     manager.complete_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
 
     # Forward order: [a, b, c]
-    spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    specs_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    assert len(specs_fwd) >= 1
+    spec_fwd = specs_fwd[0]
     assert isinstance(spec_fwd, CPULoadStoreSpec)
     assert [int(x) for x in spec_fwd.block_ids] == [
         key_to_block_id[key_a],
@@ -367,7 +376,9 @@ def test_prepare_load_preserves_key_order():
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
     # Arbitrary permutation: [b, c, a]
-    spec_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
+    specs_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
+    assert len(specs_perm) >= 1
+    spec_perm = specs_perm[0]
     assert isinstance(spec_perm, CPULoadStoreSpec)
     assert [int(x) for x in spec_perm.block_ids] == [
         key_to_block_id[key_b],

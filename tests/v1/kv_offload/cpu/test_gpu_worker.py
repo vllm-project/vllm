@@ -15,10 +15,12 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
+    GroupTransfer,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
@@ -128,21 +130,22 @@ def test_transfer(
         gpu_blocks = gpu_blocks[blocks_to_skip:]
         cpu_blocks_expanded = cpu_blocks_expanded[blocks_to_skip:]
 
+    # Build the per-group transfer spec.
+    cpu_spec = CPULoadStoreSpec(cpu_blocks)
+    cpu_spec.set_gpu_block_offset(blocks_to_skip)
+    group = GroupTransfer(
+        gpu_spec=GPULoadStoreSpec(gpu_blocks),
+        offload_spec=cpu_spec,
+    )
+    transfer_spec = TransferSpec(groups=[group], is_store=gpu_to_cpu)
+
     # set transfer direction
     if gpu_to_cpu:
-        handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
-            gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
-        )
-        dst_spec = CPULoadStoreSpec(cpu_blocks)
+        handler = worker.gpu_to_cpu_handler
         dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
-        handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_blocks)
-        dst_spec = GPULoadStoreSpec(
-            gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
-        )
+        handler = worker.cpu_to_gpu_handler
         dst_to_src = dict(zip(gpu_blocks, cpu_blocks_expanded))
         num_dst_sub_blocks = num_gpu_blocks
 
@@ -319,20 +322,21 @@ def test_transfer_multi_group(
             sub_blocks_to_skip:-sub_blocks_to_skip
         ]
 
-    # build flat gpu_blocks list and group_sizes in GPU blocks
-    gpu_blocks: list[int] = []
-    group_sizes: list[int] = []
-    for gpu_blks in gpu_blocks_per_group:
-        gpu_blocks.extend(gpu_blks)
-        group_sizes.append(len(gpu_blks))
+    # gpu_block_offset per group: only group 2 is unaligned.
+    gpu_block_offsets: list[int] = [0, 0, sub_blocks_to_skip]
 
-    # build flat cpu_blocks list
-    cpu_blocks = []
-    for cpu_blks in cpu_blocks_per_group:
-        cpu_blocks.extend(cpu_blks)
-
-    # block_indices: only relevant for unaligned transfers
-    block_indices: list[int] = [0, 0, sub_blocks_to_skip]
+    # Build one GroupTransfer per KV group.
+    groups: list[GroupTransfer] = []
+    for g in range(num_groups):
+        cpu_spec = CPULoadStoreSpec(cpu_blocks_per_group[g])
+        cpu_spec.set_gpu_block_offset(gpu_block_offsets[g])
+        groups.append(
+            GroupTransfer(
+                gpu_spec=GPULoadStoreSpec(gpu_blocks_per_group[g]),
+                offload_spec=cpu_spec,
+            )
+        )
+    transfer_spec = TransferSpec(groups=groups, is_store=gpu_to_cpu)
 
     if gpu_to_cpu:
         handler = worker._store_handler
@@ -385,9 +389,10 @@ def test_transfer_multi_group(
             assert finished[0].job_id == 1
             assert finished[0].success
             expected_bytes = sum(
-                group_size * sum([x.page_size_bytes for x in data_refs])
-                for group_size, data_refs in zip(
-                    group_sizes, handler.kv_cache_groups_data_refs
+                len(group.gpu_spec.block_ids)
+                * sum(x.page_size_bytes for x in data_refs)
+                for group, data_refs in zip(
+                    transfer_spec.groups, handler.kv_cache_groups_data_refs
                 )
             )
             assert finished[0].transfer_size == expected_bytes

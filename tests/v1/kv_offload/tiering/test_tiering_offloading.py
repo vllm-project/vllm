@@ -896,5 +896,113 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         assert count_hits(manager, blocks) == 3
 
 
+class TestTieringOffloadingMultiGroup:
+    """Regression tests for cascade paths when num_groups > 1.
+
+    Both complete_store and _cascade_existing_blocks_to_request_level_tiers
+    call prepare_read() which returns one spec per KV group. These tests
+    verify that block_ids are reassembled in key order (not group order) before
+    being passed to submit_store().
+    """
+
+    @pytest.fixture
+    def manager_setup_2_groups(self):
+        mock_region = _mock_mmap_region(num_blocks=10)
+        self.primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=10, mmap_region=mock_region, num_groups=2
+        )
+        mock_view = mock_region.create_kv_memoryview()
+        self.secondary_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+        )
+        self.manager = TieringOffloadingManager(
+            primary_tier=self.primary_tier,
+            secondary_tiers=[self.secondary_tier],
+        )
+
+    def _simulate_on_schedule_end(self):
+        self.manager.on_schedule_end()
+        list(self.manager.take_events())
+
+    def test_complete_store_cascade_multi_group_key_order(self, manager_setup_2_groups):
+        """complete_store cascade: block_ids length matches keys for multi-group stores.
+
+        Interleaved keys from two groups exercise _specs_to_key_order_block_ids.
+        ExampleSecondaryTierManager.submit_store asserts len(keys)==len(block_ids),
+        catching any misalignment.
+        """
+        keys_g0 = [make_offload_key(f"hash{i}".encode(), 0) for i in range(3)]
+        keys_g1 = [make_offload_key(f"hash{i}".encode(), 1) for i in range(3)]
+        # Interleave groups to expose ordering bugs
+        all_keys = [
+            keys_g0[0],
+            keys_g1[0],
+            keys_g0[1],
+            keys_g1[1],
+            keys_g0[2],
+            keys_g1[2],
+        ]
+
+        result = self.manager.prepare_store(all_keys, _CTX)
+        assert result is not None
+        assert len(result.keys_to_store) == 6
+
+        self.secondary_tier.submit_store = MagicMock(
+            wraps=self.secondary_tier.submit_store
+        )
+        self.manager.complete_store(all_keys, _CTX, success=True)
+
+        self.secondary_tier.submit_store.assert_called_once()
+        job = self.secondary_tier.submit_store.call_args.args[0]
+        assert len(job.keys) == 6
+        assert len(job.block_ids) == 6
+
+    def test_cascade_existing_blocks_request_level_multi_group(
+        self, manager_setup_2_groups
+    ):
+        """Request-level cascade of existing primary blocks: block_ids align with
+        keys for multi-group key sets.
+
+        ExampleSecondaryTierManager.submit_store asserts len(keys)==len(block_ids),
+        catching any misalignment from _cascade_existing_blocks_to_request_level_tiers.
+        """
+        keys_g0 = [make_offload_key(f"hash{i}".encode(), 0) for i in range(2)]
+        keys_g1 = [make_offload_key(f"hash{i}".encode(), 1) for i in range(2)]
+        existing_keys = keys_g0 + keys_g1
+
+        # Pre-populate primary tier
+        result = self.manager.prepare_store(existing_keys, _CTX)
+        assert result is not None
+        self.manager.complete_store(existing_keys, _CTX, success=True)
+        # Two schedule-end calls: first resets gate, second drains cascade ref_cnts
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        # Configure secondary tier as request-level
+        self.secondary_tier.on_new_request = (
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
+            )
+        )
+        ctx = ReqContext(req_id="req_multigroup")
+        self.manager.on_new_request(ctx)
+
+        self.secondary_tier.submit_store = MagicMock(
+            wraps=self.secondary_tier.submit_store
+        )
+
+        # All keys already in primary → prepare_store cascades existing blocks
+        result = self.manager.prepare_store(existing_keys, ctx)
+        assert result is not None
+        assert len(result.keys_to_store) == 0
+
+        self.secondary_tier.submit_store.assert_called_once()
+        job = self.secondary_tier.submit_store.call_args.args[0]
+        assert len(job.keys) == 4
+        assert len(job.block_ids) == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
