@@ -25,6 +25,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
 
         return MTPSpeculator(vllm_config, device)
     elif speculative_config.use_eagle():
+        if speculative_config.parallel_drafting:
+            from vllm.v1.worker.gpu.spec_decode.eagle.peagle import (
+                PEagleSpeculator,
+            )
+
+            return PEagleSpeculator(vllm_config, device)
         from vllm.v1.worker.gpu.spec_decode.eagle.speculator import (
             EagleSpeculator,
         )
