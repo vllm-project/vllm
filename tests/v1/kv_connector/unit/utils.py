@@ -56,6 +56,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
+    assert len(scheduler._inflight_prefills) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
