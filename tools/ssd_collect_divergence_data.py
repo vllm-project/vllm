@@ -44,10 +44,7 @@ HF_CACHE = os.path.expanduser(
     "snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6"
 )
 
-DEFAULT_OUTPUT = (
-    "training_data_divergence.pt"
-)
-)
+DEFAULT_OUTPUT = "training_data_divergence.pt"
 DEFAULT_NUM_STEPS = 2000
 K = 4
 DRAFT_TEMP = 1.5  # Higher → more diverse draft, more rejections
