@@ -326,13 +326,13 @@ class TestClientFlows:
         loads, _ = session.poll()
         assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=False)]
 
-    def test_cancel_request_sends_abort(self):
+    def test_finish_request_sends_abort(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
         )
-        session.cancel_request("req-1")
+        session.finish_request("req-1")
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortLookupFetchMsg.TYPE
         assert abort[AbortLookupFetchMsg.KV_REQUEST_ID] == "req-1"
@@ -432,6 +432,165 @@ class TestServerFlows:
         session._store_jobs[1] = time.monotonic() - 60.0
         _, stores = session.poll()
         assert StoreResult(job_id=1, success=False) in stores
+
+
+# ---------------------------------------------------------------------------
+# finish_request server-role early-fail flow
+# ---------------------------------------------------------------------------
+
+
+class TestFinishRequestServerSide:
+    def _last_transfer_done(self, conn: FakeConnection) -> dict | None:
+        for msg in reversed(conn._sent):
+            if msg[TYPE_KEY] == TransferDoneMsg.TYPE:
+                return msg
+        return None
+
+    def test_no_inflight_unmatched_demand_sends_failure(self):
+        """finish_request with unmatched demand and no inflight ->
+        immediate TransferDoneMsg(success=False); _outbound cleared."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        # Decoder demanded a block we never stored.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupFetchMsg.TYPE,
+                LookupFetchMsg.KV_REQUEST_ID: "req-1",
+                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
+                LookupFetchMsg.BLOCK_INDEXES: [5],
+            }
+        )
+        session.poll()
+        assert "req-1" in session._outbound
+
+        session.finish_request("req-1")
+
+        msg = self._last_transfer_done(conn)
+        assert msg is not None
+        assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert "req-1" not in session._outbound
+
+    def test_with_inflight_defers_then_fires_on_last_transfer(self):
+        """finish_request with inflight defers; last transfer fires the
+        early-fail message and clears _outbound."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        # Demand 2 blocks; we store 1 (kicks one inflight transfer).
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupFetchMsg.TYPE,
+                LookupFetchMsg.KV_REQUEST_ID: "req-1",
+                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                LookupFetchMsg.BLOCK_INDEXES: [10, 11],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        assert len(transport._transfers) == 1
+
+        # finish_request while inflight: no early-fail yet.
+        before = len(conn._sent)
+        session.finish_request("req-1")
+        assert len(conn._sent) == before
+        assert "req-1" in session._outbound
+        assert session._outbound["req-1"].finishing
+
+        # Last inflight settles -> early-fail fires.
+        tid = next(iter(transport._transfers))
+        transport._poll_done.append(tid)
+        session.poll()
+
+        msg = self._last_transfer_done(conn)
+        assert msg is not None
+        assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert "req-1" not in session._outbound
+
+    def test_full_demand_satisfied_still_sends_success(self):
+        """finish_request must not override a fully-satisfied transfer:
+        when remaining hits 0, success=True still fires."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupFetchMsg.TYPE,
+                LookupFetchMsg.KV_REQUEST_ID: "req-1",
+                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
+                LookupFetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        # Mark finishing (e.g., on_request_finished racing with the last
+        # store) — but all demand is satisfied.
+        session.finish_request("req-1")
+
+        tid = next(iter(transport._transfers))
+        transport._poll_done.append(tid)
+        session.poll()
+
+        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        assert msg[TransferDoneMsg.SUCCESS] is True
+
+    def test_prefiller_first_finish_before_lookup_fetch(self):
+        """Prefiller-first: finish_request runs before the decoder's
+        lookup_fetch arrives. State is held until lookup_fetch, then
+        finalized — success=True if all demand was matched against
+        available blocks, else success=False."""
+        # Case A: all demand satisfied by available blocks.
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        # finish_request first — client_id is None -> defer.
+        session.finish_request("req-1")
+        assert "req-1" in session._outbound
+        # Lookup_fetch arrives now: demand fully satisfied by available.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupFetchMsg.TYPE,
+                LookupFetchMsg.KV_REQUEST_ID: "req-1",
+                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
+                LookupFetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        # The transfer was inflight; finalize it.
+        tid = next(iter(transport._transfers))
+        transport._poll_done.append(tid)
+        session.poll()
+        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        assert msg[TransferDoneMsg.SUCCESS] is True
+
+        # Case B: demand exceeds available -> early-fail fires from lookup_fetch.
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-2", [b"k1"], [0], job_id=2)
+        session.finish_request("req-2")
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupFetchMsg.TYPE,
+                LookupFetchMsg.KV_REQUEST_ID: "req-2",
+                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                LookupFetchMsg.BLOCK_INDEXES: [10, 11],
+            }
+        )
+        session.poll()
+        # Inflight for k1 still in flight; nothing yet for the early-fail
+        # — the same code path will fire from _collect_store_results.
+        tid = next(iter(transport._transfers))
+        transport._poll_done.append(tid)
+        session.poll()
+        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert "req-2" not in session._outbound
+
+    def test_unknown_request_is_noop(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        before = len(conn._sent)
+        session.finish_request("never-existed")
+        assert len(conn._sent) == before
 
 
 # ---------------------------------------------------------------------------

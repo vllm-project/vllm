@@ -111,6 +111,7 @@ class _OutboundRequestState:
         default_factory=dict
     )  # key → remote_block_idx: blocks peer wants, awaiting supply
     remaining: int = 0
+    finishing: bool = False
 
     def add_stored_blocks(
         self,
@@ -278,7 +279,17 @@ class P2PSession:
             }
         )
 
-    def cancel_request(self, kv_request_id: str) -> None:
+    def finish_request(self, kv_request_id: str) -> None:
+        """Called when the request is finishing locally.
+
+        Cancels any inbound load (client role) and finalizes any
+        outbound serving (server role) for this id. Roles that aren't
+        active for this id are silent no-ops.
+        """
+        self._cancel_inbound(kv_request_id)
+        self._finish_outbound(kv_request_id)
+
+    def _cancel_inbound(self, kv_request_id: str) -> None:
         """Cancel a pending load request. Sends abort if active."""
         req = self._inbound.pop(kv_request_id, None)
         if req is not None and req.phase == _LoadPhase.ACTIVE:
@@ -288,6 +299,41 @@ class P2PSession:
                     AbortLookupFetchMsg.KV_REQUEST_ID: kv_request_id,
                 }
             )
+
+    def _finish_outbound(self, kv_request_id: str) -> None:
+        """Mark an outbound request finishing.
+
+        No more submit_store calls will arrive for this id. Any blocks
+        the peer demanded but we never stored will never come; tell the
+        peer to stop waiting (TransferDoneMsg success=False) instead of
+        letting it hit _LOAD_TIMEOUT_S.
+
+        If the decoder hasn't sent lookup_fetch yet (client_id is None),
+        defer — _on_lookup_fetch will finalize once demand arrives.
+
+        If inflight transfers exist for this id, defer — the last
+        completing transfer in _collect_store_results will fire the
+        message.
+        """
+        req = self._outbound.get(kv_request_id)
+        if req is None:
+            return
+        req.finishing = True
+        if req.client_id is None:
+            return
+        if self._has_inflight_for(kv_request_id):
+            return
+        del self._outbound[kv_request_id]
+        self._send(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
+                TransferDoneMsg.SUCCESS: False,
+            }
+        )
+
+    def _has_inflight_for(self, kv_request_id: str) -> bool:
+        return any(x.kv_request_id == kv_request_id for x in self._inflight.values())
 
     # ------------------------------------------------------------------
     # Public API — server role
@@ -420,6 +466,15 @@ class P2PSession:
                             TYPE_KEY: TransferDoneMsg.TYPE,
                             TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
                             TransferDoneMsg.SUCCESS: True,
+                        }
+                    )
+                elif req.finishing and not self._has_inflight_for(xfer.kv_request_id):
+                    del self._outbound[xfer.kv_request_id]
+                    self._send(
+                        {
+                            TYPE_KEY: TransferDoneMsg.TYPE,
+                            TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
+                            TransferDoneMsg.SUCCESS: False,
                         }
                     )
 
@@ -582,6 +637,18 @@ class P2PSession:
         result = req.add_fetch_demand(self.peer_id, block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
+        # Prefiller-first mode: finish_request may have run before
+        # lookup_fetch arrived. If so, finalize once we know what was
+        # demanded — fully satisfied → success, else early-fail.
+        if req.finishing and not self._has_inflight_for(kv_request_id):
+            del self._outbound[kv_request_id]
+            self._send(
+                {
+                    TYPE_KEY: TransferDoneMsg.TYPE,
+                    TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
+                    TransferDoneMsg.SUCCESS: req.remaining == 0,
+                }
+            )
 
     def _on_abort_lookup_fetch(self, msg: dict) -> None:
         AbortLookupFetchMsg.validate(msg)
