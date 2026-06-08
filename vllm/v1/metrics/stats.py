@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.metrics.perf import PerfStats
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.spec_decode.metrics import SpecDecodeRequestStats, SpecDecodingStats
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
@@ -218,6 +218,7 @@ class RequestStateStats:
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
+    spec_decode_stats: SpecDecodeRequestStats | None = None
 
 
 @dataclass
@@ -237,6 +238,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    spec_decode_stats: SpecDecodeRequestStats | None = None
 
 
 @dataclass
@@ -371,6 +373,10 @@ class IterationStats:
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
+        if output.spec_decode_stats is not None:
+            req_stats.spec_decode_stats = output.spec_decode_stats.merge(
+                req_stats.spec_decode_stats
+            )
 
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
@@ -472,6 +478,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            spec_decode_stats=req_stats.spec_decode_stats,
         )
         self.finished_requests.append(finished_req)
 
