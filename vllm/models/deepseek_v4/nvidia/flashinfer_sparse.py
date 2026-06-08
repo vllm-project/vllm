@@ -18,13 +18,15 @@ from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     build_flashinfer_mixed_sparse_indices,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLASparseBackend
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+)
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -47,13 +49,14 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     return workspace
 
 
-class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """Shares the FlashMLA V4 metadata/cache pipeline; swaps the attention impl.
 
-    Inheriting from the FlashMLA V4 backend reuses its ``FlashMLASparseMetadata``
-    builder (which the V4 sparse-index pipeline needs — the V3.2 FlashInfer
-    builder lacks the ``c128a_*`` fields), 256-token blocks, head_size 512, and
-    the (num_blocks, block_size, 512) cache shape for non-``fp8_ds_mla`` dtypes.
+    Inheriting from the FlashMLA V4 backend reuses its
+    ``DeepseekV4FlashMLAMetadata`` builder (which the V4 sparse-index
+    pipeline needs — the V3.2 FlashInfer builder lacks the ``c128a_*`` fields),
+    256-token blocks, head_size 512, and the (num_blocks, block_size, 512) cache
+    shape for non-``fp8_ds_mla`` dtypes.
     """
 
     @staticmethod
@@ -162,7 +165,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            FlashMLASparseMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -190,7 +193,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
@@ -310,7 +313,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:

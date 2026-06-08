@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -186,10 +187,10 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsBlockFp8,
             XPUExpertsFp8,
-            XPUExpertsMxfp8,
+            XPUExpertsMxFp8,
         )
 
-        return [XPUExpertsFp8, XPUExpertsMxfp8, XPUExpertsBlockFp8]
+        return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -423,7 +424,7 @@ def select_fp8_moe_backend(
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     # TODO(bnell): replace layer with weight_block_size
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
