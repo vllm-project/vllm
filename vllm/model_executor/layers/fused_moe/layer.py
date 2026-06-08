@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
+from functools import lru_cache
 from typing import Literal, cast, overload
 
 import torch
@@ -1155,7 +1156,8 @@ class FusedMoE(PluggableLayer):
                 "load weights using `self.load_weights`."
             )
         for expert_name, loaded_weight in weights:
-            qual_name = f"{self.layer_name}.{expert_name}"
+            expert_name = expert_name.removesuffix(".weight")
+            qual_name = f"{self.layer_name}.{expert_name}.weight"
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
                 if weight_name not in qual_name:
                     continue
@@ -1177,10 +1179,16 @@ class FusedMoE(PluggableLayer):
                     experts_shard = loaded_weight.unsqueeze(0)
                     start = expert_id
 
+                # Use param.weight_loader rather than self.weight_loader so
+                # any wrapping installed on the parameter (e.g. the layerwise
+                # reload's online_process_loader, which buffers loads until a
+                # full layer is ready) is preserved. self.weight_loader is the
+                # raw class method and bypasses such wrappers.
+                weight_loader = getattr(param, "weight_loader", self.weight_loader)
                 # Unified loading logic for fused and non-fused experts
                 loaded_experts = experts_shard.unbind()
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
-                    success = self.weight_loader(
+                    success = weight_loader(
                         param=param,
                         loaded_weight=loaded_expert,
                         weight_name=weight_name,
@@ -1336,12 +1344,44 @@ class FusedMoE(PluggableLayer):
     @classmethod
     def make_expert_params_mapping(
         cls,
-        model: torch.nn.Module,
-        ckpt_gate_proj_name: str,
-        ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
+        module: torch.nn.Module,
         num_experts: int,
+        ckpt_down_proj_name: str | tuple[str, ...],
+        ckpt_gate_proj_name: str | tuple[str | None, ...] | None = None,
+        ckpt_up_proj_name: str | tuple[str | None, ...] | None = None,
+        ckpt_gate_up_proj_name: str | tuple[str | None, ...] | None = None,
         num_redundant_experts: int = 0,
+    ) -> list[tuple[str, str, int, str]]:
+        # Normalize scalar names to 1-tuples so there is a single code path.
+        if not isinstance(ckpt_down_proj_name, tuple):
+            ckpt_down_proj_name = (ckpt_down_proj_name,)
+        if not isinstance(ckpt_gate_proj_name, tuple):
+            ckpt_gate_proj_name = (ckpt_gate_proj_name,)
+        if not isinstance(ckpt_up_proj_name, tuple):
+            ckpt_up_proj_name = (ckpt_up_proj_name,)
+        if not isinstance(ckpt_gate_up_proj_name, tuple):
+            ckpt_gate_up_proj_name = (ckpt_gate_up_proj_name,)
+        has_lora = any(".base_layer." in name for name, _ in module.named_parameters())
+        return cls._make_expert_params_mapping(
+            num_experts=num_experts,
+            ckpt_down_proj_name=ckpt_down_proj_name,
+            ckpt_gate_proj_name=ckpt_gate_proj_name,
+            ckpt_up_proj_name=ckpt_up_proj_name,
+            ckpt_gate_up_proj_name=ckpt_gate_up_proj_name,
+            num_redundant_experts=num_redundant_experts,
+            has_lora=has_lora,
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _make_expert_params_mapping(
+        num_experts: int,
+        ckpt_down_proj_name: tuple[str, ...],
+        ckpt_gate_proj_name: tuple[str | None, ...],
+        ckpt_up_proj_name: tuple[str | None, ...],
+        ckpt_gate_up_proj_name: tuple[str | None, ...],
+        num_redundant_experts: int = 0,
+        has_lora: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         num_physical_experts = num_experts + num_redundant_experts
 
@@ -1355,29 +1395,69 @@ class FusedMoE(PluggableLayer):
             )
         )
 
-        base_layer = (
-            "base_layer."
-            if any(".base_layer." in name for name, _ in model.named_parameters())
-            else ""
-        )
+        base = "base_layer." if has_lora else ""
 
-        return [
-            # (param_name, weight_name, expert_id, shard_id)
-            (
-                f"experts.{base_layer}w13_"
-                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else f"experts.{base_layer}w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
-                expert_id,
-                shard_id,
+        expert_mapping: list[tuple[str, str, int, str]] = []
+        for down, gate, up, gate_up in zip(
+            ckpt_down_proj_name,
+            ckpt_gate_proj_name,
+            ckpt_up_proj_name,
+            ckpt_gate_up_proj_name,
+            strict=True,
+        ):
+            if gate_up is not None:
+                # Models saved with fused experts are:
+                # - Architectures from Transformers v5
+                # - Architectures from Transformers v4 where the checkpoint was saved
+                #   with Transformers v5 and save_original_format=False
+                for name, suffix, shard_idx, shard_id in (
+                    (gate_up, "w13_", 0, "w1"),
+                    (gate_up, "w13_", 1, "w3"),
+                    (down, "w2_", 0, "w2"),
+                ):
+                    expert_mapping.append(
+                        (
+                            f"experts.{base}{suffix}",
+                            f"experts.{name}.{base}",
+                            # We repurpose the expert_id as shard_idx for
+                            # deconcatenating w1 and w3 in FusedMoE.load_weights.
+                            shard_idx,
+                            shard_id,
+                        )
+                    )
+
+            if gate is not None and up is not None:
+                # Models saved with non-fused experts are:
+                # - Architectures from Transformers v4 where the checkpoint was saved
+                #   with Transformers v4
+                # - Architectures from Transformers v4 where the checkpoint was saved
+                #   with Transformers v5 and save_original_format=True
+                for name, suffix, shard_id in (
+                    (gate, "w13_", "w1"),
+                    (down, "w2_", "w2"),
+                    (up, "w13_", "w3"),
+                ):
+                    for expert_id in range(num_physical_experts):
+                        logical_expert_id = physical_to_logical_map[expert_id]
+                        expert_mapping.append(
+                            (
+                                f"experts.{base}{suffix}",
+                                f"experts.{logical_expert_id}.{name}.{base}",
+                                expert_id,
+                                shard_id,
+                            )
+                        )
+
+        if not expert_mapping:
+            raise ValueError(
+                "Unable to make expert mapping. For fused checkpoints, "
+                "ckpt_gate_up_proj_name must be provided. For non-fused "
+                "checkpoints, both ckpt_gate_proj_name and ckpt_up_proj_name "
+                "must be provided. Provide both if either format may be "
+                "present in the checkpoint."
             )
-            for expert_id in range(num_physical_experts)
-            for shard_id, weight_name in [
-                ("w1", ckpt_gate_proj_name),
-                ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name),
-            ]
-        ]
+
+        return expert_mapping
 
     @property
     def hidden_size(self) -> int:
@@ -1402,7 +1482,7 @@ class FusedMoE(PluggableLayer):
 
 # This is a temporary forwarding method which will be removed/modified layer.
 def fused_moe_make_expert_params_mapping(
-    model: torch.nn.Module,
+    module: torch.nn.Module,
     ckpt_gate_proj_name: str,
     ckpt_down_proj_name: str,
     ckpt_up_proj_name: str,
@@ -1410,12 +1490,12 @@ def fused_moe_make_expert_params_mapping(
     num_redundant_experts: int = 0,
 ) -> list[tuple[str, str, int, str]]:
     return FusedMoE.make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name,
-        ckpt_down_proj_name,
-        ckpt_up_proj_name,
-        num_experts,
-        num_redundant_experts,
+        module,
+        ckpt_gate_proj_name=ckpt_gate_proj_name,
+        ckpt_down_proj_name=ckpt_down_proj_name,
+        ckpt_up_proj_name=ckpt_up_proj_name,
+        num_experts=num_experts,
+        num_redundant_experts=num_redundant_experts,
     )
 
 

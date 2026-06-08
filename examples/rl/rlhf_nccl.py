@@ -31,6 +31,7 @@ import os
 import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
@@ -68,15 +69,23 @@ class TrainModel:
     def get_master_address_and_port(self):
         return self.master_address, self.port
 
+    def _materialized_weights(self):
+        """Yield (name, tensor) pairs, gathering DTensors to full tensors."""
+        for name, param in self.model.state_dict().items():
+            if isinstance(param, DTensor):
+                yield name, param.full_tensor().detach().contiguous()
+            else:
+                yield name, param.detach().contiguous()
+
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
         names = []
         dtype_names = []
         shapes = []
-        for name, p in self.model.named_parameters():
+        for name, tensor in self._materialized_weights():
             names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
+            dtype_names.append(str(tensor.dtype).split(".")[-1])
+            shapes.append(list(tensor.shape))
         return names, dtype_names, shapes
 
     def init_weight_transfer_group(self, world_size):
@@ -96,7 +105,7 @@ class TrainModel:
             packed=packed,
         )
         NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
+            iterator=self._materialized_weights(),
             trainer_args=trainer_args,
         )
 
