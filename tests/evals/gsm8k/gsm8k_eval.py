@@ -25,7 +25,9 @@ INVALID = -9999999
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
-        filename = os.path.join("/tmp", url.split("/")[-1])
+        cache_dir = os.environ.get("VLLM_TEST_CACHE", "/tmp")
+        os.makedirs(os.path.join(cache_dir, "gsm8k"), exist_ok=True)
+        filename = os.path.join(cache_dir, "gsm8k", url.split("/")[-1])
 
     if os.path.exists(filename):
         return filename

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
+import hashlib
 import os
 import tempfile
 import urllib.request
@@ -113,11 +114,34 @@ def read_geotiff(
 
         write_to_file = file_data
     elif file_path is not None and path_type == "url":
-        resp = urllib.request.urlopen(file_path)
-        # with tempfile.NamedTemporaryFile() as tmpfile:
-        #     tmpfile.write(resp.read())
-        #     path = tmpfile.name
-        write_to_file = resp.read()
+        # Cache URL downloads to avoid re-downloading in CI
+        cache_base = os.environ.get("VLLM_TEST_CACHE")
+        if cache_base:
+            cache_dir = os.path.join(cache_base, "prithvi")
+            os.makedirs(cache_dir, exist_ok=True)
+            url_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+            ext = os.path.splitext(file_path)[1] or ".tiff"
+            cached_path = os.path.join(cache_dir, f"{url_hash}{ext}")
+            if os.path.exists(cached_path):
+                path = cached_path
+            else:
+                resp = urllib.request.urlopen(file_path)
+                # Write to a temporary file and atomically rename
+                # to prevent race conditions with parallel tests.
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=cache_dir, delete=False
+                ) as tmp_file:
+                    tmp_file.write(resp.read())
+                    tmp_path = tmp_file.name
+                try:
+                    os.rename(tmp_path, cached_path)
+                except OSError:
+                    # Another process may have already written the file.
+                    os.remove(tmp_path)
+                path = cached_path
+        else:
+            resp = urllib.request.urlopen(file_path)
+            write_to_file = resp.read()
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":

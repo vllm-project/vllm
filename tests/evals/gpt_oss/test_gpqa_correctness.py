@@ -23,7 +23,9 @@ from tests.utils import RemoteOpenAIServer
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 
 # Path to tiktoken encoding files
-TIKTOKEN_DATA_DIR = Path(__file__).parent / "data"
+TIKTOKEN_DATA_DIR = (
+    Path(os.environ.get("VLLM_TEST_CACHE", str(Path(__file__).parent))) / "tiktoken"
+)
 
 # Tiktoken encoding files to download
 TIKTOKEN_FILES = {

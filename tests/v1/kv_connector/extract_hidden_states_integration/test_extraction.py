@@ -63,7 +63,7 @@ def predictable_llama_config_path(tmp_path_factory):
     # Create a simple tokenizer
     tokenizer = LlamaTokenizerFast.from_pretrained(
         "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        cache_dir=os.path.expanduser("~/.cache/huggingface"),
+        cache_dir=os.environ.get("HF_HOME", None),
     )
     tokenizer.save_pretrained(config_dir)
 
