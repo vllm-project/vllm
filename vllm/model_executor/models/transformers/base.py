@@ -374,9 +374,6 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
-        for orig, new in orig_to_new_regex.items():
-            print(f"Mapping checkpoint weights matching {orig.pattern} to {new}")
-
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
 
