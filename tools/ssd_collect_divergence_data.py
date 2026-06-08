@@ -45,7 +45,8 @@ HF_CACHE = os.path.expanduser(
 )
 
 DEFAULT_OUTPUT = (
-    "/home/buddywhitman/mpi_workspace/project3_ssd_vllm/training_data_divergence.pt"
+    "training_data_divergence.pt"
+)
 )
 DEFAULT_NUM_STEPS = 2000
 K = 4
