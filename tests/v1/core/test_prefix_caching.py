@@ -1035,7 +1035,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     scheduling aligned with the common prefix.
     """
     block_size = 16
-    manager = KVCacheManager(
+    manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba_align"]),
         max_model_len=8192,
         enable_caching=True,
@@ -1892,7 +1892,7 @@ def test_reset_prefix_cache():
     unique_token_ids = [4] * 7
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids, block_size, sha256)
-    computed_blocks = manager.get_computed_blocks(req1)
+    computed_blocks, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
     assert len(computed_blocks.blocks[0]) == 3
     blocks = manager.allocate_slots(
@@ -2422,7 +2422,7 @@ def test_eagle_enabled_removes_last_block():
     req = make_request("divisible_request", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks = manager.get_computed_blocks(req)
+    computed_blocks, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
@@ -2454,7 +2454,7 @@ def test_eagle_with_partial_blocks():
     req = make_request("partial_block_test", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks = manager.get_computed_blocks(req)
+    computed_blocks, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
@@ -2495,7 +2495,7 @@ def test_eagle_with_sliding_window():
     req = make_request("partial_block_test", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks = manager.get_computed_blocks(req)
+    computed_blocks, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )

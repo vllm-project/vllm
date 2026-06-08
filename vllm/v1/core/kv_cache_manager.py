@@ -204,9 +204,6 @@ class KVCacheManager:
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
-                - 0, or the number of uncached shared prefix tokens
-                  beyond computed tokens, as detected by shared prefix detection
-                  (currently implemented in HybridKVCacheCoordinator)
         """
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
