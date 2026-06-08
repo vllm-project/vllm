@@ -1,15 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import LoadStoreSpec
+from vllm.v1.kv_offload.base import GroupTransfer, LoadStoreSpec
 
-# a single transfer spec (src_blocks_spec, dst_blocks_spec)
-TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
 # transfers are forwarded to workers by (src_medium, dst_medium)
 TransferType = tuple[str, str]
+
+
+@dataclass
+class TransferSpec:
+    """Direction tagged per group transfer descriptor.
+
+    groups: one GroupTransfer per KV cache group, positionally aligned with
+        kv_cache_groups. Groups with no blocks to move have empty block_ids.
+    is_store: True = GPU to offloaded medium, False = offloaded medium to GPU.
+        (Task 7 #33689 will replace this flag with explicit submit_store /
+        submit_load methods. is_store bridges the gap for till then.)
+    """
+
+    groups: Sequence[GroupTransfer]
+    is_store: bool
+
 
 logger = init_logger(__name__)
 
@@ -44,7 +59,9 @@ class OffloadingHandler(ABC):
         Args:
             job_id: a unique ID that will be used when notifying back on
                 transfer completion.
-            spec: the (src, dst) spec of the KV data transfer.
+            spec: per group TransferSpec describing which blocks to move
+                and in which direction (spec.is_store: True = GPU to offloaded,
+                False = offloaded to GPU).
 
         Returns:
             True if transfer was submitted successfully.
@@ -122,15 +139,21 @@ class OffloadingWorker:
         Args:
             job_id: a unique ID that will be used when notifying back on
                 transfer completion.
-            spec: the (src, dst) spec of the KV data transfer.
+            spec: the per-group transfer spec (direction encoded in is_store).
 
         Returns:
             True if transfer was submitted successfully.
         """
-        src, dst = spec
-        transfer_type = (src.medium(), dst.medium())
+        assert spec.groups, "TransferSpec must have at least one group"
+        offload_medium = spec.groups[0].offload_spec.medium()
+        if spec.is_store:
+            transfer_type = ("GPU", offload_medium)
+        else:
+            transfer_type = (offload_medium, "GPU")
         handler = self.transfer_type_to_handler.get(transfer_type)
-        assert handler is not None
+        assert handler is not None, (
+            f"No handler registered for transfer type {transfer_type!r}"
+        )
         try:
             success = handler.transfer_async(job_id, spec)
         except Exception as e:
@@ -146,7 +169,7 @@ class OffloadingWorker:
         if not success:
             logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
-            logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
+            logger.debug("Submitted %r transfer %d", transfer_type, job_id)
         return success
 
     def get_finished(self) -> list[TransferResult]:

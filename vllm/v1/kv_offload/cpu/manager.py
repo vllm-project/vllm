@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection, Iterable
 from typing import Literal
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import (
-    LoadStoreSpec,
+    BlockIDsLoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -39,13 +40,16 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_blocks: int,
+        num_groups: int = 1,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
+        assert num_groups >= 1, f"num_groups must be >= 1, got {num_groups}"
         self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
+        self._num_groups: int = num_groups
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -88,12 +92,16 @@ class CPUOffloadingManager(OffloadingManager):
     def _free_block(self, block: BlockStatus) -> None:
         self._free_list.append(block.block_id)
 
-    def _get_load_store_spec(
+    def _get_load_store_specs(
         self,
         keys: Iterable[OffloadKey],
         blocks: Iterable[BlockStatus],
-    ) -> CPULoadStoreSpec:
-        return CPULoadStoreSpec([block.block_id for block in blocks])
+    ) -> list[BlockIDsLoadStoreSpec]:
+        """Return one CPULoadStoreSpec per KV group, partitioned by group index."""
+        by_group: dict[int, list[int]] = defaultdict(list)
+        for key, block in zip(keys, blocks):
+            by_group[get_offload_group_idx(key)].append(block.block_id)
+        return [CPULoadStoreSpec(by_group.get(g, [])) for g in range(self._num_groups)]
 
     # --- OffloadingManager interface ---
 
@@ -123,7 +131,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> LoadStoreSpec:
+    ) -> list[BlockIDsLoadStoreSpec]:
         blocks = []
         for key in keys:
             block = self._policy.get(key)
@@ -131,7 +139,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert block.is_ready, f"Block {key!r} is not ready for reading"
             block.ref_cnt += 1
             blocks.append(block)
-        return self._get_load_store_spec(keys, blocks)
+        return self._get_load_store_specs(keys, blocks)
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
@@ -161,7 +169,7 @@ class CPUOffloadingManager(OffloadingManager):
         if not keys_to_store:
             return PrepareStoreOutput(
                 keys_to_store=[],
-                store_spec=self._get_load_store_spec([], []),
+                store_specs=self._get_load_store_specs([], []),
                 evicted_keys=[],
             )
 
@@ -196,12 +204,12 @@ class CPUOffloadingManager(OffloadingManager):
         for key, block in zip(keys_to_store, blocks):
             self._policy.insert(key, block)
 
-        # build store specs for allocated blocks
-        store_spec = self._get_load_store_spec(keys_to_store, blocks)
+        # build per group store specs for allocated blocks
+        store_specs = self._get_load_store_specs(keys_to_store, blocks)
 
         return PrepareStoreOutput(
             keys_to_store=keys_to_store,
-            store_spec=store_spec,
+            store_specs=store_specs,
             evicted_keys=to_evict,
         )
 

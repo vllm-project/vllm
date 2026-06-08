@@ -110,6 +110,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
+                num_groups=len(self.kv_cache_config.kv_cache_groups),
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,
                 mmap_region=scheduler_mmap,
