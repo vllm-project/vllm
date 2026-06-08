@@ -391,7 +391,7 @@ class TestDoRopeAndKVCacheUpdate:
 
 
 # ---------------------------------------------------------------------------
-# Tests: F3 dispatch replaces two separate ops with one fused op
+# Tests: F3 dispatch bypasses rotary_emb (partial fusion — see note below)
 # ---------------------------------------------------------------------------
 
 
@@ -400,18 +400,22 @@ class TestDoRopeAndKVCacheUpdate:
     reason="ROCm-specific tests"
 )
 def test_f3_fused_replaces_two_ops():
-    """F3 fires fused_rope_and_mla_kv_cache_write, NOT rotary_emb + do_kv_cache.
+    """F3 fires fused_rope_and_mla_kv_cache_write, bypassing the separate
+    rotary_emb call.
 
-    This is the production-benefit test: verifies that when _f3_fusion_enabled
-    is True the single Triton kernel path is taken and the separate rotary_emb
-    call is bypassed in the fused branch.
+    What this PR does (per decode step, per MLA layer):
+      Before: rotary_emb(q_pe, k_pe, positions)          <- op 1
+              concat_and_cache_mla(kv_c, k_pe, kv_cache) <- op 2 (inside mla_attn)
 
-    Before this PR (per decode step, per MLA layer):
-      rotary_emb(q_pe, k_pe, positions)           ← op 1
-      concat_and_cache_mla(kv_c, k_pe, kv_cache)  ← op 2
+      After:  fused_qk_rope_concat_and_cache_mla(...)    <- replaces op 1
+              concat_and_cache_mla(...)                  <- still runs once more
+                                                            (redundant duplicate
+                                                            write; removed in the
+                                                            follow-on PR)
 
-    After this PR (auto-enabled):
-      fused_qk_rope_concat_and_cache_mla(...)      ← 1 op
+    This test verifies that rotary_emb is bypassed when F3 is enabled.
+    Full elimination of the duplicate kv-cache write is tracked in the
+    follow-on PR.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
