@@ -373,16 +373,22 @@ def has_nvidia_artifactory() -> bool:
 @functools.cache
 def supports_trtllm_attention() -> bool:
     """
-    TRTLLM attention is supported if the platform is SM100,
+    TRTLLM attention is supported if the platform is SM100/SM120,
     NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    # Requires NVIDIA artifactory to be accessible to download cubins.
+    # vLLM upstream gates this to SM100. Allow SM120 here so RTX PRO 6000
+    # Blackwell can exercise FlashInfer's TRTLLM XQA attention path.
     return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+        (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        )
+        and has_nvidia_artifactory()
     )
 
 
