@@ -134,7 +134,7 @@ class AsyncLookupManager(ABC):
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = True
+            self._need_to_drain = True  # TODO: testing
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
@@ -143,6 +143,7 @@ class AsyncLookupManager(ABC):
             self._lookup_batch.append((key, req_context))
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
+        self.flush()  # TODO: testing
         return state.result
 
     def flush(self) -> None:
