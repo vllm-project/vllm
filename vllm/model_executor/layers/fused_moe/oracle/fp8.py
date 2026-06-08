@@ -186,10 +186,10 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsBlockFp8,
             XPUExpertsFp8,
-            XPUExpertsMxfp8,
+            XPUExpertsMxFp8,
         )
 
-        return [XPUExpertsFp8, XPUExpertsMxfp8, XPUExpertsBlockFp8]
+        return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
