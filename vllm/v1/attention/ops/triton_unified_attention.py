@@ -402,11 +402,17 @@ def kernel_unified_attention(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
+        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+        
         if USE_TD:
             # All TILE_SIZE slots within a single KV tile map to one
             # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
             # from the static_assert above), so load the block index as
             # a scalar instead of a broadcast reduction.
+            K = tl.where(tile_mask[None, :], K, 0.0)
+            V = tl.where(tile_mask[:, None], V, 0.0)
+            
             offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
             physical_block_scalar = tl.load(
                 block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
