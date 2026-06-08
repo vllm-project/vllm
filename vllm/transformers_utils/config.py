@@ -633,7 +633,7 @@ def maybe_override_with_speculators(
     vllm_speculative_config: dict[str, Any] | None = None,
     hf_token: bool | str | None = None,
     **kwargs,
-) -> tuple[str, str | None, dict[str, Any] | None]:
+) -> tuple[str, str | None, dict[str, Any] | None, bool]:
     """
     Resolve model configuration when speculators are detected.
 
@@ -649,8 +649,10 @@ def maybe_override_with_speculators(
         hf_token: HuggingFace token for authenticated model access
 
     Returns:
-        Tuple of (resolved_model, resolved_tokenizer, speculative_config)
+        Tuple of (resolved_model, resolved_tokenizer, speculative_config,
+        trust_remote_code)
     """
+    disable_verifier_trust_remote_code = False
     if check_gguf_file(model):
         if hf_config_path is None:
             gguf_repo = Path(model).parent
@@ -662,6 +664,7 @@ def maybe_override_with_speculators(
                 # The local GGUF parent has no usable HF config.  Revisions for
                 # the local GGUF file do not apply to its metadata base model.
                 revision = None
+                disable_verifier_trust_remote_code = True
             elif not file_or_path_exists(
                 gguf_repo,
                 HF_CONFIG_NAME,
@@ -670,6 +673,7 @@ def maybe_override_with_speculators(
                 # Preserve the previous fallback for local GGUF files that rely
                 # on Transformers' GGUF metadata parser for supported arches.
                 kwargs["gguf_file"] = Path(model).name
+                disable_verifier_trust_remote_code = True
         else:
             gguf_model_repo = Path(model).parent
     elif is_remote_gguf(model):
@@ -678,12 +682,14 @@ def maybe_override_with_speculators(
         if gguf_model_repo != repo_id:
             # A GGUF repo revision does not apply to the referenced base model.
             revision = None
+            disable_verifier_trust_remote_code = True
         elif not file_or_path_exists(repo_id, HF_CONFIG_NAME, revision=revision):
             kwargs["gguf_file"] = get_gguf_file_path_from_hf(
                 repo_id,
                 quant_type,
                 revision=revision,
             )
+            disable_verifier_trust_remote_code = True
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -700,7 +706,7 @@ def maybe_override_with_speculators(
 
     if speculators_config is None:
         # No speculators config found, return original values
-        return model, tokenizer, vllm_speculative_config
+        return model, tokenizer, vllm_speculative_config, trust_remote_code
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
@@ -715,8 +721,17 @@ def maybe_override_with_speculators(
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
+    if disable_verifier_trust_remote_code and trust_remote_code:
+        logger.warning_once(
+            "Disabling `trust_remote_code` for speculators verifier model "
+            "'%s' because it was selected from a GGUF-derived speculators "
+            "config. Pass "
+            "an explicit `--hf-config-path` to opt in for that repository.",
+            verifier_model,
+        )
+        trust_remote_code = False
 
-    return model, tokenizer, speculative_config
+    return model, tokenizer, speculative_config, trust_remote_code
 
 
 def get_config(

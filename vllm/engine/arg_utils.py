@@ -1721,16 +1721,19 @@ class EngineArgs:
         # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
         # use speculators with explicit --speculative-config.
         if not is_cloud_storage(self.model):
-            (self.model, self.tokenizer, self.speculative_config) = (
-                maybe_override_with_speculators(
-                    model=self.model,
-                    tokenizer=self.tokenizer,
-                    revision=self.revision,
-                    hf_config_path=self.hf_config_path,
-                    trust_remote_code=self.trust_remote_code,
-                    vllm_speculative_config=self.speculative_config,
-                    hf_token=self.hf_token,
-                )
+            (
+                self.model,
+                self.tokenizer,
+                self.speculative_config,
+                self.trust_remote_code,
+            ) = maybe_override_with_speculators(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                hf_config_path=self.hf_config_path,
+                trust_remote_code=self.trust_remote_code,
+                vllm_speculative_config=self.speculative_config,
+                hf_token=self.hf_token,
             )
 
         model_config = self.create_model_config()

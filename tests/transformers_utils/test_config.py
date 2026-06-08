@@ -80,14 +80,17 @@ def test_remote_gguf_speculators_uses_resolved_config_source(monkeypatch):
         },
     )
 
-    model, tokenizer, speculative_config = maybe_override_with_speculators(
-        "org/spec-GGUF:UD-IQ4_NL",
-        tokenizer=None,
-        trust_remote_code=False,
-        revision="gguf-rev",
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "org/spec-GGUF:UD-IQ4_NL",
+            tokenizer=None,
+            trust_remote_code=True,
+            revision="gguf-rev",
+        )
     )
 
     assert calls == [("org/base", None, {"local_files_only": False})]
+    assert trust_remote_code is False
     assert model == "org/target"
     assert tokenizer == "org/target"
     assert speculative_config == {
@@ -113,11 +116,13 @@ def test_remote_gguf_speculators_uses_gguf_parser_fallback(monkeypatch):
         {"model_type": "qwen3_5_moe"},
     )
 
-    model, tokenizer, speculative_config = maybe_override_with_speculators(
-        "org/spec-GGUF:UD-IQ4_NL",
-        tokenizer=None,
-        trust_remote_code=False,
-        revision="gguf-rev",
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "org/spec-GGUF:UD-IQ4_NL",
+            tokenizer=None,
+            trust_remote_code=False,
+            revision="gguf-rev",
+        )
     )
 
     assert calls == [
@@ -130,9 +135,62 @@ def test_remote_gguf_speculators_uses_gguf_parser_fallback(monkeypatch):
             },
         )
     ]
+    assert trust_remote_code is False
     assert model == "org/spec-GGUF:UD-IQ4_NL"
     assert tokenizer is None
     assert speculative_config is None
+
+
+def test_remote_gguf_parser_speculators_disables_trust_remote_code(monkeypatch):
+    from vllm.transformers_utils import config as config_module
+
+    _patch_config_source(monkeypatch, config_module, "org/spec-GGUF")
+    _patch_gguf_file(monkeypatch, config_module, "spec-UD-IQ4_NL.gguf")
+    monkeypatch.setattr(
+        config_module,
+        "file_or_path_exists",
+        lambda model, config_name, revision=None: False,
+    )
+    calls = _patch_config_dict(
+        monkeypatch,
+        config_module,
+        {
+            "speculators_model_type": "eagle3",
+            "transformer_layer_config": {},
+            "speculators_config": {
+                "proposal_methods": [{"speculative_tokens": 2}],
+                "verifier": {"name_or_path": "org/target"},
+            },
+        },
+    )
+
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "org/spec-GGUF:UD-IQ4_NL",
+            tokenizer=None,
+            trust_remote_code=True,
+            revision="gguf-rev",
+        )
+    )
+
+    assert calls == [
+        (
+            "org/spec-GGUF",
+            "gguf-rev",
+            {
+                "gguf_file": "spec-UD-IQ4_NL.gguf",
+                "local_files_only": False,
+            },
+        )
+    ]
+    assert trust_remote_code is False
+    assert model == "org/target"
+    assert tokenizer == "org/target"
+    assert speculative_config == {
+        "method": "eagle3",
+        "num_speculative_tokens": 2,
+        "model": "org/spec-GGUF:UD-IQ4_NL",
+    }
 
 
 def test_local_gguf_speculators_uses_explicit_hf_config_path(monkeypatch):
@@ -144,17 +202,58 @@ def test_local_gguf_speculators_uses_explicit_hf_config_path(monkeypatch):
         {"model_type": "qwen3_5_moe"},
     )
 
-    model, tokenizer, speculative_config = maybe_override_with_speculators(
-        "/models/qwen.gguf",
-        tokenizer="org/base",
-        trust_remote_code=False,
-        hf_config_path="org/base",
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "/models/qwen.gguf",
+            tokenizer="org/base",
+            trust_remote_code=False,
+            hf_config_path="org/base",
+        )
     )
 
     assert calls == [("org/base", None, {"local_files_only": False})]
+    assert trust_remote_code is False
     assert model == "/models/qwen.gguf"
     assert tokenizer == "org/base"
     assert speculative_config is None
+
+
+def test_local_gguf_explicit_hf_config_path_preserves_trust_remote_code(
+    monkeypatch,
+):
+    from vllm.transformers_utils import config as config_module
+
+    calls = _patch_config_dict(
+        monkeypatch,
+        config_module,
+        {
+            "speculators_model_type": "eagle3",
+            "transformer_layer_config": {},
+            "speculators_config": {
+                "proposal_methods": [{"speculative_tokens": 2}],
+                "verifier": {"name_or_path": "org/target"},
+            },
+        },
+    )
+
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "/models/qwen.gguf",
+            tokenizer="org/base",
+            trust_remote_code=True,
+            hf_config_path="org/base",
+        )
+    )
+
+    assert calls == [("org/base", None, {"local_files_only": False})]
+    assert trust_remote_code is True
+    assert model == "org/target"
+    assert tokenizer == "org/target"
+    assert speculative_config == {
+        "method": "eagle3",
+        "num_speculative_tokens": 2,
+        "model": "/models/qwen.gguf",
+    }
 
 
 def test_local_gguf_speculators_uses_resolved_config_source(monkeypatch):
@@ -172,14 +271,17 @@ def test_local_gguf_speculators_uses_resolved_config_source(monkeypatch):
         {"model_type": "qwen3_5_moe"},
     )
 
-    model, tokenizer, speculative_config = maybe_override_with_speculators(
-        "/models/qwen.gguf",
-        tokenizer=None,
-        trust_remote_code=False,
-        revision="local-rev",
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "/models/qwen.gguf",
+            tokenizer=None,
+            trust_remote_code=False,
+            revision="local-rev",
+        )
     )
 
     assert calls == [("org/base", None, {"local_files_only": False})]
+    assert trust_remote_code is False
     assert model == "/models/qwen.gguf"
     assert tokenizer is None
     assert speculative_config is None
