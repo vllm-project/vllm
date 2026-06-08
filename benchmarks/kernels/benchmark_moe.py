@@ -250,7 +250,7 @@ def benchmark_config(
                     num_experts=num_experts,
                     experts_per_token=topk,
                     hidden_dim=hidden_size,
-                    intermediate_size_per_partition=shard_intermediate_size,
+                    intermediate_size=shard_intermediate_size,
                     num_local_experts=num_experts,
                     num_logical_experts=num_experts,
                     activation=MoEActivation.SILU,
@@ -271,7 +271,6 @@ def benchmark_config(
                     moe_config=moe_config,
                     quant_config=quant_config,
                 ),
-                inplace=not disable_inplace(),
             )
 
         with override_config(config):
@@ -279,7 +278,6 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
-            inplace = not disable_inplace()
             if use_deep_gemm:
                 return deep_gemm_experts.apply(
                     x,
@@ -298,7 +296,6 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=inplace,
                 quant_config=quant_config,
             )
 

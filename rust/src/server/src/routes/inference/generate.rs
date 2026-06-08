@@ -42,8 +42,8 @@ pub async fn generate(
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let prepared = match prepare_generate_request(body, state.served_model_names(), request_context)
-    {
+    let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
+    let prepared = match prepare_generate_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };

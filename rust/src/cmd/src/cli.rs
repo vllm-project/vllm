@@ -116,6 +116,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
     pub renderer: RendererSelection,
+    /// Disable multimodal inputs and treat the model as language-only.
+    #[arg(long)]
+    #[serde(default)]
+    pub language_model_only: bool,
     /// Override the maximum model context length. When set, the frontend uses
     /// this value instead of the model's `max_position_embeddings` from
     /// `config.json`.
@@ -164,6 +168,15 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub enable_log_requests: bool,
+
+    /// If specified, API server will add X-Request-Id header to responses.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_request_id_headers: bool,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage).
@@ -234,10 +247,12 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
+            language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -274,10 +289,12 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
+            language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -408,6 +425,7 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
+            self.runtime.language_model_only,
             handshake_port,
         )
     }

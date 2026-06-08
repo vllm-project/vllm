@@ -34,6 +34,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
+                        language_model_only: false,
                         max_model_len: Some(
                             512,
                         ),
@@ -43,6 +44,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -87,6 +89,17 @@ fn serve_args_auto_forward_python_flags_without_separator() {
 }
 
 #[test]
+fn serve_args_auto_forward_enable_lora_to_python() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--enable-lora"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
+}
+
+#[test]
 fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "-tp", "2"]).unwrap();
 
@@ -114,6 +127,46 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
         panic!("expected serve args");
     };
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
+}
+
+#[test]
+fn serve_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-request-id-headers",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.enable_request_id_headers);
+}
+
+#[test]
+fn frontend_args_json_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_request_id_headers":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.enable_request_id_headers);
 }
 
 #[test]
@@ -211,6 +264,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
+                        language_model_only: false,
                         max_model_len: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -218,6 +272,7 @@ fn frontend_args_accept_json() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -268,7 +323,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_model_len":8192,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -285,6 +340,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         ParserSelection::Explicit("qwen3_thinking".to_string())
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
+    assert!(args.runtime.language_model_only);
     assert_eq!(args.runtime.max_model_len, Some(8192));
     assert_eq!(args.runtime.shutdown_timeout, 3);
 }
@@ -609,6 +665,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
+                        language_model_only: false,
                         max_model_len: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
@@ -616,6 +673,7 @@ fn serve_args_accept_handshake_aliases() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -729,10 +787,12 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -791,10 +851,12 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -868,10 +930,12 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             renderer: Auto,
+            language_model_only: false,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
