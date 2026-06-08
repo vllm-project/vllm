@@ -10,13 +10,19 @@ stream-interval) delivery.
 
 import pytest
 
+from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.parser.abstract_parser import _WrappedParser
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gemma4_reasoning_parser import Gemma4ReasoningParser
 from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
 from vllm.tokenizers.registry import get_tokenizer
 
 TOKENIZER_NAME = "google/gemma-4-E2B-it"
+
+
+class _Gemma4Parser(DelegatingParser):
+    reasoning_parser_cls = Gemma4ReasoningParser
+    tool_parser_cls = Gemma4ToolParser
 
 
 @pytest.fixture(scope="module")
@@ -27,9 +33,7 @@ def tokenizer():
 @pytest.fixture
 def parser(tokenizer):
     """Fresh parser per test — avoids _reasoning_text/_prefix_stripped state leak."""
-    _WrappedParser.reasoning_parser_cls = Gemma4ReasoningParser
-    _WrappedParser.tool_parser_cls = Gemma4ToolParser
-    return _WrappedParser(tokenizer)
+    return _Gemma4Parser(tokenizer)
 
 
 def _encode(tokenizer, text: str) -> list[int]:
@@ -52,8 +56,14 @@ def _encode(tokenizer, text: str) -> list[int]:
         return enc.encode(text)
 
 
+_DUMMY_TOOL = ChatCompletionToolParam(
+    type="function",
+    function={"name": "find", "description": "Find files", "parameters": {}},
+)
+
+
 def _make_request():
-    req = ChatCompletionRequest(messages=[], model="gemma4-test")
+    req = ChatCompletionRequest(messages=[], model="gemma4-test", tools=[_DUMMY_TOOL])
     req.skip_special_tokens = False
     return req
 
@@ -65,7 +75,7 @@ def _run_streaming(parser_instance, token_strings: list[str], tokenizer):
     request = _make_request()
     reasoning_parts, content_parts, tool_calls = [], [], []
 
-    for tok_str in token_strings:
+    for i, tok_str in enumerate(token_strings):
         tok_id = vocab.get(tok_str)
         if tok_id is not None:
             ids = [tok_id]
@@ -75,7 +85,9 @@ def _run_streaming(parser_instance, token_strings: list[str], tokenizer):
             except TypeError:
                 ids = enc.encode(tok_str)
 
-        delta = parser_instance.parse_delta(tok_str, ids, request)
+        delta = parser_instance.parse_delta(
+            tok_str, ids, request, finished=(i == len(token_strings) - 1)
+        )
         if delta is None:
             continue
         if delta.reasoning:
@@ -96,7 +108,7 @@ def _run_single_delta(parser_instance, full_text: str, tokenizer):
     """Feed entire output as one delta (simulates large stream-interval)."""
     request = _make_request()
     full_ids = _encode(tokenizer, full_text)
-    delta = parser_instance.parse_delta(full_text, full_ids, request)
+    delta = parser_instance.parse_delta(full_text, full_ids, request, finished=True)
     if delta is None:
         return None, None, []
     return (
@@ -209,6 +221,7 @@ def test_reasoning_after_tool_response(parser, tokenizer):
         delta = parser.parse_delta(
             tok_str, ids, request,
             prompt_token_ids=prompt_ids if first else None,
+            finished=False,
         )
         first = False
         if delta is None:
@@ -289,17 +302,7 @@ def test_empty_thinking_block_tool_call_no_reasoning_leak(parser, tokenizer):
     assert tool_calls[0].function.name == "find"
 
     # Single-delta: the whole output arrives in one chunk (stream-interval 20).
-    parser2_instance = type(parser)(tokenizer)
-    type(parser2_instance).reasoning_parser_cls = type(parser).reasoning_parser_cls
-    type(parser2_instance).tool_parser_cls = type(parser).tool_parser_cls
-
-    # Build a fresh parser with the correct classes set.
-    from vllm.parser.abstract_parser import _WrappedParser
-    from vllm.reasoning.gemma4_reasoning_parser import Gemma4ReasoningParser
-    from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
-    _WrappedParser.reasoning_parser_cls = Gemma4ReasoningParser
-    _WrappedParser.tool_parser_cls = Gemma4ToolParser
-    parser2 = _WrappedParser(tokenizer)
+    parser2 = _Gemma4Parser(tokenizer)
 
     full_text = (
         '<|channel>thought\n<channel|>'
