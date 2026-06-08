@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
@@ -1633,3 +1633,108 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
 
     # If there were no matches, return the untouched param name
     return name
+
+
+def maybe_remap_moe_expert_param_name(
+    name: str,
+    params_dict: dict[str, torch.nn.Parameter],
+) -> str:
+    """
+    Remap MoE expert parameter names to account for routed_experts hierarchy.
+
+    This handles the transition from the old FusedMoE structure where weights
+    were directly in the experts module, to the new MoERunner → RoutedExperts
+    structure.
+
+    Checkpoint weights have names like:
+        layers.0.mlp.experts.w13_weight
+    But actual parameters are now:
+        layers.0.mlp.experts.routed_experts.w13_weight
+
+    This function inserts 'routed_experts.' into the path when needed.
+
+    Args:
+        name: Parameter name from checkpoint
+        params_dict: Dictionary of model parameters (from named_parameters())
+
+    Returns:
+        Remapped parameter name if routed_experts hierarchy exists,
+        otherwise the original name
+    """
+    # Only remap if this looks like an expert parameter
+    if ".mlp.experts." not in name:
+        return name
+
+    # Skip if already has routed_experts
+    if ".mlp.experts.routed_experts." in name:
+        return name
+
+    # Expert parameter patterns to check
+    expert_param_suffixes = [
+        "w13_weight",
+        "w2_weight",
+        "w13_weight_scale",
+        "w2_weight_scale",
+        "w13_input_scale",
+        "w2_input_scale",
+        "w13_bias",
+        "w2_bias",
+        "w13_scale",
+        "w2_scale",
+        "w13_g_idx",
+        "w2_g_idx",
+        "w13_qweight",
+        "w2_qweight",
+        "w13_qzeros",
+        "w2_qzeros",
+        "w13_weight_shape",
+        "w2_weight_shape",
+    ]
+
+    # Check if this is an expert weight parameter
+    is_expert_param = any(
+        f".{suffix}" in name or name.endswith(suffix)
+        for suffix in expert_param_suffixes
+    )
+
+    if not is_expert_param:
+        return name
+
+    # Try inserting routed_experts
+    new_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+
+    # Only use the new name if it exists in the model
+    if new_name in params_dict:
+        return new_name
+
+    # Otherwise return original name (old checkpoint format or different structure)
+    return name
+
+
+def remap_moe_expert_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    params_dict: dict[str, torch.nn.Parameter],
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """
+    Wrapper generator that remaps MoE expert parameter names for backward compatibility.
+
+    This allows models with custom weight loading to automatically handle both old
+    and new checkpoint formats without needing model-specific remapping code.
+
+    Usage:
+        params_dict = dict(model.named_parameters())
+        for name, weight in remap_moe_expert_weights(weights, params_dict):
+            # name is automatically remapped if needed
+            param = params_dict[name]
+            ...
+
+    Args:
+        weights: Iterator of (name, tensor) tuples from checkpoint
+        params_dict: Dictionary of model parameters (from named_parameters())
+
+    Yields:
+        (remapped_name, tensor) tuples
+    """
+    for name, weight in weights:
+        remapped_name = maybe_remap_moe_expert_param_name(name, params_dict)
+        yield (remapped_name, weight)
