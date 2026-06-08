@@ -418,9 +418,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
         lora_context = self._build_lora_context()
-        self._require_lora_capable_experts(
-            self._moe_kernel.fused_experts
-        ).set_lora_context(lora_context)
+        fused_experts = self._moe_kernel.fused_experts
+        assert isinstance(fused_experts, LoRAExpertsMixin), (
+            f"{type(fused_experts).__name__} does not support LoRA context setup."
+        )
+        fused_experts.set_lora_context(lora_context)
         prepare_finalize = self._moe_kernel.prepare_finalize
         if hasattr(prepare_finalize, "set_lora_context"):
             prepare_finalize.set_lora_context(lora_context)
