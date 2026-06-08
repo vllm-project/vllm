@@ -23,8 +23,9 @@ vllm serve ... \
   --speculative-config '{"method":"dflash","model":"...","num_speculative_tokens":15,"speculative_adaptive_verify_config":"/path/to/config.json"}'
 ```
 
-- The controller is only constructed when `method=dflash`. Other spec methods
-  log a warning and ignore the path.
+- The controller is only constructed for parallel speculative methods:
+  `method=dflash`, or `method=draft_model` with `parallel_drafting=true`
+  (PARD). Other spec methods log a warning and ignore the path.
 - Example JSON: `verify_adaptive_config.example.json` in this directory.
 - Field reference: `VerifyAdaptiveConfig` in `verify_adaptive_config.py`.
 

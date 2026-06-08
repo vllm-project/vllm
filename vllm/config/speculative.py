@@ -263,8 +263,8 @@ class SpeculativeConfig:
 
     speculative_adaptive_verify_config: str | None = None
     """Path to a JSON file for :class:`~vllm.v1.spec_decode.verify_adaptive_config.
-    VerifyAdaptiveConfig`.  Enables adaptive verifier query lengths for DFlash
-    speculative decoding.  Also settable via
+    VerifyAdaptiveConfig`.  Enables adaptive verifier query lengths for parallel
+    speculative decoding (DFlash, PARD).  Also settable via
     ``--speculative-adaptive-verify-config`` or the
     ``speculative_adaptive_verify_config`` key inside ``--speculative-config``."""
 
@@ -1079,6 +1079,12 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def supports_adaptive_verify(self) -> bool:
+        """Whether adaptive verifier step-length is supported."""
+        return self.use_dflash() or (
+            self.uses_draft_model() and self.parallel_drafting
+        )
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

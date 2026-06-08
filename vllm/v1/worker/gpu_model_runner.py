@@ -627,11 +627,15 @@ class GPUModelRunner(
             else None
         )
         if _adaptive_cfg_path:
-            if self.speculative_config is None or not self.speculative_config.use_dflash():
+            if (
+                self.speculative_config is None
+                or not self.speculative_config.supports_adaptive_verify()
+            ):
                 logger.warning(
                     "speculative_adaptive_verify_config is set but speculative "
-                    "method is not dflash; adaptive verifier step-length is "
-                    "disabled."
+                    "method does not support adaptive verifier step-length "
+                    "(requires dflash or draft_model with parallel_drafting); "
+                    "adaptive verify is disabled."
                 )
             else:
                 _acfg = VerifyAdaptiveConfig.from_json(_adaptive_cfg_path)
