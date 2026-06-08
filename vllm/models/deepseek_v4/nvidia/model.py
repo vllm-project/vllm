@@ -647,9 +647,39 @@ class DeepseekV4MoE(nn.Module):
         self._sync_fused_moe_metadata()
 
     def _sync_fused_moe_metadata(self) -> None:
-        self.n_logical_experts = self.experts.logical_num_experts
-        self.n_physical_experts = self.experts.global_num_experts
-        self.n_local_physical_experts = self.experts.local_num_experts
+        experts = self.experts
+        moe_config = getattr(experts, "moe_config", None)
+        routed_experts = getattr(experts, "routed_experts", experts)
+
+        def get_optional_attr(obj, name: str):
+            return None if obj is None else getattr(obj, name, None)
+
+        def first_defined(*values):
+            return next((value for value in values if value is not None), None)
+
+        self.n_logical_experts = first_defined(
+            get_optional_attr(experts, "logical_num_experts"),
+            get_optional_attr(moe_config, "num_logical_experts"),
+        )
+        self.n_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "global_num_experts"),
+            get_optional_attr(experts, "global_num_experts"),
+            get_optional_attr(moe_config, "num_experts"),
+        )
+        self.n_local_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "local_num_experts"),
+            get_optional_attr(experts, "local_num_experts"),
+            get_optional_attr(moe_config, "num_local_experts"),
+        )
+        if (
+            self.n_logical_experts is None
+            or self.n_physical_experts is None
+            or self.n_local_physical_experts is None
+        ):
+            raise AttributeError(
+                "DeepseekV4MoE FusedMoE metadata is incomplete after "
+                "construction."
+            )
         self.n_local_experts = self.n_local_physical_experts
         self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts
 
