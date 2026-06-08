@@ -401,6 +401,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
 
+        stop_token_ids = list(default_sampling_params.get("stop_token_ids") or ())
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -408,6 +409,7 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,

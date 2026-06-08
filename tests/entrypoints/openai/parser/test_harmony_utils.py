@@ -6,7 +6,10 @@ from openai.types.responses import FunctionTool
 from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.parser import harmony_utils
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
@@ -24,6 +27,7 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 _TOOL_PARAMETERS = {
     "type": "object",
@@ -292,6 +296,44 @@ def test_harmony_default_stop_tokens_added_when_eos_is_active(monkeypatch):
     assert request_defaults is not default_sampling_params
     assert request_defaults["stop_token_ids"] == [123, 200002, 200012]
     assert default_sampling_params["stop_token_ids"] == [123, 200002]
+
+
+def test_chat_completion_uses_harmony_default_stop_tokens(monkeypatch):
+    def get_stop_tokens():
+        return [200002, 200012]
+
+    monkeypatch.setattr(
+        harmony_utils, "get_stop_tokens_for_assistant_actions", get_stop_tokens
+    )
+    request_defaults = get_harmony_request_default_sampling_params(
+        {"temperature": 0.0}, ignore_eos=False
+    )
+    request = ChatCompletionRequest(messages=[], model="test")
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=16, default_sampling_params=request_defaults
+    )
+
+    assert sampling_params.stop_token_ids == [200002, 200012]
+
+
+def test_responses_uses_harmony_default_stop_tokens(monkeypatch):
+    def get_stop_tokens():
+        return [200002, 200012]
+
+    monkeypatch.setattr(
+        harmony_utils, "get_stop_tokens_for_assistant_actions", get_stop_tokens
+    )
+    request_defaults = get_harmony_request_default_sampling_params(
+        {"temperature": 0.0}, ignore_eos=False
+    )
+    request = ResponsesRequest(input="hello", model="test")
+
+    sampling_params = request.to_sampling_params(
+        default_max_tokens=16, default_sampling_params=request_defaults
+    )
+
+    assert sampling_params.stop_token_ids == [200002, 200012]
 
 
 class TestCommonParseInputToHarmonyMessage:
