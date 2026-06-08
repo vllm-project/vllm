@@ -2018,6 +2018,7 @@ class EngineArgs:
             usage_context,
             model_config,
             parallel_config,
+            speculative_config,
         )
 
         assert self.max_num_batched_tokens is not None, (
@@ -2482,6 +2483,7 @@ class EngineArgs:
         usage_context: UsageContext | None,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        speculative_config: SpeculativeConfig | None = None,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
@@ -2543,6 +2545,22 @@ class EngineArgs:
                         model_config.model,
                     )
                     self.max_num_batched_tokens = mm_min
+
+            if speculative_config is not None:
+                assert self.max_num_seqs is not None, (
+                    "max_num_seqs must be set by this point"
+                )
+                # Match the speculative scheduled-token warning floor in
+                # VllmConfig after reserving any extra drafting slots.
+                min_scheduled_tokens = 8192
+                num_draft_slots = (
+                    speculative_config.max_num_new_slots_for_drafting
+                    * self.max_num_seqs
+                )
+                self.max_num_batched_tokens = max(
+                    self.max_num_batched_tokens,
+                    min_scheduled_tokens + num_draft_slots,
+                )
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.

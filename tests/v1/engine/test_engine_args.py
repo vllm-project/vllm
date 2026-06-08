@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import ArgumentError
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,3 +129,64 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def _get_default_max_num_batched_tokens_for_spec_decode(
+    *,
+    max_num_new_slots_for_drafting: int,
+    max_num_batched_tokens: int | None = None,
+) -> int:
+    model_config = SimpleNamespace(
+        max_model_len=32768,
+        is_multimodal_model=False,
+        is_mm_prefix_lm=False,
+    )
+    parallel_config = SimpleNamespace(use_batched_dp_moe=False)
+    speculative_config = SimpleNamespace(
+        max_num_new_slots_for_drafting=max_num_new_slots_for_drafting
+    )
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        max_model_len=32768,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=64,
+        enforce_eager=True,
+    )
+    engine_args.enable_chunked_prefill = True
+    engine_args._set_default_max_num_seqs_and_batched_tokens_args(
+        UsageContext.OPENAI_API_SERVER,
+        model_config,
+        parallel_config,
+        speculative_config,
+    )
+
+    return engine_args.max_num_batched_tokens
+
+
+def test_spec_decode_raises_default_batched_tokens_floor():
+    assert (
+        _get_default_max_num_batched_tokens_for_spec_decode(
+            max_num_new_slots_for_drafting=0
+        )
+        == 8192
+    )
+
+
+def test_spec_decode_includes_draft_slot_reserve_in_default_batched_tokens():
+    assert (
+        _get_default_max_num_batched_tokens_for_spec_decode(
+            max_num_new_slots_for_drafting=1
+        )
+        == 8192 + 64
+    )
+
+
+def test_spec_decode_keeps_explicit_batched_tokens():
+    assert (
+        _get_default_max_num_batched_tokens_for_spec_decode(
+            max_num_new_slots_for_drafting=1,
+            max_num_batched_tokens=2048,
+        )
+        == 2048
+    )
