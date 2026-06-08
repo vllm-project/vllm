@@ -177,9 +177,12 @@ class XpuMemAllocator:
 
         for ptr, data in self.pointer_to_data.items():
             size_in_bytes = data.handle[1]
+            if not data.is_mapped:
+                continue
             total_bytes += size_in_bytes
             if data.tag not in offload_tags:
                 unmap_and_release(data.handle)
+                data.is_mapped = False
                 continue
 
             backup_bytes += size_in_bytes
@@ -201,6 +204,7 @@ class XpuMemAllocator:
             data.cpu_backup_tensor = cpu_backup_tensor
 
             unmap_and_release(data.handle)
+            data.is_mapped = False
 
         logger.info(
             "XpuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -216,11 +220,38 @@ class XpuMemAllocator:
         if callable(xpu_empty_cache):
             xpu_empty_cache()
 
+    def release_tags(self, tags: tuple[str, ...] | str) -> None:
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        released_bytes = 0
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags or not data.is_mapped:
+                continue
+            released_bytes += data.handle[1]
+            data.cpu_backup_tensor = None
+            unmap_and_release(data.handle)
+            data.is_mapped = False
+
+        logger.info(
+            "XpuMemAllocator: released %.2f GiB memory for tags %s.",
+            released_bytes / 1024**3,
+            tags,
+        )
+
+        gc.collect()
+        xpu_empty_cache = getattr(torch.xpu, "empty_cache", None)
+        if callable(xpu_empty_cache):
+            xpu_empty_cache()
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         for ptr, data in self.pointer_to_data.items():
             if tags is not None and data.tag not in tags:
                 continue
+            if data.is_mapped:
+                continue
             create_and_allocate(data.handle)
+            data.is_mapped = True
 
             cpu_backup_tensor = data.cpu_backup_tensor
             if cpu_backup_tensor is None:

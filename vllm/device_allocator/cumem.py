@@ -188,6 +188,8 @@ class CuMemAllocator:
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
+            if not data.is_mapped:
+                continue
             total_bytes += handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
@@ -202,6 +204,7 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -210,6 +213,28 @@ class CuMemAllocator:
             total_bytes / 1024**3,
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
+        )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def release_tags(self, tags: tuple[str, ...] | str) -> None:
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        released_bytes = 0
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags or not data.is_mapped:
+                continue
+            released_bytes += data.handle[1]
+            data.cpu_backup_tensor = None
+            unmap_and_release(data.handle)
+            data.is_mapped = False
+
+        logger.info(
+            "CuMemAllocator: released %.2f GiB memory for tags %s.",
+            released_bytes / 1024**3,
+            tags,
         )
 
         gc.collect()
@@ -228,8 +253,11 @@ class CuMemAllocator:
         """
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
+                if data.is_mapped:
+                    continue
                 handle = data.handle
                 create_and_map(handle)
+                data.is_mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
