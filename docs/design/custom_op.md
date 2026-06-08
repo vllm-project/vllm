@@ -1,8 +1,10 @@
-# CustomOp
+# CustomOp and PluggableLayer
 
 `CustomOp` is an abstract class used for dispatching the forward method of various operations to the appropriate backend. It also offers a mechanism for both vLLM and OOT (Out-Of-Tree) plugins to register their custom operations.
 
-This document will introduce how CustomOp works in vLLM and how to implement a new `CustomOp`.
+`PluggableLayer` is similar to `CustomOp` but does not offer forward dispatching mechanism. OOT plugins should override the class of the layer totally to implement the forward method.
+
+This document will introduce how CustomOp and PluggableLayer work in vLLM and how to implement a new one.
 
 ## How CustomOp Works in vLLM
 
@@ -51,8 +53,9 @@ For example:
 **1. Attention:**
 
 ```python
---8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+--8<-- "vllm/model_executor/layers/attention/mla_attention.py:mla_decode_concat_quant_fp8"
 
+--8<-- "vllm/model_executor/layers/attention/static_sink_attention.py:static_sink_attention"
 ```
 
 **2. Activation:**
@@ -79,6 +82,12 @@ For example:
 --8<-- "vllm/model_executor/layers/activation.py:swigluoai_and_mul"
 
 --8<-- "vllm/model_executor/layers/activation.py:fatrelu_and_mul"
+
+--8<-- "vllm/model_executor/layers/activation.py:silu_and_mul_with_clamp"
+
+--8<-- "vllm/model_executor/layers/activation.py:gelu"
+
+--8<-- "vllm/model_executor/layers/activation.py:swiglustep_and_mul"
 ```
 
 **3. MM-Conv:**
@@ -89,59 +98,27 @@ For example:
 --8<-- "vllm/model_executor/layers/conv.py:conv3d"
 ```
 
-**4. Embedding:**
+**4. Mamba:**
 
 ```python
---8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:vocab_parallel_embedding"
-
---8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:parallel_lm_head"
-```
-
-**5. Linear:**
-
-```python
---8<-- "vllm/model_executor/layers/linear.py:row_parallel_linear"
-
---8<-- "vllm/model_executor/layers/linear.py:column_parallel_linear"
-
---8<-- "vllm/model_executor/layers/linear.py:replicated_linear"
-```
-
-**6. Logits Processor:**
-
-```python
---8<-- "vllm/model_executor/layers/logits_processor.py:logits_processor"
-```
-
-**7. Mamba:**
-
-```python
---8<-- "vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
-
---8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mamba_mixer2"
-
 --8<-- "vllm/model_executor/layers/mamba/mamba_mixer2.py:mixer2_gated_rms_norm"
 
---8<-- "vllm/model_executor/models/plamo2.py:plamo2_mamba_mixer"
+--8<-- "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py:chunk_gated_delta_rule"
 
---8<-- "vllm/model_executor/layers/mamba/short_conv.py:short_conv"
+--8<-- "vllm/model_executor/layers/minimax_rms_norm/rms_norm_tp.py:minimax_text01_rmsnorm_tp"
 ```
 
-**8. MoE:**
+**5. MoE:**
 
 ```python
---8<-- "vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
-
 --8<-- "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
 
 --8<-- "vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py:unquantized_fused_moe"
 
---8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
-
 --8<-- "vllm/model_executor/layers/fused_moe/router/grouped_topk_router.py:grouped_topk"
 ```
 
-**9. Norm:**
+**6. Norm:**
 
 ```python
 --8<-- "vllm/model_executor/layers/layernorm.py:rms_norm"
@@ -151,13 +128,13 @@ For example:
 --8<-- "vllm/model_executor/layers/layernorm.py:gemma_rms_norm"
 ```
 
-**10. Quantization:**
+**7. Quantization:**
 
 ```python
 --8<-- "vllm/model_executor/layers/quantization/input_quant_fp8.py:quant_fp8"
 ```
 
-**11. Rope:**
+**8. Rope:**
 
 ```python
 --8<-- "vllm/model_executor/layers/rotary_embedding/base.py:rotary_embedding"
@@ -167,12 +144,102 @@ For example:
 --8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
 ```
 
-**12. Encoder:**
+**9. Encoder:**
+
+```python
+--8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
+```
+
+**10. mHC:**
+
+```python
+--8<-- "vllm/model_executor/layers/mhc.py:mhc_pre"
+
+--8<-- "vllm/model_executor/layers/mhc.py:mhc_post"
+
+--8<-- "vllm/model_executor/layers/mhc.py:hc_head"
+
+--8<-- "vllm/model_executor/layers/mhc.py:mhc_fused_post_pre"
+```
+
+**11. Sparse Attention Indexer:**
+
+```python
+--8<-- "vllm/model_executor/layers/sparse_attn_indexer.py:sparse_attn_indexer"
+```
+
+**12. Fused RMSNormGated:**
+
+```python
+--8<-- "vllm/model_executor/layers/fla/ops/kda.py:fused_rms_norm_gated"
+```
+
+## Types of Supported PluggableLayer in vLLM
+
+**1. Attention:**
+
+```python
+--8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+```
+
+**2. Embedding:**
+
+```python
+--8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:vocab_parallel_embedding"
+
+--8<-- "vllm/model_executor/layers/vocab_parallel_embedding.py:parallel_lm_head"
+```
+
+**3. Linear:**
+
+```python
+--8<-- "vllm/model_executor/layers/linear.py:row_parallel_linear"
+
+--8<-- "vllm/model_executor/layers/linear.py:column_parallel_linear"
+
+--8<-- "vllm/model_executor/layers/linear.py:replicated_linear"
+```
+
+**4. Logits Processor:**
+
+```python
+--8<-- "vllm/model_executor/layers/logits_processor.py:logits_processor"
+```
+
+**5. MoE:**
+
+```python
+--8<-- "vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
+
+--8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
+```
+
+**6. Mamba:**
+
+```python
+--8<-- "vllm/model_executor/layers/mamba/mamba_mixer.py:mamba_mixer"
+
+--8<-- "vllm/model_executor/layers/mamba/short_conv.py:short_conv"
+
+--8<-- "vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py:kimi_gated_delta_net_attention"
+
+--8<-- "vllm/model_executor/layers/mamba/gdn/olmo_gdn_linear_attn.py:olmo_hybrid_gated_delta_net_attention"
+
+--8<-- "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py:qwen_gated_delta_net_attention"
+
+--8<-- "vllm/model_executor/layers/mamba/linear/bailing_linear_attn.py:bailing_moe_linear_attention"
+
+--8<-- "vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py:minimax_text_01_attention"
+
+--8<-- "vllm/model_executor/layers/mamba/mamba2/mamba_mixer2.py:mamba_mixer2"
+
+--8<-- "vllm/model_executor/layers/mamba/mamba2/plamo2_mixer2.py:plamo2_mamba_mixer2"
+```
+
+**7. Encoder:**
 
 ```python
 --8<-- "vllm/model_executor/models/deepencoder2.py:qwen2_decoder"
-
---8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
 
 --8<-- "vllm/model_executor/models/deepencoder.py:rel_pos_attention"
 ```

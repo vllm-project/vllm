@@ -432,8 +432,12 @@ def rms_norm_gated(
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
 
+# --8<-- [start:fused_rms_norm_gated]
 @CustomOp.register("fused_rms_norm_gated")
 class FusedRMSNormGated(CustomOp):
+    """Fused RMSNormGated CustomOp."""
+
+    # --8<-- [end:fused_rms_norm_gated]
     def __init__(
         self,
         hidden_size: int,

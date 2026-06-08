@@ -43,6 +43,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
+# --8<-- [start:olmo_hybrid_gated_delta_net_attention]
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
 class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
     """
@@ -51,6 +52,8 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
     """
+
+    # --8<-- [end:olmo_hybrid_gated_delta_net_attention]
 
     def get_state_shape(
         self,
