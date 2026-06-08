@@ -190,17 +190,18 @@ class CudagraphDispatcher:
             assert self.compilation_config.cudagraph_capture_sizes is not None, (
                 "Cudagraph capture sizes must be set when mixed mode is enabled."
             )
-            for bs, num_active_loras, dycp_reqs in product(
-                self.compilation_config.cudagraph_capture_sizes, lora_cases, range(num_dycp_reqs + 1),
+            for bs, num_active_loras in product(
+                self.compilation_config.cudagraph_capture_sizes, lora_cases
             ):
-                batch_desc = self._create_padded_batch_descriptor(
-                    bs, False, num_active_loras > 0, num_active_loras, dycp_reqs
-                )
-                # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
-                # because FA3's scheduler_metadata computation depends on it.
-                if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
-                    batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
-                self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
+                for dycp_reqs in range(min(num_dycp_reqs, bs) + 1):
+                    batch_desc = self._create_padded_batch_descriptor(
+                        bs, False, num_active_loras > 0, num_active_loras, dycp_reqs
+                    )
+                    # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
+                    # because FA3's scheduler_metadata computation depends on it.
+                    if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+                        batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
+                    self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -220,15 +221,20 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs, num_active_loras, dycp_reqs in product(
-                cudagraph_capture_sizes_for_decode, lora_cases, range(num_dycp_reqs + 1),
+            for bs, num_active_loras in product(
+                cudagraph_capture_sizes_for_decode, lora_cases
             ):
-                self.add_cudagraph_key(
-                    CUDAGraphMode.FULL,
-                    self._create_padded_batch_descriptor(
-                        bs, True, num_active_loras > 0, num_active_loras, dycp_reqs
-                    ),
-                )
+                for dycp_reqs in range(min(num_dycp_reqs, bs) + 1):
+                    self.add_cudagraph_key(
+                        CUDAGraphMode.FULL,
+                        self._create_padded_batch_descriptor(
+                            bs,
+                            True,
+                            num_active_loras > 0,
+                            num_active_loras,
+                            dycp_reqs,
+                        ),
+                    )
 
         self.keys_initialized = True
 
