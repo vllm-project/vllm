@@ -2687,22 +2687,8 @@ class NixlConnectorWorker:
                 if bid not in bids_to_check:
                     bids_to_check.append(bid)
 
-        checked = 0
-        for layer_name, cache_val in list(self.device_kv_caches.items())[:8]:
-            if isinstance(cache_val, torch.Tensor):
-                t = cache_val
-            elif isinstance(cache_val, (tuple, list)):
-                t = cache_val[0] if len(cache_val) > 0 else None
-                if t is None:
-                    continue
-            else:
-                continue
-
-            if not isinstance(t, torch.Tensor):
-                continue
-
-            is_mla = ".attn" in layer_name
-            # Check only transferred blocks — one block is tiny (~18 KB)
+        # Helper to spot-check one layer's transferred blocks
+        def _check_layer(label: str, name: str, t: torch.Tensor) -> None:
             block_stats = ""
             for bid in bids_to_check[:3]:
                 if bid < t.shape[0]:
@@ -2716,15 +2702,38 @@ class NixlConnectorWorker:
                     )
             logger.warning(
                 "[DESC-DEBUG]   %s layer=%s shape=%s dtype=%s%s",
-                "MLA" if is_mla else "SSM",
-                layer_name,
-                tuple(t.shape),
-                t.dtype,
-                block_stats,
+                label, name, tuple(t.shape), t.dtype, block_stats,
             )
-            checked += 1
 
-        if checked == 0:
+        # Check first 2 KDA layers (conv state from tuple)
+        checked = 0
+        for layer_name, cache_val in list(self.device_kv_caches.items()):
+            if checked >= 2:
+                break
+            if isinstance(cache_val, (tuple, list)):
+                t = cache_val[0] if len(cache_val) > 0 else None
+                if t is None or not isinstance(t, torch.Tensor):
+                    continue
+                if ".attn" in layer_name:
+                    continue  # skip MLA entries here
+                _check_layer("SSM", layer_name, t)
+                checked += 1
+
+        # CRITICAL: Check ALL MLA layers (keys containing ".self_attn.attn")
+        mla_count = 0
+        for layer_name, cache_val in self.device_kv_caches.items():
+            if ".attn" not in layer_name:
+                continue
+            if isinstance(cache_val, torch.Tensor):
+                _check_layer("MLA", layer_name, cache_val)
+                mla_count += 1
+            elif isinstance(cache_val, (tuple, list)):
+                for i, c in enumerate(cache_val):
+                    if isinstance(c, torch.Tensor):
+                        _check_layer(f"MLA[{i}]", layer_name, c)
+                        mla_count += 1
+
+        if checked == 0 and mla_count == 0:
             logger.warning(
                 "[DESC-DEBUG]   No torch.Tensor found in device_kv_caches. Types: %s",
                 {
