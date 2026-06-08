@@ -973,10 +973,6 @@ class NixlConnectorWorker:
                         f"{self.transfer_topo.is_kv_layout_blocks_first}"
                     )
 
-                # Allow heterogeneous per-layer KV tensor sizes, e.g. a
-                # full-attn (GQA) main model mixed with MLA regions; per-layer
-                # sizes live in block_len_per_layer. Equal-TP enforced at
-                # handshake.
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
                 self.device_id = max(cache.get_device(), 0)
