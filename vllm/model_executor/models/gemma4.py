@@ -1051,11 +1051,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Final norm: output = norm(x) * weight
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Embedding scale = sqrt(hidden_size)
-        # Downcast to model dtype (bfloat16 etc.) for numerical parity
+        # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
         self.register_buffer(
             "normalizer",
-            torch.tensor(config.hidden_size**0.5),
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=vllm_config.model_config.dtype,
+            ),
             persistent=False,
         )
 
@@ -1108,7 +1111,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             )
             self.hidden_states = torch.zeros(
                 (max_num_tokens, config.hidden_size),
-                dtype=self.embed_tokens.weight.dtype,
+                dtype=vllm_config.model_config.dtype,
                 device=device,
             )
             if (
@@ -1121,7 +1124,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         config.num_hidden_layers,
                         self.hidden_size_per_layer_input,
                     ),
-                    dtype=self.embed_tokens.weight.dtype,
+                    dtype=vllm_config.model_config.dtype,
                     device=device,
                 )
             else:
@@ -1406,16 +1409,6 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
@@ -1492,6 +1485,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    # Skip if name doesn't exist in params_dict (e.g., individual
+                    # expert weights that should have been handled above)
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(

@@ -774,6 +774,27 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+def test_reset_connector_cache_no_connector_is_no_op_success():
+    """``reset_connector_cache`` must return True when no connector is
+    configured.
+
+    Without this, ``reset_prefix_cache(reset_connector=True)`` returns
+    ``False`` on every engine that doesn't have a KV connector configured —
+    even when the local prefix cache reset succeeded — and any caller that
+    interprets the return value as "did the reset I asked for succeed?"
+    sees a spurious failure.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    assert scheduler.connector is None
+
+    # No-connector reset is treated as success.
+    assert scheduler.reset_connector_cache() is True
+
+    # End-to-end: reset_prefix_cache(reset_connector=True) on an idle
+    # scheduler succeeds with or without a connector.
+    assert scheduler.reset_prefix_cache(reset_connector=True) is True
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
@@ -3928,6 +3949,45 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_delayed_kv_connector_free_keeps_scheduler_active():
+    scheduler = create_scheduler(use_kv_connector=True)
+    queued_request, request = create_requests(
+        num_requests=2, req_ids=["queued", "finished"]
+    )
+    scheduler.add_request(queued_request)
+
+    assert not scheduler.has_finished_requests()
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    scheduler.requests[request.request_id] = request
+    scheduler.finished_req_ids = set()
+
+    assert scheduler.has_finished_requests()
+    assert scheduler.has_requests()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.has_finished_requests()
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -4289,3 +4349,206 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
+    """Test that ensure_cache_available() returning False defers the request.
+
+    When the EC connector signals a prefetch is in progress (returns False),
+    the scheduler should:
+    1. Not schedule the request (no KV cache or encoder cache allocated)
+    2. Still schedule other requests behind the deferred one
+    3. Schedule the deferred request on the next step when ensure_cache_available
+       returns True and has_cache_item returns True
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    NUM_TOKENS = 200
+    NUM_ENCODER_TOKENS = 100
+
+    request_deferred = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS,
+        mm_positions=[[PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS)]],
+        req_ids=["deferred"],
+    )[0]
+
+    request_behind = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        req_ids=["behind"],
+    )[0]
+
+    # --- Step 1: ensure_cache_available returns False → request deferred ---
+    scheduler.ec_connector.ensure_cache_available = Mock(return_value=False)
+
+    scheduler.add_request(request_deferred)
+    scheduler.add_request(request_behind)
+    output = scheduler.schedule()
+
+    # ensure_cache_available must have been called with (request, num_computed_tokens=0)
+    # for a brand-new request that has no cached tokens yet.
+    scheduler.ec_connector.ensure_cache_available.assert_called_once_with(
+        request_deferred, 0
+    )
+    # Deferred request must NOT be scheduled
+    assert request_deferred.request_id not in output.num_scheduled_tokens
+    _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
+    # No KV blocks allocated for the deferred request
+    for mgr in scheduler.kv_cache_manager.coordinator.single_type_managers:
+        assert request_deferred.request_id not in mgr.req_to_blocks
+
+    # The text-only request behind the deferred one MUST still be scheduled
+    assert request_behind.request_id in output.num_scheduled_tokens
+    assert output.num_scheduled_tokens[request_behind.request_id] == 20
+
+    # --- Step 2: prefetch done, cache exists → request scheduled ---
+    # has_cache_item is called inside _try_schedule_encoder_inputs (not during
+    # deferral), so it is only relevant here in step 2.
+    scheduler.ec_connector.ensure_cache_available = Mock(return_value=True)
+    scheduler.ec_connector.has_cache_item = Mock(return_value=True)
+
+    output = scheduler.schedule()
+
+    # Now the deferred request should be scheduled
+    assert request_deferred.request_id in output.num_scheduled_tokens
+    assert output.num_scheduled_tokens[request_deferred.request_id] == NUM_TOKENS
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request_deferred])
+    # EC connector metadata should carry the deferred request's MM data
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=request_deferred.mm_features
+    )
+    # No local encoder compute — all loaded externally
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
+    """Test that future mm feature filtering only yields features beyond
+    the computed token frontier.
+
+    Features already within num_computed_tokens (past/boundary) must be
+    filtered out; only features that extend beyond the frontier (future) should
+    be yielded so that connector implementations know which items to prefetch.
+
+    Filter cases:
+      "past":     end = 0  + 16 = 16 <  32 → filtered OUT
+      "boundary": end = 16 + 16 = 32 == 32 → filtered OUT (condition is >, not >=)
+      "future":   end = 48 + 32 = 80 >  32 → yielded
+    """
+    BLOCK_SIZE = 16
+    NUM_COMPUTED_TOKENS = BLOCK_SIZE * 2  # 32
+    NUM_TOKENS = BLOCK_SIZE * 8  # 128
+
+    HASH_PAST = "hash_past"
+    HASH_BOUNDARY = "hash_boundary"
+    HASH_FUTURE = "hash_future"
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS,
+        mm_hashes_list=[[HASH_PAST, HASH_BOUNDARY, HASH_FUTURE]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=BLOCK_SIZE),  # end=16 (past)
+                PlaceholderRange(offset=16, length=BLOCK_SIZE),  # end=32 (boundary)
+                PlaceholderRange(offset=48, length=BLOCK_SIZE * 2),  # end=80 (future)
+            ]
+        ],
+        block_size=BLOCK_SIZE,
+    )[0]
+
+    future_hashes = [
+        f.identifier
+        for f in request.mm_features
+        if f.mm_position.offset + f.mm_position.length > NUM_COMPUTED_TOKENS
+    ]
+
+    assert future_hashes == [HASH_FUTURE], (
+        f"Expected only {HASH_FUTURE!r} from future mm feature filtering, "
+        f"got {future_hashes!r}. Past/boundary features must be filtered out."
+    )
+
+
+def test_async_load_reservation_prevents_wedge_e2e():
+    """Same wedge scenario as PR #40968's lateral-preemption e2e test, but
+    resolved by reservation-based admission control instead of preemption.
+
+    A (8 blocks) and B (5 blocks) both want an async KV load, sharing a 4-block
+    prefix, in a 10-block pool (9 usable). Admitting both loads would wedge:
+    once their recvs finish neither can complete its local prefill (8+5 > 9).
+
+    Here the reservation gate refuses to admit B's load while A's full sequence
+    is still reserved, so B never holds blocks and A is free to complete - no
+    deadlock, and (unlike lateral preemption) B is never preempted.
+    """
+    BLOCK_SIZE = 16
+    A_TOKENS = BLOCK_SIZE * 8  # bigger request
+    B_TOKENS = BLOCK_SIZE * 5  # smaller request
+    MATCHED_TOKENS = BLOCK_SIZE * 4  # 4-block prefix loaded for both
+    NUM_BLOCKS = 10  # 9 usable; both prefixes fit, but not both full sequences
+
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        num_blocks=NUM_BLOCKS,
+        max_num_seqs=4,
+        max_num_batched_tokens=A_TOKENS * 2,
+        use_kv_connector=mock_kv(matched_tokens=MATCHED_TOKENS, is_async=True),
+    )
+
+    [a] = create_requests(
+        num_requests=1, num_tokens=A_TOKENS, block_size=BLOCK_SIZE, req_ids=["a"]
+    )
+    [b] = create_requests(
+        num_requests=1, num_tokens=B_TOKENS, block_size=BLOCK_SIZE, req_ids=["b"]
+    )
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+
+    EMPTY_OUTPUT = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+
+    # Step 1: A's load is admitted; B's is held back by the reservation (B never
+    # holds blocks, so the wedge precondition - both holding prefixes - is gone).
+    out1 = scheduler.schedule()
+    assert a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert a.num_computed_tokens == MATCHED_TOKENS
+    assert b.status == RequestStatus.WAITING
+    assert b.request_id not in req_to_blocks
+    assert len(scheduler.running) == 0
+    scheduler.update_from_output(out1, EMPTY_OUTPUT)
+
+    # Step 2: nothing changes until A's recv lands.
+    out2 = scheduler.schedule()
+    assert len(scheduler.running) == 0
+    a_finished = dataclasses.replace(
+        EMPTY_OUTPUT,
+        kv_connector_output=KVConnectorOutput(finished_recving=[a.request_id]),
+    )
+    scheduler.update_from_output(out2, a_finished)
+
+    # Step 3: A makes forward progress straight to RUNNING - no preemption was
+    # needed because B never wedged it.
+    out3 = scheduler.schedule()
+    assert a.status == RequestStatus.RUNNING
+    assert a in scheduler.running
+    assert a.request_id in {req.req_id for req in out3.scheduled_new_reqs}
+    assert b.status == RequestStatus.WAITING
+    assert b.num_preemptions == 0
+    assert b.request_id not in req_to_blocks

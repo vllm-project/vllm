@@ -555,22 +555,6 @@ class MiMoV2Model(nn.Module):
             if "mtp" in name:
                 continue
 
-            if self.quant_config is not None:
-                cache_scale_name = self.quant_config.get_cache_scale(name)
-                if cache_scale_name is not None and cache_scale_name in params_dict:
-                    param = params_dict[cache_scale_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-
-                    kv_scale = loaded_weight
-                    if kv_scale.dim() > 0 and kv_scale.numel() > 1:
-                        kv_scale = kv_scale.view(-1)[0]
-
-                    weight_loader(param, kv_scale)
-                    loaded_params.add(cache_scale_name)
-                    continue
-
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
                 if weight_name not in name:

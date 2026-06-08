@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
+    NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_allreduce,
 )
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -114,6 +115,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        if self.world_size > 1:
+            self._log_all_reduce_backend_selection()
+
         if self.use_all2all:
             if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
@@ -133,10 +137,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = DeepEPLLAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
-            elif self.all2all_backend == "mori":
+            elif self.all2all_backend in (
+                "mori_high_throughput",
+                "mori_low_latency",
+            ):
                 from .all2all import MoriAll2AllManager
 
-                self.all2all_manager = MoriAll2AllManager(self.cpu_group)
+                self.all2all_manager = MoriAll2AllManager(
+                    self.cpu_group, self.all2all_backend
+                )
             elif self.all2all_backend == "nixl_ep":
                 from .all2all import NixlEPAll2AllManager
 
@@ -170,6 +179,69 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager.__class__.__name__,
                 scope="global",
             )
+
+    def _log_all_reduce_backend_selection(self) -> None:
+        """Log the all-reduce backends that are active for this group.
+
+        The dispatch chain in ``all_reduce`` tries backends in this order and
+        falls through to the next one if the current backend rejects the
+        input (size/dtype gates) or is disabled. The list of "enabled"
+        backends below is the subset of potential backends that may be
+        chosen at dispatch time for this group; the actual per-call choice
+        depends on the input tensor.
+        """
+        all_potential_ar_backends = [
+            "NCCL_SYMM_MEM",
+            "QUICK_REDUCE",
+            "FLASHINFER",
+            "CUSTOM",
+            "SYMM_MEM",
+            "PYNCCL",
+        ]
+        enabled_ar_backends: list[str] = []
+        # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
+        # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
+        # min_world_size, and world_size either has a tuned entry in
+        # `custom_ar_preferred_ranges` or is greater than
+        # `always_use_above_world_size`. World sizes that fail the latter (e.g.
+        # 5/6/7 with the default config) never dispatch NCCL symm mem
+        # regardless of input. The per-tensor-size check inside the function
+        # stays as a runtime decision.
+        nccl_symm_ws_ok = self.world_size >= NCCL_SYMM_MEM_ALL_REDUCE_CONFIG[
+            "min_world_size"
+        ] and (
+            self.world_size
+            in NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["custom_ar_preferred_ranges"]
+            or self.world_size
+            > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+        )
+        if (
+            self.pynccl_comm is not None
+            and not self.pynccl_comm.disabled
+            and is_symmetric_memory_enabled()
+            and not envs.VLLM_BATCH_INVARIANT
+            and nccl_symm_ws_ok
+        ):
+            enabled_ar_backends.append("NCCL_SYMM_MEM")
+        if self.qr_comm is not None and not self.qr_comm.disabled:
+            enabled_ar_backends.append("QUICK_REDUCE")
+        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
+            enabled_ar_backends.append("FLASHINFER")
+        if self.ca_comm is not None and not self.ca_comm.disabled:
+            enabled_ar_backends.append("CUSTOM")
+        if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
+            enabled_ar_backends.append("SYMM_MEM")
+        if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
+            enabled_ar_backends.append("PYNCCL")
+
+        logger.info_once(
+            "Using %s all-reduce backends (in dispatch order) for group "
+            "'%s' out of potential backends: %s.",
+            "[" + ", ".join(f"'{b}'" for b in enabled_ar_backends) + "]",
+            self.unique_name or "<unnamed>",
+            "[" + ", ".join(f"'{b}'" for b in all_potential_ar_backends) + "]",
+            scope="global",
+        )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR

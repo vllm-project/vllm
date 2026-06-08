@@ -943,7 +943,7 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -1118,7 +1118,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset
                 result.append((addr, kv_block_len, self.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1167,7 +1167,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
@@ -2333,9 +2333,25 @@ class NixlConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
-                    assert num_local_blocks == num_remote_blocks
+                if (
+                    _is_ssm_spec(self._group_spec_types[i])
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
+                    # prior to the last one are placeholders (null blocks). Mind that
+                    # this doesn't really impact transfer, as we only still care about
+                    # the last "block", the full in-place state.
+                    assert num_local_blocks == 1, "SSM can only have one local block"
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif (
+                    self._physical_blocks_per_logical_kv_block
+                    == remote_physical_per_logical
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
+                    # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
                         self._physical_blocks_per_logical_kv_block,
                         remote_physical_per_logical,
@@ -2416,7 +2432,7 @@ class NixlConnectorWorker:
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
         assert self.transfer_topo is not None
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             if mamba_view:
                 block_len = self._mamba_ssm_size[not first_split]
             else:
