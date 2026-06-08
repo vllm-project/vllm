@@ -243,6 +243,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             logger.error("Hidden-states write failed for req_id=%s: %r", req_id, exc)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        # Delay tp rank0 initialization until after distributed init
         self._is_tp_rank_zero = get_tensor_model_parallel_rank() == 0
 
         from vllm.model_executor.models.extract_hidden_states import (

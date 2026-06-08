@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 import os
 import tempfile
 
@@ -9,7 +8,7 @@ import pytest
 import torch
 from safetensors import safe_open
 
-from tests.utils import multi_gpu_test
+from tests.utils import create_new_process_for_each_test, multi_gpu_test
 from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
@@ -87,8 +86,9 @@ def register_predictable_model():
     yield
 
 
+@create_new_process_for_each_test(method="fork")
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Comprehensive test using a predictable dummy model with synthetic weights.
 
@@ -99,12 +99,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     3. Layer ordering is preserved correctly (non-sequential layer IDs)
     4. Multiple prompts of different lengths produce consistent layer values
     """
-    # Force fork so the engine worker inherits the autouse fixture's
-    # ModelRegistry.register_model("PredictableLlamaForCausalLM", ...).
-    # Spawn (the CI default) starts a fresh Python process that wouldn't
-    # see the registration.
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-
     # Test with non-sequential layer ordering to verify correct association
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
@@ -139,8 +133,6 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     hidden_size = llm.llm_engine.model_config.get_hidden_size()
     outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
 
     assert len(outputs) == len(prompts)
 
@@ -166,16 +158,14 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             )
 
 
-def test_extract_hidden_states_chunked_prefill(
-    predictable_llama_config_path, tmp_path, monkeypatch
-):
+@create_new_process_for_each_test(method="fork")
+def test_extract_hidden_states_chunked_prefill(predictable_llama_config_path, tmp_path):
     """Test that hidden states are correctly extracted under chunked prefill.
 
     Sets max_num_batched_tokens to 128 and sends prompts with ~500 tokens
     so that each prompt is split across multiple scheduler iterations.
     Verifies that the hidden states are still correctly reassembled.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
@@ -213,8 +203,6 @@ def test_extract_hidden_states_chunked_prefill(
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     hidden_size = llm.llm_engine.model_config.get_hidden_size()
     outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
 
     assert len(outputs) == len(prompts)
 
@@ -240,12 +228,12 @@ def test_extract_hidden_states_chunked_prefill(
             )
 
 
+@create_new_process_for_each_test(method="fork")
 def test_extract_hidden_states_per_request_options(
-    predictable_llama_config_path, tmp_path, monkeypatch
+    predictable_llama_config_path, tmp_path
 ):
     """Test per-request kv_transfer_params: include_output_tokens and
     hidden_states_path."""
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     layer_ids = [2, 5, 10]
     num_layers = len(layer_ids)
@@ -294,8 +282,6 @@ def test_extract_hidden_states_per_request_options(
     ]
     prompts = ["Short", "Medium length"]
     outputs = llm.generate(prompts, sampling_params_list)
-    del llm
-    gc.collect()
 
     # First output: prompt-only hidden states, default path
     out0 = outputs[0]
@@ -334,6 +320,7 @@ def test_extract_hidden_states_per_request_options(
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
 
 
+@create_new_process_for_each_test()
 def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
     """Smoke test for Qwen3.5 hybrid (mamba + full-attention) models.
     Uses load_format="dummy" to just check shape/plumbing.
@@ -364,8 +351,6 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
     prompts = ["Hello world", "Test prompt with several tokens"]
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
 
     assert len(outputs) == len(prompts)
     for output in outputs:
@@ -388,6 +373,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
 
 @pytest.mark.timeout(60)
 @multi_gpu_test(num_gpus=2)
+@create_new_process_for_each_test()
 def test_extract_hidden_states_tp2():
     """Test that hidden states extraction works with tensor_parallel_size=2."""
     tmp_dir = tempfile.mkdtemp()
@@ -418,8 +404,6 @@ def test_extract_hidden_states_tp2():
     prompts = ["Hello world", "Test prompt with several tokens"]
     sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
     outputs = llm.generate(prompts, sampling_params)
-    del llm
-    gc.collect()
 
     assert len(outputs) == len(prompts)
     for output in outputs:
