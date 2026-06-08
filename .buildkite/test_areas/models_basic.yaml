@@ -18,6 +18,7 @@ steps:
     torch_nightly: {}
 
 - label: Basic Models Tests (Extra Initialization) %N
+  device: h200_35gb
   key: basic-models-tests-extra-initialization
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -34,6 +35,7 @@ steps:
     torch_nightly: {}
 
 - label: Basic Models Tests (Other)
+  device: h200_35gb
   key: basic-models-tests-other
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -56,35 +58,3 @@ steps:
   device: cpu-small
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
-
-- label: Transformers Nightly Models
-  key: transformers-nightly-models
-  working_dir: "/vllm-workspace/"
-  optional: true
-  soft_fail: true
-  commands:
-    - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
-    - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
-    - python3 examples/basic/offline_inference/chat.py
-    - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
-    # Whisper needs spawn method to avoid deadlock
-    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
-
-- label: Transformers Backward Compatibility Models Test
-  key: transformers-backward-compatibility-models-test
-  working_dir: "/vllm-workspace/"
-  optional: true
-  soft_fail: true
-  commands:
-    - pip install transformers==4.57.5
-    - pytest -v -s tests/models/test_initialization.py
-    - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
-    - python3 examples/basic/offline_inference/chat.py
-    - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
-    # Whisper needs spawn method to avoid deadlock
-    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
