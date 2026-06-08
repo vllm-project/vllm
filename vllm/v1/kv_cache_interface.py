@@ -163,10 +163,6 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    # The kernel block sizes the layer's attention backend supports. Carried on the spec
-    # so page-size unification can access it. Tuples for hashability; empty tuple means
-    # "not populated".
-    supported_kernel_block_sizes: tuple = ()
 
     @property
     def page_size_bytes(self) -> int:
@@ -280,7 +276,6 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
-            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -414,7 +409,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
-            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
         )
 
 

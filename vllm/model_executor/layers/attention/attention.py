@@ -91,20 +91,33 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
     )
 
 
-def _smallest_kernel_block(
-    attn_backend: "type[AttentionBackend]", fallback: int
+def _largest_kernel_block_within(
+    attn_backend: "type[AttentionBackend]",
+    per_token_bytes: int,
+    page_budget: int | None,
+    fallback: int,
 ) -> int:
-    """Smallest int kernel block size the backend supports."""
+    """Largest supported kernel block size whose page fits in ``page_budget``.
+
+    A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
+    wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
+    block whose natural page still fits under ``page_budget`` minimizes that waste.
+    Falls back to the smallest supported block when ``page_budget`` is None (no padding
+    — the block is handled by ``unify``'s integer scaling instead) or nothing fits.
+    """
     from vllm.v1.attention.backend import MultipleOf
 
     sizes = attn_backend.get_supported_kernel_block_sizes()
-    ints = [s for s in sizes if isinstance(s, int)]
-    if ints:
-        return min(ints)
-    multiples = [s.base for s in sizes if isinstance(s, MultipleOf)]
-    if multiples:
-        return min(multiples)
-    return fallback
+    candidates = [s for s in sizes if isinstance(s, int)]
+    if not candidates:
+        candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
+    if not candidates:
+        return fallback
+    smallest = min(candidates)
+    if not page_budget or per_token_bytes <= 0:
+        return smallest
+    fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
+    return max(fitting) if fitting else smallest
 
 
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
@@ -585,18 +598,30 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
-        # Backend's supported kernel block sizes — carry on the spec so the
-        # page-size unification pass can read it.
-        kernel_blocks = tuple(self.attn_backend.get_supported_kernel_block_sizes())
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
-            # SW chooses its own block_size (starts at the backend's smallest
-            # kernel-supported size) so the user's ``--block-size`` only
-            # constrains primary attention. ``unify_kv_cache_spec_page_size``
-            # decides the final value via scaling and/or padding.
-            sw_block_size = _smallest_kernel_block(self.attn_backend, block_size)
+            # SW chooses its own block_size, decoupled from the user's
+            # ``--block-size`` (which only constrains primary attention).
+            # When this SW layer is a padded spec (skip-quant: its page is
+            # padded up to ``skip_page_size_padded``), pick the largest kernel
+            # block that still fits the shared page so we waste fewer padding
+            # bytes per block. Otherwise (page_size_padded is None) the smallest
+            # block is fine — ``unify`` scales it up by an integer ratio.
+            shared_page = vllm_config.cache_config.skip_page_size_padded
+            sw_per_token = SlidingWindowSpec(
+                block_size=1,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
+                sliding_window=self.sliding_window,
+            ).real_page_size_bytes
+            sw_block_size = _largest_kernel_block_within(
+                self.attn_backend, sw_per_token, shared_page, block_size
+            )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -605,7 +630,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
-                supported_kernel_block_sizes=kernel_blocks,
+                page_size_padded=shared_page,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import (
@@ -623,7 +648,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
-                supported_kernel_block_sizes=kernel_blocks,
             )
         else:
             return FullAttentionSpec(
@@ -633,7 +657,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
-                supported_kernel_block_sizes=kernel_blocks,
             )
 
 
