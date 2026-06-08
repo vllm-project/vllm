@@ -258,3 +258,71 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_should_advance_uses_new_token_ids_when_provided(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Regression for #43388: when caller passes new_token_ids, the
+        reasoner sees the exact multi-token delta rather than the
+        placeholder-derived window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = True
+        structured_req.reasoner = reasoner
+
+        # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
+        # but only 1 placeholder remains (some drafts were rejected).
+        # The placeholder math would yield delta=[271] and miss </think>.
+        # Passing new_token_ids must override that.
+        end_token_id = 248069
+        new_token_ids = [9, 198, end_token_id, 271]
+        mock_request_with_structured_output.all_token_ids = (
+            [1, 2, 3, 4, 5] + new_token_ids
+        )
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 1
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        # is_reasoning_end_streaming was called with the full new_token_ids
+        # (not the truncated placeholder window).
+        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
+        assert list(called_delta) == new_token_ids
+
+        assert structured_req.reasoning_ended is True
+        assert result is False
+
+    def test_should_advance_without_new_token_ids_falls_back(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Backward compat: callers that don't pass new_token_ids keep
+        the original placeholder-derived delta window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = False
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
+        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.num_output_placeholders = 2
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        # placeholder window: start = 5 - 2 = 3 → delta = [4, 5]
+        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
+        assert list(called_delta) == [4, 5]
+        assert result is False
