@@ -27,7 +27,6 @@
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
 #   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
-#   ENABLE_HMA_FLAG     - set to 1 to enable hybrid KV cache manager
 #   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
 set -ex
 
@@ -85,13 +84,7 @@ if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
 fi
 echo "Using attention backend: ${ATTENTION_BACKEND}"
 
-# ── HMA & extra serve args ────────────────────────────────────────────
-
-ENABLE_HMA_VAR=""
-if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
-  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
-  echo "HMA (Hybrid KV Cache Manager) enabled"
-fi
+# ── Extra serve args ─────────────────────────────────────────────────
 
 EXTRA_SERVE_ARGS=()
 if [[ -n "${VLLM_SERVE_EXTRA_ARGS:-}" ]]; then
@@ -200,9 +193,11 @@ run_test_for_device() {
   local kv_device=$1
 
   if [[ "$kv_device" == "cuda" ]]; then
-    local kv_config='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    local kv_config_p='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+    local kv_config_d='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
   else
-    local kv_config="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_p="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_d="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${kv_device}\"}"
   fi
 
   echo ""
@@ -255,10 +250,9 @@ run_test_for_device() {
       --block-size ${BLOCK_SIZE} \
       --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
       --tensor-parallel-size $PREFILLER_TP_SIZE \
-      --kv-transfer-config "$kv_config" \
+      --kv-transfer-config "$kv_config_p" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
       --attention-backend $ATTENTION_BACKEND \
-      ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
@@ -295,10 +289,9 @@ run_test_for_device() {
       --block-size ${BLOCK_SIZE} \
       --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
       --tensor-parallel-size $DECODER_TP_SIZE \
-      --kv-transfer-config "$kv_config" \
+      --kv-transfer-config "$kv_config_d" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
       --attention-backend $ATTENTION_BACKEND \
-      ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 

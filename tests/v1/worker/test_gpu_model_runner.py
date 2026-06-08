@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -22,6 +23,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
@@ -784,6 +786,73 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
+def test_apply_sparse_weight_patches_updates_only_selected_entries():
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(6, dtype=torch.float32))
+
+    runner = object.__new__(GPUModelRunner)
+    runner.model = DummyModel()
+
+    runner.apply_sparse_weight_patches(
+        [
+            SparseWeightPatch(
+                name="weight",
+                indices=torch.tensor([1, 4], dtype=torch.int32),
+                values=torch.tensor([3.5, -2.0], dtype=torch.float32),
+            )
+        ]
+    )
+
+    expected = torch.tensor([0.0, 3.5, 0.0, 0.0, -2.0, 0.0], dtype=torch.float32)
+    assert torch.equal(runner.get_model().weight.data, expected)
+
+
+def test_apply_sparse_weight_patches_rejects_mismatched_lengths():
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(4, dtype=torch.float32))
+
+    runner = object.__new__(GPUModelRunner)
+    runner.model = DummyModel()
+
+    with pytest.raises(ValueError, match="matching lengths"):
+        runner.apply_sparse_weight_patches(
+            [
+                SparseWeightPatch(
+                    name="weight",
+                    indices=torch.tensor([1, 2], dtype=torch.int32),
+                    values=torch.tensor([1.0], dtype=torch.float32),
+                )
+            ]
+        )
+
+
+def test_apply_sparse_weight_patches_rejects_non_contiguous_param():
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(
+                torch.arange(12, dtype=torch.float32).view(3, 4).t()
+            )
+
+    runner = object.__new__(GPUModelRunner)
+    runner.model = DummyModel()
+
+    with pytest.raises(NotImplementedError, match="contiguous params"):
+        runner.apply_sparse_weight_patches(
+            [
+                SparseWeightPatch(
+                    name="weight",
+                    indices=torch.tensor([1], dtype=torch.int32),
+                    values=torch.tensor([1.0], dtype=torch.float32),
+                )
+            ]
+        )
+
+
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
@@ -1003,8 +1072,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
     """
@@ -1439,8 +1508,8 @@ def test_is_uniform_decode() -> None:
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     """Test that a ValueError is raised when max_num_seqs exceeds the
