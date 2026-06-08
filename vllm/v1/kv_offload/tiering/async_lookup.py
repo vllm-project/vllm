@@ -143,7 +143,6 @@ class AsyncLookupManager(ABC):
             self._lookup_batch.append((key, req_context))
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
-        self.flush()  # TODO: testing
         return state.result
 
     def flush(self) -> None:
@@ -180,6 +179,7 @@ class AsyncLookupManager(ABC):
         Called from the tier's on_request_finished(). Uses the reverse
         index to visit only keys associated with this request.
         """
+        return  # TODO: testing
         for key in self._req_keys.pop(req_id, ()):
             state = self._lookup_state[key]
             state.request_ids.discard(req_id)
