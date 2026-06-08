@@ -264,6 +264,106 @@ class TransformerBlock(torch.nn.Module):
         return output, residual
 
 
+def _load_per_expert_moe_weight(
+    in_name: str,
+    in_weight: torch.Tensor,
+    *,
+    params_dict: dict,
+    loaded_params: set,
+    use_ep: bool,
+    ep_rank_start: int,
+    ep_rank_end: int,
+    tp_rank: int,
+    tp_rank_start: int,
+    tp_rank_end: int,
+    per_rank_intermediate_size: int,
+) -> bool:
+    """Route LLM-Compressor per-expert keys (experts.experts.N.{gate,up,down}_proj.*)
+    into the stacked w13_*/w2_* params, honoring EP/TP. Returns True iff the
+    name matched a per-expert pattern (caller should `continue`)."""
+    if ".mlp.experts.experts." not in in_name:
+        return False
+    parts = in_name.split(".")
+    digits = [int(p) for p in parts if p.isdigit()]
+    if len(digits) != 2:
+        return False
+    layer_id, expert_id = digits
+
+    # EP gating: skip experts owned by other ranks; remap to local id.
+    if use_ep:
+        if not (ep_rank_start <= expert_id < ep_rank_end):
+            return True
+        local_expert_id = expert_id - ep_rank_start
+    else:
+        local_expert_id = expert_id
+
+    # Use the actual TP slice size (shorter than per_rank_intermediate_size
+    # only on the last rank when intermediate_size % tp_size != 0).
+    local_intermediate = tp_rank_end - tp_rank_start
+
+    suffix = "." + parts[-1]
+    if suffix in (".w1_weight", ".w1_weight_scale", ".w1_bias"):
+        fused_suffix = {
+            ".w1_weight": "w13_weight",
+            ".w1_weight_scale": "w13_weight_scale",
+            ".w1_bias": "w13_bias",
+        }[suffix]
+        dim1_start, dim1_end = 0, local_intermediate
+        if not use_ep:
+            in_weight = in_weight[tp_rank_start:tp_rank_end, ...]
+    elif suffix in (".w3_weight", ".w3_weight_scale", ".w3_bias"):
+        fused_suffix = {
+            ".w3_weight": "w13_weight",
+            ".w3_weight_scale": "w13_weight_scale",
+            ".w3_bias": "w13_bias",
+        }[suffix]
+        dim1_start, dim1_end = (
+            per_rank_intermediate_size,
+            per_rank_intermediate_size + local_intermediate,
+        )
+        if not use_ep:
+            in_weight = in_weight[tp_rank_start:tp_rank_end, ...]
+    elif suffix in (".w2_weight", ".w2_weight_scale", ".w2_bias"):
+        fused_suffix = {
+            ".w2_weight": "w2_weight",
+            ".w2_weight_scale": "w2_weight_scale",
+            ".w2_bias": "w2_bias",
+        }[suffix]
+        dim1_start = dim1_end = None
+        # w2_weight: TP-slice the INPUT (intermediate) dim.
+        if not use_ep and suffix == ".w2_weight":
+            in_weight = in_weight[:, tp_rank_start:tp_rank_end]
+        # w2_bias: replicated across ranks in TP; only rank 0 contributes
+        # to the post-all-reduce sum (mirrors the stacked-tensor loader's
+        # "if tp_rank != 0: weight.zero_()").
+        if not use_ep and suffix == ".w2_bias" and tp_rank != 0:
+            in_weight = torch.zeros_like(in_weight)
+    else:
+        return False
+
+    fused_name = f"layers.{layer_id}.mlp.experts.{fused_suffix}"
+    if fused_name not in params_dict:
+        # Model didn't allocate this param (e.g. has_bias=False).
+        return True
+
+    param = params_dict[fused_name]
+    target_slot = param.data[local_expert_id]
+
+    if dim1_start is None:
+        if target_slot.shape != in_weight.shape:
+            target_slot.copy_(in_weight.view(target_slot.shape))
+        else:
+            target_slot.copy_(in_weight)
+    else:
+        dst = target_slot[dim1_start:dim1_end]
+        if dst.shape != in_weight.shape:
+            dst.copy_(in_weight.view(dst.shape))
+        else:
+            dst.copy_(in_weight)
+    loaded_params.add(fused_name)
+    return True
+
+
 @support_torch_compile
 class GptOssModel(nn.Module, EagleModelMixin):
     def __init__(
@@ -984,6 +1084,23 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            # LLM-Compressor / HF gpt-oss per-expert layout: route into the
+            # stacked w13_*/w2_* params.
+            if _load_per_expert_moe_weight(
+                name,
+                weight,
+                params_dict=params_dict,
+                loaded_params=loaded_params,
+                use_ep=use_ep,
+                ep_rank_start=ep_rank_start,
+                ep_rank_end=ep_rank_end,
+                tp_rank=tp_rank,
+                tp_rank_start=tp_rank_start,
+                tp_rank_end=tp_rank_end,
+                per_rank_intermediate_size=per_rank_intermediate_size,
+            ):
+                continue
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -1165,6 +1282,15 @@ class GptOssForCausalLM(
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale",
+            # llm-compressor / HF "experts.experts.N.{gate,up}_proj.*" form:
+            # rename to .w1_* / .w3_* so _load_weights_other routes them into
+            # the right half of w13_* (already-fused .w13_* names untouched).
+            ".gate_proj.weight": ".w1_weight",
+            ".gate_proj.weight_scale": ".w1_weight_scale",
+            ".gate_proj.bias": ".w1_bias",
+            ".up_proj.weight": ".w3_weight",
+            ".up_proj.weight_scale": ".w3_weight_scale",
+            ".up_proj.bias": ".w3_bias",
         },
     )
 

@@ -22,12 +22,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
+    # AMD Zen CPU backend dispatching per-expert int8 GEMMs through
+    # torch.ops.zentorch.*. Requires the zentorch package + a Zen CPU.
+    CPU_ZEN = "CPU_ZEN"
 
 
 def _get_priority_backends(
@@ -36,6 +40,8 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
+    if current_platform.is_zen_cpu():
+        return [Int8MoeBackend.CPU_ZEN]
     return [Int8MoeBackend.TRITON]
 
 
@@ -49,6 +55,13 @@ def backend_to_kernel_cls(
 
         return [TritonExperts]
 
+    elif backend == Int8MoeBackend.CPU_ZEN:
+        from vllm.model_executor.layers.fused_moe.cpu_int8_experts import (
+            CPUInt8Experts,
+        )
+
+        return [CPUInt8Experts]
+
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -57,6 +70,7 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     """Map user's MoEBackend to Int8MoeBackend."""
     mapping = {
         "triton": Int8MoeBackend.TRITON,
+        "cpu_zen": Int8MoeBackend.CPU_ZEN,
     }
     if backend := mapping.get(runner_backend):
         return backend
