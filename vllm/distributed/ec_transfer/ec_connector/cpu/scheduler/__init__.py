@@ -106,7 +106,7 @@ class ECCPUScheduler:
                 region=self._region,
                 engine=engine,
                 agent_metadata=self._agent_metadata,
-                local_xfer_handle=local_xfer_handle,
+                mem_descriptor_bytes=self._mem_descriptor_bytes,
                 compat_hash=self._compat_hash,
                 hidden_dim=self._hidden_dim,
                 element_size=self._element_size,
@@ -116,8 +116,8 @@ class ECCPUScheduler:
             )
             self._producer_transport.start(
                 self._producer.handle_xfer_req,
-                self._producer.sweep_completions,
-                self._producer.has_in_flight,
+                self._producer.poll,
+                self._producer.has_pending_pins,
             )
 
         if self._is_consumer:
@@ -127,10 +127,9 @@ class ECCPUScheduler:
             self._consumer = ECCPUConsumer(
                 region=self._region,
                 transport=consumer_transport,
-                agent_metadata=self._agent_metadata,
-                mem_descriptor_bytes=self._mem_descriptor_bytes,
+                engine=engine,
+                local_xfer_handle=local_xfer_handle,
                 compat_hash=self._compat_hash,
-                engine_id=self._engine_id,
                 hidden_dim=self._hidden_dim,
                 element_size=self._element_size,
                 block_size_bytes=self._block_size_bytes,

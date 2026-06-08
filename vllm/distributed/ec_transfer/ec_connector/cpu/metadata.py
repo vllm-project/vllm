@@ -13,6 +13,7 @@ Three distinct kinds of payload live here:
    on every `XferReq` so a producer refuses to serve a mismatched peer.
 """
 
+import enum
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -26,28 +27,35 @@ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 EC_CONNECTOR_VERSION: int = 1
 
 
+class XferStatus(enum.IntEnum):
+    """Outcome the producer reports for an `XferReq`.
+
+    Every non-OK code makes the consumer free its destination blocks and fall
+    back to local encode; the distinction exists only so each path logs an
+    accurate, operator-readable reason.
+    """
+
+    OK = 0
+    NACK_MISSING = 1  # producer no longer holds the encoding (evicted/restart)
+    NACK_INCOMPAT = 2  # peer-compatibility hash mismatch
+    NACK_VERSION = 3  # connector wire-version mismatch
+    NACK_INTERNAL = 4  # producer hit an unexpected error building the grant
+
+
 class XferReq(  # type: ignore[call-arg]
     msgspec.Struct,
     tag="req",
     omit_defaults=True,
 ):
-    """Consumer → Producer: please WRITE `mm_hash` into my block indices.
+    """Consumer → Producer: I want to READ `mm_hash`; pin it and tell me where.
 
-    `consumer_nixl_metadata` is the opaque blob returned by
-    `NixlWrapper.get_agent_metadata()`; the producer feeds it to
-    `add_remote_agent` on first contact.
-
-    `consumer_mem_descriptor` is msgpack-encoded list of
-    `(base_addr, size, device_id)` tuples describing the consumer's
-    pre-registered mmap region; the producer reconstructs NIXL xfer descs
-    from it and prepares a remote dlist for WRITE targets.
+    The consumer initiates the NIXL READ, so the request carries no
+    consumer-side NIXL state — only the identity of the wanted object plus
+    the compatibility / version fingerprints the producer checks before
+    granting.
     """
 
     mm_hash: str
-    dst_block_indices: list[int]
-    consumer_agent_name: str
-    consumer_nixl_metadata: bytes
-    consumer_mem_descriptor: bytes
     compatibility_hash: str
     connector_version: int = EC_CONNECTOR_VERSION
 
@@ -57,10 +65,27 @@ class XferAck(  # type: ignore[call-arg]
     tag="ack",
     omit_defaults=True,
 ):
-    """Producer → Consumer: xfer for `mm_hash` completed (or failed)."""
+    """Producer → Consumer: response to an `XferReq`.
+
+    On `status == OK` this is a read grant: the producer has pinned the
+    source blocks and returns where they are (`src_block_indices`) together
+    with the *fresh* NIXL state the consumer needs to register it and prep a
+    READ-source dlist (`agent_metadata` from `NixlWrapper.get_agent_metadata`,
+    `mem_descriptor` = msgpack-encoded `(addr, size, device_id)` block descs).
+    The metadata travels on every grant so a same-address producer restart is
+    detected by comparison on the consumer.
+
+    On any `NACK_*` status the optional fields are empty and the consumer
+    falls back to local encode. Completion is signalled out-of-band by a NIXL
+    notification (`notif_msg == mm_hash`) delivered to the producer when the
+    READ lands — not by a second `XferAck`.
+    """
 
     mm_hash: str
-    ok: bool
+    status: XferStatus
+    src_block_indices: list[int] = []
+    agent_metadata: bytes = b""
+    mem_descriptor: bytes = b""
 
 
 @dataclass
@@ -77,7 +102,7 @@ class ECCPUConnectorMetadata(ECConnectorMetadata):
     saves: dict[str, list[int]] = field(default_factory=dict)
 
     # Consumer role: mm_hashes whose bytes have already landed in the
-    # local mmap (NIXL WRITE completed, XferAck received); the worker's
+    # local mmap (the consumer-initiated NIXL READ completed); the worker's
     # start_load_caches copies mmap[block_indices] → GPU encoder_cache.
     loads: dict[str, list[int]] = field(default_factory=dict)
 

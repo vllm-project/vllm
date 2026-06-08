@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ZMQ-backed transport implementations."""
+"""ZMQ-backed transport implementations.
+
+Each transport owns the side-channel sockets and the per-peer NIXL agent
+registration that shares their lifetime; the per-request transfers themselves
+are driven by the producer/consumer delegates against the engine.
+"""
 
 import threading
 from collections.abc import Callable
@@ -25,15 +30,14 @@ _HEARTBEAT_TTL_MS = 8000  # 2 × TIMEOUT
 
 
 class ZmqProducerTransport:
-    """ROUTER socket + router thread for producer-side ZMQ communication.
+    """ROUTER socket + router thread serving the producer side of the channel.
 
-    The router thread mirrors the original _run_router loop:
-    - Polls ROUTER for incoming XferReqs, decoded and forwarded to
-      `on_xfer_req` callback.
-    - Calls `sweep` each iteration to poll NIXL completions and get ack
-      routes, then sends XferAcks back via ROUTER directly.
-    - Uses a dynamic poll timeout: 5 ms when transfers are in flight,
-      1000 ms when idle.
+    The router thread decodes each incoming `XferReq`, hands it to `on_xfer_req`
+    for a grant/NACK decision, and sends the returned `XferAck` straight back to
+    the requesting identity — the reply is synchronous. Every loop it also calls
+    `poll` so the producer can release source pins for completed or timed-out
+    reads. The poll timeout is short (5 ms) while reads are pinned, 1000 ms when
+    idle.
     """
 
     def __init__(
@@ -50,21 +54,21 @@ class ZmqProducerTransport:
         )
         self._stop_event = threading.Event()
         self._router_t: threading.Thread | None = None
-        self._on_xfer_req: Callable[[bytes, XferReq], None] | None = None
-        self._sweep: Callable[[], list[tuple[bytes, str, bool]]] | None = None
-        self._has_in_flight: Callable[[], bool] | None = None
+        self._on_xfer_req: Callable[[bytes, XferReq], XferAck] | None = None
+        self._poll: Callable[[], None] | None = None
+        self._has_pending: Callable[[], bool] | None = None
         self._xfer_req_decoder = msgspec.msgpack.Decoder(XferReq)
         self._encoder = msgspec.msgpack.Encoder()
 
     def start(
         self,
-        on_xfer_req: Callable[[bytes, XferReq], None],
-        sweep: Callable[[], list[tuple[bytes, str, bool]]],
-        has_in_flight: Callable[[], bool],
+        on_xfer_req: Callable[[bytes, XferReq], XferAck],
+        poll: Callable[[], None],
+        has_pending: Callable[[], bool],
     ) -> None:
         self._on_xfer_req = on_xfer_req
-        self._sweep = sweep
-        self._has_in_flight = has_in_flight
+        self._poll = poll
+        self._has_pending = has_pending
         self._router_t = threading.Thread(
             target=self._run, name="ec-nixl-router", daemon=True
         )
@@ -85,12 +89,12 @@ class ZmqProducerTransport:
 
     def _run(self) -> None:
         assert self._on_xfer_req is not None
-        assert self._sweep is not None
-        assert self._has_in_flight is not None
+        assert self._poll is not None
+        assert self._has_pending is not None
         poller = zmq.Poller()
         poller.register(self._router, zmq.POLLIN)
         while not self._stop_event.is_set():
-            timeout_ms = 5 if self._has_in_flight() else 1000
+            timeout_ms = 5 if self._has_pending() else 1000
             try:
                 events = dict(poller.poll(timeout=timeout_ms))
             except zmq.ContextTerminated:
@@ -99,42 +103,45 @@ class ZmqProducerTransport:
                 logger.exception("ec: router poll failed")
                 continue
             if self._router in events:
-                try:
-                    identity, _, payload = self._router.recv_multipart(
-                        flags=zmq.NOBLOCK
-                    )
-                except zmq.Again:
-                    pass
-                except zmq.ContextTerminated:
-                    return
-                except Exception:
-                    logger.exception("ec: router recv failed")
-                else:
-                    try:
-                        req = self._xfer_req_decoder.decode(payload)
-                    except (msgspec.DecodeError, msgspec.ValidationError):
-                        logger.warning("ec: dropped malformed XferReq")
-                    else:
-                        self._on_xfer_req(identity, req)
+                self._serve_one()
             try:
-                routes = self._sweep()
-                self._send_xfer_acks(routes)
+                self._poll()
             except Exception:
-                logger.exception("ec: sweep_completions failed")
+                logger.exception("ec: producer poll failed")
 
-    def _send_xfer_acks(self, routes: list[tuple[bytes, str, bool]]) -> None:
-        for identity, mm_hash, ok in routes:
-            try:
-                payload = self._encoder.encode(XferAck(mm_hash=mm_hash, ok=ok))
-                self._router.send_multipart([identity, b"", payload])
-            except Exception:
-                logger.exception(
-                    "ec: failed to send XferAck mm_hash=%s ok=%s", mm_hash, ok
-                )
+    def _serve_one(self) -> None:
+        """Receive one `XferReq` and send back the delegate's `XferAck`."""
+        assert self._on_xfer_req is not None
+        try:
+            identity, _, payload = self._router.recv_multipart(flags=zmq.NOBLOCK)
+        except zmq.Again:
+            return
+        except zmq.ContextTerminated:
+            raise
+        except Exception:
+            logger.exception("ec: router recv failed")
+            return
+        try:
+            req = self._xfer_req_decoder.decode(payload)
+        except (msgspec.DecodeError, msgspec.ValidationError):
+            logger.warning("ec: dropped malformed XferReq")
+            return
+        try:
+            ack = self._on_xfer_req(identity, req)
+            self._router.send_multipart([identity, b"", self._encoder.encode(ack)])
+        except Exception:
+            logger.exception("ec: failed handling XferReq mm_hash=%s", req.mm_hash)
 
 
 class ZmqConsumerTransport:
-    """Lazy DEALER pool for consumer-side ZMQ communication."""
+    """Lazy DEALER pool plus the NIXL agent registration for each producer peer.
+
+    A peer's ZMQ DEALER and its registered NIXL agent share a lifetime: the
+    DEALER is created on first contact (`ensure_dealer`) so an `XferReq` can be
+    sent before any metadata exists; the NIXL agent is added once an `XferAck`
+    supplies fresh metadata (`register_source`); both are released together in
+    `evict_peer`.
+    """
 
     def __init__(self, engine: Any) -> None:
         self._ctx = zmq.Context()
@@ -143,25 +150,16 @@ class ZmqConsumerTransport:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_ack_decoder = msgspec.msgpack.Decoder(XferAck)
 
-    def get_or_create_peer(self, addr: PeerAddr, metadata: bytes) -> ConsumerPeer:
-        host, port = addr
-        key = addr
-        existing = self._peer_pool.get(key)
-        if existing is not None and existing.nixl_metadata_bytes == metadata:
-            return existing
+    def ensure_dealer(self, addr: PeerAddr) -> ConsumerPeer:
+        """Return the peer for `addr`, creating its DEALER + monitor on first
+        contact. Does not touch NIXL — registration happens in
+        `register_source` once metadata arrives.
+        """
+        existing = self._peer_pool.get(addr)
         if existing is not None:
-            self._teardown_peer(existing)
-            self._peer_pool.pop(key, None)
+            return existing
 
-        for stale_key in [k for k in self._peer_pool if k[1] == port and k[0] != host]:
-            logger.info(
-                "ec: evicting stale peer %s (same port %d, new peer %s)",
-                stale_key,
-                port,
-                host,
-            )
-            self.evict_peer(stale_key)
-
+        host, port = addr
         dealer = make_zmq_socket(
             ctx=self._ctx,
             path=make_zmq_path(scheme="tcp", host=host, port=port),
@@ -177,18 +175,83 @@ class ZmqConsumerTransport:
         mon = self._ctx.socket(zmq.PAIR)
         mon.connect(monitor_addr)
 
-        agent_name = self._engine.add_remote_agent(metadata)
-        entry = ConsumerPeer(
-            zmq_dealer=dealer,
-            nixl_agent_name=agent_name,
-            nixl_metadata_bytes=metadata,
-            zmq_monitor=mon,
-        )
-        self._peer_pool[key] = entry
-        return entry
+        peer = ConsumerPeer(zmq_dealer=dealer, zmq_monitor=mon)
+        self._peer_pool[addr] = peer
+        return peer
 
     def send_xfer_req(self, peer: ConsumerPeer, req: XferReq) -> None:
         peer.zmq_dealer.send_multipart([b"", self._encoder.encode(req)])
+
+    def register_source(
+        self, addr: PeerAddr, metadata: bytes, mem_descriptor: bytes
+    ) -> ConsumerPeer:
+        """Register the producer as a NIXL read source and prep its read dlist.
+
+        The metadata comes fresh from an `XferAck`, so the rkeys it carries
+        always belong to the live producer process. If the peer is already
+        registered with the same metadata the existing handle is reused; if the
+        metadata differs (the producer restarted at this address) the old agent
+        is torn down and replaced.
+        """
+        peer = self._peer_pool[addr]
+        if peer.remote_read_handle is not None and peer.nixl_metadata_bytes == metadata:
+            logger.debug(
+                "ec: reusing registered source %s:%d agent=%s",
+                addr[0],
+                addr[1],
+                peer.nixl_agent_name,
+            )
+            return peer
+        if peer.remote_read_handle is not None:
+            logger.info(
+                "ec: producer %s:%d metadata changed; re-registering",
+                addr[0],
+                addr[1],
+            )
+            if peer.nixl_agent_name is not None:
+                self._engine.remove_remote_agent(peer.nixl_agent_name)
+            peer.nixl_agent_name = None
+            peer.nixl_metadata_bytes = None
+            peer.remote_read_handle = None
+
+        agent_name, read_handle = self._engine.add_remote_source(
+            metadata, mem_descriptor
+        )
+        peer.nixl_agent_name = agent_name
+        peer.nixl_metadata_bytes = metadata
+        peer.remote_read_handle = read_handle
+        logger.debug(
+            "ec: registered read source %s:%d agent=%s",
+            addr[0],
+            addr[1],
+            agent_name,
+        )
+        return peer
+
+    def poll_responses(self) -> list[tuple[PeerAddr, XferAck]]:
+        """Non-blocking drain of `XferAck`s from every peer's DEALER."""
+        acks: list[tuple[PeerAddr, XferAck]] = []
+        for addr, peer in list(self._peer_pool.items()):
+            while True:
+                try:
+                    frames = peer.zmq_dealer.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                except Exception:
+                    logger.exception("ec: DEALER recv failed")
+                    break
+                if len(frames) != 2 or frames[0] != b"":
+                    logger.warning(
+                        "ec: dropped malformed XferAck envelope "
+                        "(expected [b'', payload], got %d frames)",
+                        len(frames),
+                    )
+                    continue
+                try:
+                    acks.append((addr, self._xfer_ack_decoder.decode(frames[1])))
+                except (msgspec.DecodeError, msgspec.ValidationError):
+                    logger.warning("ec: dropped malformed XferAck")
+        return acks
 
     def poll_dead_peers(self) -> list[PeerAddr]:
         """Non-blocking sweep of peer monitor sockets.
@@ -213,7 +276,7 @@ class ZmqConsumerTransport:
         return dead
 
     def evict_peer(self, key: PeerAddr) -> str | None:
-        """Tear down a peer: close monitor, close DEALER, remove NIXL agent.
+        """Tear down a peer: close monitor, remove NIXL agent, close DEALER.
 
         Returns the evicted nixl_agent_name, or None if key was not present.
         """
@@ -233,42 +296,19 @@ class ZmqConsumerTransport:
                 entry.zmq_monitor.close(linger=0)
             except Exception:
                 logger.warning("ec: close monitor failed", exc_info=True)
-        try:
-            self._engine.remove_remote_agent(entry.nixl_agent_name)
-        except Exception:
-            logger.warning(
-                "ec: remove_remote_agent failed for %s",
-                entry.nixl_agent_name,
-                exc_info=True,
-            )
+        if entry.nixl_agent_name is not None:
+            try:
+                self._engine.remove_remote_agent(entry.nixl_agent_name)
+            except Exception:
+                logger.warning(
+                    "ec: remove_remote_agent failed for %s",
+                    entry.nixl_agent_name,
+                    exc_info=True,
+                )
         try:
             entry.zmq_dealer.close(linger=0)
         except Exception:
             logger.warning("ec: close DEALER failed", exc_info=True)
-
-    def drain_acks(self) -> list[XferAck]:
-        acks: list[XferAck] = []
-        for peer in self._peer_pool.values():
-            while True:
-                try:
-                    frames = peer.zmq_dealer.recv_multipart(flags=zmq.NOBLOCK)
-                except zmq.Again:
-                    break
-                except Exception:
-                    logger.exception("ec: DEALER recv failed")
-                    break
-                if len(frames) != 2 or frames[0] != b"":
-                    logger.warning(
-                        "ec: dropped malformed XferAck envelope "
-                        "(expected [b'', payload], got %d frames)",
-                        len(frames),
-                    )
-                    continue
-                try:
-                    acks.append(self._xfer_ack_decoder.decode(frames[1]))
-                except (msgspec.DecodeError, msgspec.ValidationError):
-                    logger.warning("ec: dropped malformed XferAck")
-        return acks
 
     def shutdown(self) -> None:
         """Destroy the ZMQ context. Call only after all sockets are closed."""

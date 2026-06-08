@@ -101,33 +101,68 @@ def setup_ec_region(vllm_config: "VllmConfig") -> ECRegionLayout:
 
 
 @dataclass
-class ProducerPeer:
-    """Producer-side cache of per-consumer NIXL state.
+class PinnedEncoding:
+    """Producer-side record of an encoding pinned for in-flight remote reads.
 
-    Populated on first `XferReq` from a given consumer. The remote xfer
-    dlist must be prepared on the same NIXL agent that will issue the
-    WRITE, so the producer scheduler owns this state. Accessed only
-    from the router thread; needs no synchronization.
+    Keyed by `mm_hash` in the producer's `_pinned_encodings` dict, so it
+    stores neither the hash (the key) nor the block list (looked up live in
+    `_local_encodings`, which stays valid for the pin's lifetime because
+    producer eviction skips pinned blocks).
+
+    `deadlines` holds one monotonic deadline per outstanding read — its
+    length is the region pin refcount. Each `XferReq` grant pins the blocks
+    once and appends a deadline; a completion notif unpins once and drops one
+    deadline; the force-unpin sweep drops every expired deadline (unpinning
+    one block-set per drop). Per-read deadlines mean a stalled reader times
+    out on its own schedule instead of being kept alive by a later reader's
+    grant. The backstop only fires when a consumer dies mid-read and its
+    completion notif never arrives.
+
+    Accessed only from the producer's router thread; needs no synchronization.
     """
 
-    nixl_agent_name: str
-    nixl_metadata_bytes: bytes
-    nixl_xfer_handle: int
+    deadlines: list[float]
 
 
 @dataclass
 class ConsumerPeer:
-    """Consumer-side per-peer connection state.
+    """Consumer-side per-peer connection + NIXL-registration state.
 
-    Cached in the scheduler's `(peer_host, peer_port) → ConsumerPeer` dict;
-    invalidated transparently when a producer restarts and its NIXL
-    metadata bytes change underneath the same address.
+    Cached in the scheduler's `(peer_host, peer_port) → ConsumerPeer` dict.
+    The DEALER is created lazily so the consumer can send an `XferReq` before
+    any metadata exists; the NIXL fields stay `None` until the first OK
+    `XferAck` registers the producer. `remote_read_handle is None` therefore
+    discriminates "DEALER-only" from "registered" — no separate state enum.
+
+    `nixl_metadata_bytes` is compared against each incoming `XferAck` so a
+    producer restart at the same address (fresh, different metadata) triggers
+    re-registration rather than reuse of a stale agent.
     """
 
     zmq_dealer: zmq.Socket
-    nixl_agent_name: str
-    nixl_metadata_bytes: bytes
     zmq_monitor: zmq.Socket | None = None
+    nixl_agent_name: str | None = None
+    nixl_metadata_bytes: bytes | None = None
+    remote_read_handle: int | None = None
+
+
+@dataclass
+class PendingRead:
+    """Consumer-side state for one read it has initiated for an `mm_hash`.
+
+    Held as the value in the consumer's `mm_hash → PendingRead | None` dict,
+    where a `None` value is the NACK tombstone consumed by
+    `ensure_cache_available` to fall through to local encode.
+
+    `read_handle is None` discriminates the two live phases — awaiting the
+    `XferAck` (guarded by `deadline`) vs. the NIXL READ in flight (polled via
+    `check_xfer_state`) — so no separate state enum is needed.
+    """
+
+    addr: PeerAddr
+    dst_indices: list[int]
+    deadline: float
+    read_handle: int | None = None
 
 
 # Msgpack (de)serialization for the list-of-(addr, size, device_id)

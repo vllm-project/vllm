@@ -1,17 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Consumer role for ECCPUConnector."""
+"""Consumer role for ECCPUConnector.
 
+The consumer drives the transfer: for each announced ``mm_hash`` it allocates
+destination blocks, sends an ``XferReq``, and on the ``XferAck`` registers the
+producer with the metadata carried in that reply and issues a NIXL READ that
+pulls the encoding into its mmap. A request is deferred until every feature it
+needs is either locally cached or has finished reading.
+"""
+
+import contextlib
+import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from pybase64 import b64decode
-
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import XferReq
+from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import XferReq, XferStatus
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
     evict_and_alloc,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr, PendingRead
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
     ECSharedRegion,
@@ -23,59 +30,64 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# How long to wait for an XferAck before giving up on a peer and encoding
+# the feature locally instead.
+CONSUMER_XFER_ACK_TIMEOUT_S = 2.0
+
 
 class ECCPUConsumer:
-    """Consumer state machine.
+    """Consumer state machine over a duck-typed transport and transfer engine.
 
-    Depends on a ConsumerTransport (duck-typed) and ECSharedRegion.
-    Never imports zmq or NixlWrapper directly.
+    Per-``mm_hash`` progress lives in ``_remote_encodings`` as a
+    ``PendingRead`` (``read_handle is None`` ⇒ awaiting the ``XferAck``;
+    set ⇒ READ in flight) or a ``None`` tombstone (a NACK that
+    ``ensure_cache_available`` consumes to fall through to local encode).
+    Completed reads move to ``_ready`` and then to ``_loaded`` once handed to
+    the worker.
     """
 
     def __init__(
         self,
         region: ECSharedRegion,
         transport: Any,
-        agent_metadata: bytes,
-        mem_descriptor_bytes: bytes,
+        engine: Any,
+        local_xfer_handle: int,
         compat_hash: str,
-        engine_id: str,
         hidden_dim: int,
         element_size: int,
         block_size_bytes: int,
     ) -> None:
         self._region = region
         self._transport = transport
-        self._agent_metadata = agent_metadata
-        self._mem_descriptor_bytes = mem_descriptor_bytes
+        self._engine = engine
+        self._local_xfer_handle = local_xfer_handle
         self._compat_hash = compat_hash
-        self._engine_id = engine_id
         self._hidden_dim = hidden_dim
         self._element_size = element_size
         self._block_size_bytes = block_size_bytes
 
-        self._remote_encodings: dict[str, tuple[list[int], PeerAddr] | None] = {}
+        self._remote_encodings: dict[str, PendingRead | None] = {}
         self._ready: set[str] = set()
         self._loaded: dict[str, list[int]] = {}
         self._pending_reload: set[str] = set()
 
     def has_cache_item(self, identifier: str) -> bool:
         """True iff the bytes for `identifier` are in our local mmap, either
-        because `_drain_acks` just promoted them (worker will copy this
-        step) or because the worker already copied them last step and
-        we have not yet freed the blocks.
+        because the read just completed (`_ready`, worker copies this step) or
+        because the worker already copied them last step and we have not yet
+        freed the blocks (`_loaded`).
         """
         return identifier in self._loaded or identifier in self._ready
 
     def ensure_cache_available(
         self, request: "Request", num_computed_tokens: int
     ) -> bool:
-        """Decide whether `request` can run this step, allocating and
-        sending any XferReqs needed.
+        """Decide whether `request` can run this step, starting any reads needed.
 
-        Returns False if the request is waiting on at least one in-flight
-        transfer and should be deferred; True if every feature is
-        locally-cached or absent-from-announcement (and
-        therefore falls through to vLLM's local encode).
+        Returns False if the request is waiting on at least one in-flight read
+        and should be deferred; True if every feature is locally cached or
+        absent-from-announcement (and therefore falls through to vLLM's local
+        encode).
         """
         params: dict[str, dict[str, Any]] = (
             getattr(request, "ec_transfer_params", None) or {}
@@ -121,7 +133,7 @@ class ECCPUConsumer:
                         mm_hash,
                     )
                     continue
-                logger.debug("EC: mm_hash=%s xfer already in-flight", mm_hash)
+                logger.debug("EC: mm_hash=%s read already in-flight", mm_hash)
                 pending = True
                 continue
             info = params.get(mm_hash)
@@ -154,16 +166,16 @@ class ECCPUConsumer:
                 )
                 continue
             try:
-                self._alloc_and_start_xfer(mm_hash, info, expected_size)
+                self._start_read(mm_hash, info, expected_size)
             except Exception:
                 logger.exception(
-                    "EC: failed to start xfer for mm_hash=%s; "
+                    "EC: failed to start read for mm_hash=%s; "
                     "falling back to local encode",
                     mm_hash,
                 )
                 continue
             logger.debug(
-                "EC: mm_hash=%s xfer started size_bytes=%d", mm_hash, expected_size
+                "EC: mm_hash=%s read started size_bytes=%d", mm_hash, expected_size
             )
             pending = True
         logger.debug(
@@ -189,75 +201,181 @@ class ECCPUConsumer:
             f"under-sized num_ec_blocks for the active workload"
         )
 
-    def _alloc_and_start_xfer(
-        self, mm_hash: str, info: dict[str, Any], size_bytes: int
-    ) -> None:
+    def _start_read(self, mm_hash: str, info: dict[str, Any], size_bytes: int) -> None:
+        """Allocate destination blocks and ask the producer for the source.
+
+        The NIXL READ is issued later, in ``_handle_ack``, once the producer's
+        ``XferAck`` supplies its fresh metadata and the source block indices.
+        """
         n_blocks = max(1, ceil(size_bytes / self._block_size_bytes))
         indices = self._fifo_alloc(n_blocks)
         try:
-            peer_addr: PeerAddr = (info["peer_host"], int(info["peer_port"]))
-            metadata = b64decode(info["nixl_agent_metadata_b64"])
-            existing = self._transport._peer_pool.get(peer_addr)
-            if existing is not None and existing.nixl_metadata_bytes != metadata:
-                # Same address but the metadata is wrong - It's a new producer.
-                # We need to stop the connection and start again.
-                self.on_peer_down(peer_addr)
-            peer = self._transport.get_or_create_peer(peer_addr, metadata)
-            req = XferReq(
-                mm_hash=mm_hash,
-                dst_block_indices=indices,
-                consumer_agent_name=self._engine_id,
-                consumer_nixl_metadata=self._agent_metadata,
-                consumer_mem_descriptor=self._mem_descriptor_bytes,
-                compatibility_hash=self._compat_hash,
+            addr: PeerAddr = (info["peer_host"], int(info["peer_port"]))
+            peer = self._transport.ensure_dealer(addr)
+            self._transport.send_xfer_req(
+                peer, XferReq(mm_hash=mm_hash, compatibility_hash=self._compat_hash)
             )
-            self._transport.send_xfer_req(peer, req)
         except Exception:
             self._region.free(indices)
             raise
+        self._remote_encodings[mm_hash] = PendingRead(
+            addr=addr,
+            dst_indices=indices,
+            deadline=time.monotonic() + CONSUMER_XFER_ACK_TIMEOUT_S,
+        )
         logger.debug(
-            "EC: load requested mm_hash=%s n_blocks=%d peer=%s:%d",
+            "EC: read requested mm_hash=%s n_blocks=%d peer=%s:%d",
             mm_hash,
             n_blocks,
-            info["peer_host"],
-            int(info["peer_port"]),
+            addr[0],
+            addr[1],
         )
-        self._remote_encodings[mm_hash] = (indices, peer_addr)
 
-    def drain_acks(self) -> None:
+    def drain(self) -> None:
+        """Advance every in-flight read one step: tear down dead peers, apply
+        arriving acks, then poll running reads and expire stale ack waits.
+        """
         for addr in self._transport.poll_dead_peers():
             self.on_peer_down(addr)
-        for ack in self._transport.drain_acks():
-            if ack.mm_hash not in self._remote_encodings:
+        for addr, ack in self._transport.poll_responses():
+            self._handle_ack(addr, ack)
+        now = time.monotonic()
+        for mm_hash, pr in list(self._remote_encodings.items()):
+            if pr is None:
                 continue
-            entry = self._remote_encodings[ack.mm_hash]
-            if entry is None:
-                # Already tombstoned by a prior NACK or peer-down; ignore.
-                continue
-            indices, _ = entry
-            if ack.ok:
-                self._ready.add(ack.mm_hash)
-                logger.debug("EC: load arrived mm_hash=%s", ack.mm_hash)
+            if pr.read_handle is not None:
+                self._poll_read(mm_hash, pr)
+            elif now > pr.deadline:
+                logger.warning(
+                    "EC: no XferAck for mm_hash=%s from %s:%d within %.1fs; "
+                    "falling back to local encode",
+                    mm_hash,
+                    pr.addr[0],
+                    pr.addr[1],
+                    CONSUMER_XFER_ACK_TIMEOUT_S,
+                )
+                self._region.free(pr.dst_indices)
+                self._remote_encodings[mm_hash] = None
+
+    def _handle_ack(self, addr: PeerAddr, ack: Any) -> None:
+        """Register the producer from the ack's fresh metadata and issue the
+        READ on OK; tombstone and free the destination blocks on a NACK.
+        """
+        pr = self._remote_encodings.get(ack.mm_hash)
+        if pr is None:
+            # Unknown hash, or already tombstoned by peer-down / timeout.
+            return
+        if pr.read_handle is not None:
+            # Read already in flight; a duplicate ack.
+            return
+        if ack.status != XferStatus.OK:
+            if ack.status == XferStatus.NACK_INCOMPAT:
+                logger.warning(
+                    "EC: producer %s:%d reports an incompatible peer; "
+                    "falling back to local encode for mm_hash=%s",
+                    addr[0],
+                    addr[1],
+                    ack.mm_hash,
+                )
+            elif ack.status == XferStatus.NACK_MISSING:
+                logger.info(
+                    "EC: producer %s:%d no longer holds mm_hash=%s "
+                    "(restart/evicted); falling back to local encode",
+                    addr[0],
+                    addr[1],
+                    ack.mm_hash,
+                )
             else:
-                # NACK: free the consumer-side blocks and leave a
-                # tombstone for `ensure_cache_available` to consume on
-                # its next call. Consuming the tombstone there flips
-                # the request from deferred to runnable so vLLM's local
-                # encode path covers this feature.
-                self._region.free(indices)
-                self._remote_encodings[ack.mm_hash] = None
+                logger.warning(
+                    "EC: producer %s:%d refused mm_hash=%s (status=%s); "
+                    "falling back to local encode",
+                    addr[0],
+                    addr[1],
+                    ack.mm_hash,
+                    ack.status.name,
+                )
+            self._region.free(pr.dst_indices)
+            self._remote_encodings[ack.mm_hash] = None
+            return
+        try:
+            peer = self._transport.register_source(
+                addr, ack.agent_metadata, ack.mem_descriptor
+            )
+            handle = self._engine.post_read(
+                self._local_xfer_handle,
+                pr.dst_indices,
+                peer.remote_read_handle,
+                ack.src_block_indices,
+                notif_msg=ack.mm_hash.encode("utf-8"),
+            )
+        except Exception:
+            logger.exception(
+                "EC: failed to start READ for mm_hash=%s; falling back to local encode",
+                ack.mm_hash,
+            )
+            self._region.free(pr.dst_indices)
+            self._remote_encodings[ack.mm_hash] = None
+            return
+        pr.read_handle = handle
+        logger.debug(
+            "EC: READ started mm_hash=%s n_blocks=%d peer=%s:%d",
+            ack.mm_hash,
+            len(pr.dst_indices),
+            addr[0],
+            addr[1],
+        )
+
+    def _poll_read(self, mm_hash: str, pr: PendingRead) -> None:
+        """Check one in-flight READ; promote to `_ready` when it completes,
+        tombstone and free on failure.
+        """
+        assert pr.read_handle is not None
+        try:
+            state = self._engine.check_xfer_state(pr.read_handle)
+        except Exception:
+            logger.exception(
+                "EC: check_xfer_state failed for mm_hash=%s; "
+                "falling back to local encode",
+                mm_hash,
+            )
+            self._engine.release_xfer_handle(pr.read_handle)
+            self._region.free(pr.dst_indices)
+            self._remote_encodings[mm_hash] = None
+            return
+        if state == "DONE":
+            self._engine.release_xfer_handle(pr.read_handle)
+            self._ready.add(mm_hash)
+            logger.debug("EC: read arrived mm_hash=%s", mm_hash)
+        elif state == "PROC":
+            return
+        else:
+            logger.warning(
+                "EC: READ for mm_hash=%s in unexpected state %r; "
+                "falling back to local encode",
+                mm_hash,
+                state,
+            )
+            self._engine.release_xfer_handle(pr.read_handle)
+            self._region.free(pr.dst_indices)
+            self._remote_encodings[mm_hash] = None
 
     def on_peer_down(self, addr: PeerAddr) -> None:
+        """Tear down a peer and tombstone the reads bound to it, freeing the
+        destination blocks of any read that has not already completed.
+        """
         evicted_agent_name = self._transport.evict_peer(addr)
         n = 0
-        for mm_hash, entry in list(self._remote_encodings.items()):
-            if entry is None or entry[1] != addr:
+        for mm_hash, pr in list(self._remote_encodings.items()):
+            if pr is None or pr.addr != addr:
                 continue
-            indices, _ = entry
-            if mm_hash not in self._ready:
-                self._region.free(indices)
-                self._remote_encodings[mm_hash] = None
-                n += 1
+            if mm_hash in self._ready:
+                continue
+            if pr.read_handle is not None:
+                with contextlib.suppress(Exception):
+                    self._engine.release_xfer_handle(pr.read_handle)
+            self._region.free(pr.dst_indices)
+            self._remote_encodings[mm_hash] = None
+            n += 1
         logger.info(
             "EC: peer down addr=%s agent=%s tombstoned=%d",
             addr,
@@ -266,21 +384,20 @@ class ECCPUConsumer:
         )
 
     def build_loads(self) -> dict[str, list[int]]:
-        """Drain acks, promote arrived mm_hashes, re-emit cached reloads."""
-        # (a) Drain any fresh ack arrivals.
-        self.drain_acks()
+        """Drain progress, promote arrived mm_hashes, re-emit cached reloads."""
+        # (a) Advance in-flight reads and apply any arrivals.
+        self.drain()
         # (b) Hand newly-arrived mm_hashes to the worker; move to loaded
         #     cache. Blocks stay allocated so that subsequent requests for
         #     the same mm_hash are re-served with a local mmap→GPU re-copy
         #     instead of a producer round-trip.
         loads: dict[str, list[int]] = {}
         for mm_hash in list(self._ready):
-            entry = self._remote_encodings.pop(mm_hash, None)
-            if entry is None:
+            pr = self._remote_encodings.pop(mm_hash, None)
+            if pr is None:
                 continue
-            indices, _ = entry
-            loads[mm_hash] = indices
-            self._loaded[mm_hash] = indices
+            loads[mm_hash] = pr.dst_indices
+            self._loaded[mm_hash] = pr.dst_indices
             logger.debug("EC: load issued mm_hash=%s", mm_hash)
         self._ready.clear()
         # (c) Re-serve cached entries requested this step via a local

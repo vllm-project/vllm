@@ -1,23 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Producer role for ECCPUConnector."""
+"""Producer role for ECCPUConnector.
 
-import contextlib
+The producer is the data source for a consumer-initiated NIXL READ. Its mmap
+region is registered with NIXL once at startup; thereafter it serves, on each
+``XferReq``, the source block indices for an ``mm_hash`` plus its own current
+NIXL agent metadata, and pins those blocks until the consumer's READ completes.
+A completion notification releases the pin; a per-read deadline releases it if
+the notification never arrives.
+"""
+
 import threading
-import uuid
+import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from pybase64 import b64encode
-
 from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
     EC_CONNECTOR_VERSION,
+    XferAck,
     XferReq,
+    XferStatus,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
     evict_and_alloc,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import ProducerPeer
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PinnedEncoding
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
     ECSharedRegion,
@@ -29,13 +36,19 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Force-unpin backstop: a source pin whose completion notif never arrives
+# (consumer crash / network loss) is reclaimed after this many seconds.
+PRODUCER_PIN_LEASE_S = 10.0
+
 
 class ECCPUProducer:
-    """Producer state machine.
+    """Producer state machine over a duck-typed transfer engine.
 
-    Depends on a TransferEngine (duck-typed). Never imports NixlWrapper or
-    zmq directly. All methods that access NIXL state run on the router thread;
-    build_saves runs on the main thread.
+    The encode pipeline (``update_state_after_alloc`` → ``build_saves``) runs on
+    the main thread; ``handle_xfer_req`` and ``poll`` run on the transport's
+    router thread. ``_local_encodings`` (mm_hash → mmap block indices) is shared
+    across both threads and guarded by ``_lock``; ``_pinned_encodings`` is
+    touched only by the router thread and so needs none.
     """
 
     def __init__(
@@ -43,7 +56,7 @@ class ECCPUProducer:
         region: ECSharedRegion,
         engine: Any,
         agent_metadata: bytes,
-        local_xfer_handle: int,
+        mem_descriptor_bytes: bytes,
         compat_hash: str,
         hidden_dim: int,
         element_size: int,
@@ -54,7 +67,7 @@ class ECCPUProducer:
         self._region = region
         self._engine = engine
         self._agent_metadata = agent_metadata
-        self._local_xfer_handle = local_xfer_handle
+        self._mem_descriptor_bytes = mem_descriptor_bytes
         self._compat_hash = compat_hash
         self._hidden_dim = hidden_dim
         self._element_size = element_size
@@ -67,161 +80,145 @@ class ECCPUProducer:
 
         self._lock = threading.Lock()
         self._local_encodings: dict[str, list[int]] = {}
-        self._in_flight: dict[str, tuple[bytes, str, Any]] = {}
-        self._pending_nacks: list[tuple[bytes, str]] = []
 
         # Router-thread-only state. No lock needed.
-        self._remote_peers: dict[str, ProducerPeer] = {}
+        self._pinned_encodings: dict[str, PinnedEncoding] = {}
 
     # ── router-thread methods ─────────────────────────────────────────────────
 
-    def has_in_flight(self) -> bool:
-        with self._lock:
-            return bool(self._in_flight)
+    def has_pending_pins(self) -> bool:
+        """True while any source is pinned for an in-flight read.
 
-    def handle_xfer_req(self, identity: bytes, req: XferReq) -> None:
+        The transport uses this to poll completion notifs promptly (short
+        timeout) while reads are outstanding and idle otherwise.
+        """
+        return bool(self._pinned_encodings)
+
+    def handle_xfer_req(self, identity: bytes, req: XferReq) -> XferAck:
+        """Grant or refuse a consumer's read request.
+
+        On grant: pin the source blocks and return them together with the
+        producer's fresh NIXL metadata so the consumer can register and READ.
+        The reply is synchronous — the transport sends the returned ``XferAck``
+        straight back to ``identity``.
+        """
         if req.connector_version != EC_CONNECTOR_VERSION:
             logger.warning(
-                "EC: version mismatch req=%d local=%d, NACKing",
+                "EC: incompatible XferReq version theirs=%d ours=%d for "
+                "mm_hash=%s; consumer will fall back to local encode",
                 req.connector_version,
                 EC_CONNECTOR_VERSION,
+                req.mm_hash,
             )
-            with self._lock:
-                self._pending_nacks.append((identity, req.mm_hash))
-            return
+            return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_VERSION)
 
         if req.compatibility_hash != self._compat_hash:
-            with self._lock:
-                self._pending_nacks.append((identity, req.mm_hash))
-            return
+            logger.warning(
+                "EC: incompatible XferReq (compat theirs=%s ours=%s) for "
+                "mm_hash=%s; consumer will fall back to local encode",
+                req.compatibility_hash,
+                self._compat_hash,
+                req.mm_hash,
+            )
+            return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INCOMPAT)
 
+        # Read the block list and pin under the same lock acquisition so a
+        # concurrent eviction on the main thread cannot reclaim the blocks
+        # between the lookup and the pin.
         with self._lock:
             block_indices = self._local_encodings.get(req.mm_hash)
             if block_indices is None:
-                self._pending_nacks.append((identity, req.mm_hash))
-                return
+                logger.warning(
+                    "EC: XferReq mm_hash=%s not in local cache (evicted or "
+                    "never produced — likely a producer restart); NACKing, "
+                    "consumer will recompute locally",
+                    req.mm_hash,
+                )
+                return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
             self._region.pin(block_indices)
 
+        deadline = time.monotonic() + PRODUCER_PIN_LEASE_S
+        pin = self._pinned_encodings.get(req.mm_hash)
+        if pin is None:
+            self._pinned_encodings[req.mm_hash] = PinnedEncoding(deadlines=[deadline])
+        else:
+            pin.deadlines.append(deadline)
+
         logger.debug(
-            "EC: transfer requested mm_hash=%s consumer=%s n_blocks=%d",
-            req.mm_hash,
-            req.consumer_agent_name,
-            len(block_indices),
+            "EC: read granted mm_hash=%s n_blocks=%d", req.mm_hash, len(block_indices)
         )
+        return XferAck(
+            mm_hash=req.mm_hash,
+            status=XferStatus.OK,
+            src_block_indices=block_indices,
+            agent_metadata=self._agent_metadata,
+            mem_descriptor=self._mem_descriptor_bytes,
+        )
+
+    def poll(self) -> None:
+        """One router-loop iteration of pin maintenance: release pins for reads
+        that completed, then release pins whose deadline has passed.
+        """
+        self._drain_notifs()
+        self._sweep_timeouts()
+
+    def _drain_notifs(self) -> None:
+        """Release one source pin per arriving completion notification."""
         try:
-            peer = self._ensure_remote_peer(req)
-            handle = self._engine.post_write(
-                self._local_xfer_handle,
-                block_indices,
-                peer,
-                req.dst_block_indices,
-            )
+            notifs = self._engine.get_new_notifs()
         except Exception:
-            logger.exception(
-                "EC: failed to post NIXL WRITE for mm_hash=%s", req.mm_hash
-            )
-            self._region.unpin(block_indices)
-            with self._lock:
-                self._pending_nacks.append((identity, req.mm_hash))
+            logger.exception("EC: get_new_notifs failed")
             return
-
-        xfer_id = str(uuid.uuid4())
-        with self._lock:
-            self._in_flight[xfer_id] = (identity, req.mm_hash, handle)
-
-    def _ensure_remote_peer(self, req: XferReq) -> ProducerPeer:
-        """Look up (or create) the producer-side NIXL state for this consumer.
-
-        Keyed by `consumer_agent_name` — the consumer's NIXL-level UUID.
-        If the consumer was seen before with the same metadata we reuse
-        the prepared remote dlist; if the metadata changed we tear down
-        the old entry (the consumer restarted or re-initialized).
-
-        """
-        existing = self._remote_peers.get(req.consumer_agent_name)
-        if (
-            existing is not None
-            and existing.nixl_metadata_bytes == req.consumer_nixl_metadata
-        ):
-            return existing
-        if existing is not None:
-            self._engine.remove_remote_agent(existing.nixl_agent_name)
-
-        peer = self._engine.add_remote_peer(
-            req.consumer_nixl_metadata,
-            req.consumer_mem_descriptor,
-        )
-        self._remote_peers[req.consumer_agent_name] = peer
-        return peer
-
-    def sweep_completions(self) -> list[tuple[bytes, str, bool]]:
-        """Poll in-flight xfer state; return ack routes for the transport to send.
-
-        Runs on the router thread.
-        NIXL polling is lock-free; outcomes are applied under lock.
-        Returns list of (identity, mm_hash, ok) for each completed or failed xfer,
-        plus any queued NACKs.
-        """
-        # (1) Snapshot.
-        with self._lock:
-            in_flight_snapshot = [
-                (xfer_id, handle) for xfer_id, (_, _, handle) in self._in_flight.items()
-            ]
-
-        # (2) Poll lock-free; release handles inline on terminal states.
-        outcomes: dict[str, bool] = {}
-        for xfer_id, handle in in_flight_snapshot:
-            try:
-                state = self._engine.check_xfer_state(handle)
-            except Exception:
-                logger.exception(
-                    "EC: check_xfer_state raised for xfer_id=%s; treating as failure",
-                    xfer_id,
+        for msgs in notifs.values():
+            for msg in msgs:
+                mm_hash = msg.decode("utf-8")
+                logger.debug(
+                    "EC: read complete mm_hash=%s; releasing source pin", mm_hash
                 )
-                outcomes[xfer_id] = False
-                self._engine.release_xfer_handle(handle)
-                continue
-            if state == "DONE":
-                outcomes[xfer_id] = True
-                self._engine.release_xfer_handle(handle)
-                logger.debug("EC: transfer complete xfer_id=%s", xfer_id)
-            elif state == "PROC":
-                continue
-            else:
-                logger.warning(
-                    "EC: NIXL xfer in unexpected state %r for xfer_id=%s; "
-                    "treating as failure",
-                    state,
-                    xfer_id,
-                )
-                outcomes[xfer_id] = False
-                self._engine.release_xfer_handle(handle)
+                self._unpin_once(mm_hash)
 
-        # (3) Apply outcomes, unpin memory, drain queued NACKs.
-        ok_routes: list[tuple[bytes, str]] = []
-        fail_routes: list[tuple[bytes, str]] = []
+    def _unpin_once(self, mm_hash: str) -> None:
+        """Release one pin reference on ``mm_hash``: unpin the blocks once and
+        drop the soonest-expiring deadline, forgetting the encoding once its
+        last reference is released.
+
+        ``deadlines`` stays sorted ascending — every appended deadline is
+        ``monotonic() + lease`` and entries leave from the front — so
+        ``pop(0)`` removes the reference closest to timing out. A call for an
+        encoding with no live pins is a no-op, which keeps the total number of
+        unpins equal to the number of grants even if a completion notification
+        races a deadline expiry for the same read.
+        """
+        pin = self._pinned_encodings.get(mm_hash)
+        if pin is None:
+            return
         with self._lock:
-            for xfer_id, ok in outcomes.items():
-                entry = self._in_flight.pop(xfer_id, None)
-                if entry is None:
-                    continue
-                identity, mm_hash, _handle = entry
-                blocks = self._local_encodings.get(mm_hash)
-                if blocks is not None:
-                    self._region.unpin(blocks)
-                (ok_routes if ok else fail_routes).append((identity, mm_hash))
-            queued_nacks = self._pending_nacks
-            self._pending_nacks = []
+            blocks = self._local_encodings.get(mm_hash)
+            if blocks is not None:
+                self._region.unpin(blocks)
+        pin.deadlines.pop(0)
+        if not pin.deadlines:
+            del self._pinned_encodings[mm_hash]
 
-        # (4) Assemble routes for the transport to send.
-        routes: list[tuple[bytes, str, bool]] = []
-        for identity, mm_hash in queued_nacks:
-            routes.append((identity, mm_hash, False))
-        for identity, mm_hash in ok_routes:
-            routes.append((identity, mm_hash, True))
-        for identity, mm_hash in fail_routes:
-            routes.append((identity, mm_hash, False))
-        return routes
+    def _sweep_timeouts(self) -> None:
+        """Release pins whose deadline has passed (the expired entries are the
+        sorted prefix, so ``_unpin_once`` removes exactly them from the front).
+        """
+        now = time.monotonic()
+        for mm_hash, pin in list(self._pinned_encodings.items()):
+            n_expired = sum(1 for d in pin.deadlines if d < now)
+            if not n_expired:
+                continue
+            logger.warning(
+                "EC: %d read pin(s) for mm_hash=%s passed the %.1fs deadline "
+                "with no completion notification (consumer crash or network "
+                "loss); releasing the source",
+                n_expired,
+                mm_hash,
+                PRODUCER_PIN_LEASE_S,
+            )
+            for _ in range(n_expired):
+                self._unpin_once(mm_hash)
 
     # ── main-thread methods ───────────────────────────────────────────────────
 
@@ -238,8 +235,15 @@ class ECCPUProducer:
         logger.debug("EC: save scheduled mm_hash=%s size_bytes=%d", mm_hash, size_bytes)
 
     def request_finished(self, request: "Request") -> dict[str, Any] | None:
+        """Announce, per mm_hash, the side-channel address and encoding size a
+        consumer needs to open an ``XferReq``.
+
+        The consumer connects to ``(peer_host, peer_port)`` and learns the
+        source block indices and the producer's NIXL agent metadata from the
+        live ``XferAck`` reply, so this announcement carries only the routing
+        address and the byte size used to size the consumer's allocation.
+        """
         params: dict[str, dict[str, Any]] = {}
-        nixl_meta_b64 = b64encode(self._agent_metadata).decode("ascii")
         with self._lock:
             local_snapshot = set(self._local_encodings)
         for feature in request.mm_features:
@@ -253,7 +257,6 @@ class ECCPUProducer:
                 "peer_host": self._peer_host,
                 "peer_port": self._peer_port,
                 "size_bytes": size_bytes,
-                "nixl_agent_metadata_b64": nixl_meta_b64,
             }
         return params or None
 
@@ -302,14 +305,12 @@ class ECCPUProducer:
         return saves
 
     def shutdown(self) -> None:
-        try:
-            for _xfer_id, (_, _, handle) in list(self._in_flight.items()):
-                with contextlib.suppress(Exception):
-                    self._engine.release_xfer_handle(handle)
-            self._in_flight.clear()
-        except Exception:
-            logger.debug("EC: release in_flight failed", exc_info=True)
-
-        for peer in list(self._remote_peers.values()):
-            self._engine.remove_remote_agent(peer.nixl_agent_name)
-        self._remote_peers.clear()
+        # The router thread is already stopped by the time shutdown runs, so
+        # this is single-threaded. Release any still-held source pins so the
+        # region's free-pool accounting is balanced before teardown.
+        for mm_hash, pin in list(self._pinned_encodings.items()):
+            blocks = self._local_encodings.get(mm_hash)
+            if blocks is not None:
+                for _ in pin.deadlines:
+                    self._region.unpin(blocks)
+        self._pinned_encodings.clear()

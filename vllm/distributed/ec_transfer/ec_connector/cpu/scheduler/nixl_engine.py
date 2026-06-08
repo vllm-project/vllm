@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NIXL-backed TransferEngine."""
+"""NIXL-backed transfer engine for the ECCPUConnector scheduler."""
 
 from typing import Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
-    ProducerPeer,
     deserialize_mem_descriptor,
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -16,7 +15,7 @@ _NIXL_DRAM = "DRAM"
 
 
 class NixlEngine:
-    """Adapts NixlWrapper to the TransferEngine protocol."""
+    """Adapts NixlWrapper to the duck-typed engine the scheduler delegates use."""
 
     def __init__(self, agent_name: str, num_threads: int = 1) -> None:
         if NixlWrapper is None or nixl_agent_config is None:
@@ -55,21 +54,23 @@ class NixlEngine:
     def get_agent_metadata(self) -> bytes:
         return self._nixl.get_agent_metadata()
 
-    def add_remote_peer(self, metadata: bytes, mem_descriptor: bytes) -> ProducerPeer:
-        """Register a consumer as a remote NIXL peer; return ProducerPeer."""
+    def add_remote_source(
+        self, metadata: bytes, mem_descriptor: bytes
+    ) -> tuple[str, int]:
+        """Register a remote producer and prep a READ-source dlist over it.
+
+        `metadata` is the producer's `get_agent_metadata()` blob, delivered
+        fresh on an `XferAck` — never sourced from the routing layer — so the
+        rkeys it carries always belong to the live producer process.
+        `mem_descriptor` is the producer's msgpack-encoded block descs.
+        Returns `(agent_name, remote_read_handle)`; the handle is the prepared
+        dlist passed as the READ source to `post_read`.
+        """
         agent_name = self._nixl.add_remote_agent(metadata)
         remote_blocks = deserialize_mem_descriptor(mem_descriptor)
         remote_xfer_descs = self._nixl.get_xfer_descs(remote_blocks, _NIXL_DRAM)
-        remote_xfer_handle = self._nixl.prep_xfer_dlist(agent_name, remote_xfer_descs)
-        return ProducerPeer(
-            nixl_agent_name=agent_name,
-            nixl_metadata_bytes=metadata,
-            nixl_xfer_handle=remote_xfer_handle,
-        )
-
-    def add_remote_agent(self, metadata: bytes) -> str:
-        """Register a remote NIXL agent; return agent_name."""
-        return self._nixl.add_remote_agent(metadata)
+        remote_read_handle = self._nixl.prep_xfer_dlist(agent_name, remote_xfer_descs)
+        return agent_name, remote_read_handle
 
     def remove_remote_agent(self, agent_name: str) -> None:
         try:
@@ -79,28 +80,43 @@ class NixlEngine:
                 "EC: remove_remote_agent failed for %s", agent_name, exc_info=True
             )
 
-    def post_write(
+    def post_read(
         self,
         local_xfer_handle: int,
         local_indices: list[int],
-        peer: ProducerPeer,
+        remote_read_handle: int,
         remote_indices: list[int],
+        notif_msg: bytes,
     ) -> Any:
+        """Issue a consumer-initiated READ: pull `remote_indices` from the
+        producer's region into the consumer's `local_indices`.
+
+        `notif_msg` is delivered to the producer (the read's remote/target)
+        when the transfer completes, signalling it may unpin the source.
+        """
         if len(local_indices) != len(remote_indices):
             raise ValueError(
                 f"EC: local/remote block count mismatch "
                 f"({len(local_indices)} vs {len(remote_indices)})"
             )
         handle = self._nixl.make_prepped_xfer(
-            "WRITE",
+            "READ",
             local_xfer_handle,
             local_indices,
-            peer.nixl_xfer_handle,
+            remote_read_handle,
             remote_indices,
-            notif_msg=b"",
+            notif_msg=notif_msg,
         )
         self._nixl.transfer(handle)
         return handle
+
+    def get_new_notifs(self) -> dict[str, list[bytes]]:
+        """Drain completion notifications addressed to this agent.
+
+        On the producer this reports which `mm_hash`es remote consumers have
+        finished reading, so their source blocks can be unpinned.
+        """
+        return self._nixl.get_new_notifs()
 
     def check_xfer_state(self, handle: Any) -> str:
         """Return raw NIXL state string; propagates exceptions to caller."""
