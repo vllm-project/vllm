@@ -3059,6 +3059,33 @@ def qr_max_size() -> int:
     return torch.ops._C_custom_ar.qr_max_size()
 
 
+# push allreduce (ported from SGLang)
+def init_push_ar(
+    rank: int, world_size: int, buffer_bytes: int, max_cta: int
+) -> int:
+    return torch.ops._C_push_ar.init_push_ar(
+        rank, world_size, buffer_bytes, max_cta
+    )
+
+
+def get_push_ar_ipc_handle(mgr: int) -> torch.Tensor:
+    return torch.ops._C_push_ar.get_push_ar_ipc_handle(mgr)
+
+
+def post_init_push_ar(mgr: int, handles: torch.Tensor) -> None:
+    torch.ops._C_push_ar.post_init_push_ar(mgr, handles)
+
+
+def push_ar_all_reduce(
+    mgr: int, inp: torch.Tensor, out: torch.Tensor
+) -> None:
+    torch.ops._C_push_ar.push_ar_all_reduce(mgr, inp, out)
+
+
+def dispose_push_ar(mgr: int) -> None:
+    torch.ops._C_push_ar.dispose_push_ar(mgr)
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,

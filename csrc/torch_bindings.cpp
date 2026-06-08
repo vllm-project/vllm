@@ -657,4 +657,26 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 #endif
 }
 
+// Push-based allreduce (ported from SGLang)
+fptr_t init_push_ar(int64_t rank, int64_t world_size,
+                    int64_t push_buffer_bytes, int64_t max_num_cta);
+torch::Tensor get_push_ar_ipc_handle(fptr_t _mgr);
+void post_init_push_ar(fptr_t _mgr, torch::Tensor all_handles);
+void push_ar_all_reduce(fptr_t _mgr, torch::Tensor& inp, torch::Tensor& out);
+void dispose_push_ar(fptr_t _mgr);
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _push_ar), push_ar) {
+  push_ar.def("init_push_ar", &init_push_ar);
+
+  push_ar.def("get_push_ar_ipc_handle", &get_push_ar_ipc_handle);
+
+  push_ar.def("post_init_push_ar", &post_init_push_ar);
+
+  push_ar.def(
+      "push_ar_all_reduce(int mgr, Tensor inp, Tensor! out) -> ()");
+  push_ar.impl("push_ar_all_reduce", torch::kCUDA, &push_ar_all_reduce);
+
+  push_ar.def("dispose_push_ar", &dispose_push_ar);
+}
+
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
