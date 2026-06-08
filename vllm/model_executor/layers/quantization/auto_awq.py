@@ -243,7 +243,11 @@ class AutoAWQConfig(QuantizationConfig):
         )
         # Ensure full_config uses "awq" as quant_method for MoE fallback compatibility.
         # MoeWNA16Config only accepts "gptq" or "awq", so we normalize here.
-        full_config = config.copy()
+        # Only copy JSON-serializable fields to avoid pickle serialization issues.
+        full_config = {
+            k: v for k, v in config.items()
+            if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+        }
         full_config["quant_method"] = "awq"
         return cls(
             weight_bits,

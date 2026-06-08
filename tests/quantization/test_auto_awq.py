@@ -137,16 +137,19 @@ class TestAutoAWQConfigAttributes:
 class TestAutoAWQConfigOverrideLogic:
     """Tests for override logic by parsing source code (no GPU import required)."""
 
-    def test_cpu_check_in_override_method(self):
-        """override_quantization_method should check current_platform.is_cpu()."""
-        # Read the source file directly
+    def _get_auto_awq_source(self) -> str:
+        """Read the auto_awq.py source file."""
+        import inspect
         import pathlib
 
-        source_path = (
-            pathlib.Path(__file__).parent.parent.parent
-            / "vllm/model_executor/layers/quantization/auto_awq.py"
-        )
-        source = source_path.read_text()
+        import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+        source_path = inspect.getfile(auto_awq_module)
+        return pathlib.Path(source_path).read_text()
+
+    def test_cpu_check_in_override_method(self):
+        """override_quantization_method should check current_platform.is_cpu()."""
+        source = self._get_auto_awq_source()
 
         # Verify the CPU check exists in override method
         assert "current_platform.is_cpu()" in source, (
@@ -158,13 +161,7 @@ class TestAutoAWQConfigOverrideLogic:
 
     def test_quant_method_normalization_in_from_config(self):
         """from_config should normalize quant_method to 'awq' for MoE fallback."""
-        import pathlib
-
-        source_path = (
-            pathlib.Path(__file__).parent.parent.parent
-            / "vllm/model_executor/layers/quantization/auto_awq.py"
-        )
-        source = source_path.read_text()
+        source = self._get_auto_awq_source()
 
         # Verify the normalization exists
         assert (
