@@ -315,7 +315,9 @@ def test_worker_uses_data_parallel_index_in_dense_dp():
     vllm_config.parallel_config.data_parallel_index = 3
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
 
     assert connector.connector_worker.dp_rank == 3
 
@@ -329,7 +331,9 @@ def test_worker_uses_local_rank_when_local_engines_only():
     vllm_config.parallel_config.data_parallel_hybrid_lb = True
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
 
     assert connector.connector_worker.dp_rank == 1
 
