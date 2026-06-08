@@ -267,6 +267,10 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
     },
+    "xpu_w8a8_fp8": {
+        XPUW8A8FP8LinearKernel,
+        XPUFp8BlockScaledMMKernel,
+    },
 }
 
 
@@ -312,6 +316,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.XPU: [
+        XPUW8A16FP8LinearKernel,
         XPUW8A8FP8LinearKernel,
     ],
 }

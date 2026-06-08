@@ -156,6 +156,7 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "xpu_w8a8_fp8",
 ]
 
 
@@ -217,7 +218,9 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
-    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
+    - "xpu_w8a8_fp8": XPU kernels with explicit W8A8 opt-in for FP8 paths
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod

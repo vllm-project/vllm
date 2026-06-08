@@ -91,7 +91,7 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
 
         needs_transpose = w.shape == (N, K) if K != N else w.is_contiguous()
         layer_weight = w.t() if needs_transpose else w
-        replace_parameter(layer, "weight", layer_weight.contiguous())
+        replace_parameter(layer, "weight", layer_weight)
         ws = layer.weight_scale
         if ws.numel() == 1:
             replace_parameter(layer, "weight_scale", ws.reshape(1))
