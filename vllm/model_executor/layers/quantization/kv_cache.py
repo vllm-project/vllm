@@ -47,7 +47,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         - quantize k/v_cache entries before saving them to the cache
         - dequantize k/v_cache entries before fetching them from the cache
 
-    :param quant_config: the appropriate QuantizationConfig
+    Args:
+        quant_config: the appropriate QuantizationConfig
     """
 
     def __init__(self, quant_config: QuantizationConfig):

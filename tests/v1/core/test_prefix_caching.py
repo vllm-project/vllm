@@ -1023,6 +1023,58 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
+    """Regression test for https://github.com/vllm-project/vllm/issues/39271.
+
+    With suffix decoding enabled, the number of proposed draft token may
+    change dynamically each round, causing the MambaManager to crash during
+    allocate_slots() as it originally assumes the `num_blocks` to increase.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        scheduler_block_size=block_size,
+    )
+
+    # the default hash function is sha256
+    hash_fn = sha256
+
+    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(all_token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+
+    # prefill forward finished
+    req0.append_output_token_ids([1])
+    req0.num_computed_tokens = len(all_token_ids)
+
+    # Round1: propose 16 draft tokens, accept only one
+    req0.spec_token_ids = [4] * 16
+    blocks = manager.allocate_slots(req0, num_new_tokens=16, num_new_computed_tokens=0)
+    assert blocks is not None
+    req0.append_output_token_ids([4])
+    req0.num_computed_tokens += 1
+
+    # Round2: propose only one token, allocate should not crash
+    req0.spec_token_ids = [5] * 1
+    blocks = manager.allocate_slots(req0, num_new_tokens=1, num_new_computed_tokens=0)
+    assert blocks is not None and all(len(group) == 0 for group in blocks.blocks)
+
+    manager.free(req0)
+
+
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 
