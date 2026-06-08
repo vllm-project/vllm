@@ -509,7 +509,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "gemma4_assistant":
+        if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
             text_config = getattr(hf_config, "text_config", hf_config)
             # The assistant runs all decoder layers in a single forward
