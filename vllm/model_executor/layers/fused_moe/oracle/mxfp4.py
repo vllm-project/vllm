@@ -206,9 +206,9 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
 
-        return [XPUExpertsMXFp4]
+        return [XPUExpertsMxFp4]
 
     elif backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
