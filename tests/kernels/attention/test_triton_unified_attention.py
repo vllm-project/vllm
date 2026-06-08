@@ -114,6 +114,7 @@ def _make_triton_metadata(
         block_table=torch.zeros((1, 1), dtype=torch.int32),
         slot_mapping=torch.arange(num_tokens, dtype=torch.long),
         is_all_pure_prefill=is_all_pure_prefill,
+        is_decode_only=False,
         seq_threshold_3D=1,
         num_par_softmax_segments=16,
         softmax_segm_output=torch.empty(
@@ -404,6 +405,93 @@ def test_triton_attn_nvfp4_mm_prefix_uses_raw_current_kv(monkeypatch) -> None:
     assert called["mm_prefix_range"] is metadata.mm_prefix_range_tensor
     assert called["raw_k"] is key
     assert called["raw_v"] is value
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@pytest.mark.parametrize(
+    ("is_decode_only", "query_lens", "seq_lens", "num_blocks", "expects_raw"),
+    [
+        (True, [2, 2], [16, 16], 1, False),
+        (False, [2], [18], 2, True),
+    ],
+)
+@torch.inference_mode()
+def test_triton_attn_nvfp4_spec_verify_and_chunked_prefill_raw_current_gate(
+    monkeypatch,
+    is_decode_only: bool,
+    query_lens: list[int],
+    seq_lens: list[int],
+    num_blocks: int,
+    expects_raw: bool,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+
+    num_tokens = sum(query_lens)
+    query_start_loc = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0)
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    block_size = 16
+    dtype = torch.bfloat16
+    metadata = _make_triton_metadata(
+        num_tokens, num_query_heads, head_size, is_all_pure_prefill=False
+    )
+    metadata.is_decode_only = is_decode_only
+    metadata.max_query_len = max(query_lens)
+    metadata.query_start_loc = query_start_loc
+    metadata.seq_lens = torch.tensor(seq_lens, dtype=torch.int32)
+    metadata.max_seq_len = max(seq_lens)
+    metadata.block_table = torch.zeros((len(query_lens), num_blocks), dtype=torch.int32)
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0),
+        _k_scale=torch.tensor(1.0),
+        _v_scale=torch.tensor(1.0),
+    )
+    impl = TritonAttentionImpl(
+        num_heads=num_query_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+    kv_cache = torch.empty(
+        num_blocks,
+        2,
+        block_size,
+        num_kv_heads,
+        nvfp4_kv_cache_full_dim(head_size),
+        dtype=torch.uint8,
+    )
+    called = {}
+
+    def fail_context_attention_fwd(**kwargs):
+        raise AssertionError("test cases should stay on unified attention")
+
+    def fake_unified_attention(**kwargs):
+        called["raw_k"] = kwargs["raw_k"]
+        called["raw_v"] = kwargs["raw_v"]
+        called["max_seqlen_q"] = kwargs["max_seqlen_q"]
+        kwargs["out"].zero_()
+
+    monkeypatch.setattr(
+        triton_attn_backend, "context_attention_fwd", fail_context_attention_fwd
+    )
+    monkeypatch.setattr(
+        triton_attn_backend, "unified_attention", fake_unified_attention
+    )
+
+    result = impl.forward(layer, query, key, value, kv_cache, metadata, output=output)
+
+    assert result is output
+    assert called["max_seqlen_q"] == max(query_lens)
+    assert called["raw_k"] is (key if expects_raw else None)
+    assert called["raw_v"] is (value if expects_raw else None)
 
 
 def ref_paged_attn(
