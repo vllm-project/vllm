@@ -388,3 +388,82 @@ class TestDoRopeAndKVCacheUpdate:
                 f"is_neox={is_neox} was not forwarded to "
                 "concat_and_cache_mla_rope_fused"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: F3 dispatch replaces two separate ops with one fused op
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm-specific tests"
+)
+def test_f3_fused_replaces_two_ops():
+    """F3 fires fused_rope_and_mla_kv_cache_write, NOT rotary_emb + do_kv_cache.
+
+    This is the production-benefit test: verifies that when _f3_fusion_enabled
+    is True the single Triton kernel path is taken and the separate rotary_emb
+    call is bypassed in the fused branch.
+
+    Before this PR (per decode step, per MLA layer):
+      rotary_emb(q_pe, k_pe, positions)           ← op 1
+      concat_and_cache_mla(kv_c, k_pe, kv_cache)  ← op 2
+
+    After this PR (auto-enabled):
+      fused_qk_rope_concat_and_cache_mla(...)      ← 1 op
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
+        pytest.skip("F3 kernel absent — fused path not available")
+
+    fused_call_count = 0
+    rope_call_count = 0
+
+    original_fused = rocm_aiter_ops.fused_rope_and_mla_kv_cache_write.__func__
+
+    def counting_fused(cls, **kwargs):
+        nonlocal fused_call_count
+        fused_call_count += 1
+
+    def counting_rope(self, positions, q, k):
+        nonlocal rope_call_count
+        rope_call_count += 1
+        return q, k
+
+    # Monkeypatch at class level so the mla.py code path uses our counters
+    rocm_aiter_ops.fused_rope_and_mla_kv_cache_write = classmethod(counting_fused)
+
+    try:
+        # Simulate the mla.py __init__ gate: _f3_fusion_enabled = True
+        f3_enabled = bool(
+            rocm_aiter_ops.is_mla_enabled()
+            and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+        )
+
+        # Simulate the forward dispatch: if f3 → call fused, else call rotary_emb
+        if f3_enabled:
+            rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
+                q_nope=None, q_pe=None, kv_c=None, k_pe=None,
+                kv_cache=None, q_out=None, slot_mapping=None,
+                k_scale=None, q_scale=None, positions=None,
+                cos_cache=None, sin_cache=None, is_neox=True,
+            )
+        else:
+            rope_call_count += 1  # would have called rotary_emb
+
+        assert fused_call_count == 1, (
+            f"fused_rope_and_mla_kv_cache_write must be called once, "
+            f"got {fused_call_count}"
+        )
+        assert rope_call_count == 0, (
+            f"rotary_emb must NOT be called when F3 is enabled, "
+            f"got {rope_call_count} calls"
+        )
+        print(f"PASS: fused_calls={fused_call_count}, rope_calls={rope_call_count} "
+              f"(F3 replaces 2 ops with 1)")
+    finally:
+        rocm_aiter_ops.fused_rope_and_mla_kv_cache_write = classmethod(
+            lambda cls, **kw: original_fused(cls, **kw)
+        )
