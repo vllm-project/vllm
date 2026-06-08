@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
@@ -95,6 +96,10 @@ class LoadConfig:
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    moe_pruned_experts_profile: str | None = None
+    """Path to a JSON profile listing MoE experts to skip loading.
+    Pruned experts are removed from the local expert map so the MoE kernel
+    never selects them.  Their weight tensors are allocated but left unloaded."""
     device: str | None = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
@@ -127,11 +132,25 @@ class LoadConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
+        profile_hash = self._profile_content_hash()
+        factors: list[Any] = [self.moe_pruned_experts_profile, profile_hash]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    def _profile_content_hash(self) -> str | None:
+        """Return a hex digest of the pruned-experts profile file contents,
+        cached so repeated ``compute_hash`` calls avoid re-reading disk."""
+        if self.moe_pruned_experts_profile is None:
+            return None
+        if not hasattr(self, "_cached_profile_hash"):
+            path = Path(self.moe_pruned_experts_profile)
+            if not path.is_file():
+                raise ValueError(f"MoE pruned experts profile not found at {path}")
+            self._cached_profile_hash = safe_hash(
+                path.read_bytes(),
+                usedforsecurity=False,
+            ).hexdigest()
+        return self._cached_profile_hash
 
     @field_validator("load_format", mode="after")
     def _lowercase_load_format(cls, load_format: str) -> str:

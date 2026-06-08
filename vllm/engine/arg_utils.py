@@ -593,6 +593,7 @@ class EngineArgs:
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
+    moe_pruned_experts_profile: str | None = LoadConfig.moe_pruned_experts_profile
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: bool | None = None
@@ -888,6 +889,10 @@ class EngineArgs:
         )
         load_group.add_argument(
             "--model-loader-extra-config", **load_kwargs["model_loader_extra_config"]
+        )
+        load_group.add_argument(
+            "--moe-pruned-experts-profile",
+            **load_kwargs["moe_pruned_experts_profile"],
         )
         load_group.add_argument("--ignore-patterns", **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
@@ -1657,6 +1662,7 @@ class EngineArgs:
             safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
             safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
             model_loader_extra_config=self.model_loader_extra_config,
+            moe_pruned_experts_profile=self.moe_pruned_experts_profile,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,

@@ -54,6 +54,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
+from vllm.utils.moe_pruned_experts import (
+    build_pruned_expert_map,
+    extract_moe_layer_index,
+    load_pruned_experts_profile,
+)
 
 logger = init_logger(__name__)
 
@@ -181,6 +186,7 @@ class FusedMoE(PluggableLayer):
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
+        self.has_pruned_experts = False
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
@@ -257,6 +263,7 @@ class FusedMoE(PluggableLayer):
         )
 
         self.update_expert_map_info()
+        self._apply_pruned_experts_profile()
 
         self.top_k = top_k
 
@@ -311,6 +318,19 @@ class FusedMoE(PluggableLayer):
             hash_indices_table=self.hash_indices_table,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
+        moe_backend = vllm_config.kernel_config.moe_backend
+        if self.has_pruned_experts:
+            if moe_backend == "auto":
+                logger.info_once(
+                    "MoE pruned experts profile requires expert_map support; "
+                    "using Triton MoE backend instead of auto selection."
+                )
+                moe_backend = "triton"
+            elif moe_backend != "triton":
+                raise NotImplementedError(
+                    "MoE pruned experts profiles currently require the Triton "
+                    f"MoE backend, but got moe_backend={moe_backend!r}."
+                )
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
@@ -323,7 +343,7 @@ class FusedMoE(PluggableLayer):
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
-            moe_backend=vllm_config.kernel_config.moe_backend,
+            moe_backend=moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=max_num_batched_tokens,
             max_capture_size=compilation_config.max_cudagraph_capture_size,
@@ -525,6 +545,72 @@ class FusedMoE(PluggableLayer):
             self.register_buffer("expert_physical_to_global", physical_to_global)
             self.register_buffer("expert_local_to_global", local_global)
 
+    def _apply_pruned_experts_profile(self) -> None:
+        profile_path = self.vllm_config.load_config.moe_pruned_experts_profile
+        if not profile_path:
+            self.has_pruned_experts = False
+            return
+
+        layer_idx = extract_moe_layer_index(self.layer_name)
+        if layer_idx is None:
+            logger.warning(
+                "Skipping MoE pruned experts profile for layer %s because "
+                "its layer index could not be inferred.",
+                self.layer_name,
+            )
+            self.has_pruned_experts = False
+            return
+
+        profile = load_pruned_experts_profile(profile_path)
+        pruned_experts = profile.pruned_experts_by_layer.get(layer_idx)
+        if not pruned_experts:
+            self.has_pruned_experts = False
+            return
+
+        if self.global_num_experts != self.logical_num_experts:
+            raise NotImplementedError(
+                "MoE pruned experts profiles do not support redundant experts."
+            )
+        if self.rocm_aiter_fmoe_enabled:
+            raise NotImplementedError(
+                "MoE pruned experts profiles do not support ROCm AITER fused MoE."
+            )
+        invalid_experts = [
+            expert_id
+            for expert_id in pruned_experts
+            if expert_id >= self.global_num_experts
+        ]
+        if invalid_experts:
+            raise ValueError(
+                f"MoE pruned experts profile for layer {layer_idx} contains "
+                f"out-of-range experts {invalid_experts}; this layer has "
+                f"{self.global_num_experts} experts."
+            )
+
+        _raw_expert_map: torch.Tensor | None = self._expert_map  # type: ignore[has-type]
+        base_expert_map = _raw_expert_map.cpu() if _raw_expert_map is not None else None
+        pruned_expert_map, num_local_experts = build_pruned_expert_map(
+            num_experts=self.global_num_experts,
+            pruned_experts=pruned_experts,
+            base_expert_map=base_expert_map,
+        )
+        if num_local_experts == 0:
+            raise ValueError(
+                f"MoE pruned experts profile prunes every local expert in "
+                f"layer {layer_idx}."
+            )
+
+        self.local_num_experts = num_local_experts
+        self._expert_map = pruned_expert_map
+        self.has_pruned_experts = True
+        logger.info(
+            "MoE pruned experts layer %d: skipped %d/%d experts, local_num_experts=%d",
+            layer_idx,
+            len(pruned_experts),
+            self.global_num_experts,
+            self.local_num_experts,
+        )
+
     def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -553,6 +639,7 @@ class FusedMoE(PluggableLayer):
 
         # Update local attributes from ExpertMapManager
         self.update_expert_map_info()
+        self._apply_pruned_experts_profile()
 
     def _load_per_tensor_weight_scale(
         self,
@@ -822,6 +909,8 @@ class FusedMoE(PluggableLayer):
             expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        if self.has_pruned_experts:
+            return int(self._expert_map[expert_id])
         return self.expert_map_manager.map_global_to_local(expert_id)
 
     @overload

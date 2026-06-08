@@ -89,6 +89,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
+        if self.disable_expert_map and getattr(layer, "has_pruned_experts", False):
+            raise NotImplementedError(
+                "MoE pruned experts profiles require a MoE backend that supports "
+                "expert_map."
+            )
         return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
