@@ -1524,8 +1524,8 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
     ) -> str:
-        """Return the modality of the inputs."""
-        ...
+        """Return the modality of the inputs (default: image-only)."""
+        return "image"
 
     def get_max_frames_per_video(
         self,
@@ -1623,8 +1623,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 

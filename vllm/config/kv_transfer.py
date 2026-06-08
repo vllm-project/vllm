@@ -48,8 +48,7 @@ class KVTransferConfig:
     Currently only 1P1D is supported."""
 
     kv_parallel_size: int = 1
-    """The number of parallel instances for KV cache transfer. For
-    P2pNcclConnector, this should be 2."""
+    """The number of parallel instances for KV cache transfer."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""

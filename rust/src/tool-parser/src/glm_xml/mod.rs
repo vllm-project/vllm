@@ -6,7 +6,7 @@ use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
-use super::{Result, ToolCallDelta, ToolParseResult};
+use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
 mod glm45_moe;
@@ -76,10 +76,10 @@ impl GlmXmlToolParser {
     }
 
     /// Apply one parsed GLM event to parser state and output.
-    fn apply_event(&mut self, event: GlmEvent, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: GlmEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             GlmEvent::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             GlmEvent::ToolCallStart => self.mode = GlmMode::ToolCall,
             GlmEvent::ToolCall { name, raw_params } => {
@@ -88,7 +88,7 @@ impl GlmXmlToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index: self.emitted_tool_count,
                     name: Some(name),
                     arguments,
@@ -100,40 +100,36 @@ impl GlmXmlToolParser {
         Ok(())
     }
 
-    /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 
-    /// Push one decoded text chunk through the GLM MoE parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_glm_event(input, self.mode, self.separator)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
             match self.mode {
-                GlmMode::Text => result.normal_text.push_str(&self.buffer),
+                GlmMode::Text => output.normal_text.push_str(&self.buffer),
                 GlmMode::ToolCall => return Err(parsing_failed!("incomplete GLM MoE tool call")),
                 GlmMode::AfterToolCall => {}
             }
         }
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
     }
 }
 
@@ -256,8 +252,8 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::Glm45MoeToolParser;
-    use crate::ToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -273,10 +269,10 @@ mod tests {
     #[test]
     fn glm45_parse_complete_without_tool_call_keeps_text() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
@@ -290,13 +286,13 @@ mod tests {
             )
         );
 
-        let result = parser.parse_complete(&output).unwrap();
+        let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(result.normal_text, "Let me search for that.\n");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text, "Let me search for that.\n");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
     }
@@ -311,14 +307,14 @@ mod tests {
         );
 
         let chunks = split_by_chars(&output, 11);
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.calls.len(), 2);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(output.normal_text, "");
+        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
             json!({"x": 1, "y": 2})
         );
     }
@@ -326,7 +322,7 @@ mod tests {
     #[test]
     fn glm45_parse_complete_unescapes_literal_closing_tags_in_arg_value() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&glm45_tool_call(
                 "get_weather",
                 &[
@@ -337,7 +333,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "city": "Paris </arg_value></tool_call>",
                 "date": "2026-05-08",
@@ -349,17 +345,17 @@ mod tests {
     fn glm45_streaming_without_tool_call_emits_text_incrementally() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &["hello ", "world"]);
+        let output = collect_stream(&mut parser, &["hello ", "world"]);
 
-        assert_eq!(result.normal_text, "hello world");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "hello world");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn glm45_streaming_preserves_prefix_text() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "Prefix ",
@@ -367,14 +363,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.normal_text, "Prefix ");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.normal_text, "Prefix ");
+        assert_eq!(output.calls.len(), 1);
     }
 
     #[test]
     fn glm45_streaming_handles_start_token_split_across_chunks() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "hello <tool",
@@ -383,26 +379,26 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text, "hello ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
     }
 
     #[test]
     fn glm45_streaming_does_not_emit_incomplete_tool_call() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let result = parser.push("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
+        let output = parser.parse_chunk("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
 
-        assert_eq!(result.normal_text, "");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn glm45_finish_fails_incomplete_tool_call() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        parser.push("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
+        parser.parse_chunk("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
         let error = parser.finish().unwrap_err();
 
         assert!(error.as_report().to_string().contains("incomplete GLM MoE tool call"));
@@ -412,7 +408,7 @@ mod tests {
     fn glm45_malformed_tool_call_fails_fast() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let error = parser.push("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>").unwrap_err();
+        let error = parser.parse_chunk("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>").unwrap_err();
 
         assert!(error.as_report().to_string().contains("tool parser parsing failed"));
     }
@@ -421,7 +417,7 @@ mod tests {
     fn glm45_streaming_ignores_trailing_text_after_tool_calls() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[&format!(
                 "{}<|endoftext|>",
@@ -429,7 +425,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.normal_text, "");
+        assert_eq!(output.calls.len(), 1);
     }
 }

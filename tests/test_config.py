@@ -92,6 +92,26 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         ),
         (
             SimpleNamespace(
+                model="meta-llama/Llama-3.2-1B",
+                architectures=["LlamaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mistral-7B-v0.1",
+                architectures=["MistralForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="facebook/opt-125m",
                 architectures=["OPTForCausalLM"],
                 runner_type="generate",
@@ -752,6 +772,26 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config1.tokenizer) and os.path.isdir(config1.tokenizer)
     assert os.path.exists(config2.model) and os.path.isdir(config2.model)
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_model_and_tokenizer(mock_pull_files):
+    """Test that when model and tokenizer are different cloud URIs,
+    pull_files receives the correct URI for each."""
+    mock_pull_files.return_value = None
+
+    model_url = "s3://bucket/model/"
+    tokenizer_url = "s3://bucket/tokenizer/"
+
+    config = MockConfig(model=model_url, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
+
+    # pull_files should be called twice: once for model, once for tokenizer
+    assert mock_pull_files.call_count == 2
+    # First call: model URI with allow_pattern
+    assert mock_pull_files.call_args_list[0][0][0] == model_url
+    # Second call: tokenizer URI with ignore_pattern
+    assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
 
 
 @pytest.mark.parametrize(

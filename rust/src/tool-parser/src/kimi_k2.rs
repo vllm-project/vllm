@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
 use super::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len, take_json_object};
-use super::{Result, ToolCallDelta, ToolParseResult, ToolParser};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
 const TOOL_CALLS_START: &str = "<|tool_calls_section_begin|>";
@@ -73,10 +73,10 @@ impl KimiK2ToolParser {
     }
 
     /// Apply one parsed Kimi K2 event to parser state and output.
-    fn apply_event(&mut self, event: KimiK2Event, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: KimiK2Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             KimiK2Event::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             KimiK2Event::ToolCallsStart => self.mode = KimiK2Mode::ToolBlock,
             KimiK2Event::ToolCallStart => self.mode = KimiK2Mode::Header,
@@ -89,7 +89,7 @@ impl KimiK2ToolParser {
                 self.mode = KimiK2Mode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -101,7 +101,7 @@ impl KimiK2ToolParser {
                         "Kimi K2 arguments without an active tool call"
                     ));
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -120,16 +120,14 @@ impl KimiK2ToolParser {
         Ok(())
     }
 
-    /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.mode = KimiK2Mode::Text;
         self.active_tool_index = None;
+        std::mem::take(&mut self.buffer)
     }
 }
 
 impl ToolParser for KimiK2ToolParser {
-    /// Create a boxed Kimi K2 tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -137,38 +135,38 @@ impl ToolParser for KimiK2ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    /// Preserve Kimi K2 special-token markers while decoding.
     fn preserve_special_tokens(&self) -> bool {
         true
     }
 
-    /// Push one decoded text chunk through the Kimi K2 parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_kimi_k2_event(input, &mut self.mode)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match &self.mode {
-            KimiK2Mode::Text => result.normal_text.push_str(&self.buffer),
+            KimiK2Mode::Text => output.normal_text.push_str(&self.buffer),
             KimiK2Mode::ToolBlock | KimiK2Mode::Done => {}
             KimiK2Mode::Header | KimiK2Mode::Arguments { .. } => {
                 return Err(parsing_failed!("incomplete Kimi K2 tool call"));
             }
         }
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
+    }
+
+    fn reset(&mut self) -> String {
+        KimiK2ToolParser::reset(self)
     }
 }
 
@@ -323,8 +321,8 @@ mod tests {
         KimiK2ToolParser, TOOL_CALL_ARGUMENT_START, TOOL_CALL_END, TOOL_CALL_START, TOOL_CALLS_END,
         TOOL_CALLS_START, ToolParser, tool_header,
     };
-    use crate::ToolParseResult;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, index: usize, arguments: &str) -> String {
         format!(
@@ -339,35 +337,35 @@ mod tests {
     #[test]
     fn kimi_k2_parse_complete_without_tool_call_keeps_text() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn kimi_k2_parse_complete_extracts_raw_json_arguments() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         let arguments = r#"{ "location": "NYC", "days": "3" }"#;
-        let result = parser
+        let output = parser
             .parse_complete(&format!(
                 "Checking. {} trailing text",
                 build_tool_section(&[build_tool_call("get_weather", 0, arguments)])
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "Checking. ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.normal_text, "Checking. ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn kimi_k2_does_not_validate_or_normalize_arguments() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         let arguments = r#"{"location":"NYC",}"#;
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_section(&[build_tool_call(
                 "get_weather",
                 0,
@@ -375,7 +373,7 @@ mod tests {
             )]))
             .unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -393,23 +391,23 @@ mod tests {
             TOOL_CALLS_END,
         ];
 
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
             );
-            result.append(next);
+            output.append(next);
         }
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Paris\"", "}"]);
-        let result = result.coalesce_calls();
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Paris"}"#);
+        let output = output.coalesce_calls();
+        assert_eq!(output.calls[0].arguments, r#"{"location":"Paris"}"#);
     }
 
     #[test]
@@ -427,11 +425,11 @@ mod tests {
             TOOL_CALLS_END,
         ];
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"NYC"}"#);
+        assert_eq!(output.normal_text, "hello ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, r#"{"location":"NYC"}"#);
     }
 
     #[test]
@@ -440,10 +438,10 @@ mod tests {
         let arguments = format!(r#"{{"text":"literal {TOOL_CALL_END} inside"}}"#);
         let input = build_tool_section(&[build_tool_call("echo", 0, &arguments)]);
 
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -460,11 +458,11 @@ mod tests {
             TOOL_CALLS_END,
         ];
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.calls.len(), 1);
         assert_eq!(
-            result.calls[0].arguments,
+            output.calls[0].arguments,
             r#"{"text":"literal <|tool_call_end|> inside"}"#
         );
     }
@@ -478,10 +476,10 @@ mod tests {
         ]);
 
         let chunks = split_by_chars(&input, 7);
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -501,7 +499,7 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -511,11 +509,11 @@ mod tests {
             "{TOOL_CALLS_START}{TOOL_CALL_START}api.tools.search:42{TOOL_CALL_ARGUMENT_START}{{}}{TOOL_CALL_END}{TOOL_CALLS_END}"
         );
 
-        let result = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.calls[0].tool_index, 42);
-        assert_eq!(result.calls[0].name.as_deref(), Some("search"));
-        assert_eq!(result.calls[0].arguments, "{}");
+        assert_eq!(output.calls[0].tool_index, 42);
+        assert_eq!(output.calls[0].name.as_deref(), Some("search"));
+        assert_eq!(output.calls[0].arguments, "{}");
     }
 
     #[test]
@@ -536,7 +534,7 @@ mod tests {
     fn kimi_k2_finish_fails_incomplete_tool_call() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         parser
-            .push(&format!(
+            .parse_chunk(&format!(
                 "{TOOL_CALLS_START}{TOOL_CALL_START}functions.get_weather:0{TOOL_CALL_ARGUMENT_START}{{\"location\""
             ))
             .unwrap();
@@ -553,7 +551,7 @@ mod tests {
         let input =
             format!("{TOOL_CALLS_START}{TOOL_CALL_START}get_weather{TOOL_CALL_ARGUMENT_START}{{}}");
 
-        let error = parser.push(&input).unwrap_err();
+        let error = parser.parse_chunk(&input).unwrap_err();
 
         expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
     }
