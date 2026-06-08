@@ -67,7 +67,7 @@ class ObjAsyncLookupManager(AsyncLookupManager):
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> list[bool | None]:
+    ) -> Iterable[bool | None]:
         descriptors = [
             (
                 _PROBE_ADDR,
@@ -78,7 +78,7 @@ class ObjAsyncLookupManager(AsyncLookupManager):
             for k in keys
         ]
         results = self._tier._agent.query_memory(descriptors, "OBJ", "OBJ")
-        return [r is not None for r in results]
+        return (r is not None for r in results)
 
 
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
