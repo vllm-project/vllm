@@ -896,6 +896,13 @@ class GPUModelRunner(
         self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         self.draft_token_ids_cpu: torch.Tensor | None = None
         self.num_accepted_tokens_event: torch.Event | None = None
+        # Adaptive verifier probs async transfer (initialized below if enabled).
+        self._adaptive_probs_event: torch.cuda.Event | None = None
+        self._adaptive_probs_pinned: torch.Tensor | None = None
+        self._adaptive_probs_pending: bool = False
+        self._adaptive_num_reqs: int = 0
+        self._adaptive_req_ids: list[str] = []
+        self._adaptive_active: set[str] = set()
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
             self.num_accepted_tokens_event = torch.Event()
@@ -906,6 +913,14 @@ class GPUModelRunner(
                 device="cpu",
                 pin_memory=self.pin_memory,
             )
+            if self._verify_adaptive_controller is not None:
+                self._adaptive_probs_event = torch.cuda.Event()
+                self._adaptive_probs_pinned = torch.empty(
+                    (self.max_num_reqs, self.num_spec_tokens),
+                    dtype=torch.float32,
+                    device="cpu",
+                    pin_memory=self.pin_memory,
+                )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
                 self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
@@ -4061,8 +4076,8 @@ class GPUModelRunner(
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        # Adaptive spec-length truncation: shorten the verifier's input to the
-        # length recommended by VerifyAdaptiveController from the previous step.
+        # Adaptive spec-length truncation: apply draft_lens cached by the
+        # previous step's _maybe_process_adaptive_probs call.
         if (
             self._verify_adaptive_controller is not None
             and scheduler_output.scheduled_spec_decode_tokens
@@ -4077,10 +4092,8 @@ class GPUModelRunner(
                 if adaptive_len is not None and adaptive_len < len(draft_toks):
                     diff = len(draft_toks) - adaptive_len
                     tokens_delta += diff
-                    new_num_sched[req_id] = new_num_sched[req_id] - diff
+                    new_num_sched[req_id] -= diff
                     if adaptive_len == 0:
-                        # No speculation: drop the key so downstream treats it
-                        # as a plain decode rather than an empty-draft request.
                         del new_spec[req_id]
                     else:
                         new_spec[req_id] = draft_toks[:adaptive_len]
@@ -4615,6 +4628,11 @@ class GPUModelRunner(
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
+        # GPU is idle after bookkeeping; consume probs while the copy is
+        # guaranteed done (default stream was synced in parse_output).
+        if self._adaptive_probs_pending:
+            self._maybe_process_adaptive_probs()
+
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow
         # draft model to also save its KV cache.
@@ -4759,6 +4777,38 @@ class GPUModelRunner(
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
+        # Queue selected_probs D2H on the default stream (drafter runs there
+        # too, so no wait_stream needed).  _bookkeeping_sync's parse_output
+        # does .cpu() which syncs the default stream, covering this copy.
+        if (
+            not zeros_only
+            and not self._adaptive_probs_pending
+            and self._adaptive_probs_pinned is not None
+            and self._adaptive_probs_event is not None
+            and hasattr(self, "drafter")
+            and hasattr(self.drafter, "take_last_selected_probs")
+        ):
+            _probs = self.drafter.take_last_selected_probs()
+            if _probs is not None:
+                num_reqs = self.input_batch.num_reqs
+                self._adaptive_probs_pending = True
+                self._adaptive_num_reqs = num_reqs
+                self._adaptive_req_ids = self.input_batch.req_ids.copy()
+                self._adaptive_active = {
+                    self.input_batch.req_ids[i]
+                    for i in range(num_reqs)
+                    if (
+                        self.input_batch.num_computed_tokens_cpu[i]
+                        >= self.input_batch.num_prompt_tokens[i]
+                    )
+                }
+                # Non-blocking D2H; event lets _maybe_process_adaptive_probs
+                # verify completion cheaply via query().
+                self._adaptive_probs_pinned[:num_reqs].copy_(
+                    _probs, non_blocking=True
+                )
+                self._adaptive_probs_event.record()
+
         # Check if we need to copy draft tokens to CPU. In async scheduling,
         # we only copy when needed for structured output, penalties or bad_words.
         if self.use_async_scheduling and not (
@@ -4788,6 +4838,32 @@ class GPUModelRunner(
                 # No copy needed, just zero-out cpu tensor.
                 self.draft_token_ids_cpu[:num_reqs] = 0
             self.draft_token_ids_event.record()
+
+    def _maybe_process_adaptive_probs(self) -> None:
+        """Consume step-N probs and update _adaptive_draft_lens.
+
+        Called at end of sample_tokens after _bookkeeping_sync, where the
+        default stream is already synced, so query() returns True immediately.
+        probs(N) → draft_lens cached → used to truncate verifier(N+1).
+        """
+        if not self._adaptive_probs_pending:
+            return
+        assert self._adaptive_probs_event is not None
+        if not self._adaptive_probs_event.query():
+            self._adaptive_probs_event.synchronize()
+
+        self._adaptive_probs_pending = False
+
+        num_reqs = self._adaptive_num_reqs
+        active = self._adaptive_active
+        if active and self._verify_adaptive_controller is not None:
+            assert self._adaptive_probs_pinned is not None
+            self._verify_adaptive_controller.process_draft_output(
+                selected_probs=self._adaptive_probs_pinned[:num_reqs],
+                req_ids=self._adaptive_req_ids,
+                active_draft_req_ids=active,
+                batch_size=num_reqs,
+            )
 
     def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
         if isinstance(self._draft_token_ids, list):
@@ -5131,31 +5207,10 @@ class GPUModelRunner(
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
 
-            # Update adaptive draft lengths for the next step using the
-            # lightweight [B, T] selected-token probabilities from the drafter.
-            if (
-                self._verify_adaptive_controller is not None
-                and hasattr(self.drafter, "take_last_selected_probs")
-            ):
-                selected_probs = self.drafter.take_last_selected_probs()
-                if selected_probs is not None:
-                    num_reqs = self.input_batch.num_reqs
-                    # The sequences actually drafting this step are those past
-                    # prefill; only they receive an adaptive length for the
-                    # next verifier step.
-                    active = {
-                        self.input_batch.req_ids[i]
-                        for i in range(num_reqs)
-                        if self.input_batch.num_computed_tokens_cpu[i]
-                        >= self.input_batch.num_prompt_tokens[i]
-                    }
-                    if active:
-                        self._verify_adaptive_controller.process_draft_output(
-                            selected_probs=selected_probs,
-                            req_ids=self.input_batch.req_ids,
-                            active_draft_req_ids=active,
-                            batch_size=num_reqs,
-                        )
+            # NOTE: selected_probs are transferred to CPU asynchronously inside
+            # _copy_draft_token_ids_to_cpu (called just below via the closure).
+            # Processing happens at the top of the next execute_model via
+            # _maybe_process_adaptive_probs().
 
         return draft_token_ids
 
@@ -6690,34 +6745,13 @@ class GPUModelRunner(
         n_warmup: int = 3,
         n_measure: int = 5,
     ) -> tuple[str, float, int]:
-        """Profile verifier forward latency for one (batch, query_len) shape.
+        """Profile verifier forward latency for one (batch_size, query_len) shape.
 
-        Unlike ``_dummy_run``, this method constructs attention metadata and
-        invokes the target model in the same way as a real decode step would,
-        so the cuda-graph dispatcher naturally selects FCG / PCG / eager based
-        on the batch shape.  It is intentionally minimal: no LoRA, no EPLB, no
-        drafter, no sampler.
+        Builds attention metadata once, then times only the model forwards with
+        CUDA events (no LoRA/EPLB/drafter/sampler).  The CUDA-graph dispatcher
+        selects FCG/PCG/eager exactly as in real inference.
 
-        Crucially, all attention metadata / slot-mapping / block-table setup is
-        built **once**, and only the repeated ``self.model(...)`` forwards are
-        timed with CUDA events.  This excludes the (shape-independent) Python
-        metadata-construction overhead, which would otherwise dominate and
-        flatten the measured cost across shapes.
-
-        Args:
-            scheduled_tokens: per-request token counts, e.g. ``[ql] * bs``.
-                All requests are treated as decode (query == kv tokens so far).
-            seq_lens: simulated KV-context length set in seq_lens for attention
-                backends.  A realistic value (e.g. 1024) makes profiled
-                attention cost closer to real long-context inference.
-            n_warmup: untimed forwards before measurement.
-            n_measure: timed forwards; the returned latency is their average.
-
-        Returns:
-            ``(runtime_mode, avg_forward_ms, num_tokens_padded)`` where
-            runtime_mode is one of ``"FCG"`` / ``"PCG"`` / ``"eager"`` and
-            num_tokens_padded is the token count actually executed (after
-            cuda-graph padding).
+        Returns (runtime_mode, avg_forward_ms, num_tokens_padded).
         """
         num_scheduled_tokens = np.array(scheduled_tokens, dtype=np.int32)
         num_reqs = len(scheduled_tokens)

@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def choose_query_lens_discrete(
-    probs: list[list[float]],
+    probs: "list[list[float]] | np.ndarray",
     base_batch_size: int,
     q_levels: list[int],
     cost_lookup: Callable[[int], float],
@@ -202,9 +202,6 @@ class VerifyAdaptiveController:
 
                 sched_tokens = [ql] * bs
 
-                # The runner builds metadata once and times only the repeated
-                # model forwards, so the returned latency is free of the
-                # shape-independent Python construction overhead.
                 runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
                     sched_tokens,
                     self.config.warmup_seq_lens,
@@ -232,6 +229,13 @@ class VerifyAdaptiveController:
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
 
+        # TP correctness: GPU timings differ slightly per rank, which can
+        # flip the argmax and cause divergent draft_lens -> NCCL deadlock.
+        # Broadcast rank-0's table so all ranks decide identically.
+        tp_group = get_tp_group()
+        if tp_group.world_size > 1:
+            self._cost_table = tp_group.broadcast_object(self._cost_table, src=0)
+
         if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
             logger.info(
                 "VerifyAdaptiveController: cost table ready (%d entries).",
@@ -240,63 +244,45 @@ class VerifyAdaptiveController:
 
     def process_draft_output(
         self,
-        selected_probs: torch.Tensor,  # [B, T] prob of each chosen draft token
+        selected_probs: torch.Tensor,  # [B, T] on CPU (pinned), already transferred
         req_ids: list[str],
         active_draft_req_ids: set[str],
         batch_size: int,
     ) -> None:
-        """Compute and cache adaptive draft_lens from this step's drafter output.
-
-        *selected_probs* already holds the per-position probability of each
-        sampled draft token (gathered on GPU inside the drafter), so the only
-        host transfer here is the small [B, T] tensor.
-
-        Only sequences in *active_draft_req_ids* are updated; the rest keep
-        their previously cached value (or fall back to full spec tokens).
-        """
+        """Compute and cache adaptive draft_lens from this step's drafter probs."""
         if not self.config.enabled or not active_draft_req_ids or not self._sorted_bs:
             return
 
-        # Guard row alignment: probs[i] must correspond to req_ids[i].
         n_rows = min(selected_probs.shape[0], len(req_ids), batch_size)
-        all_probs = selected_probs[:n_rows].cpu().tolist()
+        all_probs_np: np.ndarray = selected_probs[:n_rows].numpy()
 
-        active_probs: list[list[float]] = []
-        active_req_ids: list[str] = []
-        for i in range(n_rows):
-            req_id = req_ids[i]
-            if req_id in active_draft_req_ids:
-                active_probs.append(all_probs[i])
-                active_req_ids.append(req_id)
-
-        if not active_probs:
+        active_indices: list[int] = [
+            i for i in range(n_rows) if req_ids[i] in active_draft_req_ids
+        ]
+        if not active_indices:
             return
+        active_probs: np.ndarray = all_probs_np[active_indices]
+        active_req_ids: list[str] = [req_ids[i] for i in active_indices]
 
-        # Cost depends only on (batch_size, sum_query_len).  Pin the batch-size
-        # axis to its ceiling profile level, then scan that level's measured
-        # sum_query_len points directly (no interpolation).
-        full_bs = batch_size
-        bs_key = _ceil_lookup(full_bs, self._sorted_bs)
+        bs_key = _ceil_lookup(batch_size, self._sorted_bs)
         q_levels = self._sorted_sql_per_bs[bs_key]
-
-        def cost_lookup(q: int) -> float:
-            return self._cost_table[(bs_key, q)]
 
         result = choose_query_lens_discrete(
             probs=active_probs,
-            base_batch_size=full_bs,
+            base_batch_size=batch_size,
             q_levels=q_levels,
-            cost_lookup=cost_lookup,
+            cost_lookup=lambda q: self._cost_table[(bs_key, q)],
             max_draft_len=self.max_query_len_per_req - 1,
         )
 
-        for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
+        draft_lens = result["draft_lens"]
+        for req_id, draft_len in zip(active_req_ids, draft_lens):
             self._adaptive_draft_lens[req_id] = draft_len
 
-        logger.info(
+        logger.debug(
             "adaptive: bs_key=%d best_Q=%d best_S=%d score=%.4f draft_lens=%s",
             bs_key, result["best_Q"], result["best_S"],
-            result["best_score"], result["draft_lens"],
+            result["best_score"], draft_lens,
         )
 
     def get_adaptive_draft_len(self, req_id: str) -> int | None:
