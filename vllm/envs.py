@@ -118,6 +118,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
+    VLLM_ROCM_MORI_DISPATCH_DTYPE: str = "auto"
+    VLLM_ROCM_MORI_COMBINE_DTYPE: str = "auto"
+    VLLM_ROCM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD: int = 256
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -1137,6 +1140,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #       see PR #39177 for benchmarks)
     "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
         os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
+    ),
+    # MoRI EP dispatch activation dtype. Controls the quantization applied to
+    # activations before the MoRI all2all dispatch.
+    #   "auto" (default): pick from the model weight dtype (mxfp4 weights ->
+    #       fp4 dispatch, fp8 weights -> fp8 dispatch, else bf16)
+    #   "bf16" | "fp8" | "fp4": force the dispatch dtype
+    "VLLM_ROCM_MORI_DISPATCH_DTYPE": lambda: os.getenv(
+        "VLLM_ROCM_MORI_DISPATCH_DTYPE", "auto"
+    ).lower(),
+    # MoRI EP combine dtype. Controls the on-wire quantization of expert outputs
+    # during the MoRI combine (driven by EpDispatchCombineConfig.quant_type).
+    #   "auto" (default): fp8 (blockwise) for fp4 models, bf16 otherwise
+    #   "bf16" | "fp8" | "fp8_direct_cast": force the combine dtype
+    "VLLM_ROCM_MORI_COMBINE_DTYPE": lambda: os.getenv(
+        "VLLM_ROCM_MORI_COMBINE_DTYPE", "auto"
+    ).lower(),
+    # MoRI EP inter-node dispatch kernel switch threshold (high-throughput
+    # backend). When max_num_tokens_per_dp_rank <= threshold use InterNodeV1LL,
+    # otherwise InterNodeV1.
+    "VLLM_ROCM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD": lambda: int(
+        os.getenv("VLLM_ROCM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD", "256")
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (

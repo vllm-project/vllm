@@ -770,8 +770,8 @@ class MoriAll2AllManager(All2AllManagerBase):
             " to install MoRI kernels."
         )  # noqa
         assert all2all_backend in (
-            "mori_high_throughput",
-            "mori_low_latency",
+            "moriep_high_throughput",
+            "moriep_low_latency",
         ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
         import mori
 
@@ -781,6 +781,54 @@ class MoriAll2AllManager(All2AllManagerBase):
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
         mori.shmem.shmem_torch_process_group_init("mori")
+
+    def _select_kernel(
+        self,
+        quant_dtype: torch.dtype,
+        max_num_tokens_per_dp_rank: int,
+    ):
+        """Pick the mori kernel type + block tuning.
+
+        - moriep_low_latency  -> AsyncLL (async low-latency kernel)
+        - moriep_high_throughput, single node -> IntraNode
+        - moriep_high_throughput, multi node  -> InterNodeV1LL if
+          max_num_tokens_per_dp_rank <= threshold else InterNodeV1
+        """
+        import mori  # type: ignore[import-not-found]
+
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        assert on_gfx942() or on_gfx950(), (
+            "mori currently only support arch gfx942 and gfx950"
+        )
+
+        kt = mori.ops.EpDispatchCombineKernelType
+        is_fp4 = quant_dtype == torch.float4_e2m1fn_x2
+
+        if self._all2all_backend == "moriep_low_latency":
+            # Async low-latency kernel (SGLang LOW_LATENCY config).
+            return kt.AsyncLL, 8, 64, 32
+
+        if not self.internode:
+            # High throughput, single node.
+            if is_fp4:
+                # FP4 intranode tuning mirrors SGLang get_ep_dispatch_configs.
+                if max_num_tokens_per_dp_rank < 128:
+                    return kt.IntraNode, 5, 225, 0
+                return kt.IntraNode, 16, 256, 0
+            return kt.IntraNode, 16, 80, 0
+
+        # High throughput, multi node. Threshold selects the inter-node kernel.
+        threshold = envs.VLLM_ROCM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD
+        kernel_type = (
+            kt.InterNodeV1LL
+            if max_num_tokens_per_dp_rank <= threshold
+            else kt.InterNodeV1
+        )
+        if on_gfx942():
+            return kernel_type, 16, 32, 16
+        # gfx950
+        return kernel_type, 8, 64, 32
 
     def _make_all2all_kwargs(
         self,
@@ -794,40 +842,15 @@ class MoriAll2AllManager(All2AllManagerBase):
         max_num_tokens_per_dp_rank: int,
         num_local_experts: int,
         num_experts_per_token: int,
+        quant_type: str = "none",
+        instance_id: int = 0,
     ):
-        import mori  # type: ignore[import-not-found]
-
-        from vllm.platforms.rocm import on_gfx942, on_gfx950
-
-        assert on_gfx942() or on_gfx950(), (
-            "mori currently only support arch gfx942 and gfx950"
-        )
-
-        if not self.internode:
-            # single node
-            kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
-            rdma_block_num = 0
-            warp_num_per_block = 16
-            block_num = 80
-        else:
-            # Multi-node: kernel follows --all2all-backend (mirrors deepep_* split).
-            # mori_low_latency → InterNodeV1LL; mori_high_throughput → V1.
-            if self._all2all_backend == "mori_low_latency":
-                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
-            else:
-                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
-            if on_gfx942():
-                warp_num_per_block = 16
-                block_num = 32
-                rdma_block_num = 16
-            elif on_gfx950():
-                warp_num_per_block = 8
-                block_num = 64
-                rdma_block_num = 32
-            else:
-                raise NotImplementedError(
-                    "mori currently only support arch gfx942 and gfx950"
-                )
+        (
+            kernel_type,
+            warp_num_per_block,
+            block_num,
+            rdma_block_num,
+        ) = self._select_kernel(quant_dtype, max_num_tokens_per_dp_rank)
 
         return dict(
             rank=rank,
@@ -845,12 +868,28 @@ class MoriAll2AllManager(All2AllManagerBase):
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
             gpu_per_node=min(8, num_ep_ranks),
+            # combine on-wire quantization (fp8_blockwise / fp8_direct_cast / none)
+            quant_type=quant_type,
+            # Cache discriminator so each DBO micro-batch gets its own op
+            # (mori recv buffers are internal to EpDispatchCombineOp). Stripped
+            # before building the config.
+            instance_id=instance_id,
         )
 
     def _make_handle(self, **kwargs):
+        import dataclasses
+
         import mori  # type: ignore[import-not-found]
 
-        mori_config = mori.ops.EpDispatchCombineConfig(**kwargs)
+        # Drop kwargs the installed mori's EpDispatchCombineConfig doesn't accept
+        # (e.g. instance_id, or quant_type on older builds).
+        valid = {f.name for f in dataclasses.fields(mori.ops.EpDispatchCombineConfig)}
+        config_kwargs = {k: v for k, v in kwargs.items() if k in valid}
+        dropped = set(kwargs) - set(config_kwargs)
+        if dropped:
+            logger.debug("MoRI: dropping unsupported config kwargs %s", dropped)
+
+        mori_config = mori.ops.EpDispatchCombineConfig(**config_kwargs)
         handle = mori.ops.EpDispatchCombineOp(mori_config)
         return handle
 
@@ -858,7 +897,7 @@ class MoriAll2AllManager(All2AllManagerBase):
         import mori  # type: ignore[import-not-found]
 
         mori_kwargs = self._make_all2all_kwargs(**kwargs)
-        logger.debug("MoRI all2all args %s", mori_kwargs)
+        logger.info("MoRI all2all args %s", mori_kwargs)
         handle: mori.ops.EpDispatchCombineOp = self.handle_cache.get_or_create(
             mori_kwargs, self._make_handle
         )

@@ -138,8 +138,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     self.cpu_group, tcp_store_group
                 )
             elif self.all2all_backend in (
-                "mori_high_throughput",
-                "mori_low_latency",
+                "moriep_high_throughput",
+                "moriep_low_latency",
             ):
                 from .all2all import MoriAll2AllManager
 

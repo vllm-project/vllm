@@ -41,7 +41,8 @@ if current_platform.is_cuda_alike():
             DeepEPLLPrepareAndFinalize,
         )
     if has_mori():
-        from .prepare_finalize.mori import MoriPrepareAndFinalize
+        from .prepare_finalize.moriep_ht import MoriEPHTPrepareAndFinalize
+        from .prepare_finalize.moriep_ll import MoriEPLLPrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -193,43 +194,81 @@ def maybe_make_prepare_finalize(
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
         )
-    elif moe.use_mori_kernels:
+    elif moe.use_moriep_ht_kernels or moe.use_moriep_ll_kernels:
         assert quant_config is not None
 
-        # Note: We may want to use FP8 dispatch just to reduce
-        # data movement.
-        use_fp8_dispatch = (
-            quant_config.is_per_act_token or quant_config.is_block_quantized
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_dtypes import (
+            MXFP4_BLOCK_SIZE,
+            DispatchDtype,
+            combine_quant_type,
+            resolve_mori_dtypes,
         )
-        if use_fp8_dispatch:
-            # For PTPC (per token per channel) quant, scale dim is 1
-            # For 1x128 quant, scale dim is hidden_dim // 128
-            quant_dtype = quant_config.quant_dtype
+
+        dispatch_dtype, combine_dtype = resolve_mori_dtypes(quant_config)
+
+        # data_type / scale layout dispatched on the wire.
+        if dispatch_dtype == DispatchDtype.fp4:
+            quant_dtype = torch.float4_e2m1fn_x2
+            scale_dim = moe.hidden_dim // MXFP4_BLOCK_SIZE
+            scale_type_size = torch.float8_e8m0fnu.itemsize
+        elif dispatch_dtype == DispatchDtype.fp8:
+            quant_dtype = current_platform.fp8_dtype()
+            # PTPC (per token per channel) -> scale_dim 1; 1x128 -> hidden // 128
             scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            scale_type_size = torch.float32.itemsize
         else:
-            # Unquantized dispatch (e.g. AITER with defer_input_quant):
-            # dispatch raw BF16/FP16 data, no scales needed.
+            # Unquantized dispatch (raw BF16/FP16), no scales.
             quant_dtype = moe.in_dtype
             scale_dim = 0
+            scale_type_size = 0
+
+        # EPLB routing tables (identity until EPLB is enabled).
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
+
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
             quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
-            scale_type_size=0 if scale_dim == 0 else torch.float32.itemsize,
+            scale_type_size=scale_type_size,
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
             num_experts_per_token=moe.experts_per_token,
+            quant_type=combine_quant_type(combine_dtype),
         )
-        handle = all2all_manager.get_handle(all_to_all_args)
 
-        prepare_finalize = MoriPrepareAndFinalize(
-            handle,
+        # One op per DBO micro-batch (mori recv buffers are non-reentrant).
+        def _mori_handle_factory(
+            instance_id: int,
+            _mgr=all2all_manager,
+            _args=all_to_all_args,
+        ):
+            return _mgr.get_handle({**_args, "instance_id": instance_id})
+
+        # moriep_low_latency -> AsyncLL split send/recv path;
+        # moriep_high_throughput -> monolithic dispatch/combine.
+        mori_cls = (
+            MoriEPLLPrepareAndFinalize
+            if moe.use_moriep_ll_kernels
+            else MoriEPHTPrepareAndFinalize
+        )
+        prepare_finalize = mori_cls(
+            _mori_handle_factory,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
+            dispatch_dtype=dispatch_dtype,
+            combine_dtype=combine_dtype,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
+            local_expert_global_ids=local_expert_global_ids,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
