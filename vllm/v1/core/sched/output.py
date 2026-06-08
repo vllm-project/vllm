@@ -115,9 +115,6 @@ class CachedRequestData:
     # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_req_ids: set[str]
-    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
-    # When PP is not used, new_token_ids will be empty.
-    new_token_ids: list[list[int]]
     # For requests not scheduled in the last step, propagate the token ids to the
     # connector. Won't contain requests that were scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
@@ -127,7 +124,6 @@ class CachedRequestData:
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
-        new_token_ids_lens = [len(toks) for toks in self.new_token_ids]
         all_token_ids_lens = {
             req_id: len(toks) for req_id, toks in self.all_token_ids.items()
         }
@@ -135,7 +131,6 @@ class CachedRequestData:
             f"CachedRequestData("
             f"req_ids={self.req_ids},"
             f"resumed_req_ids={self.resumed_req_ids},"
-            f"new_token_ids_lens={new_token_ids_lens},"
             f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
@@ -169,7 +164,6 @@ class CachedRequestData:
         return cls(
             req_ids=[],
             resumed_req_ids=set(),
-            new_token_ids=[],
             all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],

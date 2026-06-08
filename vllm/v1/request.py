@@ -146,6 +146,12 @@ class Request:
         self.next_decode_eligible_step = 0
 
         self.spec_token_ids: list[int] = []
+        # Tracks spec tokens that have been scheduled (included in
+        # num_computed_tokens via _update_after_schedule) but whose output
+        # has not yet been processed by update_from_output.  Used in the
+        # scheduling formula to compensate for the optimistic advance of
+        # num_computed_tokens when there is a batch-queue delay (PP > 1).
+        self.num_spec_tokens_in_flight = 0
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 

@@ -349,4 +349,6 @@ def make_empty_encoder_model_runner_output(
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={}, spec_token_ids=None)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[], req_id_to_index={}, spec_token_ids=None
+)
