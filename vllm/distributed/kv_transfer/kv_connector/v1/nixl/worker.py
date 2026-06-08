@@ -2657,6 +2657,25 @@ class NixlConnectorWorker:
             [ids[:3] for ids in meta.local_physical_block_ids],
         )
 
+        # Dump ALL keys with types and shapes so we can find MLA entries
+        all_keys_info = []
+        for k, v in self.device_kv_caches.items():
+            if isinstance(v, torch.Tensor):
+                all_keys_info.append(f"{k}=Tensor{tuple(v.shape)}")
+            elif isinstance(v, (tuple, list)):
+                parts = []
+                for c in v:
+                    if isinstance(c, torch.Tensor):
+                        parts.append(f"T{tuple(c.shape)}")
+                    else:
+                        parts.append(type(c).__name__)
+                all_keys_info.append(f"{k}=({','.join(parts)})")
+            else:
+                all_keys_info.append(f"{k}={type(v).__name__}")
+        logger.warning(
+            "[DESC-DEBUG]   device_kv_caches keys: %s", all_keys_info
+        )
+
         # Memory-efficient spot check: only examine transferred blocks,
         # not the full tensor (which can be >100 GB and cause OOM).
         block_ids = meta.local_physical_block_ids
