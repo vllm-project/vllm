@@ -51,6 +51,7 @@ steps:
     torch_nightly: {}
     amd:
       device: mi325_1
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
       commands:
