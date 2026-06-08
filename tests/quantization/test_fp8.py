@@ -14,7 +14,7 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -434,7 +434,7 @@ def test_fp8_reloading(
             method.use_marlin = use_marlin
 
         else:
-            layer = FusedMoE(
+            layer = FusedMoEFactory(
                 num_experts=1,
                 top_k=1,
                 hidden_size=1,

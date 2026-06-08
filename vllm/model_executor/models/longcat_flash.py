@@ -47,7 +47,7 @@ from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -297,7 +297,7 @@ class LongcatMoe(nn.Module):
         )
 
         assert config.zero_expert_type is not None
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             zero_expert_type=config.zero_expert_type,
             e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
@@ -317,7 +317,7 @@ class LongcatMoe(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # Align to FusedMoE padded hidden size to avoid dim mismatch
+        # Align to FusedMoEFactory padded hidden size to avoid dim mismatch
         padded_hidden = self.experts.hidden_size
         if hidden_dim < padded_hidden:
             hidden_states_padded = torch.nn.functional.pad(
@@ -333,7 +333,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.router_params_dtype)
         )
 
-        # FusedMoE handles routing memoization and zero expert computation
+        # FusedMoEFactory handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(

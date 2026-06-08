@@ -15,7 +15,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -86,7 +86,7 @@ class JambaMoE(nn.Module):
                 prefix=f"{prefix}.router",
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             self.num_total_experts,
             self.top_k,
             self.hidden_size,

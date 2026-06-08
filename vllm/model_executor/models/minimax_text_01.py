@@ -25,7 +25,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -160,7 +160,7 @@ class MiniMaxText01MoE(nn.Module):
         )
         self.gate.weight.weight_loader = MiniMaxText01MoE.gate_weight_loader
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.num_total_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,

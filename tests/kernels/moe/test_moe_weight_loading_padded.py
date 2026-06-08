@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for FusedMoE weight loading with padded hidden dimensions.
+"""Tests for FusedMoEFactory weight loading with padded hidden dimensions.
 
 When using DeepEP backends or NIXL EP with models like nemotron_h,
 hidden_size may be rounded up (e.g., 2688 -> 3072) for backend requirements.
