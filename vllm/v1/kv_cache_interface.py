@@ -96,28 +96,15 @@ class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
 
-    RFC #42082 standard vocabulary (properties, overridden by subclasses):
-      num_heads: int          — heads (1 if headless, e.g. MLA)
-      tokens_per_state: int   — -1 infinite (recurrent), 1 standard, N compressed
-      state_content_size_bytes: int — bytes per state per head
+    Key property required by subclasses (from RFC #42082):
+      tokens_per_state: int — -1 infinite (recurrent), 1 standard, N compressed
     """
 
     block_size: int
 
-    # ---- EXACT COPY from Lucas' PR #42374 ----
-    # vllm/v1/kv_cache_interface.py L107-L117
-    # https://github.com/vllm-project/vllm/pull/42374
-    # -------------------------------------------
-    @property
-    def num_heads(self) -> int:
-        raise NotImplementedError
-
+    # From RFC #42082; overridden by each subclass.
     @property
     def tokens_per_state(self) -> int:
-        raise NotImplementedError
-
-    @property
-    def state_content_size_bytes(self) -> int:
         raise NotImplementedError
 
     @property
@@ -192,12 +179,9 @@ class KVCacheSpec:
 
 
 # ---------------------------------------------------------------------------
-# EXACT COPY from Lucas' PR #42374
-# vllm/v1/kv_cache_interface.py L158-L256
+# KVCacheLayout and helpers — from PR #42374 / RFC #42082.
 # https://github.com/vllm-project/vllm/pull/42374
-# RFC: https://github.com/vllm-project/vllm/issues/42082
-#
-# Everything below until the "end of copy" marker is copied verbatim.
+# https://github.com/vllm-project/vllm/issues/42082
 # ---------------------------------------------------------------------------
 
 # Logical dim indices in the 5D stride permutation [L, B, H, N, C]
@@ -266,63 +250,8 @@ def num_states_for(block_size: int, tokens_per_state: int) -> int:
     return block_size // tokens_per_state
 
 
-def compute_layer_kv_cache_shape_bytes(
-    spec: KVCacheSpec,
-    num_blocks: int,
-    block_size: int | None = None,
-) -> tuple[int, ...]:
-    """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
-    bs = block_size if block_size is not None else spec.storage_block_size
-    ns = num_states_for(bs, spec.tokens_per_state)
-    return (num_blocks, spec.num_heads, ns, spec.state_content_size_bytes)
-
-
-def reshape_kv_cache(
-    raw: torch.Tensor,
-    spec: KVCacheSpec,
-    num_blocks: int,
-    num_layer_slots: int,
-    layout: KVCacheLayout,
-    block_size: int | None = None,
-) -> list[torch.Tensor]:
-    """View a flat int8 buffer as 4D ``[B, H, N, C]`` per-slot views.
-
-    Works for all KVCacheSpec subclasses. Shapes as int8 via
-    compute_layer_kv_cache_shape_bytes, then reinterprets as spec.dtype.
-    """
-    dtype = getattr(spec, "dtype", None)
-    logical_shape_bytes = (
-        num_layer_slots,
-        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size),
-    )
-    stride_order = layout.stride_order
-    physical_shape_bytes = tuple(logical_shape_bytes[i] for i in stride_order)
-    inv_order = [stride_order.index(i) for i in range(5)]
-
-    if page_size_padded := getattr(spec, "page_size_padded", None):
-        strides = list(torch.empty(physical_shape_bytes, device="meta").stride())
-        strides[inv_order[_DIM_B]] = page_size_padded
-        cache = torch.as_strided(
-            raw,
-            size=physical_shape_bytes,
-            stride=tuple(strides),
-        )
-    else:
-        cache = raw.view(physical_shape_bytes)
-    cache_logical = cache.permute(*inv_order)
-
-    if dtype is not None:
-        cache_logical = cache_logical.view(dtype)
-
-    return [cache_logical[i] for i in range(num_layer_slots)]
-
-
-# ---------------------------------------------------------------------------
-# End of exact copy from Lucas' PR #42374.
-# ---------------------------------------------------------------------------
-
-# 4D dim indices for per-layer tensors produced by reshape_kv_cache():
-# shape is [B, H, N, C].  Used by slice_for_tp_transfer below.
+# 4D dim indices for per-layer [B, H, N, C] tensors.
+# Used by slice_for_tp_transfer below.
 _DIM4_B, _DIM4_H, _DIM4_N, _DIM4_C = 0, 1, 2, 3
 
 
@@ -334,47 +263,12 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
-    # ---- EXACT COPY from Lucas' PR #42374 ----
-    # vllm/v1/kv_cache_interface.py L260-L275
-    # https://github.com/vllm-project/vllm/pull/42374
-    #
-    # MODIFICATION: Lucas defines `tokens_per_state: int = 1` as a
-    # dataclass field. We use a @property instead because a frozen
-    # dataclass field cannot safely shadow a @property on the parent
-    # class (KVCacheSpec) — Python data-descriptor precedence causes
-    # the parent property's __get__ to fire, raising NotImplementedError.
-    # Runtime behavior is identical.
-    #
-    # Lucas also has an NVFP4 comment:
-    #   "NVFP4: K and V are stored as separate head groups [L, B, 2*H, N, dim]
-    #    rather than interleaved in content [L, B, H, N, 2*dim]."
-    # -------------------------------------------
-
-    @property
-    def num_heads(self) -> int:
-        if self.kv_quant_mode.is_nvfp4:
-            return 2 * self.num_kv_heads
-        return self.num_kv_heads
-
+    # PR #42374 defines tokens_per_state as a dataclass field.
+    # We use a @property to avoid frozen-dataclass descriptor conflicts.
     @property
     def tokens_per_state(self) -> int:
         return 1
 
-    @property
-    def state_content_size_bytes(self) -> int:
-        hs = self.head_size
-        if self.kv_quant_mode.is_nvfp4:
-            hs = nvfp4_kv_cache_full_dim(hs)
-            return hs * get_dtype_size(self.dtype)
-        return 2 * hs * get_dtype_size(self.dtype)
-
-    # ---- Proposed by Lucas in RFC #42082, implemented here ----
-    # Takes a 4D [B, H, N, C] tensor view (from reshape_kv_cache) and
-    # returns a list of tensor views narrowed on the H dim for the
-    # head overlap between local and remote TP ranks.
-    # Replaces: rank_offset_factor * kv_block_len byte math in worker.py
-    #           and compute_tp_mapping head-offset logic in tp_mapping.py.
-    # -----------------------------------------------------------
     def slice_for_tp_transfer(
         self,
         tensor: torch.Tensor,
@@ -490,23 +384,6 @@ class FullAttentionSpec(AttentionSpec):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
-    # ---- EXACT COPY from Lucas' PR #42374 ----
-    # vllm/v1/kv_cache_interface.py FullAttentionSpec.state_content_size_bytes
-    # Handles asymmetric K/V head sizes (head_size_v != head_size).
-    # -------------------------------------------
-    @property
-    def state_content_size_bytes(self) -> int:
-        hs_k = self.head_size
-        hs_v = self.head_size_v
-        if self.kv_quant_mode.is_nvfp4:
-            hs_k = nvfp4_kv_cache_full_dim(hs_k)
-            hs_v = nvfp4_kv_cache_full_dim(hs_v)
-            assert hs_k == hs_v, (
-                "nvfp4 with asymmetric K/V head sizes not yet supported"
-            )
-            return hs_k * get_dtype_size(self.dtype)
-        return (hs_k + hs_v) * get_dtype_size(self.dtype)
-
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -618,15 +495,6 @@ class TQFullAttentionSpec(FullAttentionSpec):
 
     tq_slot_size: int = 0
 
-    # ---- EXACT COPY from Lucas' PR #42374 ----
-    # TQFullAttentionSpec.state_content_size_bytes
-    # -------------------------------------------
-    @property
-    def state_content_size_bytes(self) -> int:
-        if self.tq_slot_size > 0:
-            return self.tq_slot_size
-        return super().state_content_size_bytes
-
     @property
     def real_page_size_bytes(self) -> int:
         if self.tq_slot_size > 0:
@@ -655,28 +523,12 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    # ---- FROM Lucas' PR #42374 ----
-    # Lucas renames `compress_ratio` → `tokens_per_state` (a field).
-    # MODIFICATION: We keep `compress_ratio` as the field name to avoid
-    # breaking existing callers and add a @property that delegates to it.
-    # Same runtime behavior as Lucas' `tokens_per_state: int = 1` field.
-    #
-    # state_content_size_bytes: EXACT COPY from Lucas' PR.
-    # -------------------------------------------
+    # PR #42374 renames compress_ratio → tokens_per_state (a field).
+    # We keep compress_ratio as the field and delegate via @property.
     @property
     def tokens_per_state(self) -> int:
         return self.compress_ratio
 
-    @property
-    def state_content_size_bytes(self) -> int:
-        if self.cache_dtype_str == "fp8_ds_mla":
-            return 584 if self.model_version == "deepseek_v4" else 656
-        return self.head_size * get_dtype_size(self.dtype)
-
-    # ---- Proposed by Lucas in RFC #42082, implemented here ----
-    # MLA: single latent per block, no head sharding → always return
-    # the full tensor regardless of TP topology.
-    # -----------------------------------------------------------
     def slice_for_tp_transfer(
         self,
         tensor: torch.Tensor,
@@ -782,23 +634,6 @@ class SlidingWindowSpec(AttentionSpec):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
-    # ---- EXACT COPY from Lucas' PR #42374 ----
-    # SlidingWindowSpec.state_content_size_bytes
-    # Handles asymmetric K/V head sizes (head_size_v != head_size).
-    # -------------------------------------------
-    @property
-    def state_content_size_bytes(self) -> int:
-        hs_k = self.head_size
-        hs_v = self.head_size_v
-        if self.kv_quant_mode.is_nvfp4:
-            hs_k = nvfp4_kv_cache_full_dim(hs_k)
-            hs_v = nvfp4_kv_cache_full_dim(hs_v)
-            assert hs_k == hs_v, (
-                "nvfp4 with asymmetric K/V head sizes not yet supported"
-            )
-            return hs_k * get_dtype_size(self.dtype)
-        return (hs_k + hs_v) * get_dtype_size(self.dtype)
-
     @property
     def real_page_size_bytes(self) -> int:
         # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
@@ -866,23 +701,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     def __post_init__(self):
         _apply_alignment_padding(self)
 
-    # ---- FROM Lucas' PR #42374 ----
-    # Same tokens_per_state adaptation as MLAAttentionSpec above:
-    # delegates to existing `compress_ratio` field.
-    #
-    # state_content_size_bytes: EXACT COPY from Lucas' PR.
-    # -------------------------------------------
+    # Same tokens_per_state delegation as MLAAttentionSpec.
     @property
     def tokens_per_state(self) -> int:
         return self.compress_ratio
 
-    @property
-    def state_content_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4":
-            return 584
-        return self.head_size * get_dtype_size(self.dtype)
-
-    # MLA: single latent, no head sharding — same as MLAAttentionSpec.
     def slice_for_tp_transfer(
         self,
         tensor: torch.Tensor,
@@ -955,32 +778,12 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 
-    # ---- FROM Lucas' PR #42374 ----
-    # Lucas defines these as dataclass fields:
-    #   num_heads: int = 1
-    #   tokens_per_state: int = -1
-    # MODIFICATION: @property instead of field — same descriptor-
-    # conflict reason as AttentionSpec.tokens_per_state above.
-    #
-    # state_content_size_bytes: EXACT COPY from Lucas' PR.
-    # -------------------------------------------
-    @property
-    def num_heads(self) -> int:
-        return 1
-
+    # PR #42374 defines tokens_per_state as a dataclass field.
+    # We use a @property to avoid frozen-dataclass descriptor conflicts.
     @property
     def tokens_per_state(self) -> int:
         return -1
 
-    @property
-    def state_content_size_bytes(self) -> int:
-        return sum(
-            prod(shape) * get_dtype_size(dtype)
-            for (shape, dtype) in zip(self.shapes, self.dtypes)
-        )
-
-    # Mamba: recurrent state is TP-sharded proportionally along C.
-    # When my_tp > other_tp, narrow to local rank's portion.
     def slice_for_tp_transfer(
         self,
         tensor: torch.Tensor,
