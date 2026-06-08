@@ -110,11 +110,7 @@ def derive_mamba_conv_split(
     """Derive per-rank sub-projection byte sizes from a MambaSpec.
 
     Called once at init on both P and D.  Decomposes the conv dimension
-    into its sub-projection parts based on the model type:
-
-    - MAMBA1: conv_state as a single sub-projection (no decomposition).
-    - MAMBA2: conv_state decomposed into [x, B, C].
-    - GDN_ATTN: conv_state decomposed into [Q, K, V].
+    into its sub-projection parts based on the model type.
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
