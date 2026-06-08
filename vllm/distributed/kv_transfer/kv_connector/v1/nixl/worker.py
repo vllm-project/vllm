@@ -2150,9 +2150,12 @@ class NixlConnectorWorker:
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
-                ]
+                # Use remote block_size handle if registered (block_size_ratio > 1),
+                # otherwise fall back to local block_size handle.
+                local_xfer_side_handle = self.src_xfer_handles_by_block_size.get(
+                    remote_block_size,
+                    self.src_xfer_handles_by_block_size[self.block_size],
+                )
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
