@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ChatToolChoice, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
@@ -47,7 +50,7 @@ pub struct TokenizeChatRequest {
     #[serde(default)]
     pub chat_template: Option<String>,
     #[serde(default)]
-    pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub chat_template_kwargs: Option<HashMap<String, Value>>,
     #[serde(default)]
     pub tools: Option<Vec<Tool>>,
 }

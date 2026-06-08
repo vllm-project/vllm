@@ -52,7 +52,7 @@ mod stream;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_llm::Llm;
-use vllm_text::{TextLlm, TextRequest};
+use vllm_text::{Prompt, TextLlm, TextRequest};
 
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
@@ -218,9 +218,9 @@ impl ChatLlm {
         let tokenizer = self.text.tokenizer();
         let token_ids = match prompt {
             // Rendered string from the template (usual chat path).
-            vllm_text::Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
+            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
             // Already tokenized (e.g. multimodal path); pass through unchanged.
-            vllm_text::Prompt::TokenIds(ids) => ids,
+            Prompt::TokenIds(ids) => ids,
         };
         Ok(token_ids)
     }
