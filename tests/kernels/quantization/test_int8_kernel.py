@@ -7,6 +7,7 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.quant_utils import native_per_token_group_quant_int8
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -15,8 +16,10 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+if current_platform.is_cuda_alike() and current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
+
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -83,9 +86,9 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, topk, topk_weight, topk_ids
 
 
 @pytest.fixture(autouse=True, scope="module")
-def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
-    torch.set_default_device("cuda")
+def setup_device():
+    """Sets the default device for all tests in this module."""
+    torch.set_default_device(DEVICE)
 
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -153,3 +156,30 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.05
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 64])
+@pytest.mark.parametrize("hidden_dim", [128, 1024])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_per_token_quant_int8(num_tokens, hidden_dim, dtype):
+    """Directly covers the round_int8 Triton kernel via per_token_quant_int8.
+
+    Runs on the module default device (CUDA or XPU) selected by DEVICE.
+    """
+    torch.manual_seed(0)
+    x = torch.randn((num_tokens, hidden_dim), dtype=dtype) * 8
+
+    q, s = per_token_quant_int8(x)
+    # Per-token int8 quant is per-token-group quant with group_size = hidden_dim.
+    ref_q, ref_s = native_per_token_group_quant_int8(x, hidden_dim)
+
+    assert q.dtype == torch.int8
+    assert q.shape == (num_tokens, hidden_dim)
+    assert s.shape == (num_tokens, 1)
+
+    # Scales should match closely.
+    assert torch.allclose(s.float(), ref_s.float(), atol=1e-3, rtol=1e-3)
+    # Quantized values may differ by at most 1 ULP due to rounding at
+    # representable-value boundaries.
+    assert torch.all((q.float() - ref_q.float()).abs() <= 1)
