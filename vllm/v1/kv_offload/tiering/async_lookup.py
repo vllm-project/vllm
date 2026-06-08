@@ -34,7 +34,8 @@ query() is a pure OrderedDict operation.
 import queue
 import threading
 from abc import ABC, abstractmethod
-from typing import NamedTuple
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -42,9 +43,10 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 logger = init_logger(__name__)
 
 
-class LookupState(NamedTuple):
-    result: bool | None
-    request_ids: set[str]
+@dataclass(slots=True)
+class LookupState:
+    result: bool | None = None  # True (found), False (not found), None
+    request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
 
 class AsyncLookupManager(ABC):
@@ -74,6 +76,8 @@ class AsyncLookupManager(ABC):
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
+        # req_id → keys looked up by that request (reverse index for cleanup).
+        self._req_keys: dict[str, set[OffloadKey]] = {}
 
         # Accumulates (key, req_context) pairs during query() calls.
         # Flushed as one queue item per step by flush().
@@ -103,7 +107,7 @@ class AsyncLookupManager(ABC):
     @abstractmethod
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> list[bool | None]:
+    ) -> Iterable[bool | None]:
         """
         Check whether a batch of blocks exist in this tier.
 
@@ -131,16 +135,16 @@ class AsyncLookupManager(ABC):
         if self._need_to_drain:
             self.drain_results()
             self._need_to_drain = False
+        req_id = req_context.req_id
         if key not in self._lookup_state:
-            # New key — buffer for async lookup; flushed by flush().
-            self._lookup_state[key] = LookupState(
-                result=None, request_ids={req_context.req_id}
-            )
+            self._lookup_state[key] = LookupState(request_ids={req_id})
             self._lookup_batch.append((key, req_context))
+            self._req_keys.setdefault(req_id, set()).add(key)
             return None
-        lookup_state = self._lookup_state[key]
-        lookup_state.request_ids.add(req_context.req_id)
-        return lookup_state.result
+        state = self._lookup_state[key]
+        state.request_ids.add(req_id)
+        self._req_keys.setdefault(req_id, set()).add(key)
+        return state.result
 
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
@@ -168,24 +172,19 @@ class AsyncLookupManager(ABC):
             for key, result in batch:
                 state = self._lookup_state.get(key)
                 if state is not None and state.result is None:
-                    self._lookup_state[key] = LookupState(
-                        result=result, request_ids=state.request_ids
-                    )
+                    state.result = result
 
     def cleanup(self, req_id: str) -> None:
         """Remove entries no longer needed by any active request.
 
-        Called from the tier's on_request_finished(). Removes the given
-        req_id from all entries and deletes entries with no remaining
-        request_ids.
+        Called from the tier's on_request_finished(). Uses the reverse
+        index to visit only keys associated with this request.
         """
-        keys_to_remove: list[OffloadKey] = []
-        for key, state in self._lookup_state.items():
+        for key in self._req_keys.pop(req_id):
+            state = self._lookup_state[key]
             state.request_ids.discard(req_id)
             if not state.request_ids:
-                keys_to_remove.append(key)
-        for key in keys_to_remove:
-            del self._lookup_state[key]
+                del self._lookup_state[key]
 
     def shutdown(self) -> None:
         """Stop the worker thread."""
@@ -224,7 +223,7 @@ class AsyncLookupManager(ABC):
                         len(keys),
                         exc,
                     )
-                    hits = [False] * len(keys)
+                    hits = (False for _ in keys)
 
                 for key, hit in zip(keys, hits):
                     if hit is True:

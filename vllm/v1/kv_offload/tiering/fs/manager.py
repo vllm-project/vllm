@@ -55,8 +55,8 @@ class FsAsyncLookupManager(AsyncLookupManager):
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> list[bool | None]:
-        return [os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys]
+    ) -> Iterable[bool | None]:
+        return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -169,6 +169,9 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
+        """
+        Collect completed jobs from the finished-jobs queue.
+        """
         return (
             JobResult(job_id=job_id, success=success)
             for job_id, success in self._pool.get_finished()
@@ -187,7 +190,8 @@ class FileSystemTierManager(SecondaryTierManager):
         """
         Release resources held by this tier.
 
-        Shuts down the lookup manager and the thread pool.
+        Shuts down the lookup manager and the thread pool,
+        clearing pending tasks and waiting for active threads to complete.
         """
         self._lookup_manager.shutdown()
         self._pool.shutdown(wait=True)
