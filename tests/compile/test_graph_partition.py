@@ -705,22 +705,18 @@ def test_decompose_size_with_getitem_user():
 
 def test_decompose_size_with_slice_user():
     """
-    Regression test: _decompose_size_nodes must handle a size() node that
-    appears directly as a slice bound inside another node's args.
+    Regression test: _decompose_size_nodes must handle a scalar x.size(dim)
+    node nested inside a slice bound.
 
-    This pattern arises when Dynamo's CSE merges two .size() calls on the
-    same tensor (one from Unsloth's monkey-patched LlamaAttention.forward,
-    one from vLLM's punica LoRA kernel) into a single size_node.  After the
-    getitem user is eliminated, the remaining reference is a bare size_node
-    sitting inside a slice object:
+    This comes from the punica LoRA path (token_lora_mapping[:x.size(0)]):
+    with a dynamic batch dim, x.size(0) is traced as an FX node sitting
+    inside a slice object. The old pass only scanned top-level args, so it
+    never found the node inside the slice and erase_node crashed with
+    "still had N users".
 
-        %size    = call_method[target="size"](args = (%x,))
-        %sliced  = call_function[target=getitem](args = (%x, slice(None, %size, None)))
-
-    The old flat-loop pass did not walk into slice objects, so it either
-    crashed with "Tried to erase Node size but it still had N users" (if FX
-    tracked the slice reference) or left a dangling reference to an erased
-    node (silent graph corruption).
+        %size   = call_method[target="size"](args = (%x, 0))
+        %sliced = call_function[target=getitem](
+                      args = (%token_lora_mapping, slice(None, %size, None)))
     """
     from torch._dynamo.source import LocalSource
     from torch._subclasses.fake_tensor import FakeTensorMode
@@ -728,19 +724,18 @@ def test_decompose_size_with_slice_user():
 
     # Build graph:
     #   %x       = placeholder
-    #   %size    = x.size()
-    #   %getitem = size[0]                         # normal getitem user
-    #   %sliced  = x[slice(None, %size, None)]     # size_node inside a slice
-    #   return (%getitem, %sliced)
+    #   %mapping = placeholder
+    #   %size    = x.size(0)                                  # scalar, with a dim arg
+    #   %sliced  = mapping[slice(None, %size, None)]          # size node inside a slice
     graph = fx.Graph()
     x = graph.placeholder("x")
-    size_node = graph.call_method("size", args=(x,))
-    getitem_node = graph.call_function(operator.getitem, args=(size_node, 0))
+    mapping = graph.placeholder("token_lora_mapping")
+    size_node = graph.call_method("size", args=(x, 0))
     sliced_node = graph.call_function(
         operator.getitem,
-        args=(x, slice(None, size_node, None)),
+        args=(mapping, slice(None, size_node, None)),
     )
-    graph.output((getitem_node, sliced_node))
+    graph.output((sliced_node,))
 
     # Attach example_value with a dynamic dim 0 so the pass creates a
     # sym_size.int node (the realistic case from the Unsloth+LoRA workload).
@@ -754,7 +749,6 @@ def test_decompose_size_with_slice_user():
 
     gm = fx.GraphModule(torch.nn.Module(), graph)
 
-    # Must not crash; old code raised RuntimeError or left a dangling ref.
     _decompose_size_nodes(gm)
 
     # No size() nodes should remain.

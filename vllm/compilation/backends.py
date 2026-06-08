@@ -483,19 +483,13 @@ def _replace_size_in_slice(
 ) -> slice:
     """Replace a size node used as a slice bound with a scalar dim.
 
-    Slice bounds must be scalar.  When the size has multiple dimensions,
-    the unique dynamic (SymInt) dim is used if exactly one exists,
-    otherwise dims[0].  Using a full ``torch.Size`` as a slice bound is
-    never intentional — it is an artifact of graph-level tracing.
+    A slice bound must be scalar, and the intended value is the token count,
+    which is the unique dynamic (SymInt) dim; use it when exactly one exists,
+    otherwise fall back to dims[0].
     """
 
     def _sub(bound: object) -> object:
         if isinstance(bound, fx.Node) and bound is node:
-            # Pick the right scalar dim to use as the slice bound.
-            # When ndim > 1, the code intended a single scalar (e.g.
-            # num_tokens) but Dynamo captured the full .size() tuple.
-            # Heuristic: use the unique dynamic (SymInt) dim if exactly
-            # one exists, otherwise fall back to dims[0].
             sym_dims = [(i, d) for i, d in enumerate(dims) if isinstance(d, fx.Node)]
             if len(sym_dims) == 1:
                 return sym_dims[0][1]
@@ -516,8 +510,8 @@ def _replace_size_in_args(
     """Recursively replace a size node in an FX node's args.
 
     At expandable positions (top-level args, inside tuples/lists), the
-    size node is expanded into individual per-dim values.  At scalar
-    positions (slice bounds), a single-dim assertion is enforced.
+    size node is expanded into individual per-dim values. At slice bounds it
+    is replaced with a single scalar dim (see _replace_size_in_slice).
     """
     result: list = []
     for arg in args:
