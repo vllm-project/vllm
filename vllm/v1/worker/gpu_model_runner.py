@@ -7398,18 +7398,39 @@ class GPUModelRunner(
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
-                layer_id = module.layer_id
+            if not isinstance(module, FusedMoE):
+                continue
+            layer_id = module.layer_id
 
-                def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
-                    _capturer.capture(_layer_id, topk_ids)
+            def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
+                _capturer.capture(_layer_id, topk_ids)
 
+            if isinstance(module.router, BaseRouter):
                 module.router.set_capture_fn(_capture_fn)
+
+            # Monolithic MoE kernels bypass ``router.select_experts`` and
+            # compute routing inside the experts kernel (e.g. FlashInfer
+            # TRT-LLM ``trtllm_fp8_block_scale_moe``). For backends that
+            # opt in via ``supports_routing_replay_capture``, bind the
+            # same capture closure so the captured int16 ``replay_out``
+            # tensor flows into the device buffer alongside the non-
+            # monolithic path.
+            quant_method = getattr(module, "quant_method", None)
+            moe_kernel = getattr(quant_method, "moe_kernel", None)
+            fused_experts = getattr(moe_kernel, "fused_experts", None)
+            if (
+                isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                and fused_experts.supports_routing_replay_capture()
+            ):
+                fused_experts.set_routing_replay_capture_fn(_capture_fn)
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

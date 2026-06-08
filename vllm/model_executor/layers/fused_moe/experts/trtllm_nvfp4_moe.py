@@ -329,6 +329,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
     Monolithic version of the kernel (router + experts).
     """
 
+    def supports_routing_replay_capture(self) -> bool:
+        # Only the DeepSeekV3 routing kernel writes routing_replay_out;
+        # see ``FusedMoEExpertsMonolithic.supports_routing_replay_capture``.
+        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """The modular implementation should be used for the Dp/Ep or EPLB case."""
@@ -395,10 +400,14 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
-        return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
+        result = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -428,4 +437,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            routing_replay_out=routing_replay_out,
         )[0]
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result
