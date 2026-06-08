@@ -2144,7 +2144,6 @@ class NixlConnectorWorker:
             # use the full region (replicated, single rank) but the split
             # handle applies offset 0 + full chunk for FA when fa_num_splits=1.
             if tp_ratio < 0 and (not self.use_mla or self._has_mamba):
-                assert remote_block_size == self.block_size
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
