@@ -164,7 +164,6 @@ def _rocm_aiter_fused_moe_impl(
     quant_type = QuantType(quant_method)
 
     extra_kwargs: dict = {}
-    # `gate_mode` was added to aiter.fused_moe in #3123 (aiter>=0.1.14).
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
 
