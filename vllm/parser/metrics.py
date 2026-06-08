@@ -10,6 +10,8 @@ from typing import cast
 
 from prometheus_client import REGISTRY, Counter
 
+_model_name: str | None = None
+
 _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 _tool_call_parser_invocations: Counter | None = None
 
@@ -25,8 +27,11 @@ class RequestType(Enum):
     OTHER = "other"
 
 
-def init_parser_metrics() -> None:
-    """Lazily register parser metrics in the current Prometheus registry."""
+def init_parser_metrics(*, model_name: str) -> None:
+    """Lazily register parser metrics and cache the shared model label."""
+    global _model_name
+    _model_name = model_name
+
     global _tool_call_parser_invocations
     try:
         _tool_call_parser_invocations = Counter(
@@ -36,7 +41,7 @@ def init_parser_metrics() -> None:
                 "Non-streaming increments once per choice; "
                 "streaming increments once per delta."
             ),
-            labelnames=["mode", "outcome", "request_type"],
+            labelnames=["model_name", "mode", "outcome", "request_type"],
         )
     except ValueError:
         _tool_call_parser_invocations = cast(
@@ -50,6 +55,7 @@ def init_parser_metrics() -> None:
         RequestType,
     ):
         _tool_call_parser_invocations.labels(
+            model_name=_model_name,
             mode=mode,
             outcome=outcome.value,
             request_type=request_type.value,
@@ -95,6 +101,7 @@ def record_tool_parser_invocation(
             outcome = ToolCallOutcome.NO_TOOL_CALL
 
     _tool_call_parser_invocations.labels(
+        model_name=_model_name,
         mode="streaming" if is_streaming else "non_streaming",
         outcome=outcome.value,
         request_type=request_type.value,
