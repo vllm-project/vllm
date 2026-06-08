@@ -758,6 +758,16 @@ class EplbState:
             load_path = self.parallel_config.eplb_config.load_path
             assert load_path is not None
             preloaded_tensors = load_file(str(load_path))
+            if get_ep_group().device_group.rank() == 0:
+                sample = next(iter(preloaded_tensors.values()))
+                num_layers, num_logical = sample.shape
+                logger.info(
+                    "EPLB: load static schedule from %s "
+                    "(%d layers x %d logical experts)",
+                    load_path,
+                    num_layers,
+                    num_logical,
+                )
 
         global_expert_load_windows = [
             self._compute_global_expert_load_window(
@@ -859,6 +869,13 @@ class EplbState:
                     num_gpus=num_gpus,
                 )
                 eplb_model_state.rebalanced = True
+        if load_initial and is_main_rank and self.model_states:
+            first_state = next(iter(self.model_states.values()))
+            sample = first_state.physical_to_logical_map[0, :10].tolist()
+            logger.info(
+                "EPLB layer 0 sample (physical[0..9] -> logical): %s",
+                sample,
+            )
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.record()
