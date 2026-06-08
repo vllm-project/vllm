@@ -891,6 +891,29 @@ class NixlConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
+            if _DESC_DEBUG:
+                cache_type = type(cache_or_caches).__name__
+                if isinstance(cache_or_caches, torch.Tensor):
+                    cache_info = f"Tensor(shape={tuple(cache_or_caches.shape)}, dtype={cache_or_caches.dtype})"
+                elif isinstance(cache_or_caches, (tuple, list)):
+                    parts = []
+                    for c in cache_or_caches:
+                        if isinstance(c, torch.Tensor):
+                            parts.append(f"Tensor(shape={tuple(c.shape)}, ptr=0x{c.data_ptr():x})")
+                        else:
+                            parts.append(type(c).__name__)
+                    cache_info = f"({', '.join(parts)})"
+                else:
+                    cache_info = cache_type
+                logger.warning(
+                    "[DESC-DEBUG] register layer=%s: spec=%s, is_ssm=%s, "
+                    "cache_type=%s, cache_info=%s",
+                    layer_name,
+                    type(layer_spec).__name__,
+                    isinstance(layer_spec, MambaSpec),
+                    cache_type,
+                    cache_info,
+                )
             cache_list = self.transfer_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
@@ -929,11 +952,27 @@ class NixlConnectorWorker:
                     # across groups. This results in skipping all tensors but the ones
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
-                    logger.debug("Skipping %s because it's already seen", layer_name)
+                    if _DESC_DEBUG:
+                        logger.warning(
+                            "[DESC-DEBUG] SKIP layer=%s: base=0x%x already seen "
+                            "(spec=%s, is_ssm=%s)",
+                            layer_name,
+                            base_addr,
+                            type(layer_spec).__name__,
+                            isinstance(layer_spec, MambaSpec),
+                        )
                     continue
-                logger.debug(
-                    "Registering layer %s with cache shape: %s", layer_name, cache.shape
-                )
+                if _DESC_DEBUG:
+                    logger.warning(
+                        "[DESC-DEBUG] REGISTER layer=%s: base=0x%x shape=%s "
+                        "spec=%s is_ssm=%s page_size=%d",
+                        layer_name,
+                        base_addr,
+                        tuple(cache.shape),
+                        type(layer_spec).__name__,
+                        isinstance(layer_spec, MambaSpec),
+                        physical_page_size,
+                    )
                 seen_base_addresses.append(base_addr)
                 is_ssm = isinstance(layer_spec, MambaSpec)
                 self._is_ssm_region.append(is_ssm)
