@@ -172,7 +172,7 @@ class Worker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         torch.accelerator.synchronize()
-        free_bytes_before_sleep = torch.accelerator.mem_get_info()[0]
+        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -187,7 +187,7 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
         while True:
-            free_bytes_after_sleep, total = torch.accelerator.mem_get_info()
+            free_bytes_after_sleep, total = torch.accelerator.get_memory_info()
             freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
             if freed_bytes >= 0 or time.monotonic() >= deadline:
                 break
