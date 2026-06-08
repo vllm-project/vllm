@@ -2037,6 +2037,34 @@ def test_maybe_evict_cached_block():
     assert pool.cached_block_hash_to_block._cache == {}
 
 
+@pytest.mark.parametrize("cache_state", ["missing", "different_block"])
+def test_maybe_evict_cached_block_resets_stale_hash_on_miss(cache_state: str):
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=True,
+    )
+    block = pool.blocks[1]
+    other_block = pool.blocks[2]
+    block_hash = make_block_hash_with_group_id(BlockHash(b"stale"), 0)
+
+    block.block_hash = block_hash
+    if cache_state == "different_block":
+        other_block.block_hash = block_hash
+        pool.cached_block_hash_to_block.insert(block_hash, other_block)
+
+    assert pool._maybe_evict_cached_block(block) is False
+    assert block.block_hash is None
+    assert pool.kv_event_queue == []
+
+    if cache_state == "different_block":
+        assert pool.cached_block_hash_to_block._cache == {block_hash: other_block}
+        assert other_block.block_hash == block_hash
+    else:
+        assert pool.cached_block_hash_to_block._cache == {}
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16

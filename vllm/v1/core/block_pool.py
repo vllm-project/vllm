@@ -92,7 +92,11 @@ class BlockHashToBlockMap:
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """
-        Checks if block_hash exists and pop block_id from the cache
+        Checks if block_hash exists and pop block_id from the cache.
+
+        In the single-block case, the caller is expected to pass the exact
+        block stored at ``key``. In the collision case, the block is looked up
+        by ``block_id`` while sibling blocks remain cached.
         """
         blocks = self._cache.pop(key, None)
         if blocks is None:
@@ -283,6 +287,7 @@ class BlockPool:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
+            assert new_hashes is not None
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
@@ -367,6 +372,9 @@ class BlockPool:
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
+        When the block has a hash but is not found in the cache map, the hash
+        is still reset because the block is about to be reused for new content.
+
         Args:
             block: The block to evict.
 
@@ -382,14 +390,14 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        if self.cached_block_hash_to_block.pop(block_hash, block.block_id) is None:
-            # block not found in cached_block_hash_to_block,
-            # eviction is not needed
-            return False
+        evicted = (
+            self.cached_block_hash_to_block.pop(block_hash, block.block_id)
+            is not None
+        )
 
         block.reset_hash()
 
-        if self.enable_kv_cache_events:
+        if evicted and self.enable_kv_cache_events:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
@@ -397,7 +405,7 @@ class BlockPool:
                     group_idx=get_group_id(block_hash),
                 )
             )
-        return True
+        return evicted
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
