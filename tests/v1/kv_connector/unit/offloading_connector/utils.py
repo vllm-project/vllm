@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -38,19 +38,18 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingManager,
     OffloadingSpec,
+    OffloadingWorker,
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
-    make_offload_key,
-)
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
     TransferResult,
     TransferSpec,
+    make_offload_key,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -76,7 +75,7 @@ class MockLoadStoreSpec(LoadStoreSpec):
         return repr(self.offload_keys)
 
 
-class MockOffloadingHandler(OffloadingHandler):
+class MockOffloadingWorker(OffloadingWorker):
     def __init__(self):
         self.transfer_specs: dict[int, TransferSpec] = {}
         self.completed_transfers: list[TransferResult] = []
@@ -89,7 +88,12 @@ class MockOffloadingHandler(OffloadingHandler):
         self.completed_transfers = []
         return finished
 
-    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
+    def submit_store(self, job_id: int, spec: TransferSpec) -> bool:
+        self.transfer_specs[job_id] = spec
+        self.waiting_jobs.add(job_id)
+        return True
+
+    def submit_load(self, job_id: int, spec: TransferSpec) -> bool:
         self.transfer_specs[job_id] = spec
         self.waiting_jobs.add(job_id)
         return True
@@ -122,16 +126,13 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = False
         self.manager.on_new_request.return_value = RequestOffloadingContext()
-        self.handler = MockOffloadingHandler()
+        self.handler = MockOffloadingWorker()
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
 
-    def get_handlers(
-        self, _
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        yield GPULoadStoreSpec, MockLoadStoreSpec, self.handler
-        yield MockLoadStoreSpec, GPULoadStoreSpec, self.handler
+    def get_worker(self, _: CanonicalKVCaches) -> OffloadingWorker:
+        return self.handler
 
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())

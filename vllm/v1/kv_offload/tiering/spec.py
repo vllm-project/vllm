@@ -38,7 +38,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
+from vllm.v1.kv_offload.cpu.gpu_worker import CpuOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -138,8 +138,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     raise
 
             # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
-            # get_handlers(); secondary tier transfers are handled by the
-            # secondary tier managers and need no additional handlers here.
+            # get_worker(). Secondary tier transfers are handled by the
+            # secondary tier managers and need no additional workers here.
             tiering_manager = TieringOffloadingManager(
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
@@ -162,7 +162,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
-    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CpuOffloadingWorker:
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
@@ -171,7 +171,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CpuGpuOffloadingHandlers(
+        return CpuOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,

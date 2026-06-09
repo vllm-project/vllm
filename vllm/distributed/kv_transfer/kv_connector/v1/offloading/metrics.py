@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.worker.worker import TransferType
+from vllm.v1.kv_offload.base import TransferType
 
 logger = init_logger(__name__)
 
