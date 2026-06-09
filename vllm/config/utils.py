@@ -279,7 +279,7 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
-    # PretrainedConfig
+    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         try:
             return x.to_json_string()
