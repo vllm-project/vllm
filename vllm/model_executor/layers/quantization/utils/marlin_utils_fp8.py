@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from math import gcd
+
 import torch
 
 import vllm._custom_ops as ops
@@ -19,6 +21,31 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+
+def _round_up(value: int, multiple: int) -> int:
+    return (value + multiple - 1) // multiple * multiple
+
+
+def _lcm(a: int, b: int) -> int:
+    return a * b // gcd(a, b)
+
+
+def _get_fp8_marlin_padded_sizes(
+    size_n: int, size_k: int, group_size: int = -1
+) -> tuple[int, int]:
+    group_k = group_size if group_size > 0 else 1
+    candidates = (
+        (_round_up(size_n, 128), _round_up(size_k, _lcm(64, group_k))),
+        (_round_up(size_n, 64), _round_up(size_k, _lcm(128, group_k))),
+    )
+    return min(
+        candidates,
+        key=lambda sizes: (
+            sizes[0] * sizes[1],
+            sizes[0] - size_n + sizes[1] - size_k,
+        ),
+    )
 
 
 def is_fp8_marlin_supported():
@@ -49,15 +76,23 @@ def apply_fp8_marlin_linear(
     bias: torch.Tensor | None,
     input_dtype: torch.dtype | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    padded_size_n: int | None = None,
+    padded_size_k: int | None = None,
 ) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP8 quantization
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
+    padded_size_n = padded_size_n if padded_size_n is not None else size_n
+    padded_size_k = padded_size_k if padded_size_k is not None else size_k
 
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0),
+        n=padded_size_n,
+        k=padded_size_k,
+        device=input.device,
+        dtype=input.dtype,
     )
 
     inputs = reshaped_x
@@ -65,6 +100,9 @@ def apply_fp8_marlin_linear(
     if input_dtype is not None and input_dtype.itemsize == 1:
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
+
+    if padded_size_k != size_k:
+        inputs = torch.nn.functional.pad(inputs, (0, padded_size_k - size_k))
 
     output = ops.marlin_gemm(
         a=inputs,
@@ -80,12 +118,14 @@ def apply_fp8_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float8_e4m3fn,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
-        size_k=size_k,
+        size_n=padded_size_n,
+        size_k=padded_size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
+    if padded_size_n != size_n:
+        output = output[..., :size_n].contiguous()
     return output.reshape(out_shape)
 
 
@@ -123,12 +163,20 @@ def prepare_fp8_layer_for_marlin(
     qweight = pack_fp8_to_int32(layer.weight, size_k_first)
     if not size_k_first:
         qweight = qweight.T.contiguous()
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
+    padded_part_size_n, padded_part_size_k = _get_fp8_marlin_padded_sizes(
+        part_size_n, part_size_k, group_size
+    )
+    n_pad = padded_part_size_n - part_size_n
+    k_pad_i32 = (padded_part_size_k - part_size_k) // 4
+    if n_pad or k_pad_i32:
+        qweight = torch.nn.functional.pad(qweight, (0, n_pad, 0, k_pad_i32))
 
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
         num_bits=8,
     )
     replace_parameter(layer, "weight", marlin_qweight)
@@ -139,8 +187,6 @@ def prepare_fp8_layer_for_marlin(
         scales = layer.weight_scale.to(layer.orig_dtype)
     elif "weight_scale_inv" in dir(layer):
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
-
-    group_size = -1 if weight_block_size is None else weight_block_size[1]
 
     # marlin kernel only support channel-wise and group-wise quantization
     # we need to convert the scales
@@ -181,9 +227,17 @@ def prepare_fp8_layer_for_marlin(
         scales = scales.repeat_interleave(block_n, 1)
         # size_n may not divisible by block_size[0]
         scales = scales[:, :part_size_n]
+    k_pad_groups = 0
+    if group_size != -1:
+        k_pad_groups = padded_part_size_k // group_size - part_size_k // group_size
+    if n_pad or k_pad_groups:
+        scales = torch.nn.functional.pad(scales, (0, n_pad, 0, k_pad_groups))
 
     marlin_scales = marlin_permute_scales(
-        s=scales, size_k=part_size_k, size_n=part_size_n, group_size=group_size
+        s=scales,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
+        group_size=group_size,
     )
     if input_dtype != torch.float8_e4m3fn:
         marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
@@ -194,8 +248,14 @@ def prepare_fp8_layer_for_marlin(
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
-        bias = marlin_permute_bias(layer.bias)
+        bias = layer.bias
+        if n_pad:
+            bias = torch.nn.functional.pad(bias, (0, n_pad))
+        bias = marlin_permute_bias(bias)
         replace_parameter(layer, "bias", bias)
+
+    layer.marlin_padded_size_n = padded_part_size_n
+    layer.marlin_padded_size_k = padded_part_size_k
 
 
 def prepare_fp8_moe_layer_for_marlin(
@@ -355,20 +415,28 @@ def apply_mxfp8_marlin_linear(
     size_k: int,
     bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    padded_size_n: int | None = None,
+    padded_size_k: int | None = None,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
+    padded_size_n = padded_size_n if padded_size_n is not None else size_n
+    padded_size_k = padded_size_k if padded_size_k is not None else size_k
 
     use_atomic_add = should_use_atomic_add_reduce(
         m=reshaped_x.size(0),
-        n=size_n,
-        k=size_k,
+        n=padded_size_n,
+        k=padded_size_k,
         device=input.device,
         dtype=input.dtype,
     )
 
+    inputs = reshaped_x
+    if padded_size_k != size_k:
+        inputs = torch.nn.functional.pad(inputs, (0, padded_size_k - size_k))
+
     output = ops.marlin_gemm(
-        a=reshaped_x,
+        a=inputs,
         c=None,
         b_q_weight=weight,
         b_bias=bias,
@@ -381,12 +449,14 @@ def apply_mxfp8_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float8_e4m3fn,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
-        size_k=size_k,
+        size_n=padded_size_n,
+        size_k=padded_size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
+    if padded_size_n != size_n:
+        output = output[..., :size_n].contiguous()
     return output.reshape(out_shape)
 
 
@@ -411,12 +481,19 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = pack_fp8_to_int32(layer.weight, size_k_first=False)
     qweight = qweight.T.contiguous()
+    padded_part_size_n, padded_part_size_k = _get_fp8_marlin_padded_sizes(
+        part_size_n, part_size_k, group_size
+    )
+    n_pad = padded_part_size_n - part_size_n
+    k_pad_i32 = (padded_part_size_k - part_size_k) // 4
+    if n_pad or k_pad_i32:
+        qweight = torch.nn.functional.pad(qweight, (0, n_pad, 0, k_pad_i32))
 
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
         num_bits=8,
     )
     replace_parameter(layer, "weight", marlin_qweight)
@@ -429,12 +506,15 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     scales = scales.contiguous()
     scales = scales.view(torch.float8_e8m0fnu).to(param_dtype)
     scales = scales.T.contiguous()
+    k_pad_groups = padded_part_size_k // group_size - part_size_k // group_size
+    if n_pad or k_pad_groups:
+        scales = torch.nn.functional.pad(scales, (0, n_pad, 0, k_pad_groups))
 
     # Permute scales to Marlin layout
     marlin_scales = marlin_permute_scales(
         s=scales,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
         group_size=group_size,
     )
 
@@ -445,8 +525,14 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     # BIAS
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
-        bias = marlin_permute_bias(layer.bias)
+        bias = layer.bias
+        if n_pad:
+            bias = torch.nn.functional.pad(bias, (0, n_pad))
+        bias = marlin_permute_bias(bias)
         replace_parameter(layer, "bias", bias)
+
+    layer.marlin_padded_size_n = padded_part_size_n
+    layer.marlin_padded_size_k = padded_part_size_k
 
 
 def prepare_mxfp8_moe_layer_for_marlin(

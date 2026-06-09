@@ -102,6 +102,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             size_k=layer.input_size_per_partition,
             input_dtype=self.marlin_input_dtype,
             bias=bias,
+            padded_size_n=getattr(layer, "marlin_padded_size_n", None),
+            padded_size_k=getattr(layer, "marlin_padded_size_k", None),
         )
 
     def apply_scaled_mm(

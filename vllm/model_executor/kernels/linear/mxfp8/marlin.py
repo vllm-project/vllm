@@ -50,4 +50,6 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,
+            padded_size_n=getattr(layer, "marlin_padded_size_n", None),
+            padded_size_k=getattr(layer, "marlin_padded_size_k", None),
         )
