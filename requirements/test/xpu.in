@@ -31,7 +31,7 @@ schemathesis
 jiwer
 bm25s
 pystemmer
-mteb[bm25s]
+mteb[bm25s]>=2, <3 # required for mteb test
 num2words
 pqdm
 

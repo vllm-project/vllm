@@ -11,6 +11,7 @@ from typing_extensions import override
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -43,8 +44,10 @@ def _select_swap_blocks_fn(
     if gpu_to_cpu:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm builds without Triton).
-    if not HAS_TRITON:
+    # (e.g. ROCm builds without Triton) or where GPU kernels cannot directly
+    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
+    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
+    if not HAS_TRITON or current_platform.is_xpu():
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
@@ -92,7 +95,7 @@ def compute_sub_block_ptrs(
     Args:
         block_ids: array of block IDs at the tensor's native granularity.
         block_size_factor: number of sub-blocks per block.
-        output: pre-allocated int64 array to write pointers into.
+        output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
     """
@@ -104,16 +107,16 @@ def compute_sub_block_ptrs(
 
     if block_size_factor == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
-        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
         return
 
     # Vectorized expansion for block_size_factor > 1.
     assert tensor.shape[1] % block_size_factor == 0
     sub_block_size = tensor.shape[1] // block_size_factor
-    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    sub_offsets = np.arange(block_size_factor, dtype=np.uint64) * sub_block_size
     # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
     all_ptrs = (
-        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+        base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride
     ) + sub_offsets[np.newaxis, :]
     # Flatten and apply skip_count / truncation
     flat = all_ptrs.ravel()
@@ -122,6 +125,14 @@ def compute_sub_block_ptrs(
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if not current_platform.is_cuda_alike():
+        logger.info(
+            "Skipping mmap host registration on %s; cudaHostRegister is only "
+            "available on CUDA/ROCm.",
+            current_platform.device_name,
+        )
+        return
+
     rank = region.rank
 
     base_ptr = region._base.data_ptr()
@@ -146,10 +157,12 @@ def _new_descriptor_buffers(
     num_copy_ops: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pin = is_pin_memory_available()
+    # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
+    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
     return (
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
     )
 
 
@@ -190,7 +203,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda
+            assert gpu_tensor.is_cuda or gpu_tensor.is_xpu
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -355,7 +368,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
+        stream = (
+            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        )
         start_event = (
             self._event_pool.pop()
             if self._event_pool
@@ -369,7 +384,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
@@ -382,7 +397,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with torch.cuda.stream(stream):
+        with current_platform.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
                 self._swap_blocks_batch(

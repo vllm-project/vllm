@@ -9,9 +9,9 @@ use vllm_chat::ReasoningEffort;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, MessageContent, Normalizable, StreamOptions, StringOrArray, Tool,
-    ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
+    default_true, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -428,32 +428,6 @@ pub(super) struct ChatMessageDelta {
 
 fn default_model() -> String {
     UNKNOWN_MODEL_ID.to_string()
-}
-
-/// Validates messages array is not empty and has valid content
-fn validate_messages(messages: &[ChatMessage]) -> Result<(), validator::ValidationError> {
-    if messages.is_empty() {
-        return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-
-    for msg in messages {
-        if let ChatMessage::User { content, .. } = msg {
-            match content {
-                MessageContent::Text(text) if text.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content cannot be empty",
-                    ));
-                }
-                MessageContent::Parts(parts) if parts.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content parts cannot be empty",
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Schema-level validation for cross-field dependencies
