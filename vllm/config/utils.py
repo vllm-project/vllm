@@ -280,7 +280,8 @@ def normalize_value(x):
             return str(x)
 
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
-    if is_dataclass(x):
+    # Skip objects that also expose to_json_string() (e.g., HF PretrainedConfig)
+    if is_dataclass(x) and not hasattr(x, "to_json_string"):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
         items = tuple(
             (f.name, normalize_value(getattr(x, f.name)))
