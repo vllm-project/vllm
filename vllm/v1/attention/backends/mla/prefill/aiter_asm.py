@@ -143,6 +143,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # Populated by prepare_metadata before each forward pass.
         self._new_tokens_ps: dict | None = None
 
+        # Per-forward cache of int(reduce_indptr[-1].item()) keyed by
+        # chunk_idx. The PS scheduler is deterministic in chunk geometry
+        # (qo_indptr, kv_indptr, seq_lens) and that geometry is identical
+        # across all layers in a forward, so the live partial-tile count
+        # for chunk i is the same on every layer. Caching turns the sync
+        # from O(num_layers * num_chunks) per forward into O(num_chunks).
+        # Reset in prepare_metadata at the start of each forward.
+        self._context_num_partial_tiles: dict[int, int] = {}
+
         # Worst-case sizes used to pre-allocate persistent PS buffers.
         #
         # AITER's get_ps_metadata_info_v1 sizes work buffers as
@@ -271,12 +280,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                 dtype=reduce_partial_map_dtype,
                 device=device,
             ),
-            # AITER bounds the active partial-tile count (reduce_indptr[-1])
-            # by reduce_partial_map_size (see get_ps_metadata_info_v1 in
-            # aiter/ops/attention.py: max_partials == per_cluster_work).
-            # Stash the cap here so _build_ps_for_chunk can use it instead
-            # of a per-build DtoH sync on reduce_indptr[-1].
-            "num_partial_tiles_max": int(reduce_partial_map_size),
         }
         type(self)._SHARED_BUFFERS[cache_key] = buffers
         logger.info(
@@ -306,6 +309,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         device: torch.device,
         kind: str,
         max_qlen: int,
+        chunk_idx: int | None = None,
     ) -> dict:
         """Build PS metadata in the persistent scratch buffers of one kind.
 
@@ -346,15 +350,25 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
-        # reduce_indptr[-1] counts the K-split partial tiles emitted by the
-        # PS scheduler. Reading it would force a DtoH sync per layer per
-        # chunk. Use the static upper bound returned by
-        # get_ps_metadata_info_v1 (reduce_partial_map_size) instead: it
-        # bounds reduce_indptr[-1] by construction, so sizing
-        # logits/attn_lse to it is safe. The reduce kernel only consumes
-        # the live count via reduce_indptr, so over-sizing is harmless
-        # (extra rows are never read).
-        num_partial_tiles = buffers["num_partial_tiles_max"]
+        # reduce_indptr[-1] counts the K-split partial tiles the PS
+        # scheduler emitted. _run_kernel uses it to size the float32
+        # logits/attn_lse scratch tensors, so it must be the live count
+        # (the static upper bound from get_ps_metadata_info_v1 is sized
+        # for worst-case batch * max_qlen and produces multi-TB
+        # allocations on real shapes). The scheduler is deterministic in
+        # chunk geometry and that geometry is identical across all layers
+        # in a forward, so we cache the count per chunk_idx: first layer
+        # syncs, subsequent layers hit the cache. New-tokens (chunk_idx
+        # is None) runs once per forward from prepare_metadata and always
+        # syncs directly.
+        if chunk_idx is None:
+            num_partial_tiles = int(buffers["reduce_indptr"][-1].item())
+        else:
+            cached = self._context_num_partial_tiles.get(chunk_idx)
+            if cached is None:
+                cached = int(buffers["reduce_indptr"][-1].item())
+                self._context_num_partial_tiles[chunk_idx] = cached
+            num_partial_tiles = cached
 
         return {
             "work_indptr": buffers["work_indptr"],
@@ -481,6 +495,11 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     def prepare_metadata(self, prefill_metadata: "MLACommonPrefillMetadata") -> None:
         super().prepare_metadata(prefill_metadata)
+
+        # New forward: invalidate the per-chunk partial-tile cache. The
+        # cached counts are only valid for the chunk geometry built into
+        # the shared context buffers during this forward.
+        self._context_num_partial_tiles.clear()
 
         qo_indptr = prefill_metadata.query_start_loc  # device int32 [bs+1]
         device = qo_indptr.device
@@ -666,6 +685,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             device=q.device,
             kind="context",
             max_qlen=self._prefill_metadata.max_query_len,
+            chunk_idx=chunk_idx,
         )
         ps["qo_indptr"] = self._qo_indptr
         ps["kv_indptr"] = kv_indptr
