@@ -194,6 +194,7 @@ IMATRIX_MMQ_QUANT_TYPES = {
 DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_MMQ_QUANT_TYPES
+MOE_MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 
 def _fused_mul_mat_gguf(
@@ -276,8 +277,8 @@ def _fused_moe_gguf(
     out_hidden_states = torch.empty_like(x)
     # unless we decent expert reuse we are better off running moe_vec kernel
     if (
-        qweight_type2 in MMQ_QUANT_TYPES
-        and qweight_type in MMQ_QUANT_TYPES
+        qweight_type2 in MOE_MMQ_QUANT_TYPES
+        and qweight_type in MOE_MMQ_QUANT_TYPES
         and x.shape[0] > 64
     ):
         num_tokens, _ = x.shape
