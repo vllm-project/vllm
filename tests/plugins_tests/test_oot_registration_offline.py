@@ -7,7 +7,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
-from ..utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test
 
 
 @create_new_process_for_each_test()
