@@ -169,17 +169,8 @@ class Glm4MoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        # AITER fused MoE / fused shared-expert (FSE) gates. When AITER
-        # MoE is active, the `routed_scaling_factor` must be applied
-        # *inside* the kernel (per routed slot) rather than post-hoc to
-        # the whole MoE output - otherwise the FSE shared-expert slot
-        # (which the kernel inserts with unit weight) would also be
-        # scaled by `routed_scaling_factor`, producing a structural
-        # magnitude error in every MoE layer.
-        # See vllm/_aiter_ops.py::is_fusion_moe_shared_experts_enabled,
-        # vllm/model_executor/models/deepseek_v2.py L341 for the same
-        # pattern, and the equivalent ROCm/ATOM gate at
-        # atom/model_ops/topK.py.
+        # AITER fused shared-expert (FSE) gate; mirrors the deepseek_v2.py
+        # pattern (see Glm4MoE / FusedMoE wiring there).
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.is_fusion_moe_shared_experts_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -214,10 +205,7 @@ class Glm4MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
-            # AITER applies `routed_scaling_factor` internally per routed
-            # slot, so it must NOT also be applied to the whole output
-            # (which would incorrectly scale the FSE shared-expert slot).
-            # Mirrors deepseek_v2.py.
+            # aiter applies routed_scaling_factor internally; see deepseek_v2.py.
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
             e_score_correction_bias=self.gate.e_score_correction_bias,
@@ -498,10 +486,7 @@ class Glm4MoeModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        # When AITER fused shared experts is enabled, the FusedMoE layer is
-        # widened by n_shared_experts slots that hold the (split) shared
-        # expert weights; the mapping must enumerate those slots too so the
-        # weight loader can route mlp.shared_experts.* tensors there.
+        # FSE widens the mapping by n_shared_experts slots; see deepseek_v2.py.
         num_experts = self.config.n_routed_experts
         if (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -517,11 +502,6 @@ class Glm4MoeModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # AITER fused shared-expert (FSE) weight-loader branch. When FSE is
-        # on, the FusedMoE layer was widened by n_shared_experts slots, and
-        # checkpoint tensors named `...mlp.shared_experts.{gate,up,down}_proj.*`
-        # must be split into n_shared_experts chunks and routed to the
-        # appended expert slots `...mlp.experts.{n_routed_experts + j}.*`.
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
@@ -559,8 +539,6 @@ class Glm4MoeModel(nn.Module):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
-                # Under FSE we treat mlp.shared_experts.* as expert-style
-                # tensors (handled below) rather than stacked gate/up linears.
                 if is_fusion_moe_shared_experts_layer:
                     continue
 
@@ -585,11 +563,8 @@ class Glm4MoeModel(nn.Module):
             else:
                 is_expert_weight = False
 
-                # FSE split: if this is a widened mlp.shared_experts tensor,
-                # slice it into n_shared_experts chunks along the intermediate-
-                # size axis and synthesize per-slot expert names. For
-                # ColumnParallel (gate_proj / up_proj) the intermediate dim
-                # is dim 0; for RowParallel (down_proj) it's dim 1.
+                # FSE: split a widened mlp.shared_experts tensor into
+                # n_shared_experts chunks; see deepseek_v2.py for details.
                 num_chunks = 1
                 split_dim = 0
                 chunk_size = 0
@@ -628,9 +603,7 @@ class Glm4MoeModel(nn.Module):
                             weight_to_load = loaded_weight[chunk_slice, :]
                         else:
                             weight_to_load = loaded_weight[:, chunk_slice]
-                        # Synthesize an expert-style name so the expert
-                        # params mapping above can route it via the
-                        # FusedMoE expert-aware weight loader.
+                        # Synthesize an expert-style name for expert mapping.
                         chunk_name = name.replace(
                             "mlp.shared_experts",
                             f"mlp.experts.{self.config.n_routed_experts + j}",
