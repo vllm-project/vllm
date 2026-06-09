@@ -743,15 +743,57 @@ class Lfm2VLForConditionalGeneration(
         spatial_shapes_list: list[list[int]] = spatial_shapes.tolist()
         lengths_list = [h * w for h, w in spatial_shapes_list]
         total_tokens = int(sum(lengths_list))
+        lengths_cpu = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(
+            dtype=torch.int32
+        )
+        max_seqlen = (
+            lengths_cpu.max().reshape(1)
+            if lengths_cpu.numel()
+            else torch.tensor([0], dtype=torch.int32)
+        )
 
         if total_tokens == 0:
             return []
 
-        values = self._prepare_lfm2vl_cudagraph_values(
-            pixel_values,
-            spatial_shapes,
+        packed_pixel_values = pixel_values.new_empty(
+            (total_tokens, pixel_values.shape[-1])
         )
-        projected_packed = self.encoder_cudagraph_forward(values)
+        offset = 0
+        for i, length in enumerate(lengths_list):
+            if length <= 0:
+                continue
+            packed_pixel_values[offset : offset + length].copy_(
+                pixel_values[i, :length]
+            )
+            offset += length
+        packed_pixel_values = packed_pixel_values.unsqueeze(0)
+
+        lengths = torch.tensor(
+            lengths_list, dtype=torch.int32, device=pixel_values.device
+        )
+        cu_seqlens = torch.zeros(
+            lengths.shape[0] + 1,
+            dtype=torch.int32,
+            device=pixel_values.device,
+        )
+        cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
+
+        with set_forward_context(None, self.vllm_config):
+            vision_outputs = self.vision_tower(
+                pixel_values_packed=packed_pixel_values,
+                spatial_shapes=spatial_shapes,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+        image_outputs_packed = getattr(
+            vision_outputs, "last_hidden_state", vision_outputs
+        )
+        vision_features_packed = image_outputs_packed[0]
+
+        projected_packed = self.multi_modal_projector(
+            vision_features_packed=vision_features_packed,
+            spatial_shapes=spatial_shapes,
+        )
         projected_lengths_list = self._get_lfm2vl_tile_output_lengths(
             spatial_shapes_list
         )
