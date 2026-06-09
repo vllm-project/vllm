@@ -27,9 +27,10 @@ use self::types::{
     GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateStreamResponse,
 };
+use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
-use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
+use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::resolve_request_context;
@@ -53,7 +54,7 @@ pub async fn generate(
         engine_request_id = tracing::field::Empty,
     );
 
-    let log_request = state.enable_log_requests;
+    let api_server_options = state.api_server_options;
     let stream = prepared.stream;
     let raw_stream = match state
         .chat
@@ -76,7 +77,7 @@ pub async fn generate(
         let chunk_stream = generate_chunk_stream(
             raw_stream,
             prepared.request_id,
-            log_request,
+            api_server_options,
             prepared.options,
         );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
@@ -98,7 +99,7 @@ pub async fn generate(
     let response = match collect_generate(
         collected,
         prepared.request_id,
-        log_request,
+        api_server_options,
         prepared.options,
     ) {
         Ok(response) => response,
@@ -112,7 +113,11 @@ pub async fn generate(
 async fn generate_chunk_stream(
     stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
     request_id: String,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         include_usage,
         include_continuous_usage,
@@ -145,7 +150,7 @@ async fn generate_chunk_stream(
                 }
 
                 if let Some(finish_reason) = finish_reason.as_ref()
-                    && log_request
+                    && enable_log_requests
                 {
                     info!(
                         stream = true,
@@ -179,7 +184,8 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
                     }],
-                    usage: include_continuous_usage.then(|| usage.into()),
+                    usage: include_continuous_usage
+                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
                 })
                 .await;
             }
@@ -197,7 +203,7 @@ async fn generate_chunk_stream(
         y.yield_ok(GenerateStreamResponse {
             request_id,
             choices: Vec::new(),
-            usage: Some(usage.into()),
+            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
         })
         .await;
     }
@@ -208,7 +214,10 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         // Ignored: non-streaming raw generate responses do not include usage.
         include_usage: _,
@@ -241,7 +250,7 @@ fn collect_generate(
     };
     let finish_reason = collected.finish_reason.as_str().to_string();
 
-    if log_request {
+    if enable_log_requests {
         info!(
             prompt_tokens = collected.prompt_token_ids.len(),
             output_tokens = collected.token_ids.len(),
@@ -416,7 +425,10 @@ mod tests {
         let chunks: Vec<_> = generate_chunk_stream(
             stream,
             "raw-stream".to_string(),
-            false,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
             ResponseOptions {
                 include_usage: true,
                 include_continuous_usage: true,

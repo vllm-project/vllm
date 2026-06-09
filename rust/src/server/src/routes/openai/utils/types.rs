@@ -325,24 +325,23 @@ impl Usage {
     pub fn from_counts(
         prompt_tokens: usize,
         completion_tokens: usize,
-        cached_tokens: usize,
+        cached_tokens: Option<usize>,
     ) -> Self {
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: (cached_tokens > 0)
-                .then_some(PromptTokenUsageInfo { cached_tokens }),
+            prompt_tokens_details: cached_tokens
+                .filter(|&c| c > 0)
+                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
         }
     }
-}
 
-impl From<TokenUsage> for Usage {
-    fn from(usage: TokenUsage) -> Self {
+    pub fn from_token_usage(usage: TokenUsage, enable_prompt_tokens_details: bool) -> Self {
         Self::from_counts(
             usage.prompt_token_count,
             usage.output_token_count,
-            usage.cached_token_count,
+            enable_prompt_tokens_details.then_some(usage.cached_token_count),
         )
     }
 }
@@ -351,6 +350,46 @@ impl From<TokenUsage> for Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use vllm_llm::TokenUsage;
+
+    use super::Usage;
+
+    #[test]
+    fn token_usage_hides_prompt_token_details_by_default() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 3,
+            },
+            false,
+        );
+
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, Some(2));
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn token_usage_includes_prompt_token_details_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 3,
+            },
+            true,
+        );
+
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
+            Some(3)
+        );
+    }
 }
 
 /// OpenAI completions-style logprobs.

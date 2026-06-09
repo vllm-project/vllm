@@ -24,6 +24,7 @@ use super::utils::logprobs::{
     text_len,
 };
 use super::utils::types::Usage;
+use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
@@ -56,7 +57,7 @@ pub async fn completions(
     );
 
     let created = unix_timestamp();
-    let log_request = state.enable_log_requests;
+    let api_server_options = state.api_server_options;
     let text_stream = match state
         .chat
         .text()
@@ -80,7 +81,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
+            api_server_options,
             prepared.options,
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
@@ -92,7 +93,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
+            api_server_options,
             prepared.options,
         )
         .instrument(request_span.clone())
@@ -111,7 +112,11 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
@@ -159,9 +164,9 @@ async fn collect_completion(
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
     let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
-    let usage = Usage::from(collected.usage);
+    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
-    if log_request {
+    if enable_log_requests {
         info!(
             model = %response_model,
             prompt_tokens = usage.prompt_tokens,
@@ -199,7 +204,11 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         include_usage,
         echo,
@@ -272,7 +281,7 @@ async fn completion_chunk_stream(
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
-                    if log_request {
+                    if enable_log_requests {
                         info!(
                             stream = true,
                             model = %response_model,
@@ -295,7 +304,7 @@ async fn completion_chunk_stream(
                             &request_id,
                             &response_model,
                             created,
-                            Usage::from(finished.usage),
+                            Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
                         )))
                         .await;
                     }
@@ -425,7 +434,9 @@ mod tests {
         FinishReason, Finished,
     };
 
-    use super::{CompletionSseChunk, ResponseOptions, completion_chunk_stream, final_chunk};
+    use super::{
+        ApiServerOptions, CompletionSseChunk, ResponseOptions, completion_chunk_stream, final_chunk,
+    };
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
@@ -522,7 +533,10 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
             ResponseOptions {
                 include_usage: true,
                 requested_logprobs: Some(1),
