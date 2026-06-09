@@ -54,10 +54,8 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     # max_qlen, max_kvlen, kind). MLA backends are instantiated once per layer
     # (~30 per rank for DSV3), but the persistent PS scratch buffers depend
     # only on shape constants known at construction time. Sharing across all
-    # layer instances drops allocation from ~30x to 1x per rank and similarly
-    # gates the noncausal JIT warmup so it runs only once per rank.
+    # layer instances drops allocation from ~30x to 1x per rank.
     _SHARED_BUFFERS: dict[tuple, dict] = {}
-    _WARMUP_DONE: set[tuple] = set()
 
     @staticmethod
     def get_name() -> str:
@@ -178,131 +176,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # build and consume within run_prefill_context_chunk. Sharing one
         # buffer set would let the context loop overwrite the new-tokens PS
         # metadata before the new-tokens kernel reads it.
-
-        # JIT-compile the noncausal PS ASM kernel now, before any real request
-        # can hit it. vLLM's profile_run builds a pure-prefill batch with
-        # context_len=0 for every request, so chunked_context is None and
-        # only run_prefill_new_tokens (causal=True) fires there. The noncausal
-        # variant otherwise compiles on the first chunked-context request,
-        # stalling all TP ranks at the next collective long enough to trigger
-        # shm_broadcast timeouts. We skip the causal warmup because
-        # profile_run already covers it. Class-level gating means only the
-        # first MLA layer instance runs the warmup per rank.
-        self._warmup_noncausal()
-
-    def _warmup_noncausal(self) -> None:
-        """One synthetic launch of the noncausal PS ASM kernel pair.
-
-        Class-gated so only the first AiterAsmPrefillBackend instance on a
-        given (device, config) pair actually fires the kernel; subsequent
-        layer-level instantiations short-circuit.
-        """
-        if not torch.accelerator.is_available():
-            return
-        try:
-            from vllm.platforms import current_platform
-        except Exception:  # noqa: BLE001
-            logger.warning("AITER_ASM noncausal warmup skipped: platform import failed")
-            return
-
-        device = torch.accelerator.current_accelerator()
-        assert device is not None
-        warmup_key = (
-            str(device),
-            self.num_heads,
-            self._ps_max_num_reqs,
-            self._ps_max_qlen,
-            self._ps_max_context_kvlen,
-        )
-        if warmup_key in type(self)._WARMUP_DONE:
-            return
-        type(self)._WARMUP_DONE.add(warmup_key)
-        fp8_dtype = current_platform.fp8_dtype()
-
-        nhead = self.num_heads
-        head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        v_head_dim = self.v_head_dim
-        tile_q = _FP8_PREFILL_TILE_Q
-        # Minimal shape: 1 request, one Q-tile, one KV-granularity.
-        total_q = tile_q
-        total_k = _KVLEN_GRANULARITY
-
-        qo_indptr_cpu = torch.tensor([0, total_q], dtype=torch.int32)
-        kv_indptr_cpu = torch.tensor([0, total_k], dtype=torch.int32)
-        seq_lens_cpu = torch.tensor([total_k], dtype=torch.int32)
-
-        try:
-            ps = self._build_ps_for_chunk(
-                qo_indptr_cpu=qo_indptr_cpu,
-                kv_indptr_cpu=kv_indptr_cpu,
-                seq_lens_cpu=seq_lens_cpu,
-                is_causal=False,
-                device=device,
-                kind="context",
-            )
-            ps["qo_indptr"] = qo_indptr_cpu.to(device)
-            ps["kv_indptr"] = kv_indptr_cpu.to(device)
-            ps["kv_indices"] = torch.arange(total_k, device=device, dtype=torch.int32)
-
-            q = torch.zeros((total_q, nhead, head_dim), dtype=fp8_dtype, device=device)
-            k = torch.zeros((total_k, nhead, head_dim), dtype=fp8_dtype, device=device)
-            v = torch.zeros(
-                (total_k, nhead, v_head_dim), dtype=fp8_dtype, device=device
-            )
-            out = torch.empty(
-                (total_q, nhead, v_head_dim), dtype=torch.bfloat16, device=device
-            )
-            num_partial_tiles = ps["num_partial_tiles"]
-            logits = torch.empty(
-                (num_partial_tiles * tile_q, nhead, v_head_dim),
-                dtype=torch.float32,
-                device=device,
-            )
-            attn_lse = torch.empty(
-                (num_partial_tiles * tile_q, nhead),
-                dtype=torch.float32,
-                device=device,
-            )
-            final_lse = torch.empty(
-                (total_q, nhead), dtype=torch.float32, device=device
-            )
-            one_scale = torch.ones((), dtype=torch.float32, device=device)
-
-            self._mla_prefill_ps_asm_fwd(
-                q,
-                k,
-                v,
-                ps["qo_indptr"],
-                ps["kv_indptr"],
-                ps["kv_indices"],
-                ps["work_indptr"],
-                ps["work_info"],
-                ps["max_q_len"],
-                self.scale,
-                False,  # is_causal
-                logits,
-                attn_lse,
-                out,
-                one_scale,
-                one_scale,
-                one_scale,
-            )
-            self._mla_reduce_v1(
-                logits,
-                attn_lse,
-                ps["reduce_indptr"],
-                ps["reduce_final_map"],
-                ps["reduce_partial_map"],
-                tile_q,
-                out,
-                final_lse,
-            )
-            torch.accelerator.synchronize()
-            logger.info("AITER_ASM noncausal PS kernel warmup complete")
-        except Exception as e:  # noqa: BLE001
-            # Warmup is best-effort; if it fails the first real request just
-            # pays the JIT cost like before. Don't crash model load over it.
-            logger.warning("AITER_ASM noncausal warmup failed: %s", e)
 
     def _ensure_persistent_buffers(self, device: torch.device, kind: str) -> dict:
         """Lazily allocate max-size PS scratch buffers for one chunk kind.
