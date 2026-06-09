@@ -210,6 +210,99 @@ def test_implicit_end_marker_within_delta_split(parser):
     assert parser._implicit_end_seen is True
 
 
+def test_partial_implicit_end_marker_prefix_is_buffered(parser):
+    """A DSML marker split across text deltas must not leak into reasoning."""
+    delta = parser.extract_reasoning_streaming(
+        previous_text="reasoning ",
+        current_text="reasoning <｜DSML｜tool",
+        delta_text="<｜DSML｜tool",
+        previous_token_ids=[450],
+        current_token_ids=[450, 451],
+        delta_token_ids=[451],
+    )
+    assert delta is None
+    assert parser._implicit_end_seen is False
+
+    delta = parser.extract_reasoning_streaming(
+        previous_text="reasoning <｜DSML｜tool",
+        current_text=f"reasoning {DSML_MARKER}\n<｜DSML｜invoke",
+        delta_text="_calls>\n<｜DSML｜invoke",
+        previous_token_ids=[450, 451],
+        current_token_ids=[450, 451, 452, 453],
+        delta_token_ids=[452, 453],
+    )
+    assert delta is not None
+    assert delta.reasoning is None
+    assert delta.content == f"{DSML_MARKER}\n<｜DSML｜invoke"
+    assert parser._implicit_end_seen is True
+
+
+def test_partial_implicit_end_marker_with_reasoning_prefix(parser):
+    """Reasoning before a split DSML marker is emitted, but the marker waits."""
+    delta = parser.extract_reasoning_streaming(
+        previous_text="head ",
+        current_text="head tail reasoning<｜DSML｜tool",
+        delta_text="tail reasoning<｜DSML｜tool",
+        previous_token_ids=[460],
+        current_token_ids=[460, 461, 462],
+        delta_token_ids=[461, 462],
+    )
+    assert delta is not None
+    assert delta.reasoning == "tail reasoning"
+    assert delta.content is None
+    assert parser._implicit_end_seen is False
+
+    delta = parser.extract_reasoning_streaming(
+        previous_text="head tail reasoning<｜DSML｜tool",
+        current_text=f"head tail reasoning{DSML_MARKER}",
+        delta_text="_calls>",
+        previous_token_ids=[460, 461, 462],
+        current_token_ids=[460, 461, 462, 463],
+        delta_token_ids=[463],
+    )
+    assert delta is not None
+    assert delta.reasoning is None
+    assert delta.content == DSML_MARKER
+    assert parser._implicit_end_seen is True
+
+
+def test_partial_implicit_end_marker_can_span_multiple_deltas(parser):
+    """The buffered marker prefix can grow across more than two chunks."""
+    first = parser.extract_reasoning_streaming(
+        previous_text="r",
+        current_text="r<｜DSML｜",
+        delta_text="<｜DSML｜",
+        previous_token_ids=[470],
+        current_token_ids=[470, 471],
+        delta_token_ids=[471],
+    )
+    assert first is None
+
+    second = parser.extract_reasoning_streaming(
+        previous_text="r<｜DSML｜",
+        current_text="r<｜DSML｜tool",
+        delta_text="tool",
+        previous_token_ids=[470, 471],
+        current_token_ids=[470, 471, 472],
+        delta_token_ids=[472],
+    )
+    assert second is None
+    assert parser._implicit_end_seen is False
+
+    third = parser.extract_reasoning_streaming(
+        previous_text="r<｜DSML｜tool",
+        current_text=f"r{DSML_MARKER}",
+        delta_text="_calls>",
+        previous_token_ids=[470, 471, 472],
+        current_token_ids=[470, 471, 472, 473],
+        delta_token_ids=[473],
+    )
+    assert third is not None
+    assert third.reasoning is None
+    assert third.content == DSML_MARKER
+    assert parser._implicit_end_seen is True
+
+
 def test_subsequent_delta_after_implicit_end_is_content(parser):
     """Once the implicit end fires, every later delta is content."""
     # Seed the parser by flipping the sticky flag via a marker delta.
