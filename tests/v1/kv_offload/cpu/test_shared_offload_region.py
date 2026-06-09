@@ -476,6 +476,35 @@ def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
         _cleanup_file(region.mmap_path)
 
 
+def test_madvise_success_selects_madvise_population(iid, monkeypatch):
+    """A successful probe should keep using MADV_POPULATE_WRITE."""
+    real_mmap = mmap.mmap
+
+    class TrackingMmap(real_mmap):
+
+        madvise_calls = []
+
+        def __new__(cls, *args, **kwargs):
+            obj = super().__new__(cls, *args, **kwargs)
+            obj[:] = b"\xff" * len(obj)
+            return obj
+
+        def madvise(self, *args):
+            self.madvise_calls.append(args)
+
+    monkeypatch.setattr(mmap, "mmap", TrackingMmap)
+
+    with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
+        assert isinstance(r.mmap_obj, TrackingMmap)
+        assert TrackingMmap.madvise_calls == [
+            (23, 0, PAGE_SIZE),
+            (23, PAGE_SIZE, PAGE_SIZE),
+            (23, 3 * PAGE_SIZE, PAGE_SIZE),
+            (23, 5 * PAGE_SIZE, PAGE_SIZE),
+        ]
+        assert r.mmap_obj[PAGE_SIZE] == 0xff
+
+
 def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     """Only unsupported MADV_POPULATE_WRITE should use the fallback."""
     real_mmap = mmap.mmap
