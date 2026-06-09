@@ -2,6 +2,8 @@
 
 #include <torch/csrc/stable/tensor.h>
 
+#include "core/scalar_type.hpp"
+
 #include <optional>
 #include <tuple>
 
@@ -83,4 +85,23 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
 void dsv3_router_gemm(torch::stable::Tensor& output,
                       const torch::stable::Tensor& mat_a,
                       const torch::stable::Tensor& mat_b);
+
+torch::stable::Tensor moe_wna16_marlin_gemm(
+    torch::stable::Tensor& a, std::optional<torch::stable::Tensor> c_or_none,
+    torch::stable::Tensor& b_q_weight,
+    std::optional<torch::stable::Tensor> const& b_bias_or_none,
+    torch::stable::Tensor& b_scales,
+    std::optional<torch::stable::Tensor> const& a_scales_or_none,
+    std::optional<torch::stable::Tensor> const& global_scale_or_none,
+    std::optional<torch::stable::Tensor> const& b_zeros_or_none,
+    std::optional<torch::stable::Tensor> const& g_idx_or_none,
+    std::optional<torch::stable::Tensor> const& perm_or_none,
+    torch::stable::Tensor& workspace, torch::stable::Tensor& sorted_token_ids,
+    torch::stable::Tensor& expert_ids,
+    torch::stable::Tensor& num_tokens_past_padded,
+    torch::stable::Tensor& topk_weights, int64_t moe_block_size, int64_t top_k,
+    bool mul_topk_weights, vllm::ScalarTypeId const& b_type_id, int64_t size_m,
+    int64_t size_n, int64_t size_k, bool is_k_full, bool use_atomic_add,
+    bool use_fp32_reduce, bool is_zp_float, int64_t thread_k, int64_t thread_n,
+    int64_t blocks_per_sm);
 #endif

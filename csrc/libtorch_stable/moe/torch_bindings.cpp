@@ -110,6 +110,21 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   // conditionally compiled so impl registration is in source file
+
+  m.def(
+      "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
+      "Tensor! b_q_weight, Tensor? b_bias_or_none,"
+      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
+      "b_zeros_or_none,"
+      "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
+      "Tensor sorted_token_ids,"
+      "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
+      "Tensor! topk_weights, int moe_block_size, int top_k, "
+      "bool mul_topk_weights, int b_type_id,"
+      "int size_m, int size_n, int size_k,"
+      "bool is_full_k, bool use_atomic_add,"
+      "bool use_fp32_reduce, bool is_zp_float,"
+      "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 #endif
 }
 
@@ -124,6 +139,7 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
 #ifndef USE_ROCM
   m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
+  m.impl("moe_wna16_marlin_gemm", TORCH_BOX(&moe_wna16_marlin_gemm));
   m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
 #endif
