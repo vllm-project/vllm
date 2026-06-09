@@ -350,9 +350,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
             RoutingMethodType.Simulated,
-            RoutingMethodType.SigmoidRenorm,
         ]
 
     @staticmethod
@@ -360,7 +360,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return router_logits_dtype != torch.float32
+        return router_logits_dtype in [torch.bfloat16, torch.float32]
 
     def apply(
         self,
@@ -392,11 +392,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             not apply_router_weight_on_input
             and self.routing_method_type != RoutingMethodType.Llama4
         )
-
-        # Currently FI requires bfloat16 routing bias.
-        # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 

@@ -34,6 +34,7 @@ from transformers.models.gemma4.configuration_gemma4 import (
 )
 
 from vllm.config import VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -121,7 +122,7 @@ class Gemma4ImagePixelInputs(TensorSchema):
         - np: Number of patches (max_patches = max_soft_tokens * pooling_kernel_size²)
         - pp: Patch pixels (patch_size² * 3)
 
-    The HF Gemma4ImageProcessor outputs pixel_values as
+    The Gemma4 image processor outputs pixel_values as
     (batch, max_patches, patch_pixels) — already patchified with
     zero-padding for patches beyond the real image content.
     pixel_position_ids provides (x, y) coordinates per patch,
@@ -217,7 +218,10 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             and num_items > 0
             and self.get_hf_config().audio_config is None
         ):
-            model = self.ctx.model_config.model
+            model_config = self.ctx.model_config
+            model = get_served_model_name(
+                model_config.model, model_config.served_model_name
+            )
             raise ValueError(
                 f"Audio input was provided but the model "
                 f"'{model}' does not have an audio tower. "
@@ -341,6 +345,29 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         )
         return PromptUpdateDetails.select_token_id(token_ids, processor.image_token_id)
 
+    @staticmethod
+    def _compute_audio_num_tokens(
+        num_samples: int, sampling_rate: int, audio_seq_length: int
+    ) -> int:
+        """Replicate the audio encoder's sequence-length arithmetic.
+
+        Mirrors: mel framing (_unfold in Gemma4AudioFeatureExtractor)
+        followed by two Conv2d subsampling layers (kernel=3, stride=2,
+        semicausal padding top=1, bottom=1), capped at audio_seq_length.
+        """
+        frame_length = int(round(sampling_rate * 20.0 / 1000.0))
+        hop_length = int(round(sampling_rate * 10.0 / 1000.0))
+        frame_size_for_unfold = frame_length + 1
+        pad_left = frame_length // 2
+        padded_samples = num_samples + pad_left
+        num_mel_frames = (padded_samples - frame_size_for_unfold) // hop_length + 1
+        if num_mel_frames <= 0:
+            return 0
+        t = num_mel_frames
+        for _ in range(2):
+            t = (t + 2 - 3) // 2 + 1
+        return min(t, audio_seq_length)
+
     def get_audio_repl(
         self,
         *,
@@ -350,20 +377,21 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         """Return the dynamic audio token sequence for this audio.
 
         Computes the number of soft tokens from the audio waveform
-        length using ``ceil(duration_ms / audio_ms_per_token)``.
+        length by replicating the audio encoder's sequence-length
+        arithmetic (mel framing + two Conv2d subsampling layers).
         """
         if processor is None:
             processor = self.get_hf_processor()
 
         sampling_rate = processor.feature_extractor.sampling_rate
-        num_tokens = processor._compute_audio_num_tokens(
-            torch.zeros(audio_len), sampling_rate
+        num_tokens = self._compute_audio_num_tokens(
+            audio_len, sampling_rate, processor.audio_seq_length
         )
         config = self.get_hf_config()
         token_ids = (
             [config.boa_token_id]
             + [processor.audio_token_id] * num_tokens
-            + [config.eoa_token_id]
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
         )
         return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
 
@@ -519,6 +547,25 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        # Bypass the HF processor and tokenize directly.  The HF
+        # processor expands multimodal placeholders (<|video|>, etc.)
+        # via get_text_with_replacements, which raises StopIteration
+        # when the prompt contains placeholders without matching data.
+        # The text-only path only needs token IDs, so the tokenizer
+        # alone is sufficient.
+        processor = self.info.get_hf_processor()
+        text_inputs = processor.tokenizer([prompt_text], **tokenization_kwargs)
+        input_ids = text_inputs["input_ids"]
+        if not isinstance(input_ids, list):
+            input_ids = input_ids.tolist()
+        (prompt_ids,) = input_ids
+        return prompt_ids
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -968,6 +1015,26 @@ class Gemma4ForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.model_dtype = vllm_config.model_config.dtype
+
+        # Only quantize towers when the quant method supports their
+        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
+        # (Marlin, FP8, …) require dimensions divisible by 64, which
+        # the vision tower (intermediate_size=4304) does not satisfy.
+        # TODO(mgoin): remove this by fixing kernel padding.
+        if quant_config and quant_config.get_name() in [
+            "bitsandbytes",
+            "torchao",
+            "compressed-tensors",
+        ]:
+            tower_quant = quant_config
+        else:
+            vision_cfg = config.vision_config
+            quantizable = (
+                vision_cfg.hidden_size % 64 == 0
+                and vision_cfg.intermediate_size % 64 == 0
+            )
+            tower_quant = quant_config if quantizable else None
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -975,12 +1042,12 @@ class Gemma4ForConditionalGeneration(
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=quant_config,
+                quant_config=tower_quant,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                quant_config,
+                tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
@@ -996,12 +1063,12 @@ class Gemma4ForConditionalGeneration(
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=quant_config,
+                    quant_config=tower_quant,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    quant_config,
+                    tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
@@ -1020,13 +1087,14 @@ class Gemma4ForConditionalGeneration(
             # Pre-allocate PLE buffer for CUDA graph compatibility.
             # Some variants have hidden_size_per_layer_input=None (no PLE).
             ple_dim = config.text_config.hidden_size_per_layer_input
-            if ple_dim is not None:
+            if ple_dim is not None and ple_dim > 0:
+                embed = self.language_model.model.embed_tokens
                 self.per_layer_embeddings = torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
                     config.text_config.num_hidden_layers,
                     ple_dim,
-                    device=(self.language_model.model.embed_tokens.weight.device),
-                    dtype=(self.language_model.model.embed_tokens.weight.dtype),
+                    device=next(embed.parameters()).device,
+                    dtype=vllm_config.model_config.dtype,
                 )
             else:
                 self.per_layer_embeddings = None
@@ -1056,6 +1124,9 @@ class Gemma4ForConditionalGeneration(
         self.num_expert_groups = self.language_model.num_expert_groups
         self.num_shared_experts = self.language_model.num_shared_experts
         self.num_redundant_experts = self.language_model.num_redundant_experts
+
+        gen_cfg = vllm_config.model_config.try_get_generation_config()
+        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
 
     # ------------------------------------------------------------------ #
     # Input parsing
@@ -1183,7 +1254,6 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1228,7 +1298,7 @@ class Gemma4ForConditionalGeneration(
                     pv_tensor,
                     pp_tensor,
                     pad_tensor,
-                ).to(target_dtype)
+                ).to(self.model_dtype)
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1265,12 +1335,8 @@ class Gemma4ForConditionalGeneration(
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
 
-        # Use embed_tokens dtype as compute dtype; embedding_projection.weight
-        # may be uint8 under BnB 4-bit, which would corrupt the cast.
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
-
         # Project all images in a single batched call.
-        flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
+        flat_valid_states = torch.cat(all_valid_states, dim=0).to(self.model_dtype)
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
@@ -1310,7 +1376,6 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
@@ -1342,7 +1407,7 @@ class Gemma4ForConditionalGeneration(
                 pv_chunk,
                 pp_chunk,
                 pad_chunk,
-            ).to(target_dtype)
+            ).to(self.model_dtype)
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
@@ -1377,7 +1442,9 @@ class Gemma4ForConditionalGeneration(
             frame_valid_lens.append(valid_states.shape[0])
 
         # Project all frames in a single batched call.
-        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(target_dtype)
+        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(
+            self.model_dtype
+        )
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
@@ -1405,8 +1472,7 @@ class Gemma4ForConditionalGeneration(
         input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
 
-        # Run audio tower — mask uses standard HF convention
-        # (True=valid, False=padding).
+        # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
         if isinstance(audio_outputs, tuple):
             audio_encodings, audio_mask = audio_outputs
@@ -1417,8 +1483,8 @@ class Gemma4ForConditionalGeneration(
         # Project into LM embedding space.
         audio_features = self.embed_audio(inputs_embeds=audio_encodings)
 
-        # Strip padding per-batch element: only keep real (non-padding)
-        # tokens. audio_mask is True for valid positions (HF convention).
+        # Strip padding per-batch element: only keep valid (non-padding)
+        # tokens.
         per_audio = []
         for enc, mask in zip(audio_features, audio_mask, strict=True):
             per_audio.append(enc[mask])  # [num_real, hidden_size]
@@ -1540,7 +1606,10 @@ class Gemma4ForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        return self.language_model.compute_logits(hidden_states)
+        logits = self.language_model.compute_logits(hidden_states)
+        if logits is not None and self._suppress_token_ids:
+            logits[:, self._suppress_token_ids] = -float("inf")
+        return logits
 
     # ------------------------------------------------------------------ #
     # Bidirectional attention helpers
@@ -1598,8 +1667,7 @@ class Gemma4ForConditionalGeneration(
             "embed_vision.embedding.",
             "embed_audio.embedding.",
         ]
-        # Models without audio tower should skip
-        # audio weights entirely.
+        # Models without audio tower should skip audio weights entirely.
         if self.audio_tower is None:
             ignore_prefixes.extend(
                 [

@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_TYPES_MAP,
+    WNA16_ZP_SUPPORTED_TYPES_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -56,9 +57,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+        self.symmetric = weight_quant.symmetric
         # Extract properties from weight_quant
         self.num_bits = weight_quant.num_bits
         self.packed_factor = 32 // weight_quant.num_bits
@@ -66,7 +65,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self.group_size = weight_quant.group_size
         self.actorder = weight_quant.actorder
 
-        self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.quant_type = (
+            WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+            if self.symmetric
+            else WNA16_ZP_SUPPORTED_TYPES_MAP[self.num_bits]
+        )
+
         self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
 
         if self.num_bits == 4:
@@ -82,7 +86,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "CompressedTensorsWNA16MarlinMoEMethod only supports int4 and int8 now."
             )
 
-        weight_key = QuantKey(self.quant_type, scale)
+        weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
         # Select WNA16 MoE backend via oracle.
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
@@ -103,15 +107,15 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         Get the shape of the weight based on the weight name, number of experts
         hidden size, intermediate size per partition, number of groups for w2,
         and number of groups for w13. Pass in num_groups_w2 and num_groups_w13
-        for weight scales.
+        for weight scales/zero_points.
         """
-        if weight_name == "w13_scale":
+        if weight_name in ("w13_scale", "w13_zp"):
             assert num_groups_w13 is not None, (
-                "num_groups_w13 must be provided for weight scales"
+                "num_groups_w13 must be provided for weight scales/zero_points"
             )
-        if weight_name == "w2_scale":
+        if weight_name in ("w2_scale", "w2_zp"):
             assert num_groups_w2 is not None, (
-                "num_groups_w2 must be provided for weight scales"
+                "num_groups_w2 must be provided for weight scales/zero_points"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
@@ -140,6 +144,15 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     w13_num_shards * intermediate_size_per_partition,
                 ),
             },
+            "w13_zp": {
+                "Marlin": (
+                    num_experts,
+                    num_groups_w13,
+                    w13_num_shards
+                    * intermediate_size_per_partition
+                    // self.packed_factor,
+                ),
+            },
             "w2_weight": {
                 "Flashinfer": (
                     num_experts,
@@ -155,6 +168,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             "w2_scale": {
                 "Flashinfer": (num_experts, hidden_size, num_groups_w2),
                 "Marlin": (num_experts, num_groups_w2, hidden_size),
+            },
+            "w2_zp": {
+                "Marlin": (
+                    num_experts,
+                    num_groups_w2,
+                    hidden_size // self.packed_factor,
+                ),
             },
         }
         backend_key = "Flashinfer" if is_flashinfer else "Marlin"
@@ -263,6 +283,39 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_scale, extra_weight_attrs)
         set_weight_attrs(w2_scale, {"load_full_w2": load_full_w2})
 
+        if not self.symmetric:
+            w13_zp = torch.nn.Parameter(
+                torch.zeros(
+                    *self.get_weight_shape(
+                        "w13_zp",
+                        num_experts,
+                        hidden_size,
+                        intermediate_size_per_partition,
+                        num_groups_w13=num_groups_w13,
+                    ),
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_zero_point", w13_zp)
+            set_weight_attrs(w13_zp, extra_weight_attrs)
+
+            w2_zp = torch.nn.Parameter(
+                torch.zeros(
+                    *self.get_weight_shape(
+                        "w2_zp",
+                        num_experts,
+                        hidden_size,
+                        intermediate_size_per_partition,
+                        num_groups_w2=num_groups_w2,
+                    ),
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_zero_point", w2_zp)
+            set_weight_attrs(w2_zp, extra_weight_attrs)
+
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
         )
@@ -334,8 +387,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_g_idx_processed,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
-            _,  # w13_qzeros
-            _,  # w2_qzeros
+            w13_qzeros,
+            w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
             _,  # w13_bias
@@ -351,6 +404,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_g_idx=layer.w13_weight_g_idx,
             w2_g_idx=layer.w2_weight_g_idx,
+            w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
+            w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
         )
 
         # Replace common parameters
@@ -358,6 +413,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_packed", w2_qweight)
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
+
+        if not self.symmetric:
+            replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
+            replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if not is_flashinfer:
@@ -417,6 +476,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             group_size=self.group_size,
             num_bits=self.num_bits,
+            w1_zp=getattr(layer, "w13_weight_zero_point", None),
+            w2_zp=getattr(layer, "w2_weight_zero_point", None),
         )
 
     def apply_monolithic(
