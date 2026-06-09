@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
@@ -335,7 +336,7 @@ def select_nvfp4_moe_backend(
 
 def convert_to_nvfp4_moe_kernel_format(
     nvfp4_backend: NvFp4MoeBackend,
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,

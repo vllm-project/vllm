@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -156,6 +157,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
+    VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -1117,6 +1119,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
     ),
+    "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
+    ),
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
@@ -1319,6 +1324,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
+    ),
+    # Optional comma-separated list of node IPs that Ray data-parallel
+    # placement groups may use. When set, create_dp_placement_groups only
+    # considers these nodes (the DP master node is always included).
+    # This environment variable is ignored if data-parallel-backend is not Ray.
+    "VLLM_RAY_DP_PLACEMENT_NODE_IPS": lambda: os.getenv(
+        "VLLM_RAY_DP_PLACEMENT_NODE_IPS", ""
     ),
     # Comma-separated *additional* prefixes of env vars to copy from the
     # driver to Ray workers.  These are merged with the built-in defaults
