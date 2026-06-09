@@ -175,9 +175,12 @@ def get_numel_loaded(
     """
     Determine how many elements would be loaded by a weight loader call.
 
-    :param weight loader: used to load weights
-    :param args: bound arguments to weight loader
-    :return: number of elements loaded by the weight loader, the return value of the
+    Args:
+        weight_loader: used to load weights
+        args: bound arguments to weight loader
+
+    Returns:
+        number of elements loaded by the weight loader, the return value of the
         weight loader
     """
     with CopyCounter() as counter:
