@@ -151,6 +151,58 @@ def quantize_fp8_pad_head_dim_triton(
     return output.view((*original_shape[:-1], padded_head_dim))
 
 
+def quantize_fp8_pad_head_dim(
+    tensor: torch.Tensor,
+    scale: torch.Tensor,
+    skip_scale: bool = False,
+) -> torch.Tensor:
+    """Dispatch wrapper: prefer CUDA fast-path, fall back to Triton.
+
+    The CUDA kernel ``torch.ops._C.qkv_padded_fp8_quant`` is a faster
+    drop-in replacement for the Triton implementation. It is enabled when:
+      * the platform is CUDA (NVIDIA GPU);
+      * input dtype is bf16/fp16;
+      * the FP8 dtype is e4m3fn (rules out ROCm e4m3fnuz);
+      * ``tensor.stride(-1) == 1`` (the kernel does 16-byte vectorized loads
+        along head_dim);
+      * the op is registered (i.e. the C++ extension has been built with
+        the kernel).
+
+    All other paths (including non-CUDA platforms, e8m0 etc.) fall back
+    to the stride-aware Triton kernel.
+    """
+    if (
+        current_platform.is_cuda()
+        and tensor.dtype in (torch.bfloat16, torch.float16)
+        and current_platform.fp8_dtype() is torch.float8_e4m3fn
+        and tensor.stride(-1) == 1
+        and hasattr(torch.ops._C, "qkv_padded_fp8_quant")
+    ):
+        # The CUDA kernel processes 3D (S, H, D); flatten leading dims
+        # without a copy when possible, otherwise fall back to Triton.
+        original_shape = tensor.shape
+        cuda_input = tensor
+        if tensor.dim() == 4:
+            try:
+                cuda_input = tensor.view(-1, tensor.shape[-2], tensor.shape[-1])
+            except RuntimeError:
+                # Non-contiguous 4D view that .view() can't handle; the
+                # Triton kernel still works because it reads via strides.
+                return quantize_fp8_pad_head_dim_triton(
+                    tensor, scale, skip_scale=skip_scale
+                )
+
+        # Scale must be float32 for the CUDA kernel.
+        scale_f32 = scale if scale.dtype == torch.float32 else scale.float()
+        out = torch.ops._C.qkv_padded_fp8_quant(cuda_input, scale_f32, skip_scale)
+        # Restore original leading dims with a no-copy reshape.
+        if cuda_input is not tensor:
+            padded_d = out.shape[-1]
+            out = out.view((*original_shape[:-1], padded_d))
+        return out
+    return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
+
+
 def quantize_fp8_maybe_pad_head_dim(
     tensor: torch.Tensor,
     scale: torch.Tensor,
@@ -167,7 +219,7 @@ def quantize_fp8_maybe_pad_head_dim(
     """
     head_dim = tensor.shape[-1]
     if head_dim % 16 != 0:
-        return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
+        return quantize_fp8_pad_head_dim(tensor, scale, skip_scale=skip_scale)
 
     if skip_scale:
         return tensor.to(current_platform.fp8_dtype())

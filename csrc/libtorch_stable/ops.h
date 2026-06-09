@@ -18,6 +18,13 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
                                        int64_t group_size, double eps,
                                        double min_8bit, double max_8bit);
 
+// FP8 quantization with head_dim padding for ViT attention.
+// Produces a contiguous FP8 tensor with shape (..., H, padded_D), where
+// padded_D = round_up(D, 16). Caller must guarantee input.stride(-1) == 1.
+torch::stable::Tensor qkv_padded_fp8_quant(const torch::stable::Tensor& input,
+                                           const torch::stable::Tensor& scale,
+                                           bool skip_scale);
+
 void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 torch::stable::Tensor& output_q,
                                 torch::stable::Tensor& output_s,
