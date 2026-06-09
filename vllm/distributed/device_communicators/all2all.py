@@ -266,6 +266,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.support_fault_tolerance = False  # TODO: set to True when FT is supported.
 
     def _make_all2all_kwargs(
         self,
@@ -307,7 +308,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             explicitly_destroy=True,
-            enable_shrink=False,  # TODO: set to True when fault tolerance is supported.
+            enable_shrink=self.support_fault_tolerance,
         )
         return kwargs
 
@@ -330,11 +331,6 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     def max_sms_used(self) -> int | None:
         return 0
 
-    @property
-    def support_fault_tolerance(self) -> bool:
-        buf = DeepEPLLAll2AllManager._active_buffer
-        return buf is not None and getattr(buf, "enable_shrink", False)
-
     def query_active_mask(self) -> torch.Tensor:
         buf = DeepEPLLAll2AllManager._active_buffer
         assert buf is not None
@@ -345,10 +341,14 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         buf.low_latency_query_mask_buffer(DeepEPLLAll2AllManager._mask)
         return DeepEPLLAll2AllManager._mask
 
-    def clean_mask(self) -> None:
+    def clean_buffers(self) -> None:
         buf = DeepEPLLAll2AllManager._active_buffer
-        assert buf is not None
+        if buf is None:
+            return
+        buf.get_local_buffer_tensor(dtype=torch.int8, use_rdma_buffer=True).zero_()
+        torch.accelerator.synchronize()
         buf.low_latency_clean_mask_buffer()
+        torch.accelerator.synchronize()
         if DeepEPLLAll2AllManager._last_mask is not None:
             DeepEPLLAll2AllManager._last_mask.zero_()
 
@@ -382,6 +382,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group, tcp_store_group=None):
         assert tcp_store_group is not None
         super().__init__(cpu_group, tcp_store_group)
+        self.support_fault_tolerance = True
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
 
@@ -540,10 +541,6 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def max_sms_used(self) -> int | None:
         return 0
 
-    @property
-    def support_fault_tolerance(self) -> bool:
-        return True
-
     def query_active_mask(self) -> torch.Tensor:
         state = NixlEPAll2AllManager._buffer
         assert state is not None
@@ -554,10 +551,14 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.query_mask_buffer(NixlEPAll2AllManager._full_mask)
         return NixlEPAll2AllManager._full_mask[: state.active_ep_size]
 
-    def clean_mask(self) -> None:
-        state = NixlEPAll2AllManager._buffer
-        assert state is not None
-        state.buffer.clean_mask_buffer()
+    def clean_buffers(self) -> None:
+        if NixlEPAll2AllManager._buffer is None:
+            return
+        buf = NixlEPAll2AllManager._buffer.buffer
+        buf.get_local_buffer_tensor(dtype=torch.int8).zero_()
+        torch.accelerator.synchronize()
+        buf.clean_mask_buffer()
+        torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_active_mask = None
 
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:

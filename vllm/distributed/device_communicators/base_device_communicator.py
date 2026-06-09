@@ -62,6 +62,8 @@ class All2AllManagerBase:
                 in_the_same_node_as(tcp_store_group, source_rank=0)
             )
 
+        self.support_fault_tolerance = False
+
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
         # based on the kwargs.
@@ -102,14 +104,11 @@ class All2AllManagerBase:
         # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
-    @property
-    def support_fault_tolerance(self) -> bool:
-        return False
-
     def query_active_mask(self) -> torch.Tensor:
         raise NotImplementedError
 
-    def clean_mask(self) -> None:
+    def clean_buffers(self) -> None:
+        """Clean RDMA buffers and mask state during FT recovery."""
         raise NotImplementedError
 
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
