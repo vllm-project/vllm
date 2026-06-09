@@ -13,6 +13,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    FP8_QUANT_EPS as _FP8_QUANT_EPS,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
@@ -33,6 +36,11 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+# Must wrap in tl.constexpr: a bare module-level Python float referenced inside
+# a @triton.jit kernel is not captured as a compile-time constant by this
+# Triton version (tl.maximum(..., <python float>) fails to compile), so the
+# wrap is load-bearing, not stylistic.
+FP8_QUANT_EPS = tl.constexpr(_FP8_QUANT_EPS)
 
 
 @triton.jit
@@ -274,6 +282,21 @@ def kernel_unified_attention(
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
+    # Per-group dynamic FP8 output quantization (2D / prefill path only).
+    # When enabled the epilogue computes one FP8 scale per ``GROUP_SIZE``
+    # slice of ``head_size`` and quantizes ``acc`` in-place, writing the
+    # scales to ``out_group_scale_ptr`` — fusing the quant that would
+    # otherwise be a separate HBM round-trip after attention.
+    USE_FP8_GROUP: tl.constexpr = False,  # bool
+    GROUP_SIZE: tl.constexpr = 0,  # int, must evenly divide HEAD_SIZE
+    out_group_scale_ptr=None,  # [num_tokens, num_query_heads * NUM_GROUPS_PER_HEAD]
+    out_group_scale_stride_0: tl.int64 = 0,  # stride for token dim
+    out_group_scale_stride_1: tl.constexpr = 1,  # stride for group dim
+    NUM_GROUPS_PER_HEAD: tl.constexpr = 1,  # HEAD_SIZE // GROUP_SIZE
+    # Round per-group scales to powers of 2 (UE8M0 / MXFP-style), matching
+    # ``per_token_group_quant_fp8(use_ue8m0=True)`` — required by deep_gemm
+    # block-FP8 consumers (the default when ``is_deep_gemm_e8m0_used()``).
+    USE_UE8M0: tl.constexpr = False,  # bool
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
@@ -625,6 +648,42 @@ def kernel_unified_attention(
         if USE_FP8:
             acc = acc * tl.load(out_scale)
             acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+        elif USE_FP8_GROUP:
+            # Per-group dynamic FP8 quantization: compute one scale per
+            # GROUP_SIZE slice of head_size and quantize ``acc`` in-place,
+            # fusing the quant into the attention epilogue.  Each group spans
+            # a disjoint slice of ``offs_d``, so quantizing group ``g`` never
+            # perturbs the abs-max of a later group — no copy of ``acc`` is
+            # needed before the loop.
+            valid_mask = query_mask_0 & query_mask_1  # [BLOCK_M]
+            for g in tl.static_range(NUM_GROUPS_PER_HEAD):
+                g_start = g * GROUP_SIZE
+                group_mask = (offs_d >= g_start) & (offs_d < g_start + GROUP_SIZE)
+                combined_mask = group_mask[None, :] & dim_mask[None, :]
+                group_abs = tl.where(combined_mask, tl.abs(acc), 0.0)
+                group_max = tl.max(group_abs, axis=1)  # [BLOCK_M]
+                # Match per_token_group_quant_fp8 exactly so this fused path is
+                # numerically a no-op vs the standalone quant op it replaces:
+                # clamp the abs-max (not the scale) by eps, and multiply by the
+                # reciprocal of FP8_MAX (division can introduce a 1-ULP error
+                # that flips FP8 quantization at representable-value boundaries).
+                group_scale = tl.maximum(group_max, FP8_QUANT_EPS) * (1.0 / FP8_MAX)
+                if USE_UE8M0:
+                    # Round up to the next power of 2.  ``group_scale`` is
+                    # already >= eps/FP8_MAX > 0, so log2 is well-defined.
+                    group_scale = tl.exp2(tl.ceil(tl.log2(group_scale)))
+                acc = tl.where(combined_mask, acc / group_scale[:, None], acc)
+                scale_offset = (
+                    query_offset_0 * out_group_scale_stride_0
+                    + (query_offset_1 * NUM_GROUPS_PER_HEAD + g)
+                    * out_group_scale_stride_1
+                )
+                tl.store(
+                    out_group_scale_ptr + scale_offset,
+                    group_scale,
+                    mask=valid_mask,
+                )
+            acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
         if USE_TD_QO:
             # 2D target: flat output[token, head, :].  Strides come
             # straight from the caller (``output_stride_0`` per token,
@@ -682,6 +741,16 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Per-group dynamic FP8 output quantization (3D / decode path).  The 3D
+    # main kernel stores unquantized per-segment partials; quantization must
+    # happen here, on the combined result, mirroring the ``USE_FP8`` path.
+    USE_FP8_GROUP: tl.constexpr = False,  # bool
+    GROUP_SIZE: tl.constexpr = 0,  # int, must evenly divide HEAD_SIZE
+    out_group_scale_ptr=None,  # [num_tokens, num_query_heads * NUM_GROUPS_PER_HEAD]
+    out_group_scale_stride_0: tl.int64 = 0,
+    out_group_scale_stride_1: tl.constexpr = 1,
+    NUM_GROUPS_PER_HEAD: tl.constexpr = 1,  # HEAD_SIZE // GROUP_SIZE
+    USE_UE8M0: tl.constexpr = False,  # round per-group scales to powers of 2
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -738,6 +807,28 @@ def reduce_segments(
 
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+    elif USE_FP8_GROUP:
+        # Per-group dynamic FP8 quant on the combined (1D) result.  Groups
+        # span disjoint slices of ``offs_d``, so quantizing one never
+        # perturbs another's abs-max (no copy of ``acc`` needed).
+        offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+        for g in tl.static_range(NUM_GROUPS_PER_HEAD):
+            g_start = g * GROUP_SIZE
+            group_mask = (offs_d >= g_start) & (offs_d < g_start + GROUP_SIZE)
+            combined_mask = group_mask & dim_mask
+            group_abs = tl.where(combined_mask, tl.abs(acc), 0.0)
+            group_max = tl.max(group_abs)  # scalar (acc is 1D here)
+            # Match per_token_group_quant_fp8 exactly (see 2D epilogue note).
+            group_scale = tl.maximum(group_max, FP8_QUANT_EPS) * (1.0 / FP8_MAX)
+            if USE_UE8M0:
+                group_scale = tl.exp2(tl.ceil(tl.log2(group_scale)))
+            acc = tl.where(combined_mask, acc / group_scale, acc)
+            scale_offset = (
+                query_token_idx * out_group_scale_stride_0
+                + (query_head_idx * NUM_GROUPS_PER_HEAD + g) * out_group_scale_stride_1
+            )
+            tl.store(out_group_scale_ptr + scale_offset, group_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     # write result
@@ -801,6 +892,10 @@ def unified_attention(
     softmax_segm_expsum=None,
     alibi_slopes=None,
     output_scale=None,
+    output_group_scale=None,
+    # Round fused per-group scales to powers of 2 (UE8M0) — set by callers
+    # whose downstream consumer expects deep_gemm-style block-FP8 scales.
+    output_group_ue8m0=False,
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
@@ -856,6 +951,37 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+
+    # Per-group dynamic FP8 output quantization setup.  Implemented in both
+    # the 2D epilogue (``kernel_unified_attention``) and the 3D finalization
+    # (``reduce_segments``), so it composes with the normal 2D/3D launch
+    # selection below — no special-casing of the path is needed.
+    use_fp8_group = output_group_scale is not None
+    if use_fp8_group:
+        assert output_scale is None, (
+            "output_scale and output_group_scale are mutually exclusive"
+        )
+        # The scale tensor is laid out as (num_tokens, num_query_heads *
+        # num_groups_per_head); it may be column-major (transposed), so use
+        # ``size()`` for the logical shape rather than trusting stride order.
+        num_total_groups = output_group_scale.size(1)
+        hidden_size = num_query_heads * head_size
+        # ``group_size`` is inferred from the scale width; validate before the
+        # division so a malformed scale tensor fails with a clear message
+        # instead of a ZeroDivisionError or a silently-truncated group size.
+        assert num_total_groups > 0 and hidden_size % num_total_groups == 0, (
+            f"output_group_scale.size(1) ({num_total_groups}) must be a "
+            f"positive divisor of num_query_heads * head_size ({hidden_size})"
+        )
+        group_size = hidden_size // num_total_groups
+        assert group_size > 0 and head_size % group_size == 0, (
+            f"head_size ({head_size}) must be divisible by group_size "
+            f"({group_size}) for fused per-group FP8 quantization"
+        )
+        num_groups_per_head = head_size // group_size
+    else:
+        group_size = 0
+        num_groups_per_head = 1
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
@@ -1088,6 +1214,13 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        USE_FP8_GROUP=use_fp8_group,
+        GROUP_SIZE=group_size,
+        out_group_scale_ptr=output_group_scale,
+        out_group_scale_stride_0=(output_group_scale.stride(0) if use_fp8_group else 0),
+        out_group_scale_stride_1=(output_group_scale.stride(1) if use_fp8_group else 1),
+        NUM_GROUPS_PER_HEAD=num_groups_per_head,
+        USE_UE8M0=output_group_ue8m0,
         **launch_kwargs,
     )
 
@@ -1111,4 +1244,15 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            USE_FP8_GROUP=use_fp8_group,
+            GROUP_SIZE=group_size,
+            out_group_scale_ptr=output_group_scale,
+            out_group_scale_stride_0=(
+                output_group_scale.stride(0) if use_fp8_group else 0
+            ),
+            out_group_scale_stride_1=(
+                output_group_scale.stride(1) if use_fp8_group else 1
+            ),
+            NUM_GROUPS_PER_HEAD=num_groups_per_head,
+            USE_UE8M0=output_group_ue8m0,
         )
