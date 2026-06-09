@@ -20,10 +20,11 @@ ISA_TYPES = {
     "VEC16": 2,
     "NEON": 3,
     "VXE": 4,
+    "NNPA": 5,
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE"]
+ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE", "NNPA"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
@@ -121,6 +122,7 @@ def generate_header_file() -> str:
 
 #ifdef __s390x__
   #include "cpu_attn_vxe.hpp"
+  #include "cpu_attn_nnpa.hpp"
 #endif
 
 """
@@ -177,7 +179,7 @@ def generate_header_file() -> str:
     int64_t encoded_params = encode_cpu_attn_params(HEAD_DIM, ISA_TYPE); \\
     switch (encoded_params) { \\
 """
-    header += generate_cases_for_isa_group(["VXE", "VEC", "VEC16"])
+    header += generate_cases_for_isa_group(["VXE", "NNPA", "VEC", "VEC16"])
     header += """
       default: { \\
         TORCH_CHECK(false, "Unsupported CPU attention configuration: head_dim=" + \\

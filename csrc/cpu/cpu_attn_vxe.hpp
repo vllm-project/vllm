@@ -231,7 +231,30 @@ class TileGemmS390X {
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
+    {
+      FILE* f = fopen("/tmp/vxe_debug.txt", "a");
+      if (f) {
+        const int32_t K2 = (phase==AttentionGemmPhase::QK) ? k_size : dynamic_k_size;
+        const int32_t N2 = (phase==AttentionGemmPhase::QK) ? block_size : (int32_t)ldc;
+        fprintf(f, "[VXE] gemm: phase=%s m=%d K=%d N=%d lda=%ld ldb=%ld ldc=%ld accum=%d\n",
+                (phase==AttentionGemmPhase::QK)?"QK":"PV",
+                m_size, K2, N2, (long)lda, (long)ldb, (long)ldc, (int)accum_c);
+        fprintf(f, "  A[0:8]=");
+        for(int i=0;i<8&&i<m_size*K2;i++) fprintf(f, "%.4f ", a_tile[i]);
+        fprintf(f, "\n");
+        fprintf(f, "  B[0:8]=");
+        for(int i=0;i<8;i++) fprintf(f, "%.4f ", (float)b_tile[i]);
+        fprintf(f, "\n");
+        fclose(f);
+      }
+    }
     if constexpr (phase == AttentionGemmPhase::QK) {
+      {static int dc=0; dc++;
+      if(dc<=3){FILE* dbg=fopen("/tmp/vxe_bdump.txt","a"); if(dbg){
+        fprintf(dbg,"VXE QK B m=%d k=%d ldb=%ld b_tile[0:8]: ",m_size,(int)k_size,(long)ldb);
+        for(int i=0;i<8;i++) fprintf(dbg,"%.4f ",(float)b_tile[i]);
+        fprintf(dbg,"\n");
+        fclose(dbg);}}}
       gemm_macro_s390x_Mx8_Ku4<BLOCK_SIZE_ALIGNMENT, kv_cache_t>(
           a_tile, b_tile, c_tile, m_size, k_size, lda, ldb, ldc, accum_c);
     } else {

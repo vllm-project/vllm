@@ -18,6 +18,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::NEON;
   } else if (isa_hint == "vxe") {
     isa = cpu_attention::ISA::VXE;
+  } else if (isa_hint == "nnpa") {
+    isa = cpu_attention::ISA::NNPA;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -104,6 +106,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::NEON;
     } else if (isa == "vxe") {
       return cpu_attention::ISA::VXE;
+    } else if (isa == "nnpa") {
+      return cpu_attention::ISA::NNPA;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }
@@ -153,7 +157,22 @@ void cpu_attention_with_kv_cache(
   input.block_size = key_cache.size(2);
   input.query = query.data_ptr();
   input.query_num_tokens_stride = query.stride(0);
+  {FILE*cf=fopen("/tmp/q_contig.txt","a"); if(cf){
+    fprintf(cf,"is_contiguous=%d numel=%ld size=[%ld,%ld,%ld] expected_stride0=%ld actual_stride0=%ld\n",
+      (int)query.is_contiguous(),(long)query.numel(),
+      (long)query.size(0),(long)query.size(1),(long)query.size(2),
+      (long)(query.size(1)*query.size(2)),(long)query.stride(0)); fclose(cf);}}
   input.query_num_heads_stride = query.stride(1);
+  {FILE*qf=fopen("/tmp/q_shape.txt","a"); if(qf){
+    fprintf(qf,"query shape=[%ld,%ld,%ld] stride=[%ld,%ld,%ld] num_heads=%ld num_kv_heads=%ld\n",
+      (long)query.size(0),(long)query.size(1),(long)query.size(2),
+      (long)query.stride(0),(long)query.stride(1),(long)query.stride(2),
+      (long)input.num_heads,(long)input.num_kv_heads); fclose(qf);}}
+  {FILE*qf=fopen("/tmp/q_shape.txt","a"); if(qf){
+    fprintf(qf,"query shape=[%ld,%ld,%ld] stride=[%ld,%ld,%ld] num_heads=%ld num_kv_heads=%ld\n",
+      (long)query.size(0),(long)query.size(1),(long)query.size(2),
+      (long)query.stride(0),(long)query.stride(1),(long)query.stride(2),
+      (long)input.num_heads,(long)input.num_kv_heads); fclose(qf);}}
   input.cache_num_blocks_stride = key_cache.stride(0);
   input.cache_num_kv_heads_stride = key_cache.stride(1);
   input.blt_num_tokens_stride = block_table.stride(0);
@@ -187,3 +206,5 @@ void cpu_attention_with_kv_cache(
         });
       });
 }
+// force recompile Mon Jun  1 13:52:14 UTC 2026
+// force 1780324127

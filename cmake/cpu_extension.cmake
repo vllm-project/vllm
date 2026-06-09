@@ -364,6 +364,18 @@ else()
     add_compile_definitions(-DVLLM_NUMA_DISABLED)
 endif()
 
+# Link zDNN for NNPA support on s390x (IBM Telum II)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
+    find_library(ZDNN_LIB zdnn HINTS /zDNN/zdnn/lib)
+    if(ZDNN_LIB)
+        message(STATUS "Found zDNN: ${ZDNN_LIB}")
+        list(APPEND LIBS ${ZDNN_LIB})
+        include_directories(/zDNN/zdnn)
+    else()
+        message(WARNING "zDNN library not found, NNPA support disabled")
+    endif()
+endif()
+
 #
 # Generate CPU attention dispatch header
 #
