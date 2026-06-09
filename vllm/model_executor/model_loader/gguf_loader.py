@@ -304,6 +304,17 @@ class GGUFModelLoader(BaseModelLoader):
             # Priority 1: Search vision/projector parameters for multimodal models
             if vision_name_map is not None:
                 gguf_name = vision_name_map.get_name(base_name)
+                if gguf_name is None:
+                    # Transformers v5.6 removed a layer of nesting from CLIP models.
+                    # gguf-py tensor maps still expect the old nesting, so if gguf_name
+                    # is not found, try adding back the 'vision_model.' nesting layer.
+                    gguf_name = vision_name_map.get_name(
+                        re.sub(
+                            r"^(vision_tower\.)(?!vision_model\.)(.*)$",
+                            r"\1vision_model.\2",
+                            base_name,
+                        )
+                    )
 
             # Priority 2: Search text backbone parameters
             if gguf_name is None:
