@@ -53,7 +53,7 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-aiter_topK_meta_data = None
+aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @lru_cache(maxsize=1)
