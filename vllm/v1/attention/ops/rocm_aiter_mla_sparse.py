@@ -1818,7 +1818,7 @@ def _decode_cu_count() -> int:
     try:
         return torch.cuda.get_device_properties(0).multi_processor_count
     except Exception:
-        return 256 # For gfx950 arch, gated behind a fallback path for other archs.
+        return 256  # For gfx950 arch, gated behind a fallback path for other archs.
 
 
 def _decode_partial_iters(
@@ -1987,7 +1987,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950: # Fallback path for un-tuned architectures.
+    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,

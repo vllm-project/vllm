@@ -469,16 +469,16 @@ def test_sparse_attn_decode_split_k_kernel(
     main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
     main_indices, main_indptr = _ragged_from_rows(main_rows, device)
 
+    extra_rows: list[list[int]] | None = None
+    extra_cache: torch.Tensor | None = None
+    extra_indices: torch.Tensor | None = None
+    extra_indptr: torch.Tensor | None = None
     if with_extra:
-        extra_rows: list[list[int]] | None = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
+        rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-        extra_cache: torch.Tensor | None = _pack_fp8_ds_mla_cache(extra_kv, block_size)
-        extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
-    else:
-        extra_rows = None
-        extra_cache = None
-        extra_indices = None
-        extra_indptr = None
+        extra_rows = rows
+        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+        extra_indices, extra_indptr = _ragged_from_rows(rows, device)
 
     attn_sink = (
         torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
