@@ -6,18 +6,20 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import hashlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-    resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -34,6 +36,31 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+
+def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
+    factors = aot_compile_hash_factors(runner.vllm_config)
+    return hashlib.sha256(str(factors).encode()).hexdigest()
+
+
+def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
+    override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+    if override_dir:
+        root = Path(override_dir).expanduser()
+    else:
+        from flashinfer.jit import env as flashinfer_jit_env
+
+        flashinfer_workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+        root = (
+            Path(envs.VLLM_CACHE_ROOT)
+            / "flashinfer_autotune_cache"
+            / flashinfer_workspace.parent.name
+            / flashinfer_workspace.name
+        )
+
+    output_dir = root / _flashinfer_autotune_cache_hash(runner)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / "autotune_configs.json"
 
 
 def kernel_warmup(worker: "Worker"):
@@ -141,7 +168,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     world = get_world_group()
     is_leader = world.rank_in_group == 0
 
-    cache_path = resolve_flashinfer_autotune_file(runner)
+    cache_path = _resolve_flashinfer_autotune_file(runner)
     if is_leader:
         logger.info("Using FlashInfer autotune cache file: %s", cache_path)
 
