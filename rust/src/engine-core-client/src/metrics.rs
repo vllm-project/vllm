@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
@@ -135,57 +135,25 @@ pub(crate) fn record_scheduler_stats(
     }
 }
 
-/// Exports `vllm:lora_requests_info` as a single series whose adapter labels are
-/// the union across all engines in the replica.
+/// Exports `vllm:lora_requests_info` as a single series covering all LoRA
+/// requests tracked by this client across every engine in the replica.
+///
+/// The engine's `SchedulerStats` never carries adapter names: the Python
+/// frontend fills them in from per-request lifecycle events tracked by
+/// `LoRARequestStates` in `vllm/v1/engine/output_processor.py`. The Rust
+/// frontend mirrors that, deriving the sets from the request registry.
 #[derive(Default)]
 pub(crate) struct LoraInfoExporter {
-    per_engine: BTreeMap<u32, EngineLoraAdapters>,
     current: Option<LoraInfoLabels>,
 }
 
-#[derive(Default)]
-struct EngineLoraAdapters {
-    running: Vec<String>,
-    waiting: Vec<String>,
-}
-
 impl LoraInfoExporter {
-    pub(crate) fn record(
+    pub(crate) fn update(
         &mut self,
         metrics: &SchedulerMetrics,
-        engine: u32,
-        stats: &SchedulerStats,
+        running: BTreeSet<String>,
+        waiting: BTreeSet<String>,
     ) {
-        let active =
-            !stats.running_lora_adapters.is_empty() || !stats.waiting_lora_adapters.is_empty();
-
-        if !active && !self.per_engine.contains_key(&engine) {
-            return;
-        }
-
-        if active {
-            self.per_engine.insert(
-                engine,
-                EngineLoraAdapters {
-                    running: stats.running_lora_adapters.keys().cloned().collect(),
-                    waiting: stats.waiting_lora_adapters.keys().cloned().collect(),
-                },
-            );
-        } else {
-            self.per_engine.remove(&engine);
-        }
-
-        self.refresh(metrics);
-    }
-
-    fn refresh(&mut self, metrics: &SchedulerMetrics) {
-        let mut running = BTreeSet::new();
-        let mut waiting = BTreeSet::new();
-        for adapters in self.per_engine.values() {
-            running.extend(adapters.running.iter().map(String::as_str));
-            waiting.extend(adapters.waiting.iter().map(String::as_str));
-        }
-
         let next = (!running.is_empty() || !waiting.is_empty()).then(|| LoraInfoLabels {
             running_lora_adapters: join_names(&running),
             waiting_lora_adapters: join_names(&waiting),
@@ -206,7 +174,7 @@ impl LoraInfoExporter {
     }
 }
 
-fn join_names(names: &BTreeSet<&str>) -> String {
+fn join_names(names: &BTreeSet<String>) -> String {
     let mut out = String::new();
     for name in names {
         if !out.is_empty() {
@@ -226,20 +194,15 @@ fn now_unix_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use expect_test::expect;
     use vllm_metrics::Metrics;
 
-    use super::*;
+    use crate::metrics::LoraInfoExporter;
 
-    fn stats_with(running: &[&str], waiting: &[&str]) -> SchedulerStats {
-        let mut stats = SchedulerStats::default();
-        for name in running {
-            stats.running_lora_adapters.insert((*name).to_string(), 1);
-        }
-        for name in waiting {
-            stats.waiting_lora_adapters.insert((*name).to_string(), 1);
-        }
-        stats
+    fn names(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|name| (*name).to_string()).collect()
     }
 
     /// The `lora_requests_info` series with the non-deterministic timestamp
@@ -257,37 +220,37 @@ mod tests {
     }
 
     #[test]
-    fn lora_info_unions_engines_clears_stale_and_drains() {
+    fn lora_info_emits_clears_stale_and_drains() {
         let metrics = Metrics::new();
         let mut exporter = LoraInfoExporter::default();
 
         // No adapters: nothing emitted.
-        exporter.record(&metrics.scheduler, 0, &stats_with(&[], &[]));
+        exporter.update(&metrics.scheduler, names(&[]), names(&[]));
         expect![[""]].assert_eq(&lora_series(&metrics.render().unwrap()));
 
-        // Engine 0: two running (sorted), one waiting.
-        exporter.record(&metrics.scheduler, 0, &stats_with(&["b", "a"], &["c"]));
+        // Two running (sorted), one waiting.
+        exporter.update(&metrics.scheduler, names(&["b", "a"]), names(&["c"]));
         expect![[
             r#"vllm:lora_requests_info{running_lora_adapters="a,b",waiting_lora_adapters="c"} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
-        // Engine 1 adds "d": series is the union across engines.
-        exporter.record(&metrics.scheduler, 1, &stats_with(&["d"], &[]));
+        // "c" gets scheduled and "d" arrives: the stale series is replaced.
+        exporter.update(&metrics.scheduler, names(&["a", "b", "c"]), names(&["d"]));
         expect![[
-            r#"vllm:lora_requests_info{running_lora_adapters="a,b,d",waiting_lora_adapters="c"} <ts>"#
+            r#"vllm:lora_requests_info{running_lora_adapters="a,b,c",waiting_lora_adapters="d"} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
-        // Engine 0 drains: only engine 1's "d" remains.
-        exporter.record(&metrics.scheduler, 0, &stats_with(&[], &[]));
+        // Everything but "d" finishes.
+        exporter.update(&metrics.scheduler, names(&["d"]), names(&[]));
         expect![[
             r#"vllm:lora_requests_info{running_lora_adapters="d",waiting_lora_adapters=""} <ts>"#
         ]]
         .assert_eq(&lora_series(&metrics.render().unwrap()));
 
-        // Engine 1 drains: series removed entirely.
-        exporter.record(&metrics.scheduler, 1, &stats_with(&[], &[]));
+        // All requests done: series removed entirely.
+        exporter.update(&metrics.scheduler, names(&[]), names(&[]));
         expect![[""]].assert_eq(&lora_series(&metrics.render().unwrap()));
     }
 }

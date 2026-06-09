@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -58,17 +58,19 @@ impl ClientInner {
     /// per-request output channel bound to its `request_id`.
     ///
     /// When `data_parallel_rank` is provided, the request is routed to that
-    /// specific engine rank, bypassing load balancing.
+    /// specific engine rank, bypassing load balancing. `lora_name` is the
+    /// request's LoRA adapter, tracked for `vllm:lora_requests_info`.
     pub fn register_request(
         &self,
         request_id: String,
+        lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -129,6 +131,12 @@ impl ClientInner {
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot the adapter names of tracked LoRA requests as
+    /// (running, waiting) sets.
+    pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        self.request_reg.lock().lora_adapter_states()
     }
 
     /// Close all active request streams and utility calls with the first
@@ -358,8 +366,13 @@ pub(crate) async fn run_output_dispatcher_loop(
                             batch.engine_index,
                             scheduler_stats,
                         );
-                        lora_info.record(&METRICS.scheduler, batch.engine_index, scheduler_stats);
                     }
+
+                    // The engine's scheduler stats never carry adapter names;
+                    // the gauge is derived from the registry's frontend-side
+                    // request tracking instead.
+                    let (running, waiting) = inner.lora_adapter_states();
+                    lora_info.update(&METRICS.scheduler, running, waiting);
                 }
                 ClassifiedEngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
