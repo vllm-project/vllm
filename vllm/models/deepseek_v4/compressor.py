@@ -308,6 +308,7 @@ class DeepseekCompressor(nn.Module):
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
         token_to_req_indices = state_metadata.token_to_req_indices
+        assert token_to_req_indices is not None
         slot_mapping = state_metadata.slot_mapping
         num_actual = slot_mapping.shape[0]
         block_table = state_metadata.block_table
@@ -356,9 +357,11 @@ class DeepseekCompressor(nn.Module):
 
         if self.cp_layout.enabled:
             assert self.dcp_group is not None
+            # DCP ranks process every real global token. Rank-local slot mappings
+            # also contain CUDA graph padding, which must not launch collectives.
             self._dcp_compress_and_insert(
                 state_cache=state_cache,
-                num_actual=num_actual,
+                num_actual=token_to_req_indices.shape[0],
                 token_to_req_indices=token_to_req_indices,
                 positions=positions,
                 block_table=block_table,

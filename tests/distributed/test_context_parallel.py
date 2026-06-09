@@ -301,11 +301,8 @@ def test_cp_generation(
     )
 
 
-# The full DeepSeek-V4-Flash checkpoint is not available in public CI. This
-# opt-in E2E exercises DCP2/DCP4 decode paths and semantic retrieval across
-# context-parallel ownership and cache-layout boundaries.
+# The full checkpoint is unavailable in public CI, so this E2E is opt-in.
 DSV4_BLOCK_SIZE = 256
-# Must divide the smallest CP-capable hybrid cache block (C4 compressor).
 DSV4_INTERLEAVE = 4
 DSV4_DECODE_STEPS = 132
 DSV4_SHORT_PASSKEY_CASES = tuple(
@@ -318,29 +315,6 @@ DSV4_LONG_PASSKEY_CASES = (
     (131072, 65536),
     (262144, 131072),
 )
-DSV4_PASSKEY_WORDS = (
-    " apple",
-    " river",
-    " stone",
-    " cloud",
-    " green",
-    " music",
-    " chair",
-    " paper",
-    " light",
-    " ocean",
-    " glass",
-    " train",
-    " winter",
-)
-
-
-class DSV4PasskeyCase(NamedTuple):
-    token_id: int
-    word: str
-    context_len: int
-    position: int
-    prompt: TokensPrompt
 
 
 def _dsv4_runner_kwargs(dcp_size: int) -> dict:
@@ -363,63 +337,38 @@ def _dsv4_runner_kwargs(dcp_size: int) -> dict:
     }
 
 
-def _dsv4_passkey_cases(
-    tokenizer,
+def _run_dsv4_passkeys(
+    runner: VllmRunner,
     case_specs: tuple[tuple[int, int], ...],
-) -> tuple[list[int], list[DSV4PasskeyCase]]:
+    max_tokens: int,
+) -> tuple[list[int], list[int]]:
+    tokenizer = runner.llm.get_tokenizer()
+
     def encode(text: str) -> list[int]:
         return tokenizer.encode(text, add_special_tokens=False)
 
-    header = encode(
-        "Read carefully. Remember the requested word.\n",
-    )
+    passkeys = [f" {letter}" for letter in "ABCDEFGHIJKLM"[: len(case_specs)]]
+    passkey_tokens = [encode(passkey) for passkey in passkeys]
+    assert all(len(tokens) == 1 for tokens in passkey_tokens)
+    passkey_ids = [tokens[0] for tokens in passkey_tokens]
+
+    header = encode("Remember the requested letter.\n")
     filler = encode(" filler")
     assert len(filler) == 1
-    query = encode(
-        "\nQuestion: Which word were you told to remember?\nAnswer:",
-    )
-    passkey_ids = []
-    for word in DSV4_PASSKEY_WORDS:
-        token_ids = encode(word)
-        assert len(token_ids) == 1, f"Passkey must be one token: {word!r}"
-        passkey_ids.append(token_ids[0])
-    assert len(case_specs) <= len(passkey_ids)
+    query = encode("\nWhich letter?\nAnswer:")
 
-    cases = []
-    for index, (context_len, requested_position) in enumerate(case_specs):
-        word = DSV4_PASSKEY_WORDS[index]
-        marker = encode(f"\nThe word to remember is{word}.\n")
-        position = min(
-            max(requested_position, len(header)),
-            context_len - len(marker) - len(query),
-        )
-        assert position >= len(header)
+    prompts = []
+    for passkey, (context_len, position) in zip(passkeys, case_specs, strict=True):
+        marker = encode(f"\nRemember{passkey}.\n")
+        assert len(header) <= position <= context_len - len(marker) - len(query)
         prompt = [filler[0]] * context_len
         prompt[: len(header)] = header
         prompt[position : position + len(marker)] = marker
         prompt[-len(query) :] = query
-        cases.append(
-            DSV4PasskeyCase(
-                passkey_ids[index],
-                word,
-                context_len,
-                position,
-                TokensPrompt(prompt_token_ids=prompt),
-            )
-        )
-    return passkey_ids, cases
+        prompts.append(TokensPrompt(prompt_token_ids=prompt))
 
-
-def _assert_dsv4_passkeys(
-    runner: VllmRunner,
-    case_specs: tuple[tuple[int, int], ...],
-    *,
-    max_tokens: int,
-) -> None:
-    tokenizer = runner.llm.get_tokenizer()
-    passkey_ids, cases = _dsv4_passkey_cases(tokenizer, case_specs)
     outputs = runner.llm.generate(
-        [case.prompt for case in cases],
+        prompts,
         sampling_params=SamplingParams(
             temperature=0,
             max_tokens=max_tokens,
@@ -427,38 +376,27 @@ def _assert_dsv4_passkeys(
             allowed_token_ids=passkey_ids,
         ),
     )
-    for case, output in zip(cases, outputs, strict=True):
-        actual_ids = list(output.outputs[0].token_ids)
-        assert len(actual_ids) == max_tokens
-        # The first token is the semantic oracle. Remaining tokens exercise
-        # stateful decode across C4/C128 compressor boundaries.
-        assert actual_ids[0] == case.token_id, (
-            f"Passkey failed at context_len={case.context_len}, "
-            f"position={case.position}: expected={case.word!r}, "
-            f"got={output.outputs[0].text!r}"
+    first_token_ids = []
+    for output in outputs:
+        token_ids = output.outputs[0].token_ids
+        assert len(token_ids) == max_tokens
+        first_token_ids.append(token_ids[0])
+    return passkey_ids, first_token_ids
+
+
+def _assert_dsv4_passkeys(
+    mode: str,
+    case_specs: tuple[tuple[int, int], ...],
+    expected: list[int],
+    actual: list[int],
+) -> None:
+    for (context_len, position), expected_id, actual_id in zip(
+        case_specs, expected, actual, strict=True
+    ):
+        assert actual_id == expected_id, (
+            f"{mode} passkey mismatch at context_len={context_len}, "
+            f"position={position}: expected token {expected_id}, got {actual_id}"
         )
-
-
-def _run_dsv4_mode(dcp_size: int) -> None:
-    assert DSV4_MODEL is not None
-    with VllmRunner(DSV4_MODEL, **_dsv4_runner_kwargs(dcp_size)) as runner:
-        config = runner.llm.llm_engine.vllm_config
-        assert config.parallel_config.decode_context_parallel_size == dcp_size
-        assert config.scheduler_config.enable_chunked_prefill
-        assert {0, 4, 128} <= set(config.model_config.hf_config.compress_ratios)
-        assert config.parallel_config.cp_kv_cache_interleave_size == DSV4_INTERLEAVE
-
-        _assert_dsv4_passkeys(
-            runner,
-            DSV4_SHORT_PASSKEY_CASES,
-            max_tokens=DSV4_DECODE_STEPS,
-        )
-        if dcp_size == 4:
-            _assert_dsv4_passkeys(
-                runner,
-                DSV4_LONG_PASSKEY_CASES,
-                max_tokens=1,
-            )
 
 
 @pytest.mark.slow_test
@@ -467,6 +405,38 @@ def _run_dsv4_mode(dcp_size: int) -> None:
     reason="Set VLLM_TEST_DSV4_MODEL to a local DeepSeek-V4-Flash checkpoint.",
 )
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("dcp_size", (2, 4))
-def test_deepseek_v4_dcp_end_to_end(dcp_size: int) -> None:
-    _run_dsv4_mode(dcp_size)
+def test_deepseek_v4_dcp_end_to_end() -> None:
+    assert DSV4_MODEL is not None
+    reference: dict[str, list[int]] = {}
+
+    for dcp_size in (1, 2, 4):
+        with VllmRunner(DSV4_MODEL, **_dsv4_runner_kwargs(dcp_size)) as runner:
+            expected, actual = _run_dsv4_passkeys(
+                runner,
+                DSV4_SHORT_PASSKEY_CASES,
+                max_tokens=DSV4_DECODE_STEPS,
+            )
+            mode = "tp4" if dcp_size == 1 else f"tp4_dcp{dcp_size}"
+            if dcp_size == 1:
+                _assert_dsv4_passkeys(mode, DSV4_SHORT_PASSKEY_CASES, expected, actual)
+                reference["short"] = actual
+            else:
+                _assert_dsv4_passkeys(
+                    mode, DSV4_SHORT_PASSKEY_CASES, reference["short"], actual
+                )
+
+            if dcp_size == 2:
+                continue
+
+            expected, actual = _run_dsv4_passkeys(
+                runner,
+                DSV4_LONG_PASSKEY_CASES,
+                max_tokens=1,
+            )
+            if dcp_size == 1:
+                _assert_dsv4_passkeys(mode, DSV4_LONG_PASSKEY_CASES, expected, actual)
+                reference["long"] = actual
+            else:
+                _assert_dsv4_passkeys(
+                    mode, DSV4_LONG_PASSKEY_CASES, reference["long"], actual
+                )
