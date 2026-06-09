@@ -1422,6 +1422,9 @@ class FusedMoEKernelModularImpl:
             output_alias=output,
         )
 
+        if lora_ctx is not None:
+            lora_ctx.original_hidden_states = None
+
         return self._finalize(
             output,
             fused_out,
