@@ -188,6 +188,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.self_draft import SelfDraftProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -554,6 +555,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | SelfDraftProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -563,6 +565,12 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "self_draft":
+                self.drafter = SelfDraftProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -3101,12 +3109,23 @@ class GPUModelRunner(
         should_sync_mrope_positions = False
         should_sync_xdrope_positions = False
 
+        skip_non_spec_decode_reqs = shift_computed_tokens > 0
+        spec_decode_req_ids = (
+            scheduler_output.scheduled_spec_decode_tokens
+            if skip_non_spec_decode_reqs
+            else None
+        )
+
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
+
+            if skip_non_spec_decode_reqs and req_id not in spec_decode_req_ids:
+                req_start_idx += num_scheduled_tokens
+                continue
 
             mm_features = req_state.mm_features
             lo, hi = get_mm_features_in_window(
@@ -4466,6 +4485,7 @@ class GPUModelRunner(
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
+                or spec_config.use_self_draft()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
@@ -4476,7 +4496,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | SelfDraftProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4941,10 +4962,15 @@ class GPUModelRunner(
             spec_config.use_eagle()
             or spec_config.use_dflash()
             or spec_config.uses_draft_model()
+            or spec_config.use_self_draft()
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | SelfDraftProposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5902,6 +5928,7 @@ class GPUModelRunner(
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.use_self_draft()
             ):
                 assert isinstance(
                     self.drafter,
@@ -5909,16 +5936,25 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | SelfDraftProposer,
                 )
                 assert self.speculative_config is not None
-                # Eagle currently only supports PIECEWISE cudagraphs.
-                # Therefore only use cudagraphs if the main model uses PIECEWISE
-                # NOTE(lucas): this is a hack, need to clean up.
+                # EAGLE-style drafters only support PIECEWISE cudagraphs.
+                # ``self_draft`` uses a uniform drafter query_len = K across
+                # all requests, which is also FULL-graph-capturable, so we
+                # additionally allow FULL when the target ran under FULL.
+                # Other proposers keep the PIECEWISE-only gate.
+                _is_self_draft = self.speculative_config.use_self_draft()
+                _capture_modes_allowed = (
+                    {CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL}
+                    if _is_self_draft
+                    else {CUDAGraphMode.PIECEWISE}
+                )
                 use_cudagraphs = (
                     (
                         is_graph_capturing
-                        and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                        and cudagraph_runtime_mode in _capture_modes_allowed
                     )
                     or (
                         not is_graph_capturing
@@ -6556,6 +6592,17 @@ class GPUModelRunner(
                 )
                 torch.accelerator.synchronize()
 
+            # The drafter's native shape (num_reqs=1, num_tokens=K) is not
+            # in the target dispatcher's capture set, so drive it explicitly
+            # inside the same ``graph_capture()`` context for self_draft.
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.use_self_draft()
+                and isinstance(self.drafter, SelfDraftProposer)
+            ):
+                self.drafter.capture_drafter_cudagraph()
+                torch.accelerator.synchronize()
+
             # Capture encoder CUDA graphs if enabled
             if self.encoder_cudagraph_manager is not None:
                 encoder_graph_pool = current_platform.graph_pool_handle()
@@ -6808,6 +6855,7 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_self_draft()
         ):
             assert isinstance(
                 self.drafter,
@@ -6861,13 +6909,16 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
+            or self.speculative_config.use_self_draft()
         ):
             assert isinstance(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
                 | ExtractHiddenStatesProposer
-                | Gemma4Proposer,
+                | Gemma4Proposer
+                | DraftModelProposer
+                | SelfDraftProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 

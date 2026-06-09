@@ -61,6 +61,7 @@ SpeculativeMethod = Literal[
     "medusa",
     "mlp_speculator",
     "draft_model",
+    "self_draft",
     "suffix",
     "custom_class",
     EagleModelTypes,
@@ -150,6 +151,12 @@ class SpeculativeConfig:
     in parallel rather than sequentially. This can improve performance but
     requires the speculative model be trained to support parallel drafting.
     Only compatible with EAGLE and draft model methods."""
+
+    parallel_drafting_mask_token_id: int | None = None
+    """Explicit override of the mask token id used for parallel drafting
+    (``method='self_draft'`` / ``'dflash'``). When ``None``, the proposer
+    falls back to ``pard_token`` / ``ptd_token_id`` on the draft model's
+    ``hf_config``."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -575,6 +582,12 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "self_draft":
+                # The drafter IS the target model; ``draft_model_config`` is
+                # populated from ``target_model_config`` later in this
+                # post-init. ``self.model`` is set to the method name purely
+                # to satisfy the "model is not None" guard above.
+                self.model = "self_draft"
             elif self.method == "custom_class":
                 # method was set explicitly, but model should already contain the
                 # custom module path. If not, this is a configuration error.
@@ -665,6 +678,37 @@ class SpeculativeConfig:
             )
             self.update_arch_()
             self.draft_parallel_config = self.target_parallel_config
+
+        elif self.method == "self_draft":
+            # Self-Draft Parallel Decoding (PaRD-style): the target model
+            # itself acts as the drafter by filling ``num_speculative_tokens``
+            # appended <mask> tokens in a single forward pass. See
+            # ``vllm.v1.spec_decode.self_draft.SelfDraftProposer``.
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            # The drafter shares weights and config with the target.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+            self.parallel_drafting = True
+            # Drafter and target share the same module instance, so their
+            # cudagraph mode must agree. Inherit ``enforce_eager`` from the
+            # target when the user did not set it explicitly on the
+            # speculative config.
+            if self.enforce_eager is None and self.target_model_config is not None:
+                self.enforce_eager = bool(
+                    getattr(self.target_model_config, "enforce_eager", False)
+                )
+            # ``SpecDecodeBaseProposer`` asserts on a non-None token tree;
+            # parallel drafting ignores the tree shape but still parses it.
+            if self.speculative_token_tree is None:
+                if self.num_speculative_tokens is None:
+                    raise ValueError(
+                        "`num_speculative_tokens` must be provided when "
+                        "using method='self_draft'."
+                    )
+                self.speculative_token_tree = str(
+                    [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
+                )
 
         else:
             self.prompt_lookup_max = 0
@@ -1072,6 +1116,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def use_self_draft(self) -> bool:
+        return self.method == "self_draft"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
