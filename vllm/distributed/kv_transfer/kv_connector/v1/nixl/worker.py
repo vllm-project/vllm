@@ -1234,16 +1234,30 @@ class NixlConnectorWorker:
                 continue
             # For dual-purpose HMA regions, use the attention spec's stride
             # instead of block_len_per_layer (which stores KDA's stride).
-            # MLA stride is TP-independent (num_kv_heads=1), so skip
-            # block_size_ratio scaling — local and remote MLA strides match.
             attn_stride = self._attn_block_len.get(i)
             if attn_stride is not None:
-                if self.transfer_topo.virtually_split_kv_in_blocks:
-                    local_block_len = attn_stride // 2
+                if self.use_mla:
+                    # MLA stride is TP-independent (num_kv_heads=1),
+                    # so local attn_stride equals remote's MLA stride.
+                    if self.transfer_topo.virtually_split_kv_in_blocks:
+                        local_block_len = attn_stride // 2
+                    else:
+                        local_block_len = attn_stride
+                    remote_kv_block_len = local_block_len
+                    page_size = attn_stride
                 else:
-                    local_block_len = attn_stride
-                remote_kv_block_len = local_block_len
-                page_size = attn_stride
+                    # Standard attention stride is TP-dependent
+                    # (num_kv_heads scales with TP).  Use remote's
+                    # block_len for stepping through remote memory and
+                    # apply block_size_ratio for correct sizes.
+                    if self.transfer_topo.virtually_split_kv_in_blocks:
+                        local_block_len = attn_stride // 2
+                    else:
+                        local_block_len = attn_stride
+                    remote_kv_block_len = local_block_len // block_size_ratio
+                    if block_size_ratio > 1:
+                        local_block_len = remote_kv_block_len
+                    page_size = nixl_agent_meta.block_lens[i]
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
@@ -1266,8 +1280,14 @@ class NixlConnectorWorker:
             if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
                 if attn_stride is not None:
-                    second_split = attn_stride // 2
-                    v_stride = attn_stride
+                    if self.use_mla:
+                        second_split = attn_stride // 2
+                        v_stride = attn_stride
+                    else:
+                        # Standard attention: V size and stride must
+                        # match remote's physical page layout.
+                        second_split = local_block_len
+                        v_stride = page_size
                 else:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=False
@@ -1590,11 +1610,14 @@ class NixlConnectorWorker:
             and block_size_ratio != 1
             and not (self.use_mla and self._has_mamba)
         ):
-            # For hybrid MLA+SSM models, block_size_ratio reflects SSM
-            # dimension scaling across different TP sizes.  MLA attention
-            # stride is TP-independent (replicated KV), so FA descriptors
-            # for dual-purpose regions are safe.  SSM descriptors use their
-            # own hetero-TP-aware remote_conv_offsets.
+            # For hybrid models with HMA, block_size_ratio != 1 means
+            # token-level block sizes differ.  MLA+SSM models are
+            # exempted because MLA stride is TP-independent.
+            # Standard attention + SSM models (e.g. Qwen GDN) are
+            # handled by _build_fa_remote which applies block_size_ratio
+            # to compute remote attention dimensions.
+            # SSM descriptors use their own hetero-TP-aware
+            # remote_conv_offsets.
             raise AssertionError("HMA does not support different remote block size yet")
         kv_cache_layout = (
             self.kv_cache_layout
