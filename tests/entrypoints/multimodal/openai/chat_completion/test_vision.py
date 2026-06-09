@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoProcessor
 
+from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
@@ -15,14 +16,6 @@ from vllm.platforms import current_platform
 
 MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2
-
-# Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_ASSETS = [
-    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-    "Grayscale_8bits_palette_sample_image.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/Grayscale_8bits_palette_sample_image.png",
-    "1280px-Venn_diagram_rgb.svg.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/1280px-Venn_diagram_rgb.svg.png",
-    "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
-]
 
 # Required terms for beam search validation
 # Each entry is a list of term groups - ALL groups must match
