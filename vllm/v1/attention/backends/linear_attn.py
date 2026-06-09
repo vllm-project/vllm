@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -91,31 +91,33 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         assert isinstance(kv_cache_spec, MambaSpec)
-        self.compilation_config = vllm_config.compilation_config
-        self.num_spec_tokens = vllm_config.num_speculative_tokens
-        self.use_spec_decode = self.num_spec_tokens > 0
-        self.decode_cudagraph_max_bs = vllm_config.scheduler_config.max_num_seqs
+        self.compilation_config: CompilationConfig = vllm_config.compilation_config
+        self.num_spec_tokens: int = vllm_config.num_speculative_tokens
+        self.use_spec_decode: bool = self.num_spec_tokens > 0
+        self.decode_cudagraph_max_bs: int = (
+            vllm_config.scheduler_config.max_num_seqs
+        )
         if self.compilation_config.max_cudagraph_capture_size is not None:
             self.decode_cudagraph_max_bs = min(
                 self.decode_cudagraph_max_bs,
                 self.compilation_config.max_cudagraph_capture_size,
             )
-        self.decode_state_indices_tensor = torch.empty(
+        self.decode_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
             dtype=torch.int32,
             device=device,
         )
-        self.decode_legacy_state_indices_tensor = torch.empty(
+        self.decode_legacy_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
         )
-        self.decode_query_start_loc = torch.empty(
+        self.decode_query_start_loc: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs + 1,),
             dtype=torch.int32,
             device=device,
         )
-        self.decode_num_accepted_tokens = torch.empty(
+        self.decode_num_accepted_tokens: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
@@ -178,6 +180,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
 
         query_start_loc_d = None
         if use_spec_decode:
+            assert num_accepted_tokens is not None
             state_indices_tensor_d = state_indices_tensor_d[
                 :, : 1 + self.num_spec_tokens
             ]

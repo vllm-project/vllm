@@ -2450,7 +2450,7 @@ class GPUModelRunner(
                 ),
             ):
                 assert ubid is None, (
-                    "UBatching not supported with spec decode metadata yet"
+                    "UBatching not supported with hybrid model metadata yet"
                 )
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
