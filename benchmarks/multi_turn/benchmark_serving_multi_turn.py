@@ -240,6 +240,8 @@ async def send_request(
         payload["max_tokens"] = max_tokens
 
     headers = {"Content-Type": "application/json"}
+    if conversation_id is not None:
+        headers["X-Session-ID"] = str(conversation_id)
 
     # Calculate the timeout for the request
     if max_tokens is not None:
