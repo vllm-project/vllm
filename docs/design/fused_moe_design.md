@@ -2,14 +2,14 @@
 
 ## Overview
 
-The vLLM Mixture of Experts (MoE) subsystem lives under `vllm/model_executor/layers/fused_moe/`. The entry point is the `FusedMoE()` factory function in `layer.py`, which assembles a pipeline of cooperating objects and returns a `MoERunner` — the `nn.Module` that models call directly in their forward pass.
+The vLLM Mixture of Experts (MoE) subsystem lives under `vllm/model_executor/layers/fused_moe/`. The entry point is the `FusedMoEFactory()` factory function in `layer.py`, which assembles a pipeline of cooperating objects and returns a `MoERunner` — the `nn.Module` that models call directly in their forward pass.
 
 ## Object Relationship Diagram
 
 ```python
 Model (e.g. Mixtral, DeepSeek)
   │
-  │  calls FusedMoE(...) factory   ──────────────────────────────────┐
+  │  calls FusedMoEFactory(...) factory   ──────────────────────────────────┐
   │                                                                  │
   ▼                                                                  │
 MoERunner (nn.Module, is the return value)                           │
@@ -46,9 +46,9 @@ FusedMoEConfig (dataclass)                                           │
 
 ## Component Descriptions
 
-### 1. `FusedMoE()` — Factory Function (`layer.py`)
+### 1. `FusedMoEFactory()` — Factory Function (`layer.py`)
 
-**Role**: Top-level constructor. Models never instantiate the components directly; they call `FusedMoE(...)` which:
+**Role**: Top-level constructor. Models never instantiate the components directly; they call `FusedMoEFactory(...)` which:
 
 1. Builds `FusedMoEParallelConfig` from TP/DP/EP/SP sizes
 2. Computes expert counts (logical, global, redundant, fused-shared)
@@ -239,7 +239,7 @@ MoERunner.forward()
 
 ## Key Design Decisions
 
-1. **Factory pattern over constructor**: `FusedMoE()` is a function, not a class. This avoids deep inheritance hierarchies and allows the factory to select different `MoERunner` / `RoutedExperts` subclasses via `runner_cls` / `routed_experts_cls`.
+1. **Factory pattern over constructor**: `FusedMoEFactory()` is a function, not a class. This avoids deep inheritance hierarchies and allows the factory to select different `MoERunner` / `RoutedExperts` subclasses via `runner_cls` / `routed_experts_cls`.
 
 2. **Separation of routing from execution**: `FusedMoERouter` is decoupled from `RoutedExperts`. This allows monolithic kernels to bypass the router entirely while modular kernels use it for expert selection.
 
