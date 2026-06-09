@@ -1111,6 +1111,7 @@ def _make_mock_worker_for_desc(**overrides):
         "_is_attn_region": [],
         "_attn_block_len": {},
         "_has_mamba": True,
+        "use_mla": False,
         "num_regions": 0,
         "_group_spec_types": (),
         "_conv_decomp": None,
@@ -1140,12 +1141,13 @@ def _make_mock_nixl_meta(
 
 
 class TestBuildFaLocalDualPurpose:
-    """Tests for _build_fa_local with dual-purpose HMA regions."""
+    """Tests for _build_fa_local with dual-purpose HMA regions (MLA models)."""
 
     @pytest.mark.cpu_test
     def test_dual_purpose_uses_mla_stride(self):
         """Dual-purpose regions use _attn_block_len (MLA) stride, not KDA."""
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200],  # KDA stride
             _is_ssm_region=[True],
             _is_attn_region=[True],
@@ -1163,6 +1165,7 @@ class TestBuildFaLocalDualPurpose:
     def test_skips_ssm_only_regions(self):
         """Pure SSM regions (not attn) are skipped entirely."""
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200, 200],
             _is_ssm_region=[True, True],
             _is_attn_region=[True, False],  # region 1 is SSM-only
@@ -1179,6 +1182,7 @@ class TestBuildFaLocalDualPurpose:
     def test_no_block_size_ratio_for_dual_purpose(self):
         """Dual-purpose: block_size_ratio does NOT scale MLA stride."""
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200],
             _is_ssm_region=[True],
             _is_attn_region=[True],
@@ -1195,6 +1199,7 @@ class TestBuildFaLocalDualPurpose:
     def test_mixed_regions(self):
         """Mix of dual-purpose, pure SSM, and pure attention regions."""
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200, 128, 300],
             _is_ssm_region=[True, True, False],
             _is_attn_region=[True, False, True],
@@ -1212,7 +1217,7 @@ class TestBuildFaLocalDualPurpose:
 
 
 class TestBuildFaRemoteDualPurpose:
-    """Tests for _build_fa_remote with dual-purpose HMA regions."""
+    """Tests for _build_fa_remote with dual-purpose HMA regions (MLA models)."""
 
     @pytest.mark.cpu_test
     def test_dual_purpose_uses_local_mla_stride(self):
@@ -1220,6 +1225,7 @@ class TestBuildFaRemoteDualPurpose:
         from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200],
             _is_ssm_region=[True],
             _is_attn_region=[True],
@@ -1246,6 +1252,7 @@ class TestBuildFaRemoteDualPurpose:
         from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
         worker = _make_mock_worker_for_desc(
+            use_mla=True,
             block_len_per_layer=[200],
             _is_ssm_region=[True],
             _is_attn_region=[True],
@@ -1326,3 +1333,197 @@ class TestNonHMARegression:
         assert len(result) == 3
         for i, (addr, size, dev) in enumerate(result):
             assert addr == 0x1000 + i * 512
+
+
+# ── Qwen heterogeneous TP regression tests ───────────────────────────────
+
+
+class TestQwenHeteroTPRegression:
+    """Verify Qwen (standard GQA, use_mla=False) heterogeneous TP is not
+    broken by the _attn_block_len mechanism introduced for KimiLinear.
+
+    The root cause of the regression: _attn_block_len was populated for
+    Qwen HMA dual-purpose regions, causing _build_fa_local/_build_fa_remote
+    to use the MLA stride path which skips block_size_ratio scaling.
+    For standard attention, stride IS TP-dependent, so skipping the ratio
+    produces wrong descriptor sizes and 0 successful KV transfers.
+
+    The fix: guard attn_stride with `self.use_mla`.
+    """
+
+    @pytest.mark.cpu_test
+    def test_qwen_hma_dual_purpose_ignores_attn_stride_local(self):
+        """Qwen HMA with dual-purpose regions: _build_fa_local must NOT
+        use _attn_block_len stride when use_mla=False.
+
+        Without the use_mla guard, attn_stride=1024 would be used directly
+        (no block_size_ratio scaling), producing wrong descriptor sizes.
+        With the guard, the standard path applies block_size_ratio correctly.
+        """
+        worker = _make_mock_worker_for_desc(
+            use_mla=False,
+            block_len_per_layer=[512],  # SSM stride (local, TP=2)
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 1024},  # attention stride (local, TP=2)
+            num_blocks=2,
+        )
+        # block_size_ratio=2: local blocks are 2× remote blocks
+        result = worker._build_fa_local([0x1000], block_size_ratio=2)
+
+        # Standard path: block_len_per_layer[0] // block_size_ratio = 512//2 = 256
+        # num_blocks = 2 * 2 = 4 descriptors with stride 256
+        assert len(result) == 4
+        for i, (addr, size, dev) in enumerate(result):
+            assert size == 256  # 512 // 2, NOT 1024 (unscaled attn stride)
+            assert addr == 0x1000 + i * 256
+
+    @pytest.mark.cpu_test
+    def test_qwen_hma_dual_purpose_ignores_attn_stride_remote(self):
+        """Qwen HMA with dual-purpose regions: _build_fa_remote must NOT
+        use _attn_block_len stride when use_mla=False."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+        worker = _make_mock_worker_for_desc(
+            use_mla=False,
+            block_len_per_layer=[512],  # local SSM stride
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 1024},  # local attention stride
+            _group_spec_types=(FullAttentionSpec, MambaSpec),
+        )
+        plan = MagicMock()
+        plan.source_ranks_per_group = (MagicMock(),)
+        plan.source_ranks_per_group[0].__len__ = MagicMock(return_value=1)
+        plan.rank_offset_factor = 0
+        # Remote block_lens = P-side SSM stride (TP=4, smaller)
+        meta = _make_mock_nixl_meta(base_addrs=[0x5000], block_lens=[256], num_blocks=4)
+
+        result = worker._build_fa_remote(plan, meta, block_size_ratio=1)
+
+        # Standard path with block_size_ratio=1:
+        # get_backend_aware_kv_block_len → block_len_per_layer[0] = 512
+        # remote_kv_block_len = 512 // 1 = 512
+        # local_block_len = 512 // 1 (num_attn_reads) = 512
+        # page_size = remote's block_lens[0] = 256
+        assert len(result) == 4
+        for i, (addr, size, dev) in enumerate(result):
+            assert addr == 0x5000 + i * 256  # steps by remote page_size
+            assert size == 512
+
+    @pytest.mark.cpu_test
+    def test_qwen_hetero_tp_local_applies_block_size_ratio(self):
+        """Qwen P4D2 (D-side, TP=2): local descriptors must scale by ratio.
+
+        Without the fix, attn_stride (D's attention stride) was used without
+        //block_size_ratio, producing descriptors 2× the correct size.
+        """
+        worker = _make_mock_worker_for_desc(
+            use_mla=False,
+            block_len_per_layer=[1024],  # D-side SSM stride (large, TP=2)
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 2048},  # D-side attention stride (2×KV heads)
+            num_blocks=2,
+        )
+
+        result = worker._build_fa_local([0x1000], block_size_ratio=2)
+
+        # num_blocks = 2 * 2 = 4
+        # Standard path: stride = 1024 // 2 = 512, size = 1024 // 2 = 512
+        # Without fix: stride = 2048 (wrong!), size = 2048 (wrong!)
+        assert len(result) == 4
+        for i, (addr, size, dev) in enumerate(result):
+            assert size == 512
+            assert addr == 0x1000 + i * 512
+
+    @pytest.mark.cpu_test
+    def test_qwen_homo_tp_unaffected(self):
+        """Qwen homogeneous TP: block_size_ratio=1, both paths produce
+        same result.  This verifies no regression for the working case."""
+        worker = _make_mock_worker_for_desc(
+            use_mla=False,
+            block_len_per_layer=[512],
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 1024},
+            num_blocks=3,
+        )
+
+        result = worker._build_fa_local([0x1000], block_size_ratio=1)
+
+        # Standard path with ratio=1: stride=512, size=512
+        assert len(result) == 3
+        for i, (addr, size, dev) in enumerate(result):
+            assert size == 512
+            assert addr == 0x1000 + i * 512
+
+
+class TestKimiLinearDualPurpose:
+    """Verify KimiLinear (use_mla=True, KDA+MLA) dual-purpose regions
+    correctly use the MLA stride path with the use_mla guard."""
+
+    @pytest.mark.cpu_test
+    def test_mla_stride_path_activates_for_kimilinear(self):
+        """KimiLinear: use_mla=True → attn_stride path is taken."""
+        worker = _make_mock_worker_for_desc(
+            use_mla=True,
+            block_len_per_layer=[200],  # KDA stride
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 256},  # MLA stride (TP-independent)
+            num_blocks=3,
+        )
+
+        result = worker._build_fa_local([0x1000], block_size_ratio=1)
+
+        # MLA path: stride=256 (unscaled), size=256
+        assert len(result) == 3
+        for i, (addr, size, dev) in enumerate(result):
+            assert size == 256  # MLA stride, not KDA's 200
+            assert addr == 0x1000 + i * 256
+
+    @pytest.mark.cpu_test
+    def test_mla_stride_unscaled_by_block_size_ratio(self):
+        """KimiLinear: MLA stride is TP-independent, block_size_ratio
+        must NOT be applied (MLA num_kv_heads=1 regardless of TP)."""
+        worker = _make_mock_worker_for_desc(
+            use_mla=True,
+            block_len_per_layer=[200],
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 256},
+            num_blocks=2,
+        )
+
+        result = worker._build_fa_local([0x1000], block_size_ratio=2)
+
+        # MLA path: stride=256 (NOT 256//2=128)
+        assert result[0][1] == 256
+        assert result[1][0] == 0x1000 + 256
+
+    @pytest.mark.cpu_test
+    def test_mla_remote_uses_attn_stride_as_page_size(self):
+        """KimiLinear remote: page_size = attn_stride (MLA, TP-independent)."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+        worker = _make_mock_worker_for_desc(
+            use_mla=True,
+            block_len_per_layer=[200],
+            _is_ssm_region=[True],
+            _is_attn_region=[True],
+            _attn_block_len={0: 256},
+            _group_spec_types=(FullAttentionSpec, MambaSpec),
+        )
+        plan = MagicMock()
+        plan.source_ranks_per_group = (MagicMock(),)
+        plan.source_ranks_per_group[0].__len__ = MagicMock(return_value=1)
+        plan.rank_offset_factor = 0
+        meta = _make_mock_nixl_meta(base_addrs=[0x5000], block_lens=[200], num_blocks=3)
+
+        result = worker._build_fa_remote(plan, meta, block_size_ratio=1)
+
+        # MLA path: page_size = attn_stride = 256 (not remote's 200)
+        assert result[0] == (0x5000, 256, 0)
+        assert result[1] == (0x5000 + 256, 256, 0)
+        assert result[2] == (0x5000 + 512, 256, 0)
