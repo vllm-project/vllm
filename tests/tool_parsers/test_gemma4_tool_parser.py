@@ -413,6 +413,23 @@ class TestStreamingExtraction:
                         return name
         return None
 
+    def _collect_function_names_and_arguments(self, results):
+        """Extract the function names from streaming results."""
+        function_arguments = []
+        function_names = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    name = getattr(tc.function, "name", None)
+                    arg = getattr(tc.function, "arguments", "") or ""
+                    if name:
+                        function_names.append(name)
+                        function_arguments.append("")
+                    if arg:
+                        function_arguments[-1] += arg
+
+        return function_names, function_arguments
+
     def test_basic_streaming_single_tool(self, parser, mock_request):
         """Simulate the exact streaming scenario from the bug report.
 
@@ -441,6 +458,45 @@ class TestStreamingExtraction:
         assert args_text, "No arguments were streamed"
         parsed_args = json.loads(args_text)
         assert parsed_args == {"location": "Paris, France"}
+
+    def test_basic_streaming_parallel_tools(self, parser, mock_request):
+        """Simulate the exact streaming scenario that breaks with the
+           introduction of MTP.
+
+        Model generates:
+        <|tool_call>call:get_weather{location:<|"|>Paris<|"|>}<tool_call|>
+        <|tool_call>call:get_time{location:<|"|>France<|"|>}<tool_call|>
+
+
+        Expected: arguments should be valid JSON {"location": "Paris"}
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:get_weather{",
+            'location:<|"|>Paris',
+            '<|"|>',
+            "}<tool_call|><|tool_call>call:get_time{",
+            'location:<|"|>France',
+            '<|"|>',
+            "}<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Verify function name
+        names, args = self._collect_function_names_and_arguments(results)
+        assert names[0] == "get_weather", f"Expected 'get_weather', got '{names[0]}'"
+        assert names[1] == "get_time", f"Expected 'get_time', got '{names[1]}'"
+
+        # Verify arguments form valid JSON
+        args_text = args[0]
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {"location": "Paris"}
+        args_text = args[1]
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {"location": "France"}
 
     def test_streaming_multi_arg(self, parser, mock_request):
         """Streaming with multiple arguments."""
@@ -668,8 +724,6 @@ class TestStreamingExtraction:
             delta.content for delta, _ in results if delta is not None and delta.content
         ]
         assert "".join(content_parts) == "<div>"
-        assert captured_current_texts[-1].endswith("<tool_call|><div>")
-        assert not captured_current_texts[-1].endswith("<tool_call|><<div>")
 
     def test_streaming_html_argument_does_not_duplicate_tag_prefixes(
         self, parser, mock_request

@@ -497,25 +497,37 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Buffer delta text to handle multi-token special sequences
-        delta_text = self._buffer_delta_text(delta_text)
-        # Keep current_text from the upstream stream state. The buffered delta
-        # is only for emission, and must not be stitched back into the
-        # accumulated model text or normal content like "<div>" can be
-        # duplicated into "<<div>" when a tool call just ended.
-
         # If no tool call token seen yet, emit as content
-        if self.tool_call_start_token not in current_text:
+        if self.tool_call_start_token_id not in current_token_ids:
             if delta_text:
                 return DeltaMessage(content=delta_text)
             return None
 
+        # split delta text after end <tool_call|> token so that the parser
+        # only has to consider one tool call at a time
+        delta_texts = re.split(
+            f"(?<={re.escape(self.tool_call_end_token)})", delta_text
+        )
+        delta_msg = None
         try:
-            return self._extract_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-            )
+            for text in delta_texts:
+                if len(text) > 0:
+                    latest_msg = self._extract_streaming(
+                        previous_text=previous_text,
+                        current_text=previous_text + text,
+                        delta_text=text,
+                    )
+                    previous_text += text
+                    if delta_msg is None:
+                        delta_msg = latest_msg
+                    elif latest_msg is not None:
+                        if latest_msg.content is not None:
+                            if delta_msg.content is None:
+                                delta_msg.content = ""
+                            delta_msg.content += latest_msg.content
+                        if latest_msg.tool_calls and len(latest_msg.tool_calls) >= 1:
+                            delta_msg.tool_calls.append(latest_msg.tool_calls[0])
+            return delta_msg
         except Exception:
             logger.exception("Error in Gemma4 streaming tool call extraction")
             return None
