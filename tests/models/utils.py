@@ -506,9 +506,7 @@ def dummy_hf_overrides(
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
-        num_experts_per_tok = (
-            1 if model_arch == "Llama4ForConditionalGeneration" else 2
-        )
+        num_experts_per_tok = 1 if model_arch == "Llama4ForConditionalGeneration" else 2
         update_dict.update(
             {
                 "num_experts": num_experts,
