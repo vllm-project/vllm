@@ -12,6 +12,21 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 # - label: LM Eval Large Models (4 GPUs)(A100)
 #   device: a100
