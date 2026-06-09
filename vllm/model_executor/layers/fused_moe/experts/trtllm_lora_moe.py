@@ -54,10 +54,10 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Shared logic for LoRA-aware trtllm MoE experts. Subclasses only implement:
 
-      * ``_invoke_routed_moe(...)`` -- call the dtype-specific routed flashinfer
-        API and return its ``Array<Tensor>`` (do_finalize + gemm1_lora_delta
-        semantics described in the PR).
-      * the ``_supports_*`` capability gates.
+    * ``_invoke_routed_moe(...)`` -- call the dtype-specific routed flashinfer
+      API and return its ``Array<Tensor>`` (do_finalize + gemm1_lora_delta
+      semantics described in the PR).
+    * the ``_supports_*`` capability gates.
     """
 
     def __init__(
@@ -81,11 +81,38 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     def workspace_shapes(
-        self, M, N, K, topk, global_num_experts, local_num_experts,
-        expert_tokens_meta, activation,
+        self,
+        M,
+        N,
+        K,
+        topk,
+        global_num_experts,
+        local_num_experts,
+        expert_tokens_meta,
+        activation,
     ):
         # flashinfer manages its own workspace; only declare output (M, K)
         return (0,), (0,), (M, K)
+
+    def moe_problem_size(self, a1, w1, w2, topk_ids):
+        """Override the base 3D-weight assumption.
+
+        FusedMoEKernel._fused_experts calls moe_problem_size before apply(),
+        but the base impl asserts ``len(w1.shape) == 3``. The flashinfer
+        trtllm path stores shuffled weights in 4D BlockMajorK layout, so we
+        derive the (E, M, N, K, topk) tuple from config + inputs instead.
+        The N/K here only feed workspace sizing, which we zero out in
+        workspace_shapes(); the real shapes are handled inside flashinfer.
+        """
+        E = self.local_num_experts
+        N = 2 * self.intermediate_size_per_partition
+        K = self.hidden_dim
+        if a1.dim() == 2:
+            M = a1.size(0)
+        else:
+            M = a1.size(1)
+        topk = topk_ids.size(1)
+        return E, M, N, K, topk
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # do_finalize=True: the kernel already does moe_sum, so this is a No-Op
@@ -161,6 +188,19 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         I = self.intermediate_size_per_partition
         K = output.size(1)
 
+        # The LoRA tile-config heuristic (try_get_optimal_moe_config) unpacks
+        # w1/w2 as standard 3D MoE weights, but flashinfer stores shuffled
+        # 4D BlockMajorK weights. add_lora_w13/add_lora_w2 only read .shape
+        # from w1/w2 (the actual GEMM uses lora_a/b_stacked), so pass
+        # zero-storage meta tensors carrying the logical 3D shapes:
+        #   w1: (E, 2I, H)  w2: (E, H, I)
+        w1_cfg = torch.empty(
+            (self.local_num_experts, 2 * I, K), device="meta", dtype=torch.bfloat16
+        )
+        w2_cfg = torch.empty(
+            (self.local_num_experts, K, I), device="meta", dtype=torch.bfloat16
+        )
+
         # Routing is computed outside the MoE; pack it into the
         # (eid<<16)|w.bf16 format the routed API expects.
         packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
@@ -172,8 +212,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         w13_meta = (None, None, None, None)
         if lora_context is not None:
             gemm1_lora_delta = torch.zeros(
-                num_tokens, top_k, 2 * I,
-                dtype=torch.bfloat16, device=hidden_states.device,
+                num_tokens,
+                top_k,
+                2 * I,
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
             )
             # add_inputs=False: write the pure delta only (the base is fused in
             # by the kernel) and do NOT multiply by the routing weight (it is a
@@ -185,8 +228,8 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
                 expert_map=expert_map,
-                w1=w1,
-                w2=w2,
+                w1=w1_cfg,
+                w2=w2_cfg,
                 num_tokens=num_tokens,
                 top_k_num=top_k,
                 add_inputs=False,
@@ -215,11 +258,19 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             gemm1_act_permuted, expanded_idx_to_permuted_idx, num_tokens, top_k, I
         )  # (T*top_k, I) -- same layout as the triton path's intermediate_cache2
 
-        (sorted_token_ids_lora, expert_ids_lora,
-         num_tokens_post_padded_lora, token_lora_mapping) = w13_meta
+        (
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+            token_lora_mapping,
+        ) = w13_meta
 
         w2_delta = torch.zeros(
-            num_tokens, top_k, K, dtype=output.dtype, device=output.device,
+            num_tokens,
+            top_k,
+            K,
+            dtype=output.dtype,
+            device=output.device,
         )
         self.apply_w2_lora(
             lora_context,
@@ -231,8 +282,8 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             num_tokens_post_padded_lora=num_tokens_post_padded_lora,
             token_lora_mapping=token_lora_mapping,
             num_tokens=num_tokens,
-            w1=w1,
-            w2=w2,
+            w1=w1_cfg,
+            w2=w2_cfg,
             top_k_num=top_k,
             add_inputs=False,
         )
@@ -256,8 +307,10 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
           post-SwiGLU, and its dtype (bf16 vs uint8).
         """
         act = torch.zeros(
-            num_tokens * top_k, I,
-            dtype=act_permuted.dtype, device=act_permuted.device,
+            num_tokens * top_k,
+            I,
+            dtype=act_permuted.dtype,
+            device=act_permuted.device,
         )
         valid = idx_map >= 0
         act[valid] = act_permuted[idx_map[valid].long()]
@@ -297,12 +350,24 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         ]
 
     def _invoke_routed_moe(
-        self, *, hidden_states, w1, w2, packed_topk_ids, gemm1_lora_delta,
-        global_num_experts, a1q_scale, output,
+        self,
+        *,
+        hidden_states,
+        w1,
+        w2,
+        packed_topk_ids,
+        gemm1_lora_delta,
+        global_num_experts,
+        a1q_scale,
+        output,
     ):
         import flashinfer
 
-        return flashinfer.fused_moe.trtllm_bf16_routed_moe(
+        # Unlike the fp8/mxint4 routed APIs, trtllm_bf16_routed_moe has no
+        # `output=` kwarg: it returns the finalized tensor (or a list whose
+        # [0] is it when gemm1_lora_delta is set). Copy it into the caller's
+        # buffer so the modular-kernel output plumbing sees the result.
+        ret = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=packed_topk_ids,
             hidden_states=hidden_states,
             gemm1_weights=w1,
@@ -318,8 +383,12 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             routed_scaling_factor=None,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
-            output=output,
         )
+        if isinstance(ret, (list, tuple)):
+            output.copy_(self._as_tensor(ret[0]))
+            return list(ret)
+        output.copy_(self._as_tensor(ret))
+        return [output]
 
 
 # --------------------------------------------------------------------------- #
@@ -364,8 +433,16 @@ class TrtLlmMxfp8LoRAExperts(_TrtLlmLoRAExpertsBase):
         ]
 
     def _invoke_routed_moe(
-        self, *, hidden_states, w1, w2, packed_topk_ids, gemm1_lora_delta,
-        global_num_experts, a1q_scale, output,
+        self,
+        *,
+        hidden_states,
+        w1,
+        w2,
+        packed_topk_ids,
+        gemm1_lora_delta,
+        global_num_experts,
+        a1q_scale,
+        output,
     ):
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
@@ -443,8 +520,16 @@ class TrtLlmMxint4LoRAExperts(_TrtLlmLoRAExpertsBase):
         return False
 
     def _invoke_routed_moe(
-        self, *, hidden_states, w1, w2, packed_topk_ids, gemm1_lora_delta,
-        global_num_experts, a1q_scale, output,
+        self,
+        *,
+        hidden_states,
+        w1,
+        w2,
+        packed_topk_ids,
+        gemm1_lora_delta,
+        global_num_experts,
+        a1q_scale,
+        output,
     ):
         import flashinfer
 
