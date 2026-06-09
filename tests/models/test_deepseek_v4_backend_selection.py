@@ -7,10 +7,15 @@ import pytest
 import torch
 
 import vllm.config as vllm_config
+import vllm.model_executor.layers.quantization.mxfp4 as mxfp4_quant
 import vllm.utils.flashinfer as flashinfer_utils
+from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as dsv4_flashinfer
 from vllm.models.deepseek_v4.nvidia import model as dsv4_model
+from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla import flashinfer_mla_sparse
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -26,6 +31,34 @@ def _set_capability(monkeypatch, major: int, minor: int = 0) -> None:
         dsv4_model.current_platform,
         "get_device_capability",
         lambda device_id=0: DeviceCapability(major, minor),
+    )
+
+
+def test_dsv4_fp4_routed_experts_selects_mxfp4(monkeypatch):
+    monkeypatch.setattr(
+        mxfp4_quant,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe_config: (Mxfp4MoeBackend.NONE, None),
+    )
+    quant_config = DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        weight_block_size=[128, 128],
+    )
+    quant_config._resolved_expert_dtype = "fp4"
+    quant_config._resolved_moe_quant_algo = ""
+
+    routed_experts = object.__new__(RoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(max_capture_size=0)
+
+    method = quant_config.get_quant_method(
+        routed_experts,
+        prefix="model.layers.0.ffn.experts.routed_experts",
+    )
+
+    assert isinstance(method, Mxfp4MoEMethod)
+    assert quant_config.is_mxfp4_quant(
+        "model.layers.0.ffn.experts.routed_experts", routed_experts
     )
 
 
