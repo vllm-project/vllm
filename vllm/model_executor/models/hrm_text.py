@@ -32,7 +32,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PrefixLMAttention
+from vllm.model_executor.layers.attention import PrefillPrefixLMAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -203,18 +203,19 @@ class HrmTextAttention(nn.Module):
                 for high_cycle_idx in range(H_cycles)
             ]
 
-        # `PrefixLMAttention` forces `causal=False` on every metadata build, so
-        # the prompt attends bidirectionally during prefill (matching the
-        # HRM-Text training distribution), while `attn_type=DECODER` keeps the
-        # KV cache allocation needed by the recurrent forward. At single-token
-        # decode `causal=False` is a no-op. See `PrefixLMAttention`.
+        # `PrefillPrefixLMAttention` forces `causal=False` on every metadata
+        # build, so the prompt attends bidirectionally during prefill (matching
+        # the HRM-Text training distribution), while `attn_type=DECODER` keeps
+        # the KV cache allocation needed by the recurrent forward. At
+        # single-token decode `causal=False` is a no-op. See
+        # `PrefillPrefixLMAttention`.
         self.attn_per_step = nn.ModuleDict()
         for step in steps_used:
             global_idx = step * num_layers_per_stack + layer_idx_in_stack
             unique_prefix = prefix.replace(
                 f"layers.{layer_idx_in_stack}", f"layers.{global_idx}"
             )
-            self.attn_per_step[str(step)] = PrefixLMAttention(
+            self.attn_per_step[str(step)] = PrefillPrefixLMAttention(
                 num_heads=self.num_heads,
                 head_size=self.head_dim,
                 scale=self.scaling,

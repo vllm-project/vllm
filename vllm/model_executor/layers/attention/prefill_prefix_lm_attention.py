@@ -14,7 +14,7 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
 
-class PrefixLMAttention(Attention):
+class PrefillPrefixLMAttention(Attention):
     """Decoder attention that runs non-causally (Prefix LM).
 
     This reuses the encoder-only backend wrapper, which forces
@@ -57,7 +57,7 @@ class PrefixLMAttention(Attention):
 
         if attn_type is not None:
             assert attn_type == AttentionType.DECODER, (
-                "PrefixLMAttention only supports AttentionType.DECODER"
+                "PrefillPrefixLMAttention only supports AttentionType.DECODER"
             )
 
         super().__init__(
