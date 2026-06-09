@@ -61,7 +61,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
       device: mi300_1
@@ -81,6 +81,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
       device: mi300_1

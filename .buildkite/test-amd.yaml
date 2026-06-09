@@ -1249,7 +1249,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
@@ -1266,6 +1266,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
@@ -2827,8 +2828,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
-
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
@@ -2845,6 +2845,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
