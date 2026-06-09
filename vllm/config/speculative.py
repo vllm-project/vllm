@@ -137,6 +137,17 @@ class SpeculativeConfig:
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
+    use_heterogeneous_vocab: bool = False
+    """Allow draft and target models to use different vocabularies.
+    When enabled, builds a mapping between vocabularies at init.
+    Requires method='draft_model'."""
+
+    heterogeneous_vocab_method: str = "tli"
+    """Method for heterogeneous vocabulary handling.
+    "tli": Token-Level Intersection — constrain draft to vocab intersection.
+    "slem": String-Level Exact Match — draft uses full vocab, verify via text.
+    Only applies when use_heterogeneous_vocab=True."""
+
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -713,7 +724,11 @@ class SpeculativeConfig:
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
-                    tokenizer=self.target_model_config.tokenizer,
+                    tokenizer=(
+                        self.model
+                        if self.use_heterogeneous_vocab
+                        else self.target_model_config.tokenizer
+                    ),
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
@@ -1054,7 +1069,18 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        self.verify_equal_vocab_size_if_draft_model()
+        if self.use_heterogeneous_vocab:
+            if not self.uses_draft_model():
+                raise ValueError(
+                    "use_heterogeneous_vocab only works with method='draft_model'"
+                )
+            if self.heterogeneous_vocab_method not in ("tli", "slem"):
+                raise ValueError(
+                    f"heterogeneous_vocab_method must be 'tli' or 'slem', "
+                    f"got '{self.heterogeneous_vocab_method}'"
+                )
+        else:
+            self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
