@@ -196,8 +196,7 @@ roundtrip_tests! {
     step3p5 => [reasoning_and_content],
 
     // Note: Kimi K2.5 strips the reasoning content in history.
-    // TODO: we don't respect model-generated tool call id now so `tool_call_mix` cannot pass.
-    // kimi_k25 => [tool_call_mix],
+    kimi_k25 => [tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
