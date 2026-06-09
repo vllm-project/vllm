@@ -616,7 +616,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
                 # for amd-quark format that each expert is separated
                 # need to extract the parameter name with experts fused.
-                # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
+                # example model: amd/gpt-oss-20b-MoE-Quark-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:
                     layer_id, expert_id = int(ids[0]), int(ids[-1])
                     parts.pop(len(parts) - 1 - parts[::-1].index(str(expert_id)))
@@ -628,6 +628,24 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 elif len(ids) == 1:
                     layer_id, expert_id = int(ids[0]), None
                     fused_name = name
+
+                # After the MoE refactor (#41184) the actual params live under
+                # `mlp.experts.routed_experts.*` while checkpoints still use the
+                # legacy `mlp.experts.*` layout. The remap helper applied via
+                # remap_moe_expert_weights only rewrites `name`; mirror the same
+                # remap on the index-stripped `fused_name` so per-expert keys
+                # (`mlp.experts.<N>.w2_bias` → `mlp.experts.w2_bias`) resolve
+                # against the post-refactor params_dict.
+                if (
+                    fused_name is not None
+                    and ".mlp.experts." in fused_name
+                    and ".mlp.experts.routed_experts." not in fused_name
+                ):
+                    candidate = fused_name.replace(
+                        ".mlp.experts.", ".mlp.experts.routed_experts."
+                    )
+                    if candidate in params_dict:
+                        fused_name = candidate
 
                 else:
                     raise NameError(
