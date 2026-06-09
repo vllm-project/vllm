@@ -255,12 +255,6 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
-    # DeepSeek V4 sqrtsoftplus routing uses the fused softplus->sqrt->bias->
-    # topk->renorm kernel here too. Without this, the AITER fused-MoE path
-    # falls through to the unfused torch chain below (softplus, sqrt,
-    # torch.topk, gather, sum, div, mul), which shows up in the decode profile
-    # as the `gatherTopK`/`softplus`/`sqrt` kernels. The non-AITER branch above
-    # already routes sqrtsoftplus through this fused kernel.
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
         topk_weights = torch.empty(
