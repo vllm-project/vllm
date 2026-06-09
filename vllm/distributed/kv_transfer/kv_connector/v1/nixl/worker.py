@@ -1689,12 +1689,11 @@ class NixlConnectorWorker:
                             f"Attention region {i} block_len mismatch: "
                             f"local={self.block_len_per_layer[i]} != remote={remote_bl}"
                         )
-                    elif is_ssm and is_attn:
+                    elif is_ssm and is_attn and block_size_ratio != 1:
                         # Dual-purpose region: block_len_per_layer stores
                         # SSM stride (may differ with TP).  MLA stride is
                         # stored in _attn_block_len and is TP-independent.
-                        # Remote block_lens stores the remote's SSM stride
-                        # (which it registered first, like local).
+                        # Remote block_lens stores the remote's SSM stride.
                         assert (
                             self.block_len_per_layer[i] // block_size_ratio == remote_bl
                         ), (
@@ -1702,6 +1701,11 @@ class NixlConnectorWorker:
                             f"local={self.block_len_per_layer[i]} // "
                             f"ratio={block_size_ratio} != remote={remote_bl}"
                         )
+                    # When block_size_ratio == 1 for dual-purpose regions
+                    # (fallback from non-exact byte division), SSM strides
+                    # differ by approximately |tp_ratio| but page padding
+                    # makes the ratio inexact.  Skip strict validation —
+                    # remote_conv_offsets handles TP-scaled addressing.
             else:
                 for i in range(len(self.block_len_per_layer)):
                     assert (
