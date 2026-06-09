@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
@@ -17,7 +18,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import (
 )
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-DEVICE = "cuda"
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 
 def naive_recurrent_kda(
