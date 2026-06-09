@@ -32,6 +32,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             (
                 current_platform.get_cpu_architecture() == CpuArchEnum.X86
                 or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+                or current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
             )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
