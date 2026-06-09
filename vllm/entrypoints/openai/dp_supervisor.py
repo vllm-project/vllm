@@ -127,22 +127,25 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_multi_port_external_lb = False
     child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
+    child_args.device_ids = _build_device_ids(args, local_rank)
     return child_args
 
 
 def _build_vllm_dp_server_env(
     args: argparse.Namespace, local_rank: int
 ) -> dict[str, str]:
-    # set visible devices for the child process
+    return {}
+
+
+def _build_device_ids(args: argparse.Namespace, local_rank: int) -> str:
+    """Build the --device-ids value for a DP child process."""
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
-    device_env = current_platform.device_control_env_var
-    visible_devices = ",".join(
+    return ",".join(
         str(current_platform.device_id_to_physical_device_id(idx))
         for idx in range(start, stop)
     )
-    return {device_env: visible_devices}
 
 
 def _child_base_url(args: argparse.Namespace, port: int) -> str:
