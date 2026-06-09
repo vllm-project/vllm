@@ -120,3 +120,26 @@ def test_sparse_flashmla_prefill_smoke():
     assert out.shape == (s_q, h_q, d_v)
     assert max_logits.shape == (s_q, h_q)
     assert lse.shape == (s_q, h_q)
+
+
+def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
+    from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+
+    attn = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
+    attn.PREFILL_CHUNK_SIZE = 4
+    attn.max_model_len = 1024
+    attn.compress_ratio = 4
+    attn.window_size = 64
+    attn.max_num_batched_tokens = 128
+
+    seq_lens_cpu = torch.tensor([80, 96, 112, 128, 144], dtype=torch.int32)
+    query_lens_cpu = torch.tensor([4, 4, 4, 4, 4], dtype=torch.int32)
+
+    chunk_plan = attn._plan_prefill_chunks(
+        seq_lens_cpu=seq_lens_cpu,
+        query_lens_cpu=query_lens_cpu,
+        swa_only=False,
+    )
+
+    # the adaptive plan keeps all 5 in one chunk
+    assert chunk_plan == [(0, 5, 36, 103)]

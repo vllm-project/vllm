@@ -172,6 +172,7 @@ class DeepseekSparseSWAMetadata:
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
+    prefill_seq_lens_cpu: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
@@ -279,6 +280,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         """
         num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         block_table = common_attn_metadata.block_table_tensor
@@ -323,6 +325,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_decodes,
             num_prefills,
             seq_lens,
+            seq_lens_cpu,
             query_start_loc,
         )
 
@@ -391,6 +394,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         num_decodes: int,
         num_prefills: int,
         seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor | None,
         query_start_loc: torch.Tensor,
     ) -> dict[str, torch.Tensor | None]:
         """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
@@ -405,6 +409,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # --- Prefill query metadata (single Triton kernel + CPU slicing) ---
         if num_prefills > 0:
+            assert seq_lens_cpu is not None
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
@@ -419,6 +424,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
+            result["prefill_seq_lens_cpu"] = seq_lens_cpu[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
 
         return result
