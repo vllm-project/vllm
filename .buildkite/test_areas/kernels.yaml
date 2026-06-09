@@ -21,8 +21,9 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -86,7 +87,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
@@ -299,3 +300,4 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s kernels/moe/test_deepep_v2_moe.py
