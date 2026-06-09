@@ -166,25 +166,65 @@ def get_open_port() -> int:
     return _get_open_port()
 
 
+def get_open_ports_batch(count: int) -> list[int]:
+    """Allocate ``count`` unique free TCP ports while holding all sockets open.
+
+    All sockets are bound simultaneously before any is released, so concurrent
+    callers on the same host cannot receive the same port in the window between
+    discovery and the actual ZMQ bind.
+
+    Ports in the VLLM_DP_MASTER_PORT reserved range are excluded.
+    """
+    reserved_range: range | None = None
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_range = range(dp_master_port, dp_master_port + 10)
+
+    sockets: list[socket.socket] = []
+    ports: list[int] = []
+    try:
+        while len(ports) < count:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(("", 0))
+            except OSError:
+                s.close()
+                s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                s.bind(("", 0))
+            port = s.getsockname()[1]
+            if port not in ports and (
+                reserved_range is None or port not in reserved_range
+            ):
+                sockets.append(s)
+                ports.append(port)
+            else:
+                s.close()
+    finally:
+        for s in sockets:
+            with contextlib.suppress(OSError):
+                s.close()
+    return ports
+
+
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of unique open ports.
 
     When VLLM_PORT is set, scans upward from that port, advancing
     the start position after each find so every port is unique.
+
+    Otherwise, uses get_open_ports_batch to hold all sockets open
+    simultaneously, reducing the TOCTOU race between port discovery
+    and the real ZMQ bind.
     """
-    ports_set = set[int]()
     if envs.VLLM_PORT is not None:
+        ports_set = set[int]()
         next_port = envs.VLLM_PORT
         for _ in range(count):
             port = _get_open_port(start_port=next_port, max_attempts=1000)
             ports_set.add(port)
             next_port = port + 1
         return list(ports_set)
-    else:
-        while len(ports_set) < count:
-            ports_set.add(get_open_port())
-
-    return list(ports_set)
+    return get_open_ports_batch(count)
 
 
 def _get_open_port(

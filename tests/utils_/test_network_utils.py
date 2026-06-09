@@ -7,6 +7,7 @@ import zmq
 
 from vllm.utils.network_utils import (
     get_open_port,
+    get_open_ports_batch,
     get_open_ports_list,
     get_tcp_uri,
     join_host_port,
@@ -46,6 +47,49 @@ def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
         finally:
             for s in sockets:
                 s.close()
+
+
+def test_get_open_ports_batch_uniqueness():
+    ports = get_open_ports_batch(5)
+    assert len(ports) == 5
+    assert len(set(ports)) == 5, "ports must be unique"
+
+    # Verify every port is actually bindable after the batch returns.
+    sockets = []
+    try:
+        for p in ports:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("localhost", p))
+            sockets.append(s)
+    finally:
+        for s in sockets:
+            s.close()
+
+
+def test_get_open_ports_batch_no_concurrent_overlap():
+    """Two concurrent callers must not receive the same port."""
+    import threading
+
+    results: list[set[int]] = [set(), set()]
+    errors: list[Exception | None] = [None, None]
+
+    def collect(idx: int):
+        try:
+            results[idx] = set(get_open_ports_batch(5))
+        except Exception as exc:
+            errors[idx] = exc
+
+    t1 = threading.Thread(target=collect, args=(0,))
+    t2 = threading.Thread(target=collect, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert errors[0] is None, errors[0]
+    assert errors[1] is None, errors[1]
+    overlap = results[0] & results[1]
+    assert not overlap, f"Concurrent port allocation overlap: {overlap}"
 
 
 @pytest.mark.parametrize(

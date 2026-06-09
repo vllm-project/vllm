@@ -25,6 +25,7 @@ from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_open_port,
+    get_open_ports_batch,
     get_open_zmq_ipc_path,
     get_tcp_uri,
     zmq_socket_ctx,
@@ -999,10 +1000,20 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
+    # When pre-allocating TCP ports (Ray DP / Rust frontend), collect all ports
+    # at once while holding the sockets open so that concurrent vLLM instances
+    # on the same host cannot race and pick the same port before it is bound.
+    if not defer_api_server_ports and not client_local_only:
+        all_ports = get_open_ports_batch(2 * num_api_servers)
+        return EngineZmqAddresses(
+            inputs=[get_tcp_uri(host, p) for p in all_ports[:num_api_servers]],
+            outputs=[get_tcp_uri(host, p) for p in all_ports[num_api_servers:]],
+        )
+
     def _addr() -> str:
         if client_local_only:
             return get_open_zmq_ipc_path()
-        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+        return get_tcp_uri(host, 0)
 
     return EngineZmqAddresses(
         inputs=[_addr() for _ in range(num_api_servers)],
