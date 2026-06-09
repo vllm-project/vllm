@@ -240,9 +240,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For CUDA graphs, and will init cudagraph_manager after init_attn_backend.
         self.decode_query_len = self.num_speculative_steps + 1
-        self.lora_capture_cases = get_lora_capture_cases(
-            self.lora_config, self.compilation_config
-        )
+        # LoRA
+        self.lora_capture_cases = [0]
+        if self.lora_config:
+            self.lora_capture_cases = get_lora_capture_cases(...)
         self.cudagraph_manager: ModelCudaGraphManager | None = None
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
