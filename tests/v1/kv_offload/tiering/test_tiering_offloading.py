@@ -543,35 +543,19 @@ class TestTieringOffloadingManager:
         # Pending submission was dropped, not submitted.
         self.secondary_tier1.submit_load.assert_not_called()
 
-    def test_reset_cache_polls_tier_until_drained(self, manager_setup):
-        """reset_cache must poll the tier in a loop until _transfer_jobs is
-        empty — not just clear it. Otherwise an in-flight tier worker
-        could write into, or read junk from, a primary slot that the
-        post-reset path has reallocated.
+    def test_reset_cache_drains_all_tiers(self, manager_setup):
+        """reset_cache must drain each secondary tier before resetting
+        the primary tier so no tier I/O is touching primary memory.
+        Without the drain, an in-flight transfer could write into, or
+        read junk from, a primary slot that the post-reset path has
+        reallocated.
         """
-        from vllm.v1.kv_offload.tiering.base import JobResult
-
-        poll_count = 0
-        pending: list[int] = []
-
-        # Override submit_store on both tiers so the example tier no longer
-        # auto-completes; tier2's pending list shares the same buffer.
-        self.secondary_tier1.submit_store = lambda jm: pending.append(jm.job_id)
-        self.secondary_tier2.submit_store = lambda jm: pending.append(jm.job_id)
-
-        def slow_get_finished_jobs():
-            nonlocal poll_count
-            poll_count += 1
-            # Withhold completions for the first 2 polls to force the drain
-            # loop to iterate; report on the third.
-            if poll_count < 3:
-                return []
-            results = [JobResult(job_id=jid, success=True) for jid in pending]
-            pending.clear()
-            return results
-
-        self.secondary_tier1.get_finished_jobs = slow_get_finished_jobs
-        self.secondary_tier2.get_finished_jobs = lambda: []
+        self.secondary_tier1.drain_jobs = MagicMock(
+            wraps=self.secondary_tier1.drain_jobs
+        )
+        self.secondary_tier2.drain_jobs = MagicMock(
+            wraps=self.secondary_tier2.drain_jobs
+        )
 
         # Drive a cascade so a job lands in _transfer_jobs.
         blocks = to_keys(range(3))
@@ -581,7 +565,8 @@ class TestTieringOffloadingManager:
 
         self.manager.reset_cache()
 
-        assert poll_count >= 3
+        self.secondary_tier1.drain_jobs.assert_called_once()
+        self.secondary_tier2.drain_jobs.assert_called_once()
         assert self.manager._transfer_jobs == {}
 
 

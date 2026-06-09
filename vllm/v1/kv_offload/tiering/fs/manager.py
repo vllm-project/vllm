@@ -160,6 +160,11 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
     @override
+    def drain_jobs(self) -> None:
+        """Block until all in-flight transfers in the threadpool finish."""
+        self._pool.wait_idle()
+
+    @override
     def shutdown(self) -> None:
         """
         Release resources held by this tier.
