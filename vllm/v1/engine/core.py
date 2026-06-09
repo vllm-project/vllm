@@ -567,6 +567,9 @@ class EngineCore:
             if self.check_for_draft_tokens:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 if draft_token_ids is not None:
+                    # Update the draft token ids in the scheduler output to
+                    # filter out the invalid spec tokens, which will be padded
+                    # with -1 and skipped by the grammar bitmask computation.
                     self.scheduler.update_draft_token_ids_in_output(
                         draft_token_ids, deferred_scheduler_output
                     )
