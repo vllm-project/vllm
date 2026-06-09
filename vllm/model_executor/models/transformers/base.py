@@ -323,10 +323,10 @@ class Base(
                     source_pattern = mapping.source_patterns[0]
                     target_pattern = mapping.target_patterns[0]
                     # Handle scope_prefix if it exists
-                    scope_prefix: str | None = getattr(mapping, "scope_prefix", None)
-                    if source_pattern.startswith("^") and scope_prefix:
-                        source_pattern = rf"^{scope_prefix}\.{source_pattern[1:]}"
-                        target_pattern = rf"{scope_prefix}.{target_pattern}"
+                    prefix: str | None = getattr(mapping, "scope_prefix", None)
+                    if prefix and re.match(rf"^(?!{prefix}\.).*", source_pattern):
+                        source_pattern = rf"^{prefix}\.{source_pattern[1:]}"
+                        target_pattern = rf"{prefix}.{target_pattern}"
                     # Recompile using regex (Transformers used re)
                     orig_to_new_regex[re.compile(source_pattern)] = target_pattern
                 # TODO: Handle WeightConverter to enable layer merging
