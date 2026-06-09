@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import vllm.envs as envs
-from vllm.entrypoints.serve.sleep.api_router import attach_router
+from vllm.entrypoints.serve.dev.sleep.api_router import attach_router
 
 
 @pytest.fixture

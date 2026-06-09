@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.sleep.api_router import optional_tags
+from vllm.entrypoints.serve.dev.sleep.api_router import optional_tags
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
