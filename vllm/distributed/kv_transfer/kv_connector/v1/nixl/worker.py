@@ -965,10 +965,9 @@ class NixlConnectorWorker:
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
         # Expand NIXL registration size for dual-purpose regions.  KDA
-        # registers first with its stride (542720 bytes/block), but the
-        # physical allocation uses max(KDA, MLA) = 552960 bytes/block.
-        # Without this, the registered region is too small for FA descriptors
-        # that address MLA data at the larger stride.
+        # registers first with its stride, but the physical allocation
+        # uses max(KDA, MLA).  Without this, the registered region is
+        # too small for FA descriptors that address MLA data.
         for idx in range(len(caches_data)):
             if (
                 idx < len(self._is_ssm_region)
@@ -1172,13 +1171,12 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # For dual-purpose regions (HMA), block_len_per_layer stores the
-            # KDA/SSM stride.  FA descriptors must use the attention spec's
-            # stride instead so they address MLA data correctly.
-            # MLA stride is TP-independent (num_kv_heads=1, head_dim
-            # constant), so we skip block_size_ratio scaling entirely.
-            if i in self._attn_block_len:
-                attn_stride = self._attn_block_len[i]
+            # For dual-purpose HMA regions, block_len_per_layer stores the
+            # KDA/SSM stride; FA descriptors must use the attention spec's
+            # stride so they address MLA data correctly.  MLA stride is
+            # TP-independent (num_kv_heads=1), so skip block_size_ratio.
+            attn_stride = self._attn_block_len.get(i)
+            if attn_stride is not None:
                 if self.transfer_topo.virtually_split_kv_in_blocks:
                     kv_block_len = attn_stride // 2
                 else:
@@ -1201,8 +1199,8 @@ class NixlConnectorWorker:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
-                if i in self._attn_block_len:
-                    second_split = self._attn_block_len[i] // 2
+                if attn_stride is not None:
+                    second_split = attn_stride // 2
                 else:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=False
@@ -1234,58 +1232,48 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # Read our whole local region size from remote..
-            # For dual-purpose regions, use the attention spec's stride instead
-            # of block_len_per_layer (which stores KDA's stride).
-            # MLA stride is TP-independent, so skip block_size_ratio scaling.
-            if i in self._attn_block_len:
-                attn_stride = self._attn_block_len[i]
+            # For dual-purpose HMA regions, use the attention spec's stride
+            # instead of block_len_per_layer (which stores KDA's stride).
+            # MLA stride is TP-independent (num_kv_heads=1), so skip
+            # block_size_ratio scaling — local and remote MLA strides match.
+            attn_stride = self._attn_block_len.get(i)
+            if attn_stride is not None:
                 if self.transfer_topo.virtually_split_kv_in_blocks:
                     local_block_len = attn_stride // 2
                 else:
                     local_block_len = attn_stride
                 remote_kv_block_len = local_block_len
+                page_size = attn_stride
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
                 )
                 remote_kv_block_len = local_block_len // block_size_ratio
                 if block_size_ratio > 1:
-                    # ..using remote kv_block_len as transfer unit
                     local_block_len = remote_kv_block_len
+                page_size = nixl_agent_meta.block_lens[i]
 
             local_block_len = local_block_len // num_attn_reads
             rank_offset = plan.rank_offset_factor * remote_kv_block_len
 
-            # For dual-purpose regions, use the attention stride as page size
-            # so descriptors step through remote memory at MLA's stride.
-            # MLA stride is TP-independent (num_kv_heads=1, head_dim constant),
-            # so the local _attn_block_len equals the remote's MLA stride.
-            if i in self._attn_block_len:
-                page_size = self._attn_block_len[i]
-            else:
-                page_size = nixl_agent_meta.block_lens[i]
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
-                # For each block, grab the kv heads chunk belonging to current local
-                # tp rank of size local_block_len.
+                # For each block, grab the kv heads chunk belonging to current
+                # local tp rank of size local_block_len.
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
             if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
-                if i in self._attn_block_len:
-                    second_split = self._attn_block_len[i] // 2
+                if attn_stride is not None:
+                    second_split = attn_stride // 2
+                    v_stride = attn_stride
                 else:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=False
                     )
+                    v_stride = nixl_agent_meta.block_lens[i]
                 second_split = second_split // num_attn_reads
-                v_stride = (
-                    self._attn_block_len[i]
-                    if i in self._attn_block_len
-                    else nixl_agent_meta.block_lens[i]
-                )
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
