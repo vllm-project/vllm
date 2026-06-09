@@ -42,6 +42,7 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
     "nixl_ep",
