@@ -26,6 +26,7 @@
 #include "kernel.h"
 
 #include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -896,3 +897,9 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
 
   return c;
 }
+
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
+  m.impl("moe_wna16_marlin_gemm", TORCH_BOX(&moe_wna16_marlin_gemm));
+}
+#endif
