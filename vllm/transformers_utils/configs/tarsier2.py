@@ -17,7 +17,10 @@ def resolve_text_config(text_config):
         if hasattr(text_config, "text_config") and text_config.text_config is not None:
             return resolve_text_config(text_config.text_config)
 
-    return text_config
+    raise ValueError(
+        f"Cannot resolve text_config: {type(text_config)} has no "
+        "'num_attention_heads' or nested 'text_config' to unwrap"
+    )
 
 
 class Tarsier2Config(Qwen2VLConfig):
