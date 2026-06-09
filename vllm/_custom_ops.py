@@ -327,6 +327,24 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def can_use_fused_qk_norm_rope(
+    qkv: torch.Tensor,
+    head_dim: int,
+    cos_sin_cache: torch.Tensor | None,
+    is_neox_style: bool | None,
+) -> bool:
+    return (
+        hasattr(torch.ops._C, "fused_qk_norm_rope")
+        and current_platform.is_cuda_alike()
+        and isinstance(cos_sin_cache, torch.Tensor)
+        and isinstance(is_neox_style, bool)
+        and qkv.dtype in (torch.float16, torch.bfloat16)
+        and head_dim in (64, 128, 256)
+        and qkv.is_contiguous()
+        and qkv.dim() == 2
+    )
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,

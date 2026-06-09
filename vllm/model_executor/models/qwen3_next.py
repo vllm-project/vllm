@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -303,14 +304,38 @@ class Qwen3NextAttention(nn.Module):
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-            -1, self.num_heads * self.head_dim
-        )
-        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
-            -1, self.num_kv_heads * self.head_dim
-        )
+        if not self.attn_output_gate and not self.dual_chunk_attention_config and ops.can_use_fused_qk_norm_rope(
+            qkv,
+            self.head_dim,
+            getattr(self.rotary_emb, "cos_sin_cache", None),
+            getattr(self.rotary_emb, "is_neox_style", None),
+        ):  # qkv shape is [q, gate, k, v] when self.attn_output_gate = True
+            position_ids = positions.reshape(-1)
+            q_weight = (self.q_norm.weight.data.float() + 1.0).to(qkv.dtype)
+            k_weight = (self.k_norm.weight.data.float() + 1.0).to(qkv.dtype)
+            ops.fused_qk_norm_rope(
+                qkv,
+                self.num_heads,
+                self.num_kv_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                q_weight,
+                k_weight,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                position_ids,
+            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        else:
+            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
+                -1, self.num_heads * self.head_dim
+            )
+            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
+                -1, self.num_kv_heads * self.head_dim
+            )
 
-        q, k = self.rotary_emb(positions, q, k)
+            q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
 

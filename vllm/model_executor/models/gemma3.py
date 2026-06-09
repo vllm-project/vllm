@@ -22,6 +22,7 @@ import torch
 from torch import nn
 from transformers import Gemma3TextConfig
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -210,16 +211,40 @@ class Gemma3Attention(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if ops.can_use_fused_qk_norm_rope(
+            qkv,
+            self.head_dim,
+            getattr(self.rotary_emb, "cos_sin_cache", None),
+            getattr(self.rotary_emb, "is_neox_style", None),
+        ):
+            position_ids = positions.reshape(-1)
+            q_weight = (self.q_norm.weight.data.float() + 1.0).to(qkv.dtype)
+            k_weight = (self.k_norm.weight.data.float() + 1.0).to(qkv.dtype)
+            ops.fused_qk_norm_rope(
+                qkv,
+                self.num_heads,
+                self.num_kv_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                q_weight,
+                k_weight,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                position_ids,
+            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        k = self.k_norm(k)
-        k = k.flatten(-2, -1)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            k = self.k_norm(k)
+            k = k.flatten(-2, -1)
 
-        q, k = self.rotary_emb(positions, q, k)
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
