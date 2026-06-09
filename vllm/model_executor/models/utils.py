@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -897,8 +897,8 @@ def scatter_output_slices(
 def is_shared_expert_fse_compatible(quant_config) -> bool:
     """Return False when the quant config is incompatible with AITER FSE.
 
-    Blocks FSE when the quant config uses Quark OCP-MX dtypes (fp4/fp6) or
-    excludes the shared expert from quantization (via Quark exclude list or
+    Blocks FSE when the quant config uses OCP-MX dtypes (fp4/fp6) or
+    excludes the shared expert from quantization (via exclude list or
     any backend's modules_to_not_convert), which would cause a dtype mismatch
     or silent accuracy failure inside FusedMoE.
     """
@@ -908,7 +908,7 @@ def is_shared_expert_fse_compatible(quant_config) -> bool:
     # Quark-specific checks (config stored under quant_config.quant_config dict)
     raw_config = getattr(quant_config, "quant_config", None)
     if isinstance(raw_config, dict):
-        # Case 1: OCP-MX weight dtype — emulation backend incompatible with FSE.
+        # Case 1: OCP-MX + emulation backend — incompatible with FSE.
         global_quant = raw_config.get("global_quant_config", {})
         if isinstance(global_quant, dict):
             weight_cfg = global_quant.get("weight", {})
@@ -917,7 +917,13 @@ def is_shared_expert_fse_compatible(quant_config) -> bool:
                 "fp6_e3m2",
                 "fp6_e2m3",
             }:
-                return False
+                moe_backend = getattr(
+                    get_current_vllm_config().kernel_config,
+                    "moe_backend",
+                    "auto",
+                )
+                if moe_backend == "emulation":
+                    return False
         # Case 2: shared expert excluded from quant → dtype mismatch in FusedMoE.
         exclude = raw_config.get("exclude", [])
         if any("shared_expert" in str(e) for e in exclude):
