@@ -297,16 +297,6 @@ class Qwen3_5Model(Qwen3NextModel):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         is_fused_expert = False
-        # Qwen3.5-MoE checkpoints fuse all experts into single
-        # ``experts.{gate_up,down}_proj`` tensors. Build the target mapping
-        # with ``fused_moe_make_expert_params_mapping`` (instead of hardcoding
-        # it) so the ``routed_experts`` submodule prefix and ``base_layer``
-        # handling stay in sync with the FusedMoE layer. The helper emits
-        # per-expert checkpoint names like ``experts.{id}.gate_up_proj.`` and
-        # param-name prefixes like ``experts.routed_experts.w13_``; collapse
-        # them to the fused tensor name and full param name. ``gate_up_proj``
-        # feeds both ``w1`` and ``w3``, so we keep one entry and let the loop
-        # below split it.
         fused_expert_params_mapping: list[tuple[str, str, int, str]] = []
         for param_name, ckpt_name, _, shard_id in fused_moe_make_expert_params_mapping(
             self,
