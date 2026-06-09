@@ -1542,10 +1542,17 @@ class LlavaOnevision2MultiModalProcessor(
         video_paths = (
             _extract_video_paths(mm_data["videos"]) if videos_present else None
         )
-        if videos_present and backend != "native" and video_paths is not None:
-            # Enforce vLLM's media access controls before qwen_vl_utils fetches
-            # the path (SSRF / local-file-read protection).
+        if videos_present and video_paths is not None:
+            # Enforce vLLM's media access controls for *every* path-based video
+            # backend (frame AND native) before anything decodes/fetches the
+            # raw string. Gating this on the frame backend alone would let a
+            # per-request ``video_backend="native"`` bypass the SSRF /
+            # local-file-read checks: the native ``VideoProcessor`` decodes the
+            # path directly at the ``hf_processor`` call further below.
+            # Pre-decoded inputs (PIL/ndarray) yield ``video_paths=None`` and
+            # are skipped.
             _validate_video_sources(video_paths, self.info.ctx.model_config)
+        if videos_present and backend != "native" and video_paths is not None:
             fps = float(mm_kwargs.get("target_fps", _DEFAULT_FPS))
             max_frames = int(mm_kwargs.get("max_frames", _DEFAULT_MAX_FRAMES))
             timestamp_decimals = int(
