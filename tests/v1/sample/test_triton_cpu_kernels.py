@@ -206,3 +206,141 @@ class TestEaglePrepareInputsPaddedKernel:
         assert token_indices[1].item() == 10
         assert num_rejected[0].item() == 1
         assert num_rejected[1].item() == 1
+
+
+class TestEagleStepSlotMappingMetadataKernel:
+    def test_basic(self, device):
+        from vllm.v1.spec_decode.utils import eagle_step_slot_mapping_metadata_kernel
+
+        positions = torch.tensor([5, 10], dtype=torch.int64, device=device)
+        block_table = torch.zeros(2, 4, dtype=torch.int32, device=device)
+        block_table[0, 0] = 1
+        block_table[1, 0] = 2
+        seq_lens = torch.tensor([6, 11], dtype=torch.int32, device=device)
+        out_positions = torch.zeros(2, dtype=torch.int64, device=device)
+        out_slot_mapping = torch.zeros(2, dtype=torch.int64, device=device)
+
+        eagle_step_slot_mapping_metadata_kernel[(2,)](
+            positions,
+            block_table,
+            4,
+            seq_lens,
+            out_positions,
+            out_slot_mapping,
+            block_size=16,
+            max_model_len=2048,
+            n_blocks_per_req=4,
+            PAD_ID=-1,
+            batch_size=2,
+        )
+
+        # pos 5 -> new_pos 6, block=6//16=0, block_id=1, slot=1*16+6=22
+        # pos 10 -> new_pos 11, block=11//16=0, block_id=2, slot=2*16+11=43
+        assert out_positions[0].item() == 6
+        assert out_positions[1].item() == 11
+        assert out_slot_mapping[0].item() == 22
+        assert out_slot_mapping[1].item() == 43
+        assert seq_lens[0].item() == 7
+        assert seq_lens[1].item() == 12
+
+
+class TestEaglePrepareNextTokenPaddedKernel:
+    def test_valid_tokens(self, device):
+        from vllm.v1.spec_decode.utils import eagle_prepare_next_token_padded_kernel
+
+        sampled_ids = torch.tensor(
+            [[10, 20, -1], [30, -1, -1]], dtype=torch.int64, device=device
+        )
+        discard_mask = torch.tensor([False, False], dtype=torch.bool, device=device)
+        backup_next = torch.tensor([99, 88], dtype=torch.int64, device=device)
+        next_ids = torch.zeros(2, dtype=torch.int64, device=device)
+        valid_count = torch.zeros(2, dtype=torch.int64, device=device)
+
+        eagle_prepare_next_token_padded_kernel[(2,)](
+            sampled_ids,
+            discard_mask,
+            backup_next,
+            next_ids,
+            valid_count,
+            100,
+            3,
+            2,
+            3,
+            BLOCK_SIZE_TOKENS=4,
+        )
+
+        # Req 0: valid=[10,20], last_valid=20, count=2
+        # Req 1: valid=[30], last_valid=30, count=1
+        assert next_ids[0].item() == 20
+        assert next_ids[1].item() == 30
+        assert valid_count[0].item() == 2
+        assert valid_count[1].item() == 1
+
+    def test_discarded(self, device):
+        from vllm.v1.spec_decode.utils import eagle_prepare_next_token_padded_kernel
+
+        sampled_ids = torch.tensor([[10, 20, -1]], dtype=torch.int64, device=device)
+        discard_mask = torch.tensor([True], dtype=torch.bool, device=device)
+        backup_next = torch.tensor([99], dtype=torch.int64, device=device)
+        next_ids = torch.zeros(1, dtype=torch.int64, device=device)
+        valid_count = torch.ones(1, dtype=torch.int64, device=device)
+
+        eagle_prepare_next_token_padded_kernel[(1,)](
+            sampled_ids,
+            discard_mask,
+            backup_next,
+            next_ids,
+            valid_count,
+            100,
+            3,
+            1,
+            3,
+            BLOCK_SIZE_TOKENS=4,
+        )
+
+        assert next_ids[0].item() == 99
+        assert valid_count[0].item() == 0
+
+
+class TestCopyAndExpandEagleInputsKernel:
+    def test_no_shift(self, device):
+        from vllm.v1.spec_decode.utils import copy_and_expand_eagle_inputs_kernel
+
+        target_ids = torch.tensor([100, 200, 300], dtype=torch.int64, device=device)
+        target_pos = torch.tensor([0, 1, 2], dtype=torch.int64, device=device)
+        next_token = torch.tensor([500], dtype=torch.int64, device=device)
+        out_ids = torch.zeros(5, dtype=torch.int64, device=device)
+        out_pos = torch.zeros(5, dtype=torch.int64, device=device)
+        out_rejected = torch.zeros(5, dtype=torch.bool, device=device)
+        out_masked = torch.zeros(5, dtype=torch.bool, device=device)
+        out_new_token_idx = torch.zeros(2, dtype=torch.int32, device=device)
+        out_hidden_map = torch.zeros(5, dtype=torch.int32, device=device)
+        query_start_loc = torch.tensor([0, 3], dtype=torch.int32, device=device)
+        query_end_loc = torch.tensor([2], dtype=torch.int32, device=device)
+
+        copy_and_expand_eagle_inputs_kernel[(1, 1)](
+            target_ids,
+            target_pos,
+            next_token,
+            out_ids,
+            out_pos,
+            out_rejected,
+            out_masked,
+            out_new_token_idx,
+            out_hidden_map,
+            query_start_loc,
+            query_end_loc,
+            0,
+            -1,
+            3,
+            2,
+            False,
+            BLOCK_SIZE_TOKENS=16,
+        )
+
+        # Valid: [100, 200, 300], Bonus: 500, Parallel draft: -1
+        assert out_ids[0].item() == 100
+        assert out_ids[1].item() == 200
+        assert out_ids[2].item() == 300
+        assert out_ids[3].item() == 500
+        assert out_ids[4].item() == -1
