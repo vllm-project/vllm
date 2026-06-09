@@ -576,7 +576,8 @@ def test_fp4_marlin_linear_mxfp4_w4a8_keeps_logical_shape():
     # the SM12x family:
     # "Marlin W4A8-FP8 only support SM89 or SM12x device".
     # Treat other architectures as a successful no-op at test entry so the
-    # test only asserts wrapper behavior where the underlying op is supported.
+    # test only attempts execution where the operator will execute
+    # successfully.
     if not current_platform.is_device_capability(
         89
     ) and not current_platform.is_device_capability_family(120):
