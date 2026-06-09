@@ -235,11 +235,14 @@ class DerenderChatRequest(BaseModel):
     """
 
     chat_request: ChatCompletionRequest | None = None
-    """The original (post-adjust_request) ChatCompletionRequest from /render.
+    """The original (post adjust_request) ChatCompletionRequest from /render.
 
     Required by the parsing so that tool/reasoning parsers can receive the full
-    request context they expect (request.tools, request.tool_choice,
-    request._grammar_from_tool_parser, etc.).
+    request context they expect (request.tools, request.tool_choice, etc.).
+
+    Note: Pydantic PrivateAttr fields (e.g. _grammar_from_tool_parser) are
+    excluded from serialization and will not be present after JSON round trip.
+    Derender logic must re-derive any state that depends on those fields.
     """
 
 

@@ -19,7 +19,6 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     get_history_tool_calls_cnt,
     get_tool_call_id_type,
-    make_tool_call_id,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -31,7 +30,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
-    ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     TokenState,
@@ -43,7 +41,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
-    ToolCall,
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
@@ -55,9 +52,9 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
-    parse_chat_output,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.chat_message_builder import build_chat_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -73,7 +70,7 @@ from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
-from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
+from vllm.utils.mistral import is_mistral_tool_parser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -976,7 +973,6 @@ class OpenAIServingChat(OpenAIServing):
             self._raise_if_error(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
-            tool_call_info = None
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -990,266 +986,6 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            if self.use_harmony:
-                reasoning, content, _ = parse_chat_output(token_ids)
-                if not request.include_reasoning:
-                    reasoning = None
-
-                if self.tool_parser is not None:
-                    if tokenizer is None:
-                        raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
-                        )
-
-                    tool_parser = self.tool_parser(tokenizer, request.tools)
-                    # NOTE: We use token_ids for openai tool parser
-                    tool_call_info = tool_parser.extract_tool_calls(
-                        "",
-                        request=request,
-                        token_ids=token_ids,  # type: ignore
-                    )
-                    content = tool_call_info.content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=tool_call_info.tool_calls,
-                    )
-                else:
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                    )
-
-                # Encode routed_experts for transport. JSON can't carry raw
-                # bytes, so we write the ndarray as a ``.npy`` byte stream
-                # and base64-encode it. ``pybase64`` is ~3x faster than the
-                # stdlib ``base64`` on large payloads thanks to SIMD.
-                routed_experts_b64 = None
-                if output.routed_experts is not None:
-                    buf = io.BytesIO()
-                    np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                        "ascii"
-                    )
-
-                choice_data = ChatCompletionResponseChoice(
-                    index=output.index,
-                    message=message,
-                    logprobs=logprobs,
-                    finish_reason=(
-                        "tool_calls"
-                        if (tool_call_info is not None and tool_call_info.tools_called)
-                        else output.finish_reason
-                        if output.finish_reason
-                        else "stop"
-                    ),
-                    stop_reason=output.stop_reason,
-                    token_ids=(
-                        as_list(output.token_ids) if request.return_token_ids else None
-                    ),
-                    routed_experts=routed_experts_b64,
-                )
-                choices.append(choice_data)
-                continue
-
-            if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                )
-                if not request.include_reasoning:
-                    reasoning = None
-            else:
-                reasoning = None
-                content = output.text
-                tool_calls = []
-
-            auto_tools_called = False
-            if is_mistral_tokenizer(tokenizer):
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
-
-                tool_call_class: type[ToolCall] = MistralToolCall
-            else:
-                tool_call_class = ToolCall
-
-            use_mistral_tool_parser = request._grammar_from_tool_parser
-            if use_mistral_tool_parser:
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-                tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
-                    tool_calls
-                )
-                if tool_call_items:
-                    auto_tools_called = (
-                        request.tool_choice is None or request.tool_choice == "auto"
-                    )
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content,
-                    tool_calls=tool_call_items,
-                )
-
-            elif (not self.enable_auto_tools or not self.tool_parser) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
-            ):
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                tool_call_class_items = []
-                tool_calls = tool_calls or []
-                for idx, tc in enumerate(tool_calls):
-                    # Use native ID if available (e.g., Kimi K2),
-                    # otherwise generate ID with correct id_type
-                    if tc.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tc.id, function=tc)
-                        )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(tool_call_class(function=tc))
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tc)
-                            )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content="",
-                    tool_calls=tool_call_class_items,
-                )
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_class_items = []
-                tool_calls = tool_calls or []
-                for idx, tool_call in enumerate(tool_calls):
-                    # Use native ID if available,
-                    # otherwise generate ID with correct id_type
-                    if tool_call.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tool_call.id, function=tool_call)
-                        )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(
-                                tool_call_class(function=tool_call)
-                            )
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tool_call)
-                            )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    content="",
-                    tool_calls=tool_call_class_items,
-                    reasoning=reasoning,
-                )
-
-            # if the request doesn't use tool choice
-            # OR specifies to not use a tool
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-
-            # handle when there are tools and tool choice is auto
-            elif (
-                request.tools
-                and (request.tool_choice == "auto" or request.tool_choice is None)
-                and self.enable_auto_tools
-                and self.tool_parser
-            ):
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
-                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
-                if tool_calls:
-                    tool_call_items = []
-                    for idx, tc in enumerate(tool_calls):
-                        # Use native ID if available (e.g., Kimi K2),
-                        # otherwise generate ID with correct id_type
-                        if tc.id:
-                            tool_call_items.append(
-                                tool_call_class(id=tc.id, function=tc)
-                            )
-                        else:
-                            # Generate ID using the correct format (kimi_k2 or random),
-                            # but leave it to the class if it's Mistral to preserve
-                            # 9-char IDs
-                            if is_mistral_tokenizer(tokenizer):
-                                tool_call_items.append(tool_call_class(function=tc))
-                            else:
-                                generated_id = make_tool_call_id(
-                                    id_type=self.tool_call_id_type,
-                                    func_name=tc.name,
-                                    idx=history_tool_call_cnt,
-                                )
-                                tool_call_items.append(
-                                    tool_call_class(id=generated_id, function=tc)
-                                )
-                        history_tool_call_cnt += 1
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=tool_call_items,
-                    )
-
-                else:
-                    # FOR NOW make it a chat message; we will have to detect
-                    # the type to make it later.
-                    ret_content = content
-
-                    # try to use content return from tool parser first,
-                    # tool parser may do some modify for the content.
-                    if content and len(content) > 0:
-                        ret_content = content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=ret_content,
-                    )
-
-            # undetermined case that is still important to handle
-            else:
-                logger.error(
-                    "Error in chat_completion_full_generator - cannot determine"
-                    " if tools should be extracted. Returning a standard chat "
-                    "completion."
-                )
-                message = ChatMessage(role=role, reasoning=reasoning, content=content)
-            # In OpenAI's API, when a tool is called, the finish_reason is:
-            # "tool_calls" for "auto" or "required" tool calls,
-            # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
-            )
-
             # Encode routed_experts for transport. JSON can't carry raw
             # bytes, so we write the ndarray as a ``.npy`` byte stream
             # and base64-encode it. ``pybase64`` is ~3x faster than the
@@ -1259,6 +995,30 @@ class OpenAIServingChat(OpenAIServing):
                 buf = io.BytesIO()
                 np.save(buf, output.routed_experts)
                 routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+            message, auto_tools_called, history_tool_call_cnt = build_chat_message(
+                output_text=output.text,
+                output_token_ids=token_ids,
+                request=request,
+                parser=parser,
+                tool_parser=self.tool_parser,
+                use_harmony=self.use_harmony,
+                enable_auto_tools=self.enable_auto_tools,
+                tokenizer=tokenizer,
+                role=role,
+                tool_call_id_type=self.tool_call_id_type,
+                history_tool_call_cnt=history_tool_call_cnt,
+            )
+
+            # In OpenAI's API, when a tool is called, the finish_reason is:
+            # "tool_calls" for "auto" or "required" tool calls,
+            # and "stop" for named tool calls.
+            if self.use_harmony:
+                is_finish_reason_tool_calls = auto_tools_called
+            else:
+                is_finish_reason_tool_calls = auto_tools_called or (
+                    request.tool_choice == "required" and output.finish_reason == "stop"
+                )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1275,7 +1035,8 @@ class OpenAIServingChat(OpenAIServing):
                 ),
                 routed_experts=routed_experts_b64,
             )
-            choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+            if not self.use_harmony:
+                choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
 

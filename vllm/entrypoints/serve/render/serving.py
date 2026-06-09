@@ -11,6 +11,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    get_history_tool_calls_cnt,
+    get_tool_call_id_type,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
@@ -48,8 +50,12 @@ from vllm.entrypoints.serve.disagg.protocol import (
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.chat_message_builder import build_chat_message
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
@@ -201,6 +207,20 @@ class OpenAIServingRender:
                 reasoning_parser_name=reasoning_parser,
             )
         )
+        self.parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=model_config.model,
+        )
+        if (
+            is_mistral_tool_parser(self.tool_parser)
+            and self.reasoning_parser is not None
+        ):
+            from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+
+            MistralToolParser.model_can_reason = True
+        self.tool_call_id_type = get_tool_call_id_type(model_config)
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
@@ -545,6 +565,12 @@ class OpenAIServingRender:
         This is the symmetric inverse of render_chat_request: it detokenizes
         output token IDs, resolves token_id:N logprob placeholders, and
         formats the result as an OpenAI-compatible chat completion response.
+
+        When request.chat_request is provided (the post adjust_request object
+        from the paired /render call), reasoning and tool-call parsing is
+        applied using the same parser path as the coupled chat endpoint,
+        ensuring a single source of truth. When chat_request is absent
+        plain detokenisation is preserved.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -553,10 +579,95 @@ class OpenAIServingRender:
         tokenizer = self.renderer.get_tokenizer()
         gen = request.generate_response
         choices: list[ChatCompletionResponseChoice] = []
+        chat_request = request.chat_request
 
         try:
-            for choice in gen.choices:
-                choices.append(_build_chat_choice(choice, tokenizer))
+            if chat_request is not None:
+                # Parser aware path: run the same reasoning/tool call logic as
+                # the coupled chat endpoint so both paths share one implementation.
+                parser = None
+                chat_template_kwargs: dict[str, Any] = {}
+                if self.parser_cls is not None:
+                    chat_template_kwargs = (
+                        chat_request.build_chat_params(
+                            self.chat_template,
+                            self.chat_template_content_format,
+                        )
+                        .with_defaults(self.default_chat_template_kwargs)
+                        .chat_template_kwargs
+                    )
+                    parser = self.parser_cls(
+                        tokenizer,
+                        chat_request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+
+                if self.tool_call_id_type == "kimi_k2":
+                    # The chat path seeds this from the rendered conversation.
+                    # Here we use chat_request.messages directly.
+                    # get_history_tool_calls_cnt only reads role/tool_calls so
+                    # both work but they aren't guaranteed identical after
+                    # template normalization> Its a latent parity gap for kimi_k2 IDs.
+                    history_tool_call_cnt = get_history_tool_calls_cnt(
+                        chat_request.messages  # type: ignore[arg-type]
+                    )
+                else:
+                    history_tool_call_cnt = 0
+
+                for choice in gen.choices:
+                    if not choice.token_ids:
+                        raise ValueError(
+                            f"choice {choice.index} has empty or null token_ids"
+                        )
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=True
+                    )
+                    resolved_logprobs = (
+                        _resolve_logprobs(choice.logprobs, tokenizer)
+                        if choice.logprobs is not None
+                        else None
+                    )
+                    message, auto_tools_called, history_tool_call_cnt = (
+                        build_chat_message(
+                            output_text=decoded_text,
+                            output_token_ids=choice.token_ids,
+                            request=chat_request,
+                            parser=parser,
+                            tool_parser=self.tool_parser,
+                            use_harmony=self.use_harmony,
+                            enable_auto_tools=self.enable_auto_tools,
+                            tokenizer=tokenizer,
+                            role="assistant",
+                            tool_call_id_type=self.tool_call_id_type,
+                            history_tool_call_cnt=history_tool_call_cnt,
+                        )
+                    )
+                    if self.use_harmony:
+                        is_finish_reason_tool_calls = auto_tools_called
+                    else:
+                        is_finish_reason_tool_calls = auto_tools_called or bool(
+                            chat_request.tool_choice == "required"
+                            and choice.finish_reason == "stop"
+                        )
+                    choice_data = ChatCompletionResponseChoice(
+                        index=choice.index,
+                        message=message,
+                        logprobs=resolved_logprobs,
+                        finish_reason="tool_calls"
+                        if is_finish_reason_tool_calls
+                        else choice.finish_reason
+                        if choice.finish_reason
+                        else "stop",
+                    )
+                    if not self.use_harmony:
+                        choice_data = maybe_filter_parallel_tool_calls(
+                            choice_data, chat_request
+                        )
+                    choices.append(choice_data)
+            else:
+                # Plain detokenisation only.
+                for choice in gen.choices:
+                    choices.append(_build_chat_choice(choice, tokenizer))
         except ValueError as exc:
             return self.create_error_response(str(exc))
 
