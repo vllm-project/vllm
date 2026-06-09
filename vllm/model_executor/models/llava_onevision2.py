@@ -40,7 +40,6 @@ from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from transformers.processing_utils import ProcessorMixin
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -111,52 +110,6 @@ except ImportError:  # pragma: no cover
 # Qwen2-VL. The real frame count is decided by the HF VideoProcessor at apply
 # time; this only sizes the memory-profiling estimate.
 _MAX_FRAMES_PER_VIDEO = 14
-
-
-class LlavaOnevision2Processor(ProcessorMixin):
-    """``ProcessorMixin`` adapter for OV2's ``trust_remote_code`` processor.
-
-    The OV2 model card ships a bare ``LlavaOnevision2Processor`` that does
-    *not* inherit from :class:`~transformers.ProcessorMixin`. vLLM's
-    :func:`~vllm.transformers_utils.processor.get_processor` validates the
-    loaded object with ``isinstance(_, processor_cls)`` and rejects the bare
-    class. Rather than monkey-patching ``get_processor`` at import time, this
-    thin wrapper subclasses ``ProcessorMixin`` and delegates every attribute
-    access (``image_processor``, ``tokenizer``, ``video_processor``,
-    ``__call__``, ...) to the real OV2 processor loaded via
-    :class:`~transformers.AutoProcessor`.
-
-    :class:`LlavaOnevision2ProcessingInfo.get_hf_processor` passes this class
-    as the ``processor_cls`` so ``get_processor`` takes the
-    ``issubclass(processor_cls, ProcessorMixin)`` branch and calls
-    :meth:`from_pretrained`, which returns an instance of this class — making
-    the downstream ``isinstance`` check pass with no source changes to vLLM.
-    """
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        from transformers import AutoProcessor
-
-        inner = AutoProcessor.from_pretrained(
-            pretrained_model_name_or_path,
-            revision=kwargs.get("revision"),
-            trust_remote_code=kwargs.get("trust_remote_code", True),
-        )
-        return cls(inner)
-
-    def __init__(self, inner: Any) -> None:
-        # Bypass ProcessorMixin.__init__ machinery (which expects declared
-        # sub-processor attributes) and simply hold the real OV2 processor.
-        object.__setattr__(self, "_inner", inner)
-
-    def __getattr__(self, name: str) -> Any:
-        # Only reached when normal attribute lookup fails; delegate to the
-        # wrapped OV2 processor (image_processor / tokenizer / video_processor
-        # / etc.). ``object.__getattribute__`` avoids infinite recursion.
-        return getattr(object.__getattribute__(self, "_inner"), name)
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return object.__getattribute__(self, "_inner")(*args, **kwargs)
 
 
 def _unwrap_video_input_for_ov2(videos: Any) -> list:
@@ -1175,12 +1128,14 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_hf_processor(self, **kwargs: object):
-        # Pass the ProcessorMixin adapter as ``processor_cls`` so
-        # ``get_processor`` loads the real OV2 processor via the wrapper's
-        # ``from_pretrained`` and the downstream isinstance check passes
-        # without any monkey-patching of vLLM internals.
+        # OV2's ``trust_remote_code`` processor is a bare class that does not
+        # subclass ``ProcessorMixin``, so vLLM's ``get_processor`` isinstance
+        # check would reject it. Pass ``disable_type_check=True`` to skip that
+        # check and load the real OV2 processor directly via AutoProcessor.
         return self.ctx.get_hf_processor(
-            LlavaOnevision2Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
+            use_fast=kwargs.pop("use_fast", True),
+            disable_type_check=True,
+            **kwargs,
         )
 
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
