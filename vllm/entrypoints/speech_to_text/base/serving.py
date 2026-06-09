@@ -78,6 +78,8 @@ logger = init_logger(__name__)
 
 
 def _get_stt_preprocess_max_workers() -> int:
+    # 2 threads was found to be the sweet spot for the best performance.
+    # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
     default_workers = max(1, min(os.cpu_count() or 1, 2))
     configured_workers = os.getenv("VLLM_STT_PREPROCESS_MAX_WORKERS")
     num_workers = int(configured_workers) if configured_workers else default_workers
@@ -143,6 +145,9 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         # setup preprocess resources
+        # we keep separate thread pool for frontend preprocessing instead
+        # of reusing the one from Renderer which showed lower throughput
+        # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
         self._preprocess_max_workers = _get_stt_preprocess_max_workers()
         self._preprocess_executor = ThreadPoolExecutor(
             max_workers=self._preprocess_max_workers,
