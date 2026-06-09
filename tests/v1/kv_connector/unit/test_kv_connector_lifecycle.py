@@ -45,7 +45,7 @@ def test_kv_connector_mixin_clears_metadata():
         num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
     )
     # Initialize the global connector instance.
-    # kv_transfer init syncs engine_id across TP, so unit tests need
+    # kv_transfer init now syncs engine_id across TP, so unit tests need
     # a minimal mocked TP group.
     mock_tp_group = MagicMock()
     mock_tp_group.broadcast_object.side_effect = lambda value, src=0: value
