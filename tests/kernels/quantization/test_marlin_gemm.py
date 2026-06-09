@@ -20,9 +20,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
+    marlin_quant_input,
     query_marlin_supported_quant_types,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    _get_fp4_marlin_padded_sizes,
+    apply_fp4_marlin_linear,
     rand_marlin_weight_mxfp4_like,
     rand_marlin_weight_nvfp4_like,
 )
@@ -520,6 +523,88 @@ def test_marlin_gemm(
     )
     output_ref = torch.matmul(a_input_ref, w_ref)
 
+    max_diff = compute_max_diff(output, output_ref)
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_fp4_marlin_linear_nvfp4_w4a16_padded_shape():
+    size_m, size_n, size_k = 4, 96, 96
+    group_size = 16
+    dtype = torch.bfloat16
+    marlin_size_n, marlin_size_k = _get_fp4_marlin_padded_sizes(size_n, size_k)
+    assert (marlin_size_n, marlin_size_k) != (size_n, size_k)
+
+    a_input = rand_data((size_m, size_k), dtype=dtype)
+    b_weight = rand_data((marlin_size_k, marlin_size_n), dtype=dtype)
+    w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_nvfp4_like(
+        b_weight.T, group_size
+    )
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    output = apply_fp4_marlin_linear(
+        input=a_input,
+        weight=marlin_q_w,
+        weight_scale=marlin_s,
+        weight_global_scale=marlin_s2,
+        workspace=workspace,
+        size_n=size_n,
+        size_k=size_k,
+        marlin_size_n=marlin_size_n,
+        marlin_size_k=marlin_size_k,
+    )
+
+    padded_input = torch.nn.functional.pad(a_input, (0, marlin_size_k - size_k))
+    output_ref = torch.matmul(padded_input, w_ref)[..., :size_n].contiguous()
+
+    assert output.shape == (size_m, size_n)
+    max_diff = compute_max_diff(output, output_ref)
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_fp4_marlin_linear_mxfp4_w4a8_keeps_logical_shape():
+    if not current_platform.is_device_capability(
+        89
+    ) and not current_platform.is_device_capability_family(120):
+        pytest.skip("Marlin MXFP4 W4A8-FP8 requires SM89 or SM12x")
+
+    size_m, size_n, size_k = 4, 128, 96
+    group_size = 32
+    dtype = torch.bfloat16
+    assert _get_fp4_marlin_padded_sizes(size_n, size_k) != (size_n, size_k)
+
+    a_input = rand_data((size_m, size_k), dtype=dtype)
+    b_weight = rand_data((size_k, size_n), dtype=dtype)
+    w_ref, marlin_q_w, marlin_s = rand_marlin_weight_mxfp4_like(
+        b_weight.T, group_size, input_dtype=torch.float8_e4m3fn
+    )
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    output = apply_fp4_marlin_linear(
+        input=a_input,
+        weight=marlin_q_w,
+        weight_scale=marlin_s,
+        weight_global_scale=None,
+        workspace=workspace,
+        size_n=size_n,
+        size_k=size_k,
+        input_dtype=torch.float8_e4m3fn,
+        marlin_size_n=size_n,
+        marlin_size_k=size_k,
+    )
+
+    quant_input, input_scales = marlin_quant_input(a_input, torch.float8_e4m3fn)
+    input_ref = quant_input.to(input_scales.dtype) * input_scales.view(-1, 1)
+    output_ref = torch.matmul(input_ref.to(dtype), w_ref)
+
+    assert output.shape == (size_m, size_n)
     max_diff = compute_max_diff(output, output_ref)
     assert max_diff < 0.04
 

@@ -19,26 +19,23 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
 logger = init_logger(__name__)
 
 
-def _round_up(value: int, multiple: int) -> int:
-    return (value + multiple - 1) // multiple * multiple
-
-
 def _get_fp4_marlin_padded_sizes(size_n: int, size_k: int) -> tuple[int, int]:
     min_thread_k = 64
     candidates = (
         (
-            _round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N * 2),
-            _round_up(size_k, min_thread_k),
+            round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N * 2),
+            round_up(size_k, min_thread_k),
         ),
         (
-            _round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N),
-            _round_up(size_k, min_thread_k * 2),
+            round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N),
+            round_up(size_k, min_thread_k * 2),
         ),
     )
     return min(
@@ -183,6 +180,8 @@ def apply_fp4_marlin_linear(
     size_k: int,
     bias: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
+    marlin_size_n: int | None = None,
+    marlin_size_k: int | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
@@ -191,12 +190,13 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
-    padded_size_n, padded_size_k = _get_fp4_marlin_padded_sizes(size_n, size_k)
+    marlin_size_n = marlin_size_n if marlin_size_n is not None else size_n
+    marlin_size_k = marlin_size_k if marlin_size_k is not None else size_k
 
     use_atomic_add = should_use_atomic_add_reduce(
         m=reshaped_x.size(0),
-        n=padded_size_n,
-        k=padded_size_k,
+        n=marlin_size_n,
+        k=marlin_size_k,
         device=input.device,
         dtype=input.dtype,
     )
@@ -212,8 +212,8 @@ def apply_fp4_marlin_linear(
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
-    if input_dtype is None and padded_size_k != size_k:
-        inputs = torch.nn.functional.pad(inputs, (0, padded_size_k - size_k))
+    if input_dtype is None and marlin_size_k != size_k:
+        inputs = torch.nn.functional.pad(inputs, (0, marlin_size_k - size_k))
 
     output = ops.marlin_gemm(
         a=inputs,
@@ -229,13 +229,13 @@ def apply_fp4_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float4_e2m1f,
         size_m=reshaped_x.size(0),
-        size_n=padded_size_n,
-        size_k=padded_size_k,
+        size_n=marlin_size_n,
+        size_k=marlin_size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
-    if padded_size_n != size_n:
+    if marlin_size_n != size_n:
         output = output[..., :size_n].contiguous()
     return output.reshape(out_shape)
 
@@ -269,9 +269,16 @@ def prepare_fp4_layer_for_marlin(
     qweight = layer.weight.view(torch.int32).T.contiguous()
 
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-    padded_part_size_n, padded_part_size_k = _get_fp4_marlin_padded_sizes(
-        part_size_n, part_size_k
-    )
+    if is_a_8bit:
+        padded_part_size_n, padded_part_size_k = part_size_n, part_size_k
+    else:
+        padded_part_size_n, padded_part_size_k = _get_fp4_marlin_padded_sizes(
+            part_size_n, part_size_k
+        )
+    if padded_part_size_n != part_size_n or padded_part_size_k != part_size_k:
+        layer.marlin_size_n = padded_part_size_n
+        layer.marlin_size_k = padded_part_size_k
+
     n_pad = padded_part_size_n - part_size_n
     k_pad_qweight = (padded_part_size_k - part_size_k) // 8
     k_pad_scales = padded_part_size_k // group_size - part_size_k // group_size

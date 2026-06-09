@@ -49,4 +49,10 @@ class MarlinMxFp4LinearKernel(MxFp4LinearKernel):
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
             bias=bias,
+            marlin_size_n=getattr(
+                layer, "marlin_size_n", layer.output_size_per_partition
+            ),
+            marlin_size_k=getattr(
+                layer, "marlin_size_k", layer.input_size_per_partition
+            ),
         )
