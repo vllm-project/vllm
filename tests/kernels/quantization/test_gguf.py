@@ -125,6 +125,8 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantization
         GGMLQuantizationType.Q4_0,
         GGMLQuantizationType.Q5_0,
         GGMLQuantizationType.Q8_0,
+        # imatrix quants
+        GGMLQuantizationType.IQ4_NL,
     ],
 )
 @torch.inference_mode()
