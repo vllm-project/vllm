@@ -35,6 +35,19 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
+def _env_int(name: str) -> int | None:
+    raw = envs.environment_variables.get(name) if hasattr(envs, "environment_variables") else None
+    if raw is None:
+        import os
+        raw = os.getenv(name)
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
@@ -750,6 +763,25 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _is_qwen3_vl_4b_prefill_signature(
+    *,
+    head_size: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    max_seqlen_q: int,
+) -> bool:
+    """Detect Qwen3-VL-4B text prefill attention shape.
+
+    This signature is intentionally strict to avoid affecting unrelated models.
+    """
+    return (
+        head_size == 128
+        and num_query_heads == 32
+        and num_kv_heads == 8
+        and max_seqlen_q >= 256
+    )
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
@@ -1088,15 +1120,57 @@ def unified_attention(
 
     grid: tuple[Any, ...]
     config = {}
+    tile_size_prefill = TILE_SIZE_PREFILL
 
     use_swapped_grid = not use_3d and current_platform.is_gfx1151()
+
+    # Optional tuning overrides for targeted profiling/experiments.
+    # These are intentionally no-op unless explicitly set.
+    if not use_3d:
+        # Qwen3-VL-4B prefill default on Navi/gfx11:
+        # BM64/T32/W4/S1/EU4 was the best end-to-end TTFT setting in local sweeps.
+        if current_platform.is_navi() and _is_qwen3_vl_4b_prefill_signature(
+            head_size=head_size,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            max_seqlen_q=max_seqlen_q,
+        ):
+            BLOCK_M = 64
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+            tile_size_prefill = 32
+            num_warps = 4
+            num_stages = 1
+            waves_per_eu = 4
+
+        forced_block_m = _env_int("VLLM_UA_PREFILL_BLOCK_M")
+        if forced_block_m is not None and forced_block_m > 0:
+            BLOCK_M = max(forced_block_m, triton.next_power_of_2(num_queries_per_kv))
+            BLOCK_Q = BLOCK_M // num_queries_per_kv
+            total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+
+        forced_tile = _env_int("VLLM_UA_PREFILL_TILE_SIZE")
+        if forced_tile is not None and forced_tile > 0:
+            tile_size_prefill = forced_tile
+
+        forced_num_warps = _env_int("VLLM_UA_PREFILL_NUM_WARPS")
+        if forced_num_warps is not None and forced_num_warps > 0:
+            num_warps = forced_num_warps
+
+        forced_num_stages = _env_int("VLLM_UA_PREFILL_NUM_STAGES")
+        if forced_num_stages is not None and forced_num_stages > 0:
+            num_stages = forced_num_stages
+
+        forced_waves = _env_int("VLLM_UA_PREFILL_WAVES_PER_EU")
+        if forced_waves is not None and forced_waves > 0:
+            waves_per_eu = forced_waves
 
     if not use_3d:
         if use_swapped_grid:
             grid = (num_kv_heads, total_num_q_blocks)
         else:
             grid = (total_num_q_blocks, num_kv_heads)
-        tile_size = TILE_SIZE_PREFILL
+        tile_size = tile_size_prefill
     else:
         tile_size = TILE_SIZE_DECODE
 
