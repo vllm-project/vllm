@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
 
 _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS = 8192
+_INDEXED_D512_SPLIT_PREFILL_MIN_TOPK = 256
 _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK = 1152
 
 
@@ -74,8 +75,16 @@ def _use_indexed_d512_split_prefill(
         and compress_ratio in (4, 128)
         and head_dim == 512
         and num_prefills == 1
-        and 512 < combined_topk <= _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
+        and _is_indexed_d512_split_topk(combined_topk)
         and max_prefill_seq_len >= _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS
+    )
+
+
+def _is_indexed_d512_split_topk(combined_topk: int) -> bool:
+    return (
+        _INDEXED_D512_SPLIT_PREFILL_MIN_TOPK
+        <= combined_topk
+        <= _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
     )
 
 
@@ -625,9 +634,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and layer.compress_ratio in (4, 128)
             and q.shape[-1] == 512
             and kv.shape[0] == 1
-            and 512
-            < combined_indices.shape[-1]
-            <= _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
+            and _is_indexed_d512_split_topk(combined_indices.shape[-1])
             and len(state_buffers) == 4
         ):
             indexed_d512_scores = state_buffers[3]
