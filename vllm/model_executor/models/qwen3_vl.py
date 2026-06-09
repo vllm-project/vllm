@@ -1417,17 +1417,25 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 select_token_id=select_token_id,
             )
 
+        # replace_video_token only exists in transformers>=5.10
+        if hasattr(hf_processor, "replace_video_token"):
+            # transformers>=5.10 only wants the video_token
+            video_target = hf_processor.video_token
+        else:
+            # transformers<5.10 wants the full placeholder string
+            # NOTE: We match string on purpose since searching sequence of
+            # token ids takes more time.
+            video_target = "<|vision_start|><|video_pad|><|vision_end|>"
+
         return [
             PromptReplacement(
                 modality="image",
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
             PromptReplacement(
                 modality="video",
-                target="<|vision_start|><|video_pad|><|vision_end|>",
+                target=video_target,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
