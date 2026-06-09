@@ -1972,6 +1972,55 @@ def test_maybe_evict_cached_block():
     assert pool.cached_block_hash_to_block._cache == {}
 
 
+def test_evict_cached_block_always_resets_hash():
+    """A block whose hash is not the one stored in the cache (a hash
+    collision where another block owns the cache entry) must still have its
+    hash cleared on eviction.
+
+    This guards against the memory leak fixed in PR #44237: previously the
+    method returned early without calling ``reset_hash`` when
+    ``cached_block_hash_to_block.pop`` returned None, leaving a stale hash on
+    the block that would accumulate over time under prefix caching.
+    """
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    block_hash = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
+
+    owner, collider = pool.blocks[1], pool.blocks[2]
+    # The cache entry for ``block_hash`` is owned by ``owner``.
+    owner.block_hash = block_hash
+    pool.cached_block_hash_to_block.insert(block_hash, owner)
+
+    # ``collider`` carries the same hash but is NOT the block stored in the
+    # cache, so ``pop`` will fail to match it (returns None).
+    collider.block_hash = block_hash
+
+    evicted = pool._maybe_evict_cached_block(collider)
+
+    # Hash is cleared even though nothing was evicted from the cache.
+    assert collider.block_hash is None
+    assert evicted is False
+    # The owner's cache entry must be left intact.
+    assert pool.cached_block_hash_to_block.get_one_block(block_hash) is owner
+
+
+def test_evict_cached_block_normal_path():
+    """When the block is the one stored in the cache, it is evicted and its
+    hash is reset."""
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
+    block_hash = make_block_hash_with_group_id(BlockHash(b"10"), 1000)
+
+    block = pool.blocks[1]
+    block.block_hash = block_hash
+    pool.cached_block_hash_to_block.insert(block_hash, block)
+
+    evicted = pool._maybe_evict_cached_block(block)
+
+    assert block.block_hash is None
+    assert evicted is True
+    # The block is no longer present in the cache.
+    assert pool.cached_block_hash_to_block.get_one_block(block_hash) is None
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16
