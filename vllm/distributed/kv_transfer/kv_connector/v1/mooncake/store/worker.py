@@ -141,7 +141,7 @@ class MooncakeStoreConfig:
         )
 
     @staticmethod
-    def load_from_env() -> "MooncakeStoreConfig":
+    def load_from_config() -> "MooncakeStoreConfig":
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
             raise ValueError(
@@ -983,15 +983,11 @@ class MooncakeStoreWorker:
         )
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
-        store_config = MooncakeStoreConfig.load_from_env()
+        store_config = MooncakeStoreConfig.load_from_config()
         extra_config = (
             vllm_config.kv_transfer_config.kv_connector_extra_config
             if vllm_config.kv_transfer_config
             else {}
-        )
-        store_config.device_name = rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
         )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
