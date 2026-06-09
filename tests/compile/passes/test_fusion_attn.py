@@ -111,7 +111,10 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # Fetch the attention backend and kv cache shape and stride order
         attn_backend = self.attn.attn_backend
         kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size,
+            num_blocks,
+            self.block_size,
+            self.num_kv_heads,
+            self.head_size,
             cache_dtype_str=self.attn.kv_cache_dtype,
         )
         try:

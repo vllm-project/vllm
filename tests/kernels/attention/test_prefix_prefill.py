@@ -214,6 +214,11 @@ def test_contexted_kv_attention(
     v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    # context_attention_fwd expects [num_blocks, num_kv_heads, head_size, block_size]
+    if op is context_attention_fwd:
+        k_cache = k_cache.transpose(2, 3)
+        v_cache = v_cache.transpose(2, 3)
+
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
     op(
@@ -448,6 +453,10 @@ def test_contexted_kv_attention_alibi(
     # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
     v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    if op is context_attention_fwd:
+        k_cache = k_cache.transpose(2, 3)
+        v_cache = v_cache.transpose(2, 3)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
