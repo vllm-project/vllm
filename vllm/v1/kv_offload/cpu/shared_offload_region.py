@@ -4,7 +4,9 @@ import errno
 import mmap
 import os
 import time
+from collections.abc import Callable
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
@@ -29,18 +31,30 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
         time.sleep(0.005)
 
 
-def _populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
-    """Pre-fault writable mmap pages, falling back for older Linux kernels."""
+def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+
+
+def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    arr = np.frombuffer(mmap_obj, dtype=np.uint8)
+    arr[offset : offset + length : mmap.PAGESIZE] = 0
+
+
+def _get_populate_write_fn(
+    mmap_obj: mmap.mmap,
+) -> Callable[[mmap.mmap, int, int], None]:
+    """Select the pre-faulting method once for this mmap."""
     try:
-        mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
-        return
+        mmap_obj.madvise(_MADV_POPULATE_WRITE, 0, mmap.PAGESIZE)
     except OSError as e:
         if e.errno != errno.EINVAL:
             raise
-
-    end = offset + length
-    for page_offset in range(offset, end, mmap.PAGESIZE):
-        mmap_obj[page_offset : page_offset + 1] = b"\0"
+        logger.warning(
+            "MADV_POPULATE_WRITE is not supported; falling back to per-page "
+            "writes for mmap pre-population. Startup may be slower."
+        )
+        return _fallback_populate_write
+    return _madvise_populate_write
 
 
 class SharedOffloadRegion:
@@ -103,6 +117,8 @@ class SharedOffloadRegion:
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
 
+        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+
         if rank is not None:
             # Populate only this worker's pages (one slot per block row).
             worker_offset = rank * cpu_page_size
@@ -113,7 +129,7 @@ class SharedOffloadRegion:
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
                 aligned_length = end - aligned_offset
-                _populate_write(self.mmap_obj, aligned_offset, aligned_length)
+                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
                 num_blocks,
@@ -122,7 +138,7 @@ class SharedOffloadRegion:
         else:
             # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
-            _populate_write(self.mmap_obj, 0, self.total_size_bytes)
+            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )

@@ -412,26 +412,29 @@ def test_madvise_einval_falls_back_for_ranked_region(iid, monkeypatch):
     class EINVALMmap(real_mmap):
 
         madvise_calls = []
-        written_offsets = []
+
+        def __new__(cls, *args, **kwargs):
+            obj = super().__new__(cls, *args, **kwargs)
+            obj[:] = b"\xff" * len(obj)
+            return obj
 
         def madvise(self, *args):
             self.madvise_calls.append(args)
             raise OSError(errno.EINVAL, "Invalid argument")
 
-        def __setitem__(self, key, value):
-            self.written_offsets.append(key.start)
-            super().__setitem__(key, value)
-
     monkeypatch.setattr(mmap, "mmap", EINVALMmap)
 
     with _region(iid, num_blocks=3, num_workers=2, rank=1) as r:
         assert isinstance(r.mmap_obj, EINVALMmap)
-        assert len(EINVALMmap.madvise_calls) == 3
-        assert EINVALMmap.written_offsets == [
+        assert len(EINVALMmap.madvise_calls) == 1
+        touched_offsets = [
             PAGE_SIZE,
             3 * PAGE_SIZE,
             5 * PAGE_SIZE,
         ]
+        assert [r.mmap_obj[offset] for offset in touched_offsets] == [0, 0, 0]
+        assert r.mmap_obj[0] == 0xff
+        assert r.mmap_obj[PAGE_SIZE + 1] == 0xff
 
 
 def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
@@ -441,15 +444,15 @@ def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
     class EINVALMmap(real_mmap):
 
         madvise_calls = []
-        written_offsets = []
+
+        def __new__(cls, *args, **kwargs):
+            obj = super().__new__(cls, *args, **kwargs)
+            obj[:] = b"\xff" * len(obj)
+            return obj
 
         def madvise(self, *args):
             self.madvise_calls.append(args)
             raise OSError(errno.EINVAL, "Invalid argument")
-
-        def __setitem__(self, key, value):
-            self.written_offsets.append(key.start)
-            super().__setitem__(key, value)
 
     monkeypatch.setattr(mmap, "mmap", EINVALMmap)
 
@@ -463,9 +466,11 @@ def test_madvise_einval_falls_back_for_unranked_region(iid, monkeypatch):
     try:
         assert isinstance(region.mmap_obj, EINVALMmap)
         assert len(EINVALMmap.madvise_calls) == 1
-        assert EINVALMmap.written_offsets == [
+        touched_offsets = [
             page * PAGE_SIZE for page in range(6)
         ]
+        assert [region.mmap_obj[offset] for offset in touched_offsets] == [0] * 6
+        assert region.mmap_obj[1] == 0xff
     finally:
         region.cleanup()
         _cleanup_file(region.mmap_path)
