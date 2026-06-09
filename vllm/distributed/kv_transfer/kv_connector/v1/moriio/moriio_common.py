@@ -280,9 +280,15 @@ class MoRIIOConfig:
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        # For per-node port allocation we want the local dp_rank within
+        # the node, not the global one. data_parallel_rank is global, so
+        # fold it back to [0, data_parallel_size_local).
+        dp_rank = (
+            vllm_config.parallel_config.data_parallel_rank
+            % vllm_config.parallel_config.data_parallel_size_local
+        )
         base_notify_port = int(extra_config["notify_port"])
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        dp_size = vllm_config.parallel_config.data_parallel_size_local
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
         backend = str(extra_config.get("backend", "rdma")).lower()
@@ -391,20 +397,28 @@ def parse_moriio_zmq_address(
     return host, handshake_port, notify_port
 
 
-def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str:
+def get_peer_zmq_from_request_id(
+    request_id: str, is_producer: bool
+) -> str | None:
     """Extract the *peer's* zmq_address from the vLLM router request_id.
 
     The producer (prefill) needs the decode's address; the consumer (decode)
     needs the prefill's address.
+
+    Returns ``None`` when the request_id does not encode peer info. The
+    llm-d routing sidecar (``llm-d-inference-scheduler``) does not embed
+    addresses in ``request_id``; instead it passes ``remote_host``,
+    ``remote_handshake_port`` and ``remote_notify_port`` explicitly in
+    ``kv_transfer_params``. Callers must handle the ``None`` return by
+    falling back to those fields. See ``add_new_req`` for the canonical
+    fallback path.
     """
     if is_producer:
         m = _DECODE_ZMQ_RE.search(request_id)
     else:
         m = _PREFILL_ZMQ_RE.search(request_id)
     if m is None:
-        raise ValueError(
-            f"Cannot parse peer zmq_address from request_id: {request_id!r}"
-        )
+        return None
     return m.group(1)
 
 
@@ -422,6 +436,18 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # Wide-EP multi-pod support: list of remote pod IPs to address when
+    # the remote DP fan-out is split across more than one pod. Indexed by
+    # ``remote_global_dp_rank // remote_dp_size_local`` -- i.e.
+    # ranks 0..dp_local-1 live on remote_hosts[0], ranks dp_local..2*dp_local-1
+    # live on remote_hosts[1], and so on. For single-pod deployments the
+    # sidecar may either emit a 1-element list or leave the field empty, in
+    # which case add_new_req falls back to ``[remote_host]`` so behaviour is
+    # bit-identical to the single-pod path.
+    remote_hosts: list[str] = field(default_factory=list)
+    # The remote DP-size-local. When ``remote_dp_size_local == 0`` callers
+    # must treat it as "fall back to remote_dp_size" (single-pod).
+    remote_dp_size_local: int = 0
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -448,21 +474,52 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
-        remote_host = kv_transfer_params.get("remote_host")
-        remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
-        remote_notify_port = kv_transfer_params.get("remote_notify_port")
-        if (
-            remote_host is None
-            or remote_handshake_port is None
-            or remote_notify_port is None
-        ):
-            # Parse host/ports from the request_id. The router embeds both
-            # zmq_addresses in PD request IDs, but WRITE decode requests may carry
-            # a plain request ID and get the remote address via kv_transfer_params.
-            peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
+        # Parse host/ports from the request_id. The vLLM router embeds both
+        # zmq_addresses in the request_id; the llm-d routing sidecar does
+        # not, and instead populates ``remote_host``, ``remote_handshake_port``
+        # and ``remote_notify_port`` directly in ``kv_transfer_params``. Try
+        # the request_id form first for backwards compatibility and fall back
+        # to the explicit fields for sidecar-driven deployments.
+        peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
+        if peer_zmq is not None:
             remote_host, remote_handshake_port, remote_notify_port = (
                 parse_moriio_zmq_address(peer_zmq)
             )
+        else:
+            try:
+                remote_host = kv_transfer_params["remote_host"]
+                remote_handshake_port = int(
+                    kv_transfer_params["remote_handshake_port"]
+                )
+                remote_notify_port = int(kv_transfer_params["remote_notify_port"])
+            except (KeyError, TypeError, ValueError) as e:
+                raise ValueError(
+                    f"request_id {request_id!r} does not embed a peer "
+                    f"zmq_address and kv_transfer_params is missing one or "
+                    f"more sidecar-fallback keys (need remote_host, "
+                    f"remote_handshake_port, remote_notify_port): {e}"
+                ) from e
+            if not remote_host:
+                raise ValueError(
+                    f"request_id {request_id!r} does not embed a peer "
+                    f"zmq_address and kv_transfer_params['remote_host'] is "
+                    f"empty; cannot route MoRI-IO transfer"
+                )
+
+        # Wide-EP multi-pod support: derive the remote_hosts list from
+        # ``kv_transfer_params["remote_hosts"]`` (a list of pod IPs the
+        # router can address) with a fallback to ``[remote_host]`` so the
+        # single-pod path is unchanged. ``remote_dp_size_local`` tells the
+        # consumer how to map a global DP rank back to a pod index.
+        _remote_hosts = kv_transfer_params.get("remote_hosts") or [remote_host]
+        if not isinstance(_remote_hosts, list):
+            _remote_hosts = [str(_remote_hosts)]
+        _remote_dp_size_local = int(
+            kv_transfer_params.get(
+                "remote_dp_size_local",
+                kv_transfer_params.get("remote_dp_size", 1),
+            )
+        )
 
         _req = ReqMeta(
             transfer_id=transfer_id,
@@ -475,6 +532,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_notify_port=int(remote_notify_port),
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_hosts=[str(h) for h in _remote_hosts],
+            remote_dp_size_local=_remote_dp_size_local,
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
