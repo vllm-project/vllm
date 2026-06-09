@@ -126,6 +126,13 @@ class LoRAModel:
         skip_prefixes: list[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
+        if peft_helper.use_dora:
+            raise NotImplementedError(
+                "DoRA adapter loading is not implemented yet. "
+                "DoRA config validation and magnitude vector name parsing are "
+                "supported, but DoRA weight storage is still pending."
+            )
+
         pin_memory = str(device) == "cpu" and PIN_MEMORY
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
@@ -134,7 +141,7 @@ class LoRAModel:
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
                 continue
-            module_name, is_lora_a = parse_fine_tuned_lora_name(
+            module_name, weight_type = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
             if module_name not in loras:
@@ -142,7 +149,13 @@ class LoRAModel:
                     module_name, peft_helper
                 )
 
-            if is_lora_a:
+            if weight_type == "dora_magnitude":
+                raise NotImplementedError(
+                    "DoRA magnitude vector parsing is recognized, but DoRA "
+                    "weight storage is not implemented yet."
+                )
+
+            if weight_type == "lora_a":
                 if (
                     "lora_embedding_A" in tensor_name
                     and model_vocab_size is not None

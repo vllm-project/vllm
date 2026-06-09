@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+LoRAWeightType = Literal["lora_a", "lora_b", "dora_magnitude"]
 
 
 def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
@@ -154,7 +156,7 @@ def replace_submodule(
 
 def parse_fine_tuned_lora_name(
     name: str, weights_mapper: "WeightsMapper | None" = None
-) -> tuple[str, bool]:
+) -> tuple[str, LoRAWeightType]:
     """Parse the name of lora weights.
 
     args:
@@ -162,10 +164,10 @@ def parse_fine_tuned_lora_name(
             base_model.model.dense1.weight
         weights_mapper: maps the name of weight, e.g.
             `model.` -> `language_model.model.`,
-    return:
-        tuple(module_name, is_lora_a):
+    Returns:
+        tuple(module_name, weight_type):
             module_name: the name of the module, e.g. model.dense1,
-            is_lora_a whether the tensor is lora_a or lora_b.
+            weight_type: the kind of adapter tensor.
     """
 
     # LoRA weight qualified name usually starts with `base_model.model.`,
@@ -198,11 +200,15 @@ def parse_fine_tuned_lora_name(
         and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
     ):
         new_name = ".".join(parts[start_index:-2])
-        return new_name, parts[-2] == "lora_A"
+        return new_name, "lora_a" if parts[-2] == "lora_A" else "lora_b"
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
-        return new_name, parts[-1] == "lora_embedding_A"
+        return new_name, "lora_a" if parts[-1] == "lora_embedding_A" else "lora_b"
+
+    if parts[-1] == "lora_magnitude_vector":
+        new_name = ".".join(parts[start_index:-1])
+        return new_name, "dora_magnitude"
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

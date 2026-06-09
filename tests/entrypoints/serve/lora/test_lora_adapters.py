@@ -22,7 +22,7 @@ BADREQUEST_CASES = [
         {"r": 1024},
         "is greater than max_lora_rank",
     ),
-    ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
+    ("test_dora", {"use_dora": True}, "DoRA adapter loading is not implemented yet"),
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
