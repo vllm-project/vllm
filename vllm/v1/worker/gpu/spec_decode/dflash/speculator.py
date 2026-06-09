@@ -18,7 +18,10 @@ from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
+    get_dflash_causal,
+    load_dflash_model,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 
@@ -43,6 +46,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
         )
+
+        self.dflash_causal = get_dflash_causal(self.draft_model_config)
 
         # Buffers for context K/V precomputation. Populated by prepare_dflash_inputs,
         # and processed by the model's precompute_and_store_context_kv method.
@@ -86,6 +91,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
+            causal=self.dflash_causal,
         )
 
     def capture(self, attn_states: dict | None = None) -> None:
@@ -340,6 +346,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,
+            causal=self.dflash_causal,
         )
         draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
             self.block_tables.slot_mappings[:, :num_tokens_padded],

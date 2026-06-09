@@ -29,6 +29,7 @@ def _prepare_dflash_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     skip_attn: bool,
+    causal: bool,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -53,14 +54,18 @@ def _prepare_dflash_inputs_to_capture(
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             for_cudagraph_capture=True,
-            causal=False,
+            causal=causal,
         )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
 class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
-    building its own non-causal attention metadata from scratch."""
+    building its own attention metadata from scratch."""
+
+    def __init__(self, *args, causal: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.causal = causal
 
     def capture(
         self,
@@ -92,6 +97,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 max_model_len,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
+                causal=self.causal,
             )
             attn_metadata, slot_mappings = attn_state
 

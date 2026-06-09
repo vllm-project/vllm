@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
+
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
+
+
+def get_dflash_causal(draft_model_config: ModelConfig) -> bool:
+    """Whether the DFlash draft uses causal (vs non-causal) attention."""
+    dflash_config = getattr(draft_model_config.hf_config, "dflash_config", None) or {}
+    return dflash_config.get("causal", False)
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -14,9 +22,18 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+    # Modify the attention config so that we select an attention backend that matches
+    # the causal/non-causal mode of the dflash model.
+    causal = get_dflash_causal(draft_model_config)
+    draft_vllm_config = replace(
+        vllm_config,
+        attention_config=replace(
+            vllm_config.attention_config, use_non_causal=not causal
+        ),
+    )
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
-            vllm_config=vllm_config, model_config=draft_model_config
+            vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
     target_language_model = (
