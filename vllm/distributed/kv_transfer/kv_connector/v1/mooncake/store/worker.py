@@ -507,7 +507,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
     def _handle_request(self, req_meta: ReqMeta):
-        # Cache hits are always a multiple of ``lcm_block_size`` tokens
+        # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
+        # is also ``store_mask``'s precondition.
         lcm_block_size = self.coord.lcm_block_size
         token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
         block_ids_per_group = req_meta.block_ids
@@ -550,7 +551,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     starts.append(start)
                     ends.append(end)
                     keys.append(key.to_string())
-                    block_hashes.append(req_meta.block_hashes[chunk_idx])
+                    block_hashes.append(BlockHash(bytes.fromhex(key.chunk_hash)))
                     group_indices.append(g_idx)
 
             # Apply put_step striding for TP
@@ -627,10 +628,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         block_hashes=[new_block_hashes[idx]],
                         parent_block_hash=prev_key_per_group.get(g_idx),
                         token_ids=token_ids,
-                        block_size=req_meta.original_block_size,
+                        block_size=db.block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
+                        group_idx=g_idx,
                     )
                     stored_events.append(stored_event)
                     prev_key_per_group[g_idx] = new_block_hashes[idx]
@@ -947,7 +949,6 @@ class MooncakeStoreWorker:
             "load_async", True
         )
         self.cache_config = vllm_config.cache_config
-        self.original_block_size = self.cache_config.block_size
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )

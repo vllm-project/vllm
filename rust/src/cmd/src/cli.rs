@@ -16,6 +16,7 @@ use educe::Educe;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
@@ -84,6 +85,7 @@ pub enum Command {
 }
 
 /// Runtime arguments shared by the external-engine and managed-engine paths.
+#[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
@@ -178,6 +180,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// If provided, the server will require one of these keys to be presented
+    /// in the Authorization header.
+    #[educe(Debug(ignore))]
+    #[arg(long, env = "VLLM_API_KEY", value_delimiter = ' ')]
+    #[serde_as(as = "DefaultOnNull<OneOrMany<_>>")]
+    #[serde(default)]
+    pub api_key: Vec<String>,
+
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage).
     #[arg(long)]
@@ -213,6 +223,15 @@ impl SharedRuntimeArgs {
     /// Maximum time to wait for active requests to drain during shutdown.
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout)
+    }
+
+    /// Apply fallback logic for API key configuration from env variables.
+    fn apply_env_api_key_fallback(&mut self) {
+        if self.api_key.is_empty()
+            && let Ok(api_key) = std::env::var("VLLM_API_KEY")
+        {
+            self.api_key.push(api_key);
+        }
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -253,6 +272,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
+            api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -295,6 +315,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
+            api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -311,8 +332,11 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let args: SharedRuntimeArgs = serde_json::from_str(value)
+    let mut args: SharedRuntimeArgs = serde_json::from_str(value)
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    // --args-json is parsed with serde, so clap's env support does not run for
+    // the Python-supervised frontend path.
+    args.apply_env_api_key_fallback();
     args.unsupported.check()?;
     Ok(args)
 }
