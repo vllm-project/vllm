@@ -118,9 +118,9 @@ ENV CARGO_BUILD_JOBS=4
 # Build the release binary. Cache cargo registry/git and target/, but copy the
 # binary out of the target/ cache mount so it persists into the image layer
 # for later COPY --from=rust-build.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,target=/workspace/rust/target,sharing=locked \
     VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
 
 ######################### BUILD IMAGE #########################

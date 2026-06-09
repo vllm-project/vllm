@@ -991,6 +991,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             )
             cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
+        # and FA3 vit attention requires cu_seqlens on CUDA.
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
