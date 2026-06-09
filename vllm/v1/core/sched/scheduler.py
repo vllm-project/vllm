@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -103,7 +104,7 @@ class Scheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
-            if self.scheduler_config.max_num_scheduled_tokens
+            if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -285,6 +286,10 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # In-flight requests still prefilling (prefill chunks + in-progress
+        # async KV loads). Their remaining-block reservation gates async loads.
+        self._inflight_prefills: set[Request] = set()
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -292,9 +297,6 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -715,7 +717,8 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                # Skip block alignment when setting up async receive (no local work).
+                if self.need_mamba_block_aligned_split and not load_kv_async:
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
@@ -747,6 +750,14 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
+                reserved_blocks = 0
+                if load_kv_async:
+                    # An async load holds its blocks for the whole transfer with
+                    # no forward progress and isn't preemptible here. Admit it
+                    # only if it fits in (free - other in-flight reservations), to
+                    # avoid deadlock and predictable preemptions.
+                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -757,6 +768,7 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    reserved_blocks=reserved_blocks,
                 )
 
                 if new_blocks is None:
@@ -808,6 +820,7 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    self._inflight_prefills.add(request)
                     continue
 
                 self.running.append(request)
@@ -831,6 +844,9 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                # Only track requests that will still be prefilling after this chunk.
+                if num_computed_tokens + num_new_tokens < request.num_tokens:
+                    self._inflight_prefills.add(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -966,6 +982,7 @@ class Scheduler(SchedulerInterface):
         )
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
+        self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
@@ -997,6 +1014,9 @@ class Scheduler(SchedulerInterface):
             scheduler_output.has_structured_output_requests |= (
                 request.use_structured_output and not request.is_prefill_chunk
             )
+            # Drop from the in-flight-prefill set once it's no longer prefilling.
+            if not request.is_prefill_chunk:
+                self._inflight_prefills.discard(request)
 
         # Snapshot block IDs for routed experts before forward starts.
         # A concurrent schedule() may preempt requests and free blocks
@@ -1163,21 +1183,22 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
-        for i, mm_feature in enumerate(mm_features):
+
+        lo, hi = get_mm_features_in_window(
+            mm_features,
+            start=num_computed_tokens,
+            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
+        )
+        # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
+        if self.is_encoder_decoder:
+            lo = 0
+
+        for i in range(lo, hi):
+            mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
-
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
-            if (
-                start_pos
-                >= num_computed_tokens + num_new_tokens + shift_computed_tokens
-            ):
-                # The encoder input is not needed in this step.
-                break
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
                 assert start_pos == 0, (
@@ -1193,10 +1214,6 @@ class Scheduler(SchedulerInterface):
                 # inputs before running the decoder.  Once we've calculated some
                 # decoder tokens (num_computed_tokens > 0), then we know we
                 # already calculated encoder inputs and can skip here.
-                continue
-            elif start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
                 continue
 
             if not self.is_encoder_decoder:
@@ -1873,6 +1890,7 @@ class Scheduler(SchedulerInterface):
     ) -> dict[str, Any] | None:
         assert request.is_finished()
 
+        self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -2060,12 +2078,16 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
+
+        logger.debug_once("[shutdown] Scheduler: complete")
 
     ########################################################################
     # KV Connector Related Methods
@@ -2104,6 +2126,30 @@ class Scheduler(SchedulerInterface):
             return self.connector.request_finished(request, block_ids[0])
 
         return self.connector.request_finished_all_groups(request, block_ids)
+
+    def _request_remaining_blocks(self, request: Request) -> int:
+        """Blocks `request` still needs to allocate to hold its full sequence."""
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=full_num_tokens,
+            new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+            num_encoder_tokens=0,
+            total_computed_tokens=request.num_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+            apply_admission_cap=True,
+        )
+
+    def _inflight_prefill_reserved_blocks(self) -> int:
+        """Blocks in-flight prefills still need to finish (their reservation).
+
+        Sums remaining full-ISL blocks over `self._inflight_prefills` (running
+        prefills + in-progress async loads). The candidate async load isn't yet
+        in the set, so it's naturally excluded.
+        """
+        return sum(
+            self._request_remaining_blocks(req) for req in self._inflight_prefills
+        )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
         """
