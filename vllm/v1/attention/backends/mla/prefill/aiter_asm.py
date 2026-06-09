@@ -368,11 +368,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
         qo_indptr = prefill_metadata.query_start_loc  # device int32 [bs+1]
         device = qo_indptr.device
-        # DEBUG: temporarily reverted to direct DtoH copy to rule out a
-        # stale-CPU-mirror cause of the noncausal kernel's GPU memory access
-        # fault. Re-enable the CPU-mirror path once confirmed not the bug:
-        #   qo_indptr_cpu = prefill_metadata.query_start_loc_cpu.to(torch.int32)
-        qo_indptr_cpu = qo_indptr.to("cpu", dtype=torch.int32)
+        # Use the CPU mirror the metadata builder already populated; avoids
+        # one DtoH copy + host sync per layer per forward (~30x with DSV3).
+        qo_indptr_cpu = prefill_metadata.query_start_loc_cpu.to(torch.int32)
         q_seq_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(torch.int32)
         total_q = int(qo_indptr_cpu[-1].item())
 
@@ -536,12 +534,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         assert self._prefill_metadata.chunked_context is not None
         cc = self._prefill_metadata.chunked_context
 
-        # DEBUG: temporarily reverted to direct DtoH copy to rule out a
-        # stale-CPU-mirror cause of the noncausal kernel's GPU memory access
-        # fault. Re-enable the CPU-mirror path once confirmed not the bug:
-        #   kv_indptr_cpu = cc.cu_seq_lens_cpu[chunk_idx].to(torch.int32)
+        # Use the CPU mirror surfaced by the metadata builder; avoids one
+        # DtoH copy + host sync per layer per chunk.
         kv_indptr = cc.cu_seq_lens[chunk_idx]
-        kv_indptr_cpu = kv_indptr.to("cpu", dtype=torch.int32)
+        kv_indptr_cpu = cc.cu_seq_lens_cpu[chunk_idx].to(torch.int32)
         k_seq_lens_cpu = (kv_indptr_cpu[1:] - kv_indptr_cpu[:-1]).to(torch.int32)
         total_k = int(kv_indptr_cpu[-1].item())
 
