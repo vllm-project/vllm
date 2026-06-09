@@ -27,35 +27,28 @@ import math
 import pytest
 import torch
 
-from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-try:
-    import vllm._C  # noqa: F401
-
-    _VLLM_C_AVAILABLE = True
-except ModuleNotFoundError:
-    _VLLM_C_AVAILABLE = False
+# --- Helpers ------------------------------------------------------------------
 
 _NEEDS_ROCM_AITER = pytest.mark.skipif(
-    not (current_platform.is_rocm() and IS_AITER_FOUND and _VLLM_C_AVAILABLE),
-    reason="Requires ROCm platform with AITER installed and compiled vllm._C",
+    not (current_platform.is_rocm() and is_aiter_found_and_supported()),
+    reason="Requires ROCm platform with AITER installed",
 )
 
 _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
     not (
         current_platform.is_rocm()
-        and IS_AITER_FOUND
-        and _VLLM_C_AVAILABLE
+        and is_aiter_found_and_supported()
         and rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant()
     ),
     reason="Requires aiter.ops.triton.fused_mxfp4_quant (fused_rms_mxfp4_quant)",
 )
 
 
-# ─── UNIT TESTS: feature probes ───────────────────────────────────────────────
+# --- UNIT TESTS: feature probes
 
 
 def test_unit_probe_rmsnorm_mxfp4_returns_bool():
@@ -67,13 +60,19 @@ def test_unit_probe_rmsnorm_mxfp4_returns_bool():
 
 
 def test_unit_probe_rmsnorm_false_without_aiter():
-    """Without AITER the rmsnorm probe must return False (not raise)."""
-    if IS_AITER_FOUND:
+    """Probe must return False (not raise) when AITER is absent.
+
+    Guards against a regression where the try/except in has_fused_rmsnorm_mxfp4_quant()
+    is changed to a bare attribute access that would raise ImportError or
+    AttributeError instead of returning False, breaking callers that rely on
+    the bool contract for conditional dispatch.
+    """
+    if is_aiter_found_and_supported():
         pytest.skip("AITER is present — probe may return True or False")
     assert rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant() is False
 
 
-# ─── UNIT TESTS: get_*_op staticmethods ──────────────────────────────────────
+# --- UNIT TESTS: get_*_op staticmethods
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -97,10 +96,10 @@ def test_unit_get_ops_exist():
         assert op is not None, f"{name}() returned None"
 
 
-# ─── UNIT TESTS: VllmPatternReplacement subclass structure ───────────────────
+# --- UNIT TESTS: VllmPatternReplacement subclass structure
 
 
-# ─── UNIT TESTS: DeepSeek-R1 shape traces ────────────────────────────────────
+# --- UNIT TESTS: DeepSeek-R1 shape traces
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -128,13 +127,13 @@ def test_unit_deepseek_shape_no_residual(epsilon):
     )
 
 
-# ─── UNIT TESTS: model helper guard ─────────────────────────────────────────
-# _AiterRMSNormMXFP4QuantModel uses torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant
-# which is registered by vllm._C.  The _NEEDS_MXFP4_STANDALONE marker on every
-# test that instantiates it ensures _VLLM_C_AVAILABLE is True before the op is
-# accessed, so the class can safely live at module scope.
+# --- UNIT TESTS: model helper guard
+# _AiterRMSNormMXFP4QuantModel uses torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant.
+# The _NEEDS_MXFP4_STANDALONE marker on every test that instantiates it ensures
+# AITER is available before the op is accessed, so the class can safely live at
+# module scope.
 
-# ─── UNIT TESTS: registration ordering in RocmAiterRMSNormQuantFusionPass ────
+# --- UNIT TESTS: registration ordering in RocmAiterRMSNormQuantFusionPass
 
 
 @_NEEDS_ROCM_AITER
@@ -214,7 +213,7 @@ def test_unit_uuid_changes_with_mxfp4(monkeypatch):
     )
 
 
-# ─── FUNCTIONAL TESTS: numerical correctness ─────────────────────────────────
+# --- FUNCTIONAL TESTS: numerical correctness
 
 
 class _RMSNormMXFP4Model(torch.nn.Module):
@@ -355,9 +354,11 @@ def test_functional_residual_update_correct(num_tokens, eps):
     )
 
     expected_residual = x + residual
-    # BF16 accumulation: allow small numeric error
+    # BF16 addition: max error is bounded by 1 BF16 ULP of the result.
+    # BF16 epsilon = 2^-7 ≈ 7.8e-3; for |val| ≤ 3 (3σ of randn), bound ≈ 2.3e-2.
+    # Using 5e-3 is tighter than 1 BF16 ULP and catches any precision regression.
     diff = (residual_out.float() - expected_residual.float()).abs().max().item()
-    assert diff < 1e-2, f"residual_out = x + residual_in failed: max diff={diff:.4e}"
+    assert diff < 5e-3, f"residual_out = x + residual_in failed: max diff={diff:.4e}"
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -406,7 +407,7 @@ def test_functional_scale_numerically_correct(eps):
     )
 
 
-# ─── FUNCTIONAL TESTS: graph-level fusion (pattern matcher fires) ─────────────
+# --- FUNCTIONAL TESTS: graph-level fusion (pattern matcher fires)
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -445,7 +446,7 @@ def test_functional_pattern_fires_no_residual(
     with vllm.config.set_current_vllm_config(vllm_config):
         torch.set_default_device("cuda")
         torch.set_default_dtype(torch.bfloat16)
-        torch.manual_seed(42)
+        set_random_seed(42)
 
         model = _RMSNormMXFP4Model(hidden_size=hidden_size, eps=eps).cuda()
 
@@ -502,7 +503,7 @@ def test_functional_pattern_fires_with_residual(
     with vllm.config.set_current_vllm_config(vllm_config):
         torch.set_default_device("cuda")
         torch.set_default_dtype(torch.bfloat16)
-        torch.manual_seed(42)
+        set_random_seed(42)
 
         model = _FusedAddRMSNormMXFP4Model(hidden_size=hidden_size, eps=eps).cuda()
 
@@ -571,7 +572,7 @@ def test_functional_fused_matches_unfused_output(
     )
 
 
-# ─── UNIT TESTS: both patterns fire on a symbolic FX graph ───────────────────
+# --- UNIT TESTS: both patterns fire on a symbolic FX graph
 
 
 class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
@@ -647,7 +648,7 @@ def test_mxfp4_patterns_fire_on_model(monkeypatch):
     with vllm.config.set_current_vllm_config(vllm_config):
         torch.set_default_device("cuda")
         torch.set_default_dtype(torch.bfloat16)
-        torch.manual_seed(42)
+        set_random_seed(42)
 
         model = _AiterRMSNormMXFP4QuantModel(
             hidden_size=hidden_size, eps=eps
