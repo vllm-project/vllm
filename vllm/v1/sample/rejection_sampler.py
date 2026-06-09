@@ -921,8 +921,14 @@ def sample_recovered_tokens_kernel(
             other=0.0,
         )
 
-        # Local tile reduction
+        # Local tile reduction. Mask padding (``vocab_offset >= vocab_size``,
+        # score ``0.0`` via ``other=0.0``) to ``-inf``. Otherwise, with all-NaN
+        # ``target_probs`` those zeros win the NaN-propagating ``tl.max`` and
+        # yield an out-of-vocab ``recovered_id == vocab_size``. Masking keeps
+        # ``recovered_id`` at its in-vocab init (0); healthy runs are unaffected
+        # since real scores are ``>= 0 > -inf``.
         score = prob * inv_q
+        score = tl.where(vocab_mask, score, -float("inf"))
         local_max, local_id = tl.max(score, axis=0, return_indices=True)
 
         if local_max > max_val:
