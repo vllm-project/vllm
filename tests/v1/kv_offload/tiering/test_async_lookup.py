@@ -5,8 +5,6 @@
 import time
 from collections.abc import Iterable
 
-import pytest
-
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 
@@ -156,7 +154,3 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager()
         mgr.shutdown()
         assert not mgr._thread.is_alive()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
