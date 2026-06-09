@@ -402,6 +402,33 @@ def _filter_by_activation(
     return bf16 if bf16 else backends
 
 
+def _disable_cudagraph_for_aiter_mxfp4_mxfp4(backend: Mxfp4MoeBackend) -> None:
+    """Force eager execution for the ROCm AITER MXFP4xMXFP4 (W4A4) MoE backend.
+
+    The AITER MXFP4xMXFP4 CK MoE kernel manages its own internal workspace and
+    is not CUDA/HIP-graph safe: under graph capture it reads stale/uninitialized
+    memory, producing non-deterministic, corrupted decode output (repeated or
+    garbage tokens). Disabling CUDA/HIP graphs for this backend avoids the
+    corruption until the kernel is fixed upstream in AITER.
+
+    Args:
+        backend: The MXFP4 MoE backend that was selected.
+    """
+    if backend != Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return
+    from vllm.config.compilation import CUDAGraphMode
+
+    compilation_config = get_current_vllm_config().compilation_config
+    if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        logger.warning_once(
+            "Disabling CUDA/HIP graphs (cudagraph_mode=NONE) for the ROCm "
+            "AITER MXFP4xMXFP4 MoE backend: the AITER CK kernel is not "
+            "graph-safe and produces non-deterministic, corrupted decode "
+            "output under graph capture."
+        )
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
@@ -448,13 +475,15 @@ def select_mxfp4_moe_backend(
                 else _backend_activation_key(requested_backend)
             )
             try:
-                return _return_or_raise(
+                backend, k_cls = _return_or_raise(
                     requested_backend,
                     config,
                     kMxfp4Static,
                     act_key,
                     activation_format,
                 )
+                _disable_cudagraph_for_aiter_mxfp4_mxfp4(backend)
+                return backend, k_cls
             except ValueError as e:
                 last_error = e
         assert last_error is not None
@@ -546,6 +575,7 @@ def select_mxfp4_moe_backend(
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
+                _disable_cudagraph_for_aiter_mxfp4_mxfp4(backend)
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason))
