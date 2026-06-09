@@ -1049,10 +1049,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
-        req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-        num_active_loras = get_num_active_loras_for_dispatch(
-            self.lora_config, self.lora_state, req_ids, dummy_run
-        )
+        num_active_loras = 0
+        if self.lora_config:
+            num_active_loras = get_num_active_loras_for_dispatch(
+                self.lora_config, self.lora_state, req_ids, dummy_run
+            )
 
         skip_compiled = False
         if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
