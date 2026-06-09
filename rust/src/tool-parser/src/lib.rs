@@ -6,6 +6,7 @@ mod deepseek_dsml;
 mod deepseek_json;
 mod gemma4;
 mod glm_xml;
+mod hy_v3;
 mod json;
 mod kimi_k2;
 mod minimax_m2;
@@ -22,7 +23,11 @@ pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use gemma4::Gemma4ToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub use json::{HermesToolParser, Llama3JsonToolParser, MistralToolParser, Qwen3XmlToolParser};
+pub use hy_v3::HyV3ToolParser;
+pub use json::{
+    HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser, MistralToolParser,
+    Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+};
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;

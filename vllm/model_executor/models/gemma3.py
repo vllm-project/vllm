@@ -386,17 +386,6 @@ class Gemma3Model(nn.Module):
             ):
                 loaded_weight -= 1
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             # Check if this is a scale parameter that needs remapping first
             if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 # Try to remap the scale name first
