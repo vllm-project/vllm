@@ -1171,11 +1171,13 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # For dual-purpose HMA regions, block_len_per_layer stores the
-            # KDA/SSM stride; FA descriptors must use the attention spec's
-            # stride so they address MLA data correctly.  MLA stride is
-            # TP-independent (num_kv_heads=1), so skip block_size_ratio.
-            attn_stride = self._attn_block_len.get(i)
+            # For dual-purpose HMA regions with MLA (num_kv_heads=1, stride
+            # is TP-independent), use the attention spec's stride instead of
+            # block_len_per_layer (which stores KDA/SSM stride).
+            # For standard attention (e.g. Qwen GQA), stride is TP-dependent,
+            # so we must fall through to the original path that correctly
+            # applies block_size_ratio for heterogeneous TP.
+            attn_stride = self._attn_block_len.get(i) if self.use_mla else None
             if attn_stride is not None:
                 if self.transfer_topo.virtually_split_kv_in_blocks:
                     kv_block_len = attn_stride // 2
@@ -1232,34 +1234,20 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # For dual-purpose HMA regions, use the attention spec's stride
-            # instead of block_len_per_layer (which stores KDA's stride).
-            attn_stride = self._attn_block_len.get(i)
+            # For dual-purpose HMA regions with MLA (stride is TP-independent),
+            # use the attention spec's stride.  For standard attention (Qwen GQA),
+            # stride is TP-dependent so fall through to the original path that
+            # applies block_size_ratio correctly for heterogeneous TP.
+            attn_stride = self._attn_block_len.get(i) if self.use_mla else None
             if attn_stride is not None:
-                if self.use_mla:
-                    # MLA stride is TP-independent (num_kv_heads=1),
-                    # so local attn_stride equals remote's MLA stride.
-                    if self.transfer_topo.virtually_split_kv_in_blocks:
-                        local_block_len = attn_stride // 2
-                    else:
-                        local_block_len = attn_stride
-                    remote_kv_block_len = local_block_len
-                    page_size = attn_stride
+                # MLA stride is TP-independent (num_kv_heads=1),
+                # so local attn_stride equals remote's MLA stride.
+                if self.transfer_topo.virtually_split_kv_in_blocks:
+                    local_block_len = attn_stride // 2
                 else:
-                    # Standard attention stride is TP-dependent
-                    # (num_kv_heads scales with TP).  Use remote's
-                    # block_len for stepping through remote memory.
-                    # Do NOT apply block_size_ratio to descriptor SIZE —
-                    # the split handle mechanism (fa_num_splits) already
-                    # reduces sizes for heterogeneous TP.  Applying
-                    # block_size_ratio here would double-reduce and cause
-                    # local/remote size mismatches at makeXferReq.
-                    if self.transfer_topo.virtually_split_kv_in_blocks:
-                        local_block_len = attn_stride // 2
-                    else:
-                        local_block_len = attn_stride
-                    remote_kv_block_len = local_block_len
-                    page_size = nixl_agent_meta.block_lens[i]
+                    local_block_len = attn_stride
+                remote_kv_block_len = local_block_len
+                page_size = attn_stride
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
@@ -1282,14 +1270,8 @@ class NixlConnectorWorker:
             if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
                 if attn_stride is not None:
-                    if self.use_mla:
-                        second_split = attn_stride // 2
-                        v_stride = attn_stride
-                    else:
-                        # Standard attention: V size and stride must
-                        # match remote's physical page layout.
-                        second_split = local_block_len
-                        v_stride = page_size
+                    second_split = attn_stride // 2
+                    v_stride = attn_stride
                 else:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=False
@@ -1456,7 +1438,8 @@ class NixlConnectorWorker:
         # block_size_ratio and once by num_attn_reads), producing remote
         # descriptors that are half the size of local split descriptors.
         if (
-            self._attn_block_len  # Only for dual-purpose HMA regions
+            self.use_mla  # Only for MLA where stride is TP-independent
+            and self._attn_block_len  # Only for dual-purpose HMA regions
             and self.block_len_per_layer
             and nixl_agent_meta.block_lens
             and self.block_len_per_layer[0] != nixl_agent_meta.block_lens[0]
