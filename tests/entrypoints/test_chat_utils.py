@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -2088,6 +2089,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
         )
 
 
+@pytest.mark.skip_global_cleanup
 def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
     messages = [
         {
@@ -2140,13 +2142,34 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
             "role": "assistant",
             "content": [
                 {"type": "text", "text": "Let me think about it."},
-                {"type": "text", "text": "2+2 = 4"},
                 {"type": "text", "text": "The answer is 4."},
             ],
+            "reasoning": "2+2 = 4",
+            "reasoning_content": "2+2 = 4",
         },
     ]
 
     assert conversation_with_thinking == expected_conversation
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_chat_messages_rejects_duplicate_assistant_reasoning(
+    mistral_model_config,
+):
+    messages = [
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "from content"}],
+            "reasoning": "from reasoning",
+        }
+    ]
+
+    with pytest.raises(VLLMValidationError, match="both top-level `reasoning`"):
+        parse_chat_messages(
+            messages,
+            mistral_model_config,
+            content_format="string",
+        )
 
 
 def test_parse_chat_messages_single_empty_audio_with_uuid(

@@ -1735,6 +1735,23 @@ def _parse_chat_message_content_part(
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
+def _extract_assistant_thinking_parts(
+    parts: list[ChatCompletionContentPartParam],
+) -> tuple[list[ChatCompletionContentPartParam], str | None]:
+    visible_parts: list[ChatCompletionContentPartParam] = []
+    reasoning_parts: list[str] = []
+
+    for part in parts:
+        if isinstance(part, dict) and part.get("type") == "thinking":
+            thinking = part.get("thinking")
+            if thinking is not None:
+                reasoning_parts.append(cast(str, thinking))
+            continue
+        visible_parts.append(part)
+
+    return visible_parts, "".join(reasoning_parts) or None
+
+
 # No need to validate using Pydantic again
 _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
@@ -1755,6 +1772,20 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+
+    if role == "assistant":
+        content, reasoning_from_content = _extract_assistant_thinking_parts(content)
+        if reasoning is not None and reasoning_from_content is not None:
+            raise VLLMValidationError(
+                "Assistant messages must not contain both top-level "
+                "`reasoning` and content parts of type `thinking`. Please "
+                "use only one representation for assistant reasoning.",
+                parameter="messages",
+                value=message,
+            )
+        if reasoning_from_content is not None:
+            reasoning = reasoning_from_content
+
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
