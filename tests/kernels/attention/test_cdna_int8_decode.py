@@ -97,5 +97,14 @@ def test_cdna_int8_decode_matches_reference(
     ref_k = (k_q.to(torch.float32) * k_sc.unsqueeze(-1)).to(dtype)
     ref_v = (v_q.to(torch.float32) * v_sc.unsqueeze(-1)).to(dtype)
     ref = _ref_attention_decode(q_fp, ref_k, ref_v, sm_scale)
+    # Tolerance rationale: the KV cache is symmetric INT8-quantized with
+    # scale = amax / 127, so the worst-case rounding error is scale / 2 and
+    # the per-element RMS relative quant error is
+    # (scale / sqrt(12)) / signal_rms ≈ sqrt(3) / (127 * sqrt(12)) ≈ 0.4%.
+    # Averaging over the head_size-wide Q·K / P·V dot products decorrelates
+    # these errors, while fp16 / MFMA accumulation and the softmax set the
+    # floor, leaving an end-to-end output error of ~1%. rtol = atol = 2e-2
+    # is ~2x that headroom (confirmed across the swept shapes): tight enough
+    # to catch a real regression, loose enough to avoid quant-noise flakes.
     torch.testing.assert_close(out.to(torch.float32), ref, rtol=2e-2,
                                atol=2e-2)

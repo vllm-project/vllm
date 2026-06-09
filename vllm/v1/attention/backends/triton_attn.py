@@ -39,6 +39,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
+from vllm.v1.attention.ops.cdna_pth_attn import maybe_dispatch_cdna_pth
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -451,116 +452,6 @@ class TritonAttentionImpl(AttentionImpl):
         )
         self._v_scale_cache.fill_(1.0)
 
-    _cdna_dispatch_logged: ClassVar[set[str]] = set()
-
-    def _maybe_dispatch_cdna_pth(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output: torch.Tensor,
-        attn_metadata,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        k_scale_cache: torch.Tensor | None,
-        v_scale_cache: torch.Tensor | None,
-    ) -> bool:
-        """If conditions are met, run the CDNA HIP per-token-head attention
-        kernel and return True. Otherwise return False so the caller falls
-        through to the Triton path.
-
-        Opt-in via ``VLLM_USE_CDNA_PTH_ATTN=1``. Only engages on MI3xx with
-        kv_cache_dtype == int8_per_token_head or int4_per_token_head, no
-        alibi / sliding-window / sinks / softcap, and head_size in {64, 128}.
-        """
-        import os as _os
-        if _os.environ.get("VLLM_USE_CDNA_PTH_ATTN") != "1":
-            return False
-        if not current_platform.is_rocm():
-            return False
-        try:
-            from vllm.platforms.rocm import on_mi3xx
-        except ImportError:
-            return False
-        if not on_mi3xx():
-            return False
-        if self.kv_cache_dtype not in (
-            "int8_per_token_head",
-            "int4_per_token_head",
-        ):
-            return False
-        if (
-            self.alibi_slopes is not None
-            or self.sliding_window != (-1, -1)
-            or self.sinks is not None
-            or (self.logits_soft_cap is not None
-                and self.logits_soft_cap > 0)
-        ):
-            return False
-        head_size = query.shape[-1]
-        if head_size not in (64, 128):
-            return False
-        if k_scale_cache is None or v_scale_cache is None:
-            return False
-
-        is_int4 = (self.kv_cache_dtype == "int4_per_token_head")
-        op = (torch.ops._C.paged_prefill_attn_cdna_int4
-              if is_int4
-              else torch.ops._C.paged_prefill_attn_cdna_int8) \
-            if hasattr(torch.ops._C, "paged_prefill_attn_cdna_int4"
-                       if is_int4
-                       else "paged_prefill_attn_cdna_int8") else None
-        if op is None:
-            return False
-
-        # Mixed prefill+decode batches fall through (the HIP kernel handles
-        # one (q_len, ctx_len) regime per CTA; the unified-batch split lives
-        # in a later phase). For now, only engage when every sequence in
-        # the batch is prefill OR every sequence is decode of length 1.
-        cu = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
-        # Compute per-seq query length on-device but avoid a host sync: if
-        # max_query_len > 1 we assume all-prefill; otherwise all-decode.
-        if attn_metadata.max_query_len <= 1:
-            tag = f"decode-{'int4' if is_int4 else 'int8'}-hs{head_size}"
-            if tag not in TritonAttentionImpl._cdna_dispatch_logged:
-                TritonAttentionImpl._cdna_dispatch_logged.add(tag)
-                logger.info("[CDNA-PTH] dispatching %s kernel", tag)
-            # All-decode: use the decode kernel.
-            decode_op = (
-                torch.ops._C.pth_decode_int4_cdna if is_int4
-                else torch.ops._C.pth_decode_int8_cdna)
-            decode_op(
-                output.view(-1, query.shape[-2], head_size),
-                query.view(-1, query.shape[-2], head_size),
-                key_cache, value_cache, k_scale_cache, v_scale_cache,
-                attn_metadata.block_table, seq_lens, self.scale,
-            )
-            return True
-
-        tag = f"prefill-{'int4' if is_int4 else 'int8'}-hs{head_size}"
-        if tag not in TritonAttentionImpl._cdna_dispatch_logged:
-            TritonAttentionImpl._cdna_dispatch_logged.add(tag)
-            logger.info("[CDNA-PTH] dispatching %s kernel", tag)
-        # All-prefill (possibly with continuation context).
-        op(
-            output,            # [num_tokens, num_heads, head_size]
-            query,             # [num_tokens, num_heads, head_size]
-            key,               # [num_tokens, num_kv_heads, head_size] (chunk)
-            value,             # [num_tokens, num_kv_heads, head_size] (chunk)
-            key_cache,
-            value_cache,
-            k_scale_cache,
-            v_scale_cache,
-            attn_metadata.block_table,
-            cu,
-            seq_lens,
-            attn_metadata.max_query_len,
-            float(self.scale),
-            True,              # causal
-        )
-        return True
-
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -746,13 +637,13 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        # ----- CDNA HIP per-token-head dispatch (MI300, opt-in) -----------
-        # When VLLM_USE_CDNA_PTH_ATTN=1 and we're on gfx942/950 with one of
-        # the per-token-head INT8/INT4 dtypes, route to the native HIP
-        # kernels. Mixed-batch (prefill + decode) requests fall through to
-        # the Triton path for now; a unified scheduler split lives in a
-        # later phase of the port.
-        if self._maybe_dispatch_cdna_pth(
+        # ----- CDNA HIP per-token-head dispatch (MI300) -------------------
+        # On gfx942/950 with a per-token-head INT8/INT4 KV cache, route to
+        # the native HIP kernels. The dispatcher self-gates on platform,
+        # dtype and request shape; mixed-batch (prefill + decode) requests
+        # fall through to the Triton path (a later phase of the port).
+        if maybe_dispatch_cdna_pth(
+            kv_cache_dtype=self.kv_cache_dtype,
             query=query[:num_actual_tokens],
             key=key[:num_actual_tokens],
             value=value[:num_actual_tokens],
@@ -762,6 +653,11 @@ class TritonAttentionImpl(AttentionImpl):
             value_cache=value_cache,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            scale=self.scale,
+            alibi_slopes=self.alibi_slopes,
+            sliding_window=self.sliding_window,
+            sinks=self.sinks,
+            logits_soft_cap=self.logits_soft_cap,
         ):
             return output
 

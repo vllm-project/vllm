@@ -6,8 +6,8 @@ Targets AMD CDNA (gfx942 / gfx950 / gfx90a). The compiled extension is
 registered as ``torch.ops._C.paged_prefill_attn_cdna_int8`` when vLLM is
 built with one of those architectures in ``PYTORCH_ROCM_ARCH``.
 
-Phase 1 of the port from JartX's RDNA3 branch — see
-``CDNA_INT8_INT4_PORT_PLAN.md`` at the repo root for the full plan.
+Ported from the RDNA3 ``int8_per_token_head`` HIP kernels. Dispatch is
+handled in :mod:`vllm.v1.attention.ops.cdna_pth_attn`.
 """
 
 from __future__ import annotations

@@ -174,5 +174,12 @@ def test_cdna_int4_prefill_matches_reference(
         ref_k = k_chunk_fp
         ref_v = v_chunk_fp
     ref = _ref_attention(q_fp, ref_k, ref_v, sm_scale, causal=True)
+    # Tolerance rationale: the KV cache is INT4-quantized (4-bit, 16 levels)
+    # vs INT8's 256, so the quant step — and hence the per-element RMS
+    # relative quant error — is ~16x larger (~6-7% per element). Averaging
+    # over the head_size-wide Q·K / P·V dot products pulls the aggregate
+    # output error down to ~2%, with fp16 / MFMA accumulation and the softmax
+    # as the floor. rtol = atol = 4e-2 (2x the INT8 tolerance) gives ~2x
+    # margin over the observed error, confirmed across the swept shapes.
     torch.testing.assert_close(out.to(torch.float32), ref, rtol=4e-2,
                                atol=4e-2)
