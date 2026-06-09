@@ -19,7 +19,6 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables, _compute_slot_mappings_kernel
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     prepare_prefill_inputs,
 )
@@ -380,31 +379,18 @@ class PEagleSpeculator(EagleSpeculator):
         first_sample_positions = self.peagle_positions[last_token_indices]
         idx_mapping = self.idx_mapping[:num_reqs]
 
-        steps = torch.arange(N, device=self.device)
-        all_sample_indices = (
-            last_token_indices.unsqueeze(1) + steps.unsqueeze(0)
-        ).reshape(-1)  # [B*N]
-        all_logits = self.model.compute_logits(
-            last_hidden_states[all_sample_indices]
-        )  # [B*N, vocab]
-
-        if self.draft_logits is None:
-            self.draft_tokens[:num_reqs] = all_logits.argmax(dim=-1).view(num_reqs, N)
-        else:
-            all_logits_view = all_logits.view(num_reqs, N, -1)
-            for step in range(N):
-                self.current_draft_step.fill_(step)
-                self.draft_tokens[:num_reqs, step] = gumbel_sample(
-                    all_logits_view[:, step, :].contiguous(),
-                    idx_mapping,
-                    self.temperature,
-                    self.seeds,
-                    first_sample_positions + step + 1,
-                    apply_temperature=True,
-                    output_processed_logits=self.draft_logits,
-                    output_processed_logits_col=self.current_draft_step,
-                    use_fp64=self.use_fp64_gumbel,
-                )
+        for step in range(N):
+            self.current_draft_step.fill_(step)
+            sample_hidden_states = last_hidden_states[last_token_indices + step]
+            self.draft_tokens[:num_reqs, step] = self.sample_draft(
+                sample_hidden_states,
+                first_sample_positions + step,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
 
     def _build_peagle_attn_metadata(
         self,
