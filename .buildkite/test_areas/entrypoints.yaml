@@ -34,7 +34,7 @@ steps:
 
 - label: Entrypoints Integration (API Server)
   device: h200_35gb
-  key: entrypoints-integration-api-server-2
+  key: entrypoints-integration-api-server
   timeout_in_minutes: 130
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
