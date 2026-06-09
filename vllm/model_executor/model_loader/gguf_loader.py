@@ -310,8 +310,10 @@ class GGUFModelLoader(BaseModelLoader):
                     # is not found, try adding back the 'vision_model.' nesting layer.
                     gguf_name = vision_name_map.get_name(
                         re.sub(
-                            r"^(vision_tower\.)(?!vision_model\.)(.*)$",
-                            r"\1vision_model.\2",
+                            # Pattern exhaustively matches everything that precedes
+                            # `vision_model.` in gguf.tensor_mapping.TensorNameMap
+                            r"^((model|siglip2|vision_tower)\.)(?!vision_model\.)(.*)$",
+                            r"\1vision_model.\3",
                             base_name,
                         )
                     )
