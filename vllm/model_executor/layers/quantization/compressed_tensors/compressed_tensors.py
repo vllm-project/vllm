@@ -210,7 +210,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
         return None
 
-    def _add_fused_moe_to_target_scheme_map(self):
+    def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
@@ -219,10 +219,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         if (
             "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
+            or "RoutedExperts" in self.target_scheme_map
         ):
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
