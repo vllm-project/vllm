@@ -1109,7 +1109,10 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
     import cutlass
     import cutlass.cute as cute
     from cutlass import Int32  # type: ignore[attr-defined]
-    from flash_attn.cute.utils import scalar_to_ssa  # type: ignore[import-untyped]
+
+    from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
+        scalar_to_ssa,
+    )
 
     @cute.jit
     def mm_prefix_mask_mod(
