@@ -31,9 +31,8 @@ def _is_bailing_hybrid_model(vllm_config: VllmConfig) -> bool:
     hf_config = vllm_config.model_config.hf_config
     model_type = getattr(hf_config, "model_type", "")
     architectures = set(getattr(hf_config, "architectures", []) or [])
-    return (
-        model_type in _BAILING_HYBRID_MODEL_TYPES
-        or not architectures.isdisjoint(_BAILING_HYBRID_ARCHITECTURES)
+    return model_type in _BAILING_HYBRID_MODEL_TYPES or not architectures.isdisjoint(
+        _BAILING_HYBRID_ARCHITECTURES
     )
 
 
