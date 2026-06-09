@@ -170,6 +170,76 @@ fn frontend_args_json_passes_enable_request_id_headers_into_config() {
 }
 
 #[test]
+fn serve_passes_api_keys_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--api-key",
+        "secret-a",
+        "--api-key",
+        "secret-b",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.api_keys, vec!["secret-a", "secret-b"]);
+    let debug = format!("{config:#?}");
+    assert!(debug.contains("api_keys: [<redacted>; 2]"));
+    assert!(!debug.contains("secret-a"));
+    assert!(!debug.contains("secret-b"));
+}
+
+#[test]
+fn frontend_args_json_accepts_api_key_string() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":"secret"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.api_keys, vec!["secret"]);
+}
+
+#[test]
+fn frontend_args_json_accepts_api_key_list() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":["secret-a","secret-b"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.api_keys, vec!["secret-a", "secret-b"]);
+}
+
+#[test]
 fn serve_args_reject_unknown_renderer_value() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -446,20 +516,21 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"ssl_keyfile":"/tmp/key.pem"}"#,
     ])
     .unwrap_err();
 
+    let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"ssl_keyfile":"/tmp/key.pem"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - allow_credentials
-        - api_key
+        - ssl_keyfile
 
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]].assert_eq(&actual);
 }
 
 #[test]
@@ -793,6 +864,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             enable_request_id_headers: false,
+            api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -857,6 +929,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             enable_request_id_headers: false,
+            api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -936,6 +1009,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template_content_format: Auto,
             enable_log_requests: false,
             enable_request_id_headers: false,
+            api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
