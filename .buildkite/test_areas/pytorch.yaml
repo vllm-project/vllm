@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: PyTorch Compilation Unit Tests
+  device: h200_35gb
   key: pytorch-compilation-unit-tests
   timeout_in_minutes: 10
   source_file_dependencies:

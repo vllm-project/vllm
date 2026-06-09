@@ -236,6 +236,10 @@ def _construct_message_from_response_item(
     return item  # type: ignore[arg-type]
 
 
+def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
+    return frozenset(tool.name for tool in tools if tool.type == "function")
+
+
 def extract_tool_types(tools: list[Tool]) -> set[str]:
     """
     Extracts the tool types from the given tools.

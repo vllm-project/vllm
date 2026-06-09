@@ -56,6 +56,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
+    assert len(scheduler._inflight_prefills) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -102,7 +103,8 @@ def create_vllm_config(
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
-    kv_role: str = "kv_both",
+    kv_connector_module_path: str | None = None,
+    kv_role: str = "kv_consumer",
     disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
@@ -130,6 +132,7 @@ def create_vllm_config(
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},

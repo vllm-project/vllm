@@ -34,6 +34,7 @@ WINDOW_ATTN_IMAGE_PROMPT = qwen2_5_vl_chat_template(
     IMAGE_PLACEHOLDER,
     "Describe the image.",
 )
+IMAGE_ONLY_LIMIT_MM_PER_PROMPT = {"image": 1, "video": 0}
 
 
 def _window_attention_regression_image():
@@ -193,7 +194,7 @@ def test_qwen2_5_vl_window_attention_image(
         runner="generate",
         max_model_len=4096,
         dtype=dtype,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt=IMAGE_ONLY_LIMIT_MM_PER_PROMPT,
         compilation_config=_encoder_cudagraph_config(max_vision_items=1),
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompt, max_tokens, images=images)
@@ -231,7 +232,7 @@ def test_qwen2_5_vl_window_attention_image_batch(
         max_model_len=4096,
         max_num_seqs=2,
         dtype=dtype,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt=IMAGE_ONLY_LIMIT_MM_PER_PROMPT,
         compilation_config=_encoder_cudagraph_config(max_vision_items=2),
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)

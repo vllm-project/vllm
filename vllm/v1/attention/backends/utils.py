@@ -878,8 +878,10 @@ def mamba_get_block_table_tensor(
     Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size));
-               output (#requests, cdiv(max_model_len, block_size)).
+    - "all":   input  (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks);
+               output (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks).
 
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).
