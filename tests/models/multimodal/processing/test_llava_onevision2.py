@@ -24,6 +24,7 @@ import pytest
 from vllm.model_executor.models.llava_onevision2 import (
     _CODEC_VIDEO_MARKER,
     _extract_codec_video_paths,
+    _extract_video_paths,
     _validate_video_source,
     prepare_codec_video_input,
 )
@@ -167,3 +168,40 @@ def test_validate_data_url_allowed():
 def test_validate_unsupported_scheme_blocked():
     with pytest.raises(ValueError):
         _validate_video_source("ftp://example.com/v.mp4", _model_config())
+
+
+# ---------------------------------------------------------------------------
+# Validation engages for *all* path-based backends, including native.
+#
+# _call_hf_processor validates the result of _extract_video_paths before the
+# backend dispatch, so the gate fires whenever a raw path reaches the frame OR
+# native backend. These tests pin the precondition: string payloads are
+# extracted to paths (so _validate_video_sources runs), while pre-decoded
+# inputs return None (validation correctly skipped). This guards against
+# silently disabling native-backend validation, which would re-open the
+# video_backend="native" SSRF / local-file-read bypass.
+# ---------------------------------------------------------------------------
+
+
+def test_extract_video_paths_returns_paths_for_string_payloads():
+    # Single, flat-list, and nested-list path payloads must all yield the raw
+    # path strings that _validate_video_sources then checks.
+    assert _extract_video_paths("/x/solo.mp4") == ["/x/solo.mp4"]
+    assert _extract_video_paths(["/x/1.mp4", "/x/2.mp4"]) == [
+        "/x/1.mp4",
+        "/x/2.mp4",
+    ]
+    assert _extract_video_paths([["/x/1.mp4"], ["/x/2.mp4"]]) == [
+        "/x/1.mp4",
+        "/x/2.mp4",
+    ]
+
+
+def test_extract_video_paths_returns_none_for_predecoded_inputs():
+    # Pre-decoded frames (ndarray / list of ndarray) carry no path, so
+    # validation is skipped (nothing to fetch from a URL/filesystem).
+    plain = np.zeros((4, 8, 8, 3), dtype=np.uint8)
+    assert _extract_video_paths(plain) is None
+    assert _extract_video_paths([plain, plain]) is None
+    assert _extract_video_paths(None) is None
+    assert _extract_video_paths([]) is None
