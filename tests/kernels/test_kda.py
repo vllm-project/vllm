@@ -16,8 +16,9 @@ from vllm.model_executor.layers.fla.ops.kda import (
     fused_kda_gate,
 )
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
+from vllm.platforms import current_platform
 
-DEVICE = "cuda"
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 
 def naive_recurrent_kda(
