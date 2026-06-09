@@ -583,8 +583,13 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
-    worker._is_ssm_region = []
-    worker._is_attn_region = []
+    # Derive _is_ssm_region from group_spec_types: one entry per
+    # unique base-address region.  With _cross_layers_blocks each group
+    # maps to one region, so we use a simple per-group flag.
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    worker._is_ssm_region = [issubclass(t, MambaSpec) for t in group_spec_types]
+    worker._is_attn_region = [not s for s in worker._is_ssm_region]
     worker._attn_block_len = {}
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
