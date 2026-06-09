@@ -2,11 +2,11 @@ use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
-/// Reasoning parser for the Qwen3/Qwen3.5 family.
+/// Reasoning parser for Qwen3 style outputs.
 ///
-/// This parser uses standard `<think>...</think>` delimiters and defaults to
-/// waiting for an explicit start token when prompt initialization finds no
-/// reasoning boundary.
+/// Qwen3 uses the standard `<think>` / `</think>` delimiters. The parser
+/// starts in content mode (i.e., not inside a reasoning block) unless the
+/// prompt token IDs indicate that a `<think>` token has already been seen.
 pub struct Qwen3ReasoningParser {
     inner: DelimitedReasoningParser,
 }
