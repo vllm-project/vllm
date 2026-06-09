@@ -44,6 +44,9 @@ profiles:
     when: server.type == "vllm" && matches(gpu.name, "gb200")
     args:
       attention-backend: "FLASHINFER"
+      # GB200 C4 FP8 TTFT regressed v0.19→v0.21 with auto VLLM_CUTLASS MoE;
+      # try Triton backend (same as H100) to bisect modular_kernel/CUTLASS path.
+      moe-backend: "triton"
     env:
       VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE: "true"
 
