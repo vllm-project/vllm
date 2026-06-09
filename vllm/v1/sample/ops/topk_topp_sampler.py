@@ -4,7 +4,6 @@
 
 import torch
 import torch.nn as nn
-from packaging import version
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -19,17 +18,16 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-_FLASHINFER_MIN_VERSION = "0.2.3"
-
-
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
-    unsupported, or when the installed flashinfer is missing or too old. Raises
-    ``RuntimeError`` if the user explicitly opted in via the env var but
-    FlashInfer is unavailable.
+    unsupported. Raises ``RuntimeError`` if the user explicitly opted in
+    via the env var but FlashInfer is unavailable.
+
+    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
+    otherwise importing the FlashInfer backend below raises ``ImportError``.
 
     Note: callers must additionally ensure ``logprobs_mode`` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
@@ -52,19 +50,6 @@ def flashinfer_sampler_supported() -> bool:
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
-    else:
-        try:
-            import flashinfer
-
-            if version.parse(flashinfer.__version__) < version.parse(
-                _FLASHINFER_MIN_VERSION
-            ):
-                unsupported_reason = (
-                    f"flashinfer {flashinfer.__version__} is too old "
-                    f"(>={_FLASHINFER_MIN_VERSION} required)"
-                )
-        except ImportError:
-            unsupported_reason = "flashinfer is not installed"
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
@@ -90,9 +75,14 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
+    def __init__(
+        self,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        use_fp64_gumbel: bool = False,
+    ) -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
+        self.use_fp64_gumbel = use_fp64_gumbel
         if current_platform.is_cuda():
             # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
             # so it can't be used when the configured mode requires them.
@@ -157,7 +147,10 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators), logits_to_return
+        return (
+            random_sample(probs, generators, self.use_fp64_gumbel),
+            logits_to_return,
+        )
 
     def forward_cuda(
         self,
@@ -177,6 +170,8 @@ class TopKTopPSampler(nn.Module):
                     "per-request generators. Falling back to "
                     "PyTorch-native implementation."
                 )
+            return self.forward_native(logits, generators, k, p)
+        if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
             "FlashInfer does not support returning logits/logprobs"
@@ -205,16 +200,16 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0]:
+        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        q = torch.empty_like(probs)
+        q = empty_exponential_noise_like(probs, self.use_fp64_gumbel)
         q.exponential_()
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
 
-        return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
+        return sample_with_exponential_noise(probs, q), logits_to_return
 
     def forward_hip(
         self,
@@ -230,6 +225,8 @@ class TopKTopPSampler(nn.Module):
                     "aiter sampler does not support per-request generators; "
                     "falling back to PyTorch-native."
                 )
+            return self.forward_native(logits, generators, k, p)
+        if self.use_fp64_gumbel:
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
             "processed_logits",
@@ -419,16 +416,33 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
 
 
+def empty_exponential_noise_like(
+    probs: torch.Tensor, use_fp64_gumbel: bool
+) -> torch.Tensor:
+    dtype = torch.float64 if use_fp64_gumbel else probs.dtype
+    return torch.empty(probs.shape, dtype=dtype, device=probs.device)
+
+
+def sample_with_exponential_noise(probs: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    if q.dtype == probs.dtype:
+        scores = probs.div_(q)
+    else:
+        scores = q.reciprocal_()
+        scores.mul_(probs)
+    return scores.argmax(dim=-1).view(-1)
+
+
 def random_sample(
     probs: torch.Tensor,
     generators: dict[int, torch.Generator],
+    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     """Randomly sample from the probabilities.
 
     We use this function instead of torch.multinomial because torch.multinomial
     causes CPU-GPU synchronization.
     """
-    q = torch.empty_like(probs)
+    q = empty_exponential_noise_like(probs, use_fp64_gumbel)
     # NOTE(woosuk): To batch-process the requests without their own seeds,
     # which is the common case, we first assume that every request does
     # not have its own seed. Then, we overwrite the values for the requests
@@ -440,7 +454,7 @@ def random_sample(
         # one by one. Optimize this.
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
-    return probs.div_(q).argmax(dim=-1).view(-1)
+    return sample_with_exponential_noise(probs, q)
 
 
 def flashinfer_sample(

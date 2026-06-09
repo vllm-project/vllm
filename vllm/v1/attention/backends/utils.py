@@ -136,32 +136,6 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
-def get_num_attention_heads_from_layers(
-    vllm_config: VllmConfig, layer_names: list[str]
-) -> int | None:
-    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
-
-    Use in metadata builders whose plan-time allocations depend on the
-    head count: the model-wide ``get_num_attention_heads()`` is wrong
-    for models with non-uniform per-layer head counts. All layers in
-    one attention group must agree on ``num_heads``; this is asserted.
-    Returns ``None`` when no matching Attention layer is found.
-    """
-    attn_layers = get_layers_from_vllm_config(
-        vllm_config,
-        AttentionLayerBase,  # type: ignore[type-abstract]
-        layer_names,
-    )
-    if not attn_layers:
-        return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
-    assert len(heads) == 1, (
-        f"All layers in one attention group must share num_heads; "
-        f"got {heads} for {layer_names}."
-    )
-    return heads.pop()
-
-
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
@@ -484,14 +458,15 @@ def split_decodes_prefills_and_extends(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
+
+    if max_query_len <= decode_threshold:
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
     # Upper bound is exact for prefill rows; decode rows still satisfy
     # seq_len > query_len under the optimistic bound, so `seq_lens ==
     # query_lens` identifies prefills correctly either way.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
     seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
-
-    if max_query_len <= decode_threshold:
-        return num_reqs, 0, 0, num_tokens, 0, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_prefill_or_extend = query_lens > decode_threshold
