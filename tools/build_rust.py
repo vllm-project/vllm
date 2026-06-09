@@ -15,7 +15,7 @@ from setuptools_rust import Binding, RustExtension
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-def rust_extensions(*, optional: bool) -> list[RustExtension]:
+def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
     return [
         RustExtension(
             target="vllm.vllm-rs",
@@ -36,9 +36,9 @@ def rust_extensions(*, optional: bool) -> list[RustExtension]:
     ]
 
 
-def rust_py_extension_module_names(extensions: list[RustExtension]) -> list[str]:
+def rust_py_extension_module_names() -> list[str]:
     module_names = []
-    for extension in extensions:
+    for extension in rust_extensions():
         if extension.binding != Binding.PyO3:
             continue
 

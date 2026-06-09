@@ -72,15 +72,10 @@ def build_invoke(
     params: Sequence[tuple[str, str, bool]],
 ) -> str:
     param_text = "\n".join(
-        f'{PARAM_START}{name}" string="{str(is_string).lower()}">'
-        f"{value}{PARAM_END}"
+        f'{PARAM_START}{name}" string="{str(is_string).lower()}">{value}{PARAM_END}'
         for name, value, is_string in params
     )
-    return (
-        f'{INV_START}{function_name}">\n'
-        f"{param_text}\n"
-        f"{INV_END}\n"
-    )
+    return f'{INV_START}{function_name}">\n{param_text}\n{INV_END}\n'
 
 
 def build_tool_call() -> str:
