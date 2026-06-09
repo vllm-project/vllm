@@ -11,7 +11,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -289,6 +289,14 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+        vllm_config = get_current_vllm_config()
+        self.isa = _get_attn_isa(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.block_size,
+            self.head_size,
+            self.kv_cache_dtype,
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -395,16 +403,13 @@ class CPUAttentionBackendImpl(AttentionImpl):
         num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
-        isa = _get_attn_isa(
-            key.dtype, key_cache.shape[2], self.head_size, self.kv_cache_dtype
-        )
         ops.cpu_attn_reshape_and_cache(
             key,
             value,
             key_cache,
             value_cache,
             slot_mapping,
-            isa,
+            self.isa,
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             kv_cache_dtype=self.kv_cache_dtype,
