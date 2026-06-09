@@ -25,7 +25,6 @@ from __future__ import annotations
 import hashlib
 import importlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
 from typing import (
     Annotated,
     Any,
@@ -53,10 +52,10 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -99,11 +98,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.v1.attention.backends.registry import (
-    AttentionBackendEnum as _Backend,
-)
 
 logger = init_logger(__name__)
 
@@ -111,6 +106,11 @@ try:
     from qwen_vl_utils import fetch_video as _qwen_fetch_video  # type: ignore
 except ImportError:  # pragma: no cover
     _qwen_fetch_video = None
+
+# Upper bound on frames used when profiling the worst-case video item, mirroring
+# Qwen2-VL. The real frame count is decided by the HF VideoProcessor at apply
+# time; this only sizes the memory-profiling estimate.
+_MAX_FRAMES_PER_VIDEO = 14
 
 
 class LlavaOnevision2Processor(ProcessorMixin):
@@ -411,10 +411,11 @@ def _fetch_frames_with_timestamps(
     Byte-identical to ``vllm_hf_chat._process_video_with_timestamp``.
     Returns ``(pil_frames, timestamps_seconds)``.
     """
-    assert _qwen_fetch_video is not None, (
-        "qwen_vl_utils is required for the frame backend. "
-        "Install via `pip install qwen-vl-utils`."
-    )
+    if _qwen_fetch_video is None:
+        raise ImportError(
+            "qwen_vl_utils is required for the frame backend. "
+            "Install via `pip install qwen-vl-utils`."
+        )
 
     video_request = {
         "type": "video",
@@ -668,21 +669,21 @@ class LlavaOnevision2VisionMLP(nn.Module):
         super().__init__()
         if quant_config is not None:
             raise RuntimeError("LLaVAOneVision2 does not support quantization")
-        mlp_up = ReplicatedLinear if use_data_parallel else ColumnParallelLinear
-        mlp_down = ReplicatedLinear if use_data_parallel else RowParallelLinear
-        self.fc1 = mlp_up(
+        self.fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
-        self.fc2 = mlp_down(
+        self.fc2 = RowParallelLinear(
             hidden_features,
             in_features,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
         self.act_fn = F.gelu
 
@@ -724,80 +725,31 @@ class LlavaOnevision2VisionAttn(nn.Module):
         self.hidden_size_per_attn_head = dist_utils.divide(projection_size, num_heads)
         self.num_attn_heads_per_partition = dist_utils.divide(num_heads, self.tp_size)
 
-        if use_data_parallel:
-            self.qkv = ReplicatedLinear(
-                embed_dim,
-                self.hidden_size_per_attn_head * 3 * num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv",
-            )
-        else:
-            self.qkv = QKVParallelLinear(
-                hidden_size=embed_dim,
-                head_size=self.hidden_size_per_attn_head,
-                total_num_heads=num_heads,
-                total_num_kv_heads=num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv",
-            )
+        self.qkv = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.hidden_size_per_attn_head,
+            total_num_heads=num_heads,
+            total_num_kv_heads=num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
+            disable_tp=use_data_parallel,
+        )
 
-        _proj = ReplicatedLinear if use_data_parallel else RowParallelLinear
-        self.proj = _proj(
+        self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
+            disable_tp=use_data_parallel,
         )
 
-        _be = get_vit_attn_backend(
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attn_heads_per_partition,
             head_size=self.hidden_size_per_attn_head,
-            dtype=torch.get_default_dtype(),
+            scale=self.hidden_size_per_attn_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
-        if _be == _Backend.FLASH_ATTN:
-            try:
-                import flash_attn  # noqa: F401
-            except ImportError:
-                _be = _Backend.TORCH_SDPA
-        if _be not in {_Backend.FLASH_ATTN, _Backend.TORCH_SDPA}:
-            raise RuntimeError(f"LLaVAOneVision2 does not support {_be} backend")
-        self.attn_backend: _Backend = _be
-        self.is_flash_attn_backend = _be == _Backend.FLASH_ATTN
-
-    def _all_gather_tensor(
-        self, local_tensor: torch.Tensor, hidden_size: int, tp_size: int
-    ) -> torch.Tensor:
-        import torch.distributed as dist
-
-        gathered = [torch.zeros_like(local_tensor) for _ in range(tp_size)]
-        dist.all_gather(
-            gathered, local_tensor, group=parallel_state.get_tp_group().device_group
-        )
-        split = [torch.split(t, hidden_size // tp_size, -1) for t in gathered]
-        ordered = [t for pair in zip(*split) for t in pair]
-        return torch.cat(ordered, dim=-1)
-
-    def _split_qkv(self, qkv: torch.Tensor):
-        seq_len, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = self._all_gather_tensor(qkv, self.qkv.hidden_size, self.tp_size)
-        qkv = qkv.reshape(qkv.shape[0], 1, -1)
-        q, k, v = qkv.chunk(3, dim=2)
-        if self.tp_size > 1:
-            splitter = partial(
-                dist_utils.split_tensor_along_last_dim, num_partitions=self.tp_size
-            )
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-            v = splitter(v)[self.tp_rank]
-        shape = (
-            seq_len,
-            self.num_attn_heads_per_partition,
-            self.hidden_size_per_attn_head,
-        )
-        q, k, v = (x.view(*shape) for x in (q, k, v))
-        return q, k, v
 
     @staticmethod
     def _rotate_half_interleaved(x: torch.Tensor) -> torch.Tensor:
@@ -829,53 +781,52 @@ class LlavaOnevision2VisionAttn(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: int | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x, _ = self.qkv(x)
-        q, k, v = self._split_qkv(x)
-        seq_len = q.shape[0]
+        seq_len = x.shape[0]
+        # QKVParallelLinear packs q/k/v along the last dim as
+        # [q_heads, k_heads, v_heads]; view splits the three sections, each
+        # holding this partition's heads (no all-gather: MMEncoderAttention
+        # runs per-partition and ``proj`` reduces across TP ranks).
+        qkv = x.view(
+            seq_len,
+            3,
+            self.num_attn_heads_per_partition,
+            self.hidden_size_per_attn_head,
+        )
+        q, k, v = qkv.unbind(1)
 
         if rotary_pos_emb is not None:
+            # OV2 uses interleaved RoPE on the raw freqs, applied outside
+            # MMEncoderAttention (which is rotary-agnostic).
             q = self._apply_rotary_pos_embed(q, rotary_pos_emb)
             k = self._apply_rotary_pos_embed(k, rotary_pos_emb)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from flash_attn import flash_attn_varlen_func
-
-            output = flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-            )
-            output = output.reshape(seq_len, -1)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            # Block-diagonal True-keep mask from cu_seqlens windows.
-            attn_mask = torch.zeros(
-                [1, seq_len, seq_len], device=q.device, dtype=torch.bool
-            )
-            for i in range(1, len(cu_seqlens)):
-                lo, hi = int(cu_seqlens[i - 1]), int(cu_seqlens[i])
-                attn_mask[..., lo:hi, lo:hi] = True
-            q = q.transpose(0, 1)
-            k = k.transpose(0, 1)
-            v = v.transpose(0, 1)
-            output = F.scaled_dot_product_attention(
-                q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0), attn_mask, dropout_p=0.0
-            )
-            output = output.squeeze(0).transpose(0, 1).reshape(seq_len, -1)
-        else:
-            raise RuntimeError(f"LLaVAOneVision2 does not support {self.attn_backend}")
+        # Add a leading batch dim (b=1) for MMEncoderAttention, which expects
+        # (batch, seq_len, num_heads, head_size) and windows via cu_seqlens.
+        output = self.attn(
+            query=q.unsqueeze(0),
+            key=k.unsqueeze(0),
+            value=v.unsqueeze(0),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
+        output = output.reshape(seq_len, -1)
 
         output, _ = self.proj(output)
         return output
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"x": 0, "cu_seqlens": 0, "rotary_pos_emb": 0},
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+        "sequence_lengths": 0,
+    },
     enable_if=should_torch_compile_mm_encoder,
     is_encoder=True,
 )
@@ -915,13 +866,15 @@ class LlavaOnevision2VisionTowerBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: int | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.self_attn(
             self.layer_norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         x = x + self.mlp(self.layer_norm2(x))
         return x
@@ -941,24 +894,24 @@ class LlavaOnevision2PatchMerger(nn.Module):
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = nn.LayerNorm(context_dim, eps=norm_eps)
-        cls_fc1 = ReplicatedLinear if use_data_parallel else ColumnParallelLinear
-        cls_fc2 = ReplicatedLinear if use_data_parallel else RowParallelLinear
         self.mlp = nn.ModuleList(
             [
-                cls_fc1(
+                ColumnParallelLinear(
                     self.hidden_size,
                     self.hidden_size,
                     bias=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp.0",
+                    disable_tp=use_data_parallel,
                 ),
                 nn.GELU(),
-                cls_fc2(
+                RowParallelLinear(
                     self.hidden_size,
                     d_model,
                     bias=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp.2",
+                    disable_tp=use_data_parallel,
                 ),
             ]
         )
@@ -1026,6 +979,11 @@ class LlavaOnevision2VisionTower(nn.Module):
         self.embed_dim = embed_dim
         self.head_dim = embed_dim // num_heads
         self.use_data_parallel = use_data_parallel
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
 
         self.embeddings = LlavaOnevision2VisionEmbeddings(
             patch_size=patch_size, in_channels=in_channels, embed_dim=embed_dim
@@ -1062,15 +1020,12 @@ class LlavaOnevision2VisionTower(nn.Module):
             use_data_parallel=use_data_parallel,
         )
 
-        _be = get_vit_attn_backend(
+        # Vision attention backend; mirrors the one MMEncoderAttention picks
+        # internally so the cu_seqlens / max_seqlen metadata computed below
+        # matches the kernel actually used.
+        self.attn_backend = get_vit_attn_backend(
             head_size=self.head_dim, dtype=torch.get_default_dtype()
         )
-        if _be == _Backend.FLASH_ATTN:
-            try:
-                import flash_attn  # noqa: F401
-            except ImportError:
-                _be = _Backend.TORCH_SDPA
-        self.attn_backend: _Backend = _be
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1080,18 +1035,17 @@ class LlavaOnevision2VisionTower(nn.Module):
     def device(self) -> torch.device:
         return self.embeddings.patch_embedding.weight.device
 
-    def _build_window_cu_seqlens(
-        self, grid_thw: torch.Tensor
-    ) -> tuple[torch.Tensor, int]:
+    def _build_window_cu_seqlens(self, grid_thw: torch.Tensor) -> np.ndarray:
         """Build cu_seqlens that chunk each sample's T-axis into windows of
         ``frame_windows_size`` frames.
 
-        Result ``cu`` is int32 with shape [num_windows+1] — the canonical
-        prefix-sum format expected by both SDPA and flash_attn paths.
+        Returns an int32 ``np.ndarray`` of shape [num_windows+1] (the
+        canonical prefix-sum format). Backend-specific transforms are applied
+        afterwards via ``MMEncoderAttention.maybe_recompute_cu_seqlens``.
         """
         win = self.frame_windows_size
         chunk_lengths: list[int] = []
-        for row in grid_thw:
+        for row in grid_thw.tolist():
             t, h, w = int(row[0]), int(row[1]), int(row[2])
             per_frame = h * w
             t_remaining = t
@@ -1099,12 +1053,13 @@ class LlavaOnevision2VisionTower(nn.Module):
                 this_t = min(win, t_remaining)
                 chunk_lengths.append(this_t * per_frame)
                 t_remaining -= this_t
-        cu = torch.tensor(
-            [0] + chunk_lengths, device=grid_thw.device, dtype=torch.int32
-        ).cumsum(0)
-        cu = cu.to(torch.int32)
-        max_window_len = max(chunk_lengths) if chunk_lengths else 0
-        return cu, max_window_len
+        cu = np.concatenate(
+            [
+                np.zeros(1, dtype=np.int32),
+                np.array(chunk_lengths, dtype=np.int32).cumsum(dtype=np.int32),
+            ]
+        )
+        return cu
 
     def forward(
         self,
@@ -1120,9 +1075,23 @@ class LlavaOnevision2VisionTower(nn.Module):
             patch_positions.to(self.device)
         )
 
-        cu_seqlens, max_seqlen = self._build_window_cu_seqlens(grid_thw.to(self.device))
-        if self.attn_backend != _Backend.FLASH_ATTN:
-            max_seqlen = None
+        # Build window cu_seqlens, then derive backend-specific attention
+        # metadata (passthrough for FA/SDPA; transformed for FlashInfer).
+        cu_seqlens_np = self._build_window_cu_seqlens(grid_thw)
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens_np, self.device
+        )
+        max_seqlen = torch.tensor(
+            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens_np),
+            dtype=torch.int32,
+        )
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens_np,
+            self.embed_dim,
+            self.tp_size,
+            self.device,
+        )
 
         for blk in self.encoder.layers:
             x = blk(
@@ -1130,6 +1099,7 @@ class LlavaOnevision2VisionTower(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
 
         return self.merger(x, patch_positions=patch_positions)
@@ -1161,7 +1131,10 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len, mm_counts),
+        }
 
     def _get_vision_info(
         self,
@@ -1229,6 +1202,62 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         w, h = self.get_image_size_with_most_features()
         return self.get_num_image_tokens(
             image_width=w, image_height=h, image_processor=None
+        )
+
+    def get_num_video_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int,
+        image_processor: Qwen2VLImageProcessor | None = None,
+    ) -> int:
+        _, n = self._get_vision_info(
+            image_width=image_width,
+            image_height=image_height,
+            num_frames=num_frames,
+            image_processor=image_processor,
+        )
+        return n
+
+    def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
+        w, h = self.get_image_size_with_most_features()
+        num_frames = start_num_frames
+        while True:
+            next_num_frames = num_frames + 1
+            next_max_tokens = self.get_num_video_tokens(
+                image_width=w,
+                image_height=h,
+                num_frames=next_num_frames,
+            )
+            if next_max_tokens > max_tokens:
+                break
+            num_frames = next_num_frames
+        return num_frames
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
+    ) -> int:
+        max_videos = mm_counts.get("video", 0)
+        max_total_frames = self._get_max_video_frames(seq_len)
+        max_frames_per_video = min(
+            max_total_frames // max(max_videos, 1), max_frames_per_video
+        )
+        return max(max_frames_per_video, 1)
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        w, h = self.get_image_size_with_most_features()
+        return self.get_num_video_tokens(
+            image_width=w,
+            image_height=h,
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -1385,8 +1414,13 @@ class LlavaOnevision2MultiModalProcessor(
             }
         }
         mm_data = dict(mm_data)
-        videos_present = "videos" in mm_data and mm_data["videos"]
-        images_present = "images" in mm_data and mm_data["images"]
+        # Explicit None + length checks: ``mm_data[...]`` may be a list, numpy
+        # array, or tensor, and ``and <array>`` would raise on the ambiguous
+        # truth value of a multi-element array.
+        _videos = mm_data.get("videos")
+        _images = mm_data.get("images")
+        videos_present = _videos is not None and len(_videos) > 0
+        images_present = _images is not None and len(_images) > 0
 
         codec_video_paths = (
             _extract_codec_video_paths(mm_data["videos"]) if videos_present else None
@@ -1594,6 +1628,26 @@ class LlavaOnevision2MultiModalProcessor(
             data["video_grid_thw"] = data.pop("image_grid_thw")
             if "patch_positions" in data:
                 data["patch_positions_videos"] = data.pop("patch_positions")
+            # The native VideoProcessor capture only fires when OV2 actually
+            # decodes a path. Pre-decoded frames (e.g. dummy profiling inputs)
+            # bypass it, leaving captured_timestamps empty. Synthesize per-video
+            # frame counts from the grid_thw rows (one row per frame) so field
+            # sharding still produces one video item per input video.
+            if not captured_timestamps:
+                total_frames = int(data["video_grid_thw"].shape[0])
+                videos_arg = mm_data.get("videos")
+                if (
+                    isinstance(videos_arg, (list, tuple))
+                    and videos_arg
+                    and isinstance(videos_arg[0], (list, tuple))
+                ):
+                    num_videos = len(videos_arg)
+                else:
+                    num_videos = 1
+                num_videos = max(1, min(num_videos, total_frames))
+                base, rem = divmod(total_frames, num_videos)
+                per_video = [base + (1 if i < rem else 0) for i in range(num_videos)]
+                captured_timestamps = [[float(j) for j in range(n)] for n in per_video]
             data["frame_timestamps"] = _pack_timestamps(captured_timestamps)
             # OV2 emits one grid_thw row per frame; vLLM's field sharding
             # expects per-video sizing, so record explicit per-video frame
@@ -1821,7 +1875,12 @@ class LlavaOnevision2ForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        # Build the vision tower under the tower marker so it is shared by the
+        # image, video-frame and video-codec backends (all routed through
+        # ``self.visual``). When both modalities are disabled via
+        # ``--limit-mm-per-prompt`` the marker turns the tower into a skipped
+        # placeholder whose weights are dropped automatically by the loader.
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = LlavaOnevision2VisionTower(
                 config.vision_config,
                 text_hidden_size=config.text_config.hidden_size,
@@ -1829,8 +1888,6 @@ class LlavaOnevision2ForConditionalGeneration(
                 quant_config=None,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-        else:
-            self.visual = None
 
         # OV2 LLM is plain Qwen3 -- 1-D positions, no M-RoPE. The wrapper
         # LlavaOnevision2Config keeps text/vision configs nested (unlike OV1.5
@@ -1859,7 +1916,10 @@ class LlavaOnevision2ForConditionalGeneration(
                 raise ValueError(
                     f"{name} must be 2D or batched-3D, got shape={mm_input.shape}"
                 )
-            return torch.concat(list(mm_input))
+            # Flatten the leading batch dim into the patch dim (b, n, d) ->
+            # (b*n, d). flatten avoids materializing a Python list of row
+            # tensors (which torch.concat(list(...)) would do).
+            return mm_input.flatten(0, 1)
         return torch.concat(mm_input)
 
     def _parse_and_validate_image_input(
@@ -1954,6 +2014,10 @@ class LlavaOnevision2ForConditionalGeneration(
         patch_positions_videos = self._validate_and_reshape_mm_tensor(
             patch_positions_videos, "video patch_positions"
         )
+        if video_num_frames is None:
+            raise ValueError(
+                "OV2 requires video_num_frames alongside pixel_values_videos."
+            )
         if isinstance(video_num_frames, list):
             video_num_frames = torch.cat([v.flatten() for v in video_num_frames])
         else:
@@ -2030,20 +2094,6 @@ class LlavaOnevision2ForConditionalGeneration(
             )
         return inputs_embeds
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: LlavaOnevision2ImagePixelInputs | None = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            is_mm = input_ids == self.config.image_token_id
-            inputs_embeds = merge_multimodal_embeddings(
-                inputs_embeds, image_embeds, is_mm
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -2052,20 +2102,11 @@ class LlavaOnevision2ForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        # V1 precomputes multimodal ``inputs_embeds`` via ``embed_multimodal`` /
+        # ``get_input_embeddings``, so the model forward only threads them into
+        # the language model (image + video share the same embedding merge).
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is None:
-                inputs_embeds = None
-            else:
-                assert not uses_mrope(self.config), (
-                    "OV2 expects 1-D position_ids; M-RoPE must be off."
-                )
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids, image_input=image_input
-                )
-                input_ids = None
 
         return self.language_model.model(
             input_ids=input_ids,
@@ -2078,10 +2119,7 @@ class LlavaOnevision2ForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes: list[str] = []
-        if self.visual is None:
-            skip_prefixes.append("visual.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
