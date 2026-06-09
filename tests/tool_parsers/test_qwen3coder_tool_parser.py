@@ -29,7 +29,7 @@ from vllm.tool_parsers.qwen3xml_tool_parser import (
     StreamingXMLToolCallParser,
 )
 
-MODEL = "/mnt/data4/models/Qwen/Qwen3.5-0.8B"
+MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 
 @pytest.fixture(scope="module")
