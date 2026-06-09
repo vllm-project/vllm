@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from typing_extensions import override
@@ -27,8 +29,51 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=False,
             runner=runner,
         )
-        self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
+
+        spec = self.speculative_config
+        self.use_heterogeneous_vocab = spec.use_heterogeneous_vocab
+        self.heterogeneous_vocab_method = spec.heterogeneous_vocab_method
+
+        if self.use_heterogeneous_vocab:
+            self._init_heterogeneous_vocab(device)
+        else:
+            self._raise_if_vocab_size_mismatch()
+
+    def _init_heterogeneous_vocab(self, device: torch.device):
+        from vllm.tokenizers.registry import get_tokenizer
+
+        spec = self.speculative_config
+
+        target_tokenizer = get_tokenizer(
+            spec.target_model_config.tokenizer,
+            trust_remote_code=spec.target_model_config.trust_remote_code,
+        )
+        draft_tokenizer = get_tokenizer(
+            spec.draft_model_config.model,
+            trust_remote_code=spec.draft_model_config.trust_remote_code,
+        )
+
+        if self.heterogeneous_vocab_method == "slem":
+            from vllm.v1.spec_decode.slem import SlemMapper
+
+            self.slem_mapper: SlemMapper | None = SlemMapper(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                device=device,
+            )
+            self.vocab_mapping = None
+        else:
+            from vllm.v1.spec_decode.vocab_mapping import VocabMapping
+
+            self.slem_mapper = None
+            self.vocab_mapping: VocabMapping | None = VocabMapping(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                target_vocab_size=spec.target_model_config.get_vocab_size(),
+                draft_vocab_size=spec.draft_model_config.get_vocab_size(),
+                device=device,
+            )
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()
