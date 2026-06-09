@@ -565,7 +565,9 @@ class AiterRMSNormMXFP4QuantPattern(AiterRMSNormQuantPattern):
     (i.e. aiter.ops.triton.fused_mxfp4_quant is importable).
     """
 
-    FUSED_OP = rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op()
+    @property
+    def FUSED_OP(self):  # lazy — avoids import-time crash when op absent
+        return rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op()
 
     def __init__(self, epsilon: float) -> None:
         self.epsilon = epsilon
@@ -616,7 +618,9 @@ class AiterFusedAddRMSNormMXFP4QuantPattern(AiterRMSNormQuantPattern):
     larger subgraph is attempted first (greedy matching).
     """
 
-    FUSED_OP = rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op()
+    @property
+    def FUSED_OP(self):  # lazy — avoids import-time crash when op absent
+        return rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op()
 
     def __init__(self, epsilon: float) -> None:
         self.epsilon = epsilon
@@ -684,7 +688,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         self._pattern_replacements: list = []
 
         # Make sure fused add patterns are before simple rms norm,
-        # as the latter is a subset of the former in torch ops
+        # as the latter is a subset of the former in torch ops.
+        # The DoubleQuant patterns handle 1 rms_norm -> 2 group_fp8_quant
+        # fan-out (e.g. DSv3.2) and must be registered before the single
+        # group-quant pattern so they match first. The view-tolerant variant
+        # additionally covers the rms_norm -> view -> 2x quant shape that
+        # appears when the FP8 linear path inserts a 2D-flatten boilerplate
+        # (DSv3.2 MLA indexer q_c norm).
         mxfp4_pattern_count = 0
         for epsilon in [1e-5, 1e-6]:
             # ── MXFP4 patterns ───────────────────────────────────────────────
@@ -700,8 +710,18 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 self._pattern_replacements.append(p_rms)
                 mxfp4_pattern_count += 2
 
-            #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
+            # Fuse aiter rms_norm + 2x aiter group fp8 quant (DSv3.2 fan-out)
             if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+                DoubleAiterRMSFp8GroupQuantPattern(
+                    epsilon, FP8_DTYPE, GroupShape(1, 128)
+                ).register(self.patterns)
+
+                # View-tolerant sibling for DSv3.2 q_c norm fan-out
+                DoubleAiterRMSFp8GroupQuantViewPattern(
+                    epsilon, FP8_DTYPE, GroupShape(1, 128)
+                ).register(self.patterns)
+
+                #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
                 AiterRMSFp8GroupQuantPattern(
                     epsilon, FP8_DTYPE, GroupShape(1, 128)
                 ).register(self.patterns)
@@ -759,6 +779,9 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
+            DoubleAiterRMSFp8GroupQuantPattern,
+            DoubleAiterRMSFp8GroupQuantViewPattern,
+            AiterRMSNormGatedFp8GroupQuantPattern,
             AiterRMSNormMXFP4QuantPattern,
             AiterFusedAddRMSNormMXFP4QuantPattern,
         ]

@@ -137,7 +137,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                         "F3 fused RoPE+KV-cache dispatch auto-enabled (prefix=%s)",
                         prefix,
                     )
-            except Exception:
+            except (ImportError, AttributeError):
                 pass  # aiter not available; stay False
 
     def forward(
@@ -213,7 +213,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                     q_out=q,
                     slot_mapping=layer_slot_mapping.flatten(),
                     k_scale=self.mla_attn._k_scale,
-                    q_scale=self.mla_attn._k_scale,
+                    q_scale=self.mla_attn._q_scale,
                     positions=positions,
                     cos_cache=cos_cache,
                     sin_cache=sin_cache,
