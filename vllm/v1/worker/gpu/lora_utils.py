@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LoRA utilities for the Model Runner V2 and cudagraph.
-
-"""
+"""LoRA utilities for the Model Runner V2 and cudagraph."""
 
 import bisect
 from collections.abc import Callable
