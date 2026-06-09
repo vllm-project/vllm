@@ -14,11 +14,11 @@ use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{ApiError, server_error};
-use crate::routes::openai::tokenize::types::{
+use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
     TokenizeRequest, TokenizeResponse,
 };
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::resolve_base_request_id;
 
