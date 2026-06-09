@@ -542,6 +542,21 @@ class NixlEplbCommunicator(EplbCommunicator):
         )
         return (local_handle, remote_handle, xfer_handle)
 
+    def _post_read_barrier(self) -> None:
+        """Correctness fence: prevents overwrite-while-remote-read race.
+
+        We avoid ``torch.distributed.monitored_barrier`` because it
+        calls ``get_backend(group)`` which fails for stateless groups
+        (elastic EP).  An async ``all_reduce`` + ``wait(timeout)``
+        works with both regular and stateless groups and provides
+        equivalent timeout detection.
+        """
+        _dummy = torch.zeros(1, dtype=torch.int32)
+        work = torch.distributed.all_reduce(
+            _dummy, group=self._cpu_group, async_op=True
+        )
+        work.wait(timeout=timedelta(minutes=5))
+
     def execute(self) -> None:
         assert self._layer_idx is not None or not self._xfer_entries, (
             "set_transfer_context() must be called before execute() "
@@ -550,13 +565,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         try:
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
 
-            # Post-READ barrier.
-            # Correctness fence for zero-copy: prevents overwrite-while-
-            # remote-read race.
-            torch.distributed.monitored_barrier(
-                group=self._cpu_group,
-                timeout=timedelta(minutes=5),
-            )
+            self._post_read_barrier()
         finally:
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
