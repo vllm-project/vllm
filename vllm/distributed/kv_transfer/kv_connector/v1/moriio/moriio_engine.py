@@ -311,7 +311,19 @@ class MoRIIOWriter:
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
             request_info.completion_remote_notify_port = task.remote_notify_port
-            request_info.completion_remote_ip = task.remote_ip
+            # Wide-EP multi-pod support: when the remote DP fan-out is split
+            # across multiple pods, ``task.remote_ip`` (from ``meta.remote_host``)
+            # only addresses the first pod. Resolve the per-rank host from the
+            # worker's ``remote_hosts`` list. Falls back to ``task.remote_ip``
+            # for single-pod deployments and on any indexing miss.
+            _remote_ip = task.remote_ip
+            _hosts = list(getattr(self.worker, "remote_hosts", []) or [])
+            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            if _hosts and _dp_local > 0:
+                _pod_idx = int(request_info.decode_dp_rank) // _dp_local
+                if 0 <= _pod_idx < len(_hosts):
+                    _remote_ip = _hosts[_pod_idx]
+            request_info.completion_remote_ip = _remote_ip
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -454,8 +466,17 @@ class MoRIIOWriter:
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
+        # Wide-EP multi-pod port offset: each remote pod only binds notify
+        # sockets on ``notify_port .. notify_port + dp_local - 1`` (one per
+        # LOCAL DP rank in that pod), so the offset must use the per-pod LOCAL
+        # rank, not the GLOBAL ``decode_dp_rank``. Single-pod (``_dp_local ==
+        # 0``) is bit-identical because the modulus is a no-op there.
+        _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+        _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
+        if _dp_local > 0:
+            _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
         remote_port = remote_notify_port + get_port_offset(
-            request_info.decode_dp_rank, self.worker.tp_rank
+            _decode_dp_rank_for_port, self.worker.tp_rank
         )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
