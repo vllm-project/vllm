@@ -12,6 +12,11 @@ steps:
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=entrypoints/multimodal --ignore=entrypoints/generate
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (LLM)
   key: entrypoints-integration-llm
@@ -131,6 +136,11 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Pooling)
   key: entrypoints-integration-pooling
@@ -152,6 +162,11 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: OpenAI API Correctness
   key: openai-api-correctness
