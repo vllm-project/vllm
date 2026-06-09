@@ -14,6 +14,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -39,7 +40,7 @@ def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
     return tensor_model_parallel_all_reduce(var.flatten()).view_as(var)
 
 
-# @torch.compile(backend=current_platform.simple_compile_backend, dynamic=True)
+@torch.compile(backend=current_platform.simple_compile_backend, dynamic=True)
 def _minimax_qk_norm_fallback(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
