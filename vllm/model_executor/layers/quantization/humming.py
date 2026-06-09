@@ -759,7 +759,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     success = success and part_subccess
 
                 del tensor_list, loaded_weight, tensor
-                torch.cuda.empty_cache()
+                torch.accelerator.empty_cache()
                 return success if return_success else None
 
             # weight processing logic for specific quantization schema
