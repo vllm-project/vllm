@@ -629,29 +629,18 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     layer_id, expert_id = int(ids[0]), None
                     fused_name = name
 
-                # After the MoE refactor (#41184) the actual params live under
-                # `mlp.experts.routed_experts.*` while checkpoints still use the
-                # legacy `mlp.experts.*` layout. The remap helper applied via
-                # remap_moe_expert_weights only rewrites `name`; mirror the same
-                # remap on the index-stripped `fused_name` so per-expert keys
-                # (`mlp.experts.<N>.w2_bias` → `mlp.experts.w2_bias`) resolve
-                # against the post-refactor params_dict.
-                if (
-                    fused_name is not None
-                    and ".mlp.experts." in fused_name
-                    and ".mlp.experts.routed_experts." not in fused_name
-                ):
-                    candidate = fused_name.replace(
-                        ".mlp.experts.", ".mlp.experts.routed_experts."
-                    )
-                    if candidate in params_dict:
-                        fused_name = candidate
-
                 else:
                     raise NameError(
                         f"Layer {name} contains more than 2 numeric indices. This is "
                         "an unexpected condition. Please open an issue if encountered."
                     )
+
+                # The MoE refactor (#41184) moved expert params under
+                # `mlp.experts.routed_experts.*`; remap the legacy checkpoint
+                # name so keys like w2_bias resolve against params_dict.
+                fused_name = fused_name.replace(
+                    ".mlp.experts.", ".mlp.experts.routed_experts."
+                )
 
                 moe_quant_method = _get_moe_weight_dtype(layer_id=layer_id)
 
