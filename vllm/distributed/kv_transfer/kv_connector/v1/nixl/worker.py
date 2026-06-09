@@ -840,7 +840,7 @@ class NixlConnectorWorker:
 
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
-        seen_base_addresses = []
+        seen_base_addresses: list[int] = []
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -1070,10 +1070,8 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
         blocks, enabling the 3-read transfer with DS conv layout."""
-        assert block_size_ratio == 1, (
-            "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
-            f"Got block_size_ratio={block_size_ratio}."
-        )
+        # block_size_ratio is not used here because local descriptors always
+        # use local strides.  Only remote descriptors need ratio scaling.
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
@@ -1177,14 +1175,15 @@ class NixlConnectorWorker:
             # For dual-purpose regions (HMA), block_len_per_layer stores the
             # KDA/SSM stride.  FA descriptors must use the attention spec's
             # stride instead so they address MLA data correctly.
+            # MLA stride is TP-independent (num_kv_heads=1, head_dim
+            # constant), so we skip block_size_ratio scaling entirely.
             if i in self._attn_block_len:
                 attn_stride = self._attn_block_len[i]
                 if self.transfer_topo.virtually_split_kv_in_blocks:
                     kv_block_len = attn_stride // 2
                 else:
                     kv_block_len = attn_stride
-                kv_block_len = kv_block_len // block_size_ratio
-                page_stride = attn_stride // block_size_ratio
+                page_stride = attn_stride
             else:
                 kv_block_len = (
                     self.get_backend_aware_kv_block_len(
@@ -1238,29 +1237,30 @@ class NixlConnectorWorker:
             # Read our whole local region size from remote..
             # For dual-purpose regions, use the attention spec's stride instead
             # of block_len_per_layer (which stores KDA's stride).
+            # MLA stride is TP-independent, so skip block_size_ratio scaling.
             if i in self._attn_block_len:
                 attn_stride = self._attn_block_len[i]
                 if self.transfer_topo.virtually_split_kv_in_blocks:
                     local_block_len = attn_stride // 2
                 else:
                     local_block_len = attn_stride
+                remote_kv_block_len = local_block_len
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
                 )
-            remote_kv_block_len = local_block_len // block_size_ratio
-            if block_size_ratio > 1:
-                # ..using remote kv_block_len as transfer unit
-                local_block_len = remote_kv_block_len
+                remote_kv_block_len = local_block_len // block_size_ratio
+                if block_size_ratio > 1:
+                    # ..using remote kv_block_len as transfer unit
+                    local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
             rank_offset = plan.rank_offset_factor * remote_kv_block_len
 
             # For dual-purpose regions, use the attention stride as page size
             # so descriptors step through remote memory at MLA's stride.
-            # NOTE: This assumes homogeneous TP where both sides have the same
-            # attention spec stride.  For heterogeneous TP, the remote's attn
-            # stride must be propagated via metadata.
+            # MLA stride is TP-independent (num_kv_heads=1, head_dim constant),
+            # so the local _attn_block_len equals the remote's MLA stride.
             if i in self._attn_block_len:
                 page_size = self._attn_block_len[i]
             else:
@@ -1597,10 +1597,17 @@ class NixlConnectorWorker:
                 "Disable prefix caching with --no-enable-prefix-caching."
             )
 
-        if self._is_hma_required:
-            assert block_size_ratio == 1, (
-                "HMA does not support different remote block size yet"
-            )
+        if (
+            self._is_hma_required
+            and block_size_ratio != 1
+            and not (self.use_mla and self._has_mamba)
+        ):
+            # For hybrid MLA+SSM models, block_size_ratio reflects SSM
+            # dimension scaling across different TP sizes.  MLA attention
+            # stride is TP-independent (replicated KV), so FA descriptors
+            # for dual-purpose regions are safe.  SSM descriptors use their
+            # own hetero-TP-aware remote_conv_offsets.
+            raise AssertionError("HMA does not support different remote block size yet")
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -1660,9 +1667,42 @@ class NixlConnectorWorker:
         remote_block_len = nixl_agent_meta.block_lens[0]
         if self.use_mla or self.transfer_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
-            # TODO (ZhanqiuHu): For mamba models, validate FA and mamba
-            # block_lens separately.
-            if not self._has_mamba:
+            if self._has_mamba and self._is_hma_required:
+                # Hybrid MLA+SSM with HMA: dual-purpose regions have both
+                # SSM and attention block lengths.  Validate separately.
+                for i in range(len(self.block_len_per_layer)):
+                    is_ssm = i < len(self._is_ssm_region) and self._is_ssm_region[i]
+                    is_attn = i < len(self._is_attn_region) and self._is_attn_region[i]
+                    remote_bl = nixl_agent_meta.block_lens[i]
+                    if is_ssm and not is_attn:
+                        # Pure SSM region: stride scales with TP.
+                        assert (
+                            self.block_len_per_layer[i] // block_size_ratio == remote_bl
+                        ), (
+                            f"SSM region {i} block_len mismatch: "
+                            f"local={self.block_len_per_layer[i]} // "
+                            f"ratio={block_size_ratio} != remote={remote_bl}"
+                        )
+                    elif is_attn and not is_ssm:
+                        # Pure attention region: MLA is replicated (TP-independent).
+                        assert self.block_len_per_layer[i] == remote_bl, (
+                            f"Attention region {i} block_len mismatch: "
+                            f"local={self.block_len_per_layer[i]} != remote={remote_bl}"
+                        )
+                    elif is_ssm and is_attn:
+                        # Dual-purpose region: block_len_per_layer stores
+                        # SSM stride (may differ with TP).  MLA stride is
+                        # stored in _attn_block_len and is TP-independent.
+                        # Remote block_lens stores the remote's SSM stride
+                        # (which it registered first, like local).
+                        assert (
+                            self.block_len_per_layer[i] // block_size_ratio == remote_bl
+                        ), (
+                            f"Dual-purpose region {i} SSM stride mismatch: "
+                            f"local={self.block_len_per_layer[i]} // "
+                            f"ratio={block_size_ratio} != remote={remote_bl}"
+                        )
+            else:
                 for i in range(len(self.block_len_per_layer)):
                     assert (
                         self.block_len_per_layer[i] // block_size_ratio
