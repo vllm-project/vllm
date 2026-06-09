@@ -19,9 +19,7 @@ from vllm.model_executor.models.gemma4 import (
     _load_gemma4_gguf_fused_moe_qweight_type,
 )
 from vllm.model_executor.models.gemma4_mm import _gemma4_patch_embed_weight_loader
-from vllm.model_executor.models.qwen3_next import (
-    _maybe_reshape_gguf_shared_expert_gate,
-)
+from vllm.model_executor.models.qwen3_next import _maybe_reshape_gguf_weight
 
 
 class TestGGUFDownload:
@@ -284,7 +282,7 @@ class TestGGUFModelLoader:
 
     def test_qwen_gguf_shared_expert_gate_weight_is_2d(self):
         loaded_weight = torch.arange(4)
-        reshaped = _maybe_reshape_gguf_shared_expert_gate(
+        reshaped = _maybe_reshape_gguf_weight(
             "model.layers.0.mlp.shared_expert_gate.weight",
             loaded_weight,
         )
@@ -292,12 +290,22 @@ class TestGGUFModelLoader:
         assert reshaped.shape == (1, 4)
         assert torch.equal(reshaped, loaded_weight[None, :])
         assert (
-            _maybe_reshape_gguf_shared_expert_gate(
+            _maybe_reshape_gguf_weight(
                 "model.layers.0.mlp.gate_proj.weight",
                 loaded_weight,
             )
             is loaded_weight
         )
+
+    def test_qwen_gguf_linear_attn_conv1d_weight_is_3d(self):
+        loaded_weight = torch.arange(8).reshape(2, 4)
+        reshaped = _maybe_reshape_gguf_weight(
+            "model.layers.0.linear_attn.conv1d.weight",
+            loaded_weight,
+        )
+
+        assert reshaped.shape == (2, 1, 4)
+        assert torch.equal(reshaped, loaded_weight[:, None, :])
 
     def test_gemma4_patch_embedder_weight_transform(self):
         param = torch.nn.Parameter(torch.empty(2, 60), requires_grad=False)
