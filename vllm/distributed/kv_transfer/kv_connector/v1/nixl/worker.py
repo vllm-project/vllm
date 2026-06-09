@@ -101,6 +101,7 @@ class NixlConnectorWorker:
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
         num_fa_descs = num_fa_regions * num_blocks
+
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
             # NOTE (NickLucche) With HMA, every kv group has the same number of layers
@@ -146,8 +147,7 @@ class NixlConnectorWorker:
                     f"Unknown spec type {self._group_spec_types[i]} at index {i}"
                 )
 
-        result = np.concatenate(all_descs)
-        return result
+        return np.concatenate(all_descs)
 
     def _build_local_splits_from_plan(
         self,
@@ -919,8 +919,6 @@ class NixlConnectorWorker:
                         self._attn_block_len[idx] = physical_page_size
                     continue
                 seen_base_addresses.append(base_addr)
-                is_ssm = isinstance(layer_spec, MambaSpec)
-                is_attn = not is_ssm
                 self._is_ssm_region.append(is_ssm)
                 self._is_attn_region.append(is_attn)
                 # Only record non-Mamba page sizes.
@@ -1171,12 +1169,8 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # For dual-purpose HMA regions with MLA (num_kv_heads=1, stride
-            # is TP-independent), use the attention spec's stride instead of
-            # block_len_per_layer (which stores KDA/SSM stride).
-            # For standard attention (e.g. Qwen GQA), stride is TP-dependent,
-            # so we must fall through to the original path that correctly
-            # applies block_size_ratio for heterogeneous TP.
+            # Dual-purpose HMA regions: use MLA's TP-independent stride.
+            # Standard attention falls through to block_size_ratio path.
             attn_stride = self._attn_block_len.get(i) if self.use_mla else None
             if attn_stride is not None:
                 if self.transfer_topo.virtually_split_kv_in_blocks:
@@ -1234,10 +1228,7 @@ class NixlConnectorWorker:
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
                 continue
-            # For dual-purpose HMA regions with MLA (stride is TP-independent),
-            # use the attention spec's stride.  For standard attention (Qwen GQA),
-            # stride is TP-dependent so fall through to the original path that
-            # applies block_size_ratio correctly for heterogeneous TP.
+            # MLA: TP-independent stride; standard attention: use block_size_ratio.
             attn_stride = self._attn_block_len.get(i) if self.use_mla else None
             if attn_stride is not None:
                 # MLA stride is TP-independent (num_kv_heads=1),
@@ -1325,6 +1316,7 @@ class NixlConnectorWorker:
             blocks_data.extend(
                 self._build_mamba_local(local_base_addresses, block_size_ratio)
             )
+
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
@@ -1422,21 +1414,10 @@ class NixlConnectorWorker:
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         # Compute block_size_ratio.
-        #
-        # For dual-purpose HMA regions (MLA+GDN sharing one backing tensor),
-        # block_len_per_layer stores the KDA/SSM stride which differs from the
-        # attention stride.  The token-level block_size is the same across TP,
-        # so transfer_topo.block_size_ratio returns 1 even though byte-level
-        # strides differ.  Use byte-level comparison only for these models so
-        # that mamba descriptor building and desc-ID computation see the
-        # correct ratio.
-        #
-        # For standard attention (Qwen, etc.), the byte-level difference comes
-        # purely from KV head count, which num_attn_reads and the split-handle
-        # mechanism already handle correctly.  Using byte-level ratio here
-        # would cause double reduction in _build_fa_remote (once by
-        # block_size_ratio and once by num_attn_reads), producing remote
-        # descriptors that are half the size of local split descriptors.
+        # For dual-purpose HMA regions, byte-level strides differ across TP
+        # even when token-level block_size is the same.  Compute byte-level
+        # ratio for MLA models.  Standard attention models use the existing
+        # num_attn_reads mechanism instead.
         if (
             self.use_mla  # Only for MLA where stride is TP-independent
             and self._attn_block_len  # Only for dual-purpose HMA regions
@@ -1496,26 +1477,11 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for split_idx, handle_data in enumerate(
-                self._build_local_splits_from_plan(
-                    plan,
-                    self.src_blocks_data,
-                    self.num_descs,
-                )
+            for handle_data in self._build_local_splits_from_plan(
+                plan,
+                self.src_blocks_data,
+                self.num_descs,
             ):
-                # Debug: log split handle mamba descriptor sizes
-                if self._has_mamba and abs(tp_ratio) != 1:
-                    fa_count = self.num_descs
-                    mamba_part = handle_data[fa_count:]
-                    logger.info(
-                        "HETEROTP local split[%d]: total=%d, fa=%d, "
-                        "mamba=%d, first_mamba_sizes=%s",
-                        split_idx,
-                        len(handle_data),
-                        fa_count,
-                        len(mamba_part),
-                        [s for _, s, _ in mamba_part[:8]],
-                    )
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
                 )
@@ -1547,28 +1513,13 @@ class NixlConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            mamba_remote = self._build_mamba_remote(
-                nixl_agent_meta,
-                tp_ratio,
-                transfer_info,
-            )
-            # Debug: log mamba descriptor sizes for hetero-TP diagnosis
-            if abs(tp_ratio) != 1 and mamba_remote:
-                fa_count = len(blocks_data)
-                logger.info(
-                    "HETEROTP remote descs: fa=%d, mamba=%d, "
-                    "first_mamba_sizes=%s, "
-                    "ssm_sizes_remote=%s, ssm_sizes_local=%s, "
-                    "tp_ratio=%s, block_size_ratio=%s",
-                    fa_count,
-                    len(mamba_remote),
-                    [s for _, s, _ in mamba_remote[:8]],
-                    nixl_agent_meta.ssm_sizes,
-                    self._mamba_ssm_size,
+            blocks_data.extend(
+                self._build_mamba_remote(
+                    nixl_agent_meta,
                     tp_ratio,
-                    block_size_ratio,
+                    transfer_info,
                 )
-            blocks_data.extend(mamba_remote)
+            )
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
@@ -1687,7 +1638,8 @@ class NixlConnectorWorker:
 
         # Heterogeneous TP requires head-splitting, which only works with
         # HND layout. MLA and replicated-KV cases don't split on heads.
-        # Mamba doesn't support heterogeneous TP.
+        # The attention component of hybrid models still requires HND for
+        # head-dimension splitting under heterogeneous TP.
         if (
             abs(tp_ratio) != 1
             and not self.use_mla
@@ -2299,10 +2251,7 @@ class NixlConnectorWorker:
                 req_id,
             )
             # Get side handles.
-            # For hybrid MLA+GDN with tp_ratio < 0, SSM needs split handles to
-            # assemble data from multiple remote ranks. MLA attention reads
-            # use the full region (replicated, single rank) but the split
-            # handle applies offset 0 + full chunk for FA when fa_num_splits=1.
+            # Hybrid MLA+GDN: SSM needs split handles for multi-rank assembly.
             if tp_ratio < 0 and (not self.use_mla or self._has_mamba):
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
@@ -2463,6 +2412,7 @@ class NixlConnectorWorker:
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+
         # Prepare transfer with Nixl.
         handle = None
         try:
