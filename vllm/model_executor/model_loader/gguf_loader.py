@@ -38,10 +38,19 @@ logger = init_logger(__name__)
 _GEMMA4_PATCH_EMBEDDER_INPUT_PROJ = (
     "model.vision_tower.patch_embedder.input_proj.weight"
 )
+_GGUF_MODEL_TYPE_ALIASES = {
+    # gguf-py does not expose a Gemma4 arch enum yet. Gemma4 GGUF uses
+    # Gemma-style base tensor names, with Gemma4-specific tensors added below.
+    "gemma4": "gemma3",
+}
 
 
 def _gguf_name_with_suffix(gguf_name: str, suffix: str) -> str:
     return f"{gguf_name}.{suffix}" if suffix else gguf_name
+
+
+def _gguf_arch_model_type(model_type: str) -> str:
+    return _GGUF_MODEL_TYPE_ALIASES.get(model_type, model_type)
 
 
 def _add_gemma4_gguf_mappings(
@@ -310,6 +319,7 @@ class GGUFModelLoader(BaseModelLoader):
                 text_config,
                 config.vision_config,
             )
+        model_type = _gguf_arch_model_type(model_type)
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
             # GGUF layer map assumes merged expert weights

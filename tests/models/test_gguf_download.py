@@ -11,6 +11,7 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.gguf_loader import (
     GGUFModelLoader,
     _add_gemma4_gguf_mappings,
+    _gguf_arch_model_type,
     _gguf_name_with_suffix,
 )
 from vllm.model_executor.model_loader.weight_utils import download_gguf
@@ -18,6 +19,9 @@ from vllm.model_executor.models.gemma4 import (
     _load_gemma4_gguf_fused_moe_qweight_type,
 )
 from vllm.model_executor.models.gemma4_mm import _gemma4_patch_embed_weight_loader
+from vllm.model_executor.models.qwen3_next import (
+    _maybe_reshape_gguf_shared_expert_gate,
+)
 
 
 class TestGGUFDownload:
@@ -236,6 +240,10 @@ class TestGGUFModelLoader:
         assert _gguf_name_with_suffix("blk.0.ssm_a", "") == "blk.0.ssm_a"
         assert _gguf_name_with_suffix("blk.0.attn_q", "weight") == "blk.0.attn_q.weight"
 
+    def test_gemma4_gguf_arch_alias(self):
+        assert _gguf_arch_model_type("gemma4") == "gemma3"
+        assert _gguf_arch_model_type("qwen35") == "qwen35"
+
     def test_gemma4_manual_gguf_mappings(self):
         text_config = MagicMock()
         text_config.num_hidden_layers = 2
@@ -272,6 +280,23 @@ class TestGGUFModelLoader:
         )
         assert gguf_to_hf_name_map["mm.input_projection.weight"] == (
             "model.embed_vision.embedding_projection.weight"
+        )
+
+    def test_qwen_gguf_shared_expert_gate_weight_is_2d(self):
+        loaded_weight = torch.arange(4)
+        reshaped = _maybe_reshape_gguf_shared_expert_gate(
+            "model.layers.0.mlp.shared_expert_gate.weight",
+            loaded_weight,
+        )
+
+        assert reshaped.shape == (1, 4)
+        assert torch.equal(reshaped, loaded_weight[None, :])
+        assert (
+            _maybe_reshape_gguf_shared_expert_gate(
+                "model.layers.0.mlp.gate_proj.weight",
+                loaded_weight,
+            )
+            is loaded_weight
         )
 
     def test_gemma4_patch_embedder_weight_transform(self):

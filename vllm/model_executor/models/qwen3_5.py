@@ -85,6 +85,7 @@ from .qwen3_next import (
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
+    _maybe_reshape_gguf_shared_expert_gate,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -471,6 +472,9 @@ class Qwen3_5Model(Qwen3NextModel):
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
+                    )
+                    loaded_weight = _maybe_reshape_gguf_shared_expert_gate(
+                        name, loaded_weight
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)

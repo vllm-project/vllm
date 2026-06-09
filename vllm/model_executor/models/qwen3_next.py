@@ -84,6 +84,17 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _maybe_reshape_gguf_shared_expert_gate(
+    name: str,
+    loaded_weight: torch.Tensor,
+) -> torch.Tensor:
+    # GGUF stores this gate as [hidden], while ReplicatedLinear expects
+    # [1, hidden].
+    if "mlp.shared_expert_gate" in name and loaded_weight.ndim == 1:
+        return loaded_weight[None, :]
+    return loaded_weight
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -656,6 +667,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
+                    )
+                    loaded_weight = _maybe_reshape_gguf_shared_expert_gate(
+                        name, loaded_weight
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
