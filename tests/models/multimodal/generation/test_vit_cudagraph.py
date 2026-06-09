@@ -66,6 +66,14 @@ def gemma3_chat_template(content: str) -> str:
     return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
 
 
+def ernie45_vl_chat_template(content: str) -> str:
+    return (
+        f"<|begin_of_sentence|>User: {content}"
+        "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>\n"
+        "Assistant: <think></think>"
+    )
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
@@ -204,6 +212,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="StepVLForConditionalGeneration",
+            ),
+        },
+    ),
+    "ernie45_vl": VitCudagraphTestConfig(
+        model="baidu/ERNIE-4.5-VL-28B-A3B-PT",
+        # Image only: Ernie's resampler applies a temporal conv for video
+        # that changes the output token count, so video uses the eager path.
+        modalities=["image"],
+        image_prompt=ernie45_vl_chat_template("What is in this image?"),
+        # Shrink to 1 text + 1 vision layer with random weights so the test
+        # runs on any CI GPU and skips the ~56 GiB weight download. The test
+        # only validates encoder CG capture/replay, not output quality.
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "trust_remote_code": True,
+            "revision": "refs/pr/17",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Ernie4_5_VLMoeForConditionalGeneration",
             ),
         },
     ),

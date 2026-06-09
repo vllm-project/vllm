@@ -77,12 +77,18 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+    scatter_output_slices,
+)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -453,13 +459,44 @@ class Ernie4_5_VisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
-    def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, num_pad=0
-    ) -> torch.Tensor:
-        hidden_states = self.patch_embed(hidden_states)
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: torch.Tensor | list[list[int]],
+        *,
+        num_pad: int = 0,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute encoder metadata outside the CUDA graph.
 
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
+        Splits the rotary embeddings, ``cu_seqlens`` and ``max_seqlen`` out of
+        :meth:`forward` so they can be precomputed on the host side and fed
+        into a captured graph through fixed buffers. Shared by the eager path,
+        CUDA graph capture and CUDA graph replay so the three stay numerically
+        identical.
+
+        Args:
+            grid_thw: Per-frame grid sizes as a ``[num_frames, 3]`` tensor or
+                an equivalent list of ``[t, h, w]``.
+            num_pad: Legacy ``cu_seqlens`` padding (eager path only).
+            max_batch_size: If set, pad ``cu_seqlens`` to this many sequences
+                so the CUDA graph replay buffer keeps a constant shape.
+            max_seqlen_override: If set, use this value for ``max_seqlen``
+                instead of deriving it from ``cu_seqlens``. CUDA graph capture
+                bakes ``max_seqlen`` at capture time, so it must cover the
+                worst-case replay.
+            device: Device for the returned tensors. Defaults to ``self.device``.
+
+        Returns:
+            Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+        """
+        if device is None:
+            device = self.device
+        if not isinstance(grid_thw, torch.Tensor):
+            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thw).to(device)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
@@ -472,14 +509,60 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             cu_seqlens = torch.cat([zeros, cu_seqlens])
 
+        # Pad cu_seqlens to a fixed number of sequences so the CUDA graph
+        # replay buffer keeps a constant shape across batches.
+        if max_batch_size is not None:
+            num_seqs = cu_seqlens.numel() - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = torch.cat(
+                    [
+                        cu_seqlens,
+                        cu_seqlens.new_full(
+                            (max_batch_size - num_seqs,), cu_seqlens[-1]
+                        ),
+                    ]
+                )
+
+        # max_seqlen is baked into the graph at capture time, so capture passes
+        # a worst-case override. compute_attn_mask_seqlen keeps it on CPU (it is
+        # consumed via .item()), avoiding a captured D2H copy.
+        if max_seqlen_override is not None:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+        else:
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+
+        cu_seqlens = cu_seqlens.to(device)
+
+        return {
+            "rotary_pos_emb": rotary_pos_emb,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": max_seqlen,
+        }
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor | None = None,
+        num_pad: int = 0,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.patch_embed(hidden_states)
+
+        if encoder_metadata is None:
+            # Eager path: compute metadata inline (unchanged behavior).
+            encoder_metadata = self.prepare_encoder_metadata(
+                grid_thw, num_pad=num_pad, device=hidden_states.device
+            )
+        rotary_pos_emb = encoder_metadata["rotary_pos_emb"]
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        max_seqlen = encoder_metadata["max_seqlen"]
+
         # add batch size
         if hidden_states.ndim == 2:
             hidden_states = hidden_states.unsqueeze(dim=1)
 
-        # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-
-        for i, blk in enumerate(self.blocks):
+        for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
@@ -1256,7 +1339,12 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
     dummy_inputs=Ernie4_5_VLDummyInputsBuilder,
 )
 class Ernie4_5_VLMoeForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsMRoPE,
+    SupportsEncoderCudaGraph,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1488,6 +1576,182 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
             )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    #
+    # Only the vision transformer (self.vision_model) is captured into the
+    # CUDA graph. The VariableResolutionResamplerModel (spatial merge +
+    # projection) runs eagerly in encoder_eager_forward / postprocess_
+    # encoder_output because its temporal path performs host-side (numpy)
+    # indexing that cannot be captured. Image only: video uses a temporal
+    # conv that changes the output token count, so it falls back to the
+    # eager multimodal path for now.
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            # Ernie consumes a single rotary freqs tensor (not cos/sin), so
+            # the buffer set is smaller than the Qwen3-VL reference.
+            buffer_keys=[
+                "pixel_values",
+                "rotary_pos_emb",
+                "cu_seqlens",
+                "max_seqlen",
+            ],
+            # Post-merge embeddings (produced in postprocess_encoder_output)
+            # are at the LM hidden dim; used only for DP gather sizing.
+            out_hidden_size=self.config.hidden_size,
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        if "image_grid_thw" in mm_kwargs:
+            return "image"
+        raise AssertionError("This line should be unreachable.")
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
+        # Min: a 224x224 image -> 16x16 patches (patch_size=14),
+        # spatial_merge_size=2 -> 8x8 = 64 output tokens.
+        min_budget = 64
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_pixel_values_by_modality(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        return mm_kwargs["pixel_values"]
+
+    def _get_grid_thw_by_modality(self, mm_kwargs: dict[str, Any]) -> list[list[int]]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
+        return grid_thw
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        m = self.vision_model.spatial_merge_size
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=(t * h * w) // m // m,
+            )
+            for t, h, w in grid_thw
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+
+        if len(indices) == 0:
+            return {"pixel_values": pixel_values[:0], "image_grid_thw": []}
+
+        # Cumulative patch offsets for slicing the concatenated pixel_values.
+        cum_patches = [0]
+        for t, h, w in grid_thw:
+            cum_patches.append(cum_patches[-1] + t * h * w)
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+        return {"pixel_values": selected_pv, "image_grid_thw": selected_grid}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self, token_budget, max_batch_size, max_frames_per_batch, device, dtype
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        m = self.vision_model.spatial_merge_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        # Image-format grid (T=1): h=m, w=per_mm_item_output*m, so the merged
+        # token count per item equals per_mm_item_output.
+        grid_config = [[1, m, per_mm_item_output * m] for _ in range(max_batch_size)]
+
+        patch_embed = self.vision_model.patch_embed
+        # Ernie has no temporal_patch_size, so the flattened patch is just
+        # in_channels * patch_size**2.
+        in_channels = patch_embed.in_channels
+        patch_size = patch_embed.patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = in_channels * patch_size * patch_size
+        dummy_pixel_values = torch.randn(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
+        )
+
+        # max_seqlen is baked at capture: worst case is one item consuming the
+        # full budget -> seq_len = token_budget * spatial_merge_size**2.
+        metadata = self.vision_model.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (m**2),
+            device=device,
+        )
+        values = metadata | {"pixel_values": dummy_pixel_values}
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self, mm_kwargs, max_batch_size, max_frames_per_batch
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
+        metadata = self.vision_model.prepare_encoder_metadata(
+            grid_thw_list, max_batch_size=max_batch_size
+        )
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        # Graph captures the ViT only; the resampler runs in
+        # postprocess_encoder_output.
+        pixel_values = values.pop("pixel_values")
+        return self.vision_model(pixel_values, encoder_metadata=values)
+
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        # Eager fallback: run the full pipeline (ViT + resampler); the result
+        # is scattered directly, so it must be the post-merge embeddings.
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs).type(
+            self.vision_model.dtype
+        )
+        grid_thw = torch.tensor(
+            self._get_grid_thw_by_modality(mm_kwargs),
+            device=self.vision_model.device,
+        )
+        image_features = self.vision_model(pixel_values, grid_thw)
+        return self.resampler_model(image_features, grid_thw)
+
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest,
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        # The graph output is the raw ViT features (pre-merge), padded to the
+        # token budget. Run the resampler eagerly on the valid portion using
+        # the actual batch grid_thw, then scatter the post-merge embeddings.
+        grid_thw_list = self._get_grid_thw_by_modality(batch_mm_kwargs)
+        num_valid = sum(t * h * w for t, h, w in grid_thw_list)
+        grid_thw = torch.tensor(grid_thw_list, device=output.device)
+        image_embeds = self.resampler_model(output[:num_valid], grid_thw)
+        scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
     def _process_image_input(
         self, image_input: Ernie4_5_VLImageInputs
