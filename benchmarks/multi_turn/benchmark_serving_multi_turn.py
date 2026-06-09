@@ -250,6 +250,7 @@ async def send_request(
         "model": model,
         "messages": messages,
     }
+    
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
 
@@ -443,7 +444,7 @@ async def send_turn(
         if max_tokens == NUM_TOKENS_FROM_DATASET:
             max_tokens = max(1, answer_num_tokens)
 
-    # Send the current conversation to LLM and get a response.
+    # Send the current conversation to LLM and get a response
     response: ServerResponse = await send_request(
         session,
         messages,
