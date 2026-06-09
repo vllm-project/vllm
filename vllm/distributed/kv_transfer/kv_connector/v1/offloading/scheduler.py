@@ -433,10 +433,6 @@ class OffloadingConnectorScheduler:
                     max_hit_size_tokens, self._mamba_align_size
                 )
 
-            if max_hit_size_tokens == 0:
-                # could drop to zero with mamba round_down
-                return 0
-
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
