@@ -375,6 +375,15 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 !!! warning
     `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.
 
+#### Speculative Decoding with P/D Roles
+
+When using speculative decoding (EAGLE, DFlash, MTP, etc.) with disaggregated prefilling, the `kv_role` controls how the drafter behaves:
+
+- **kv_producer**: The scheduler sets `num_lookahead_tokens=0`, so no extra blocks are allocated for speculative tokens. The drafter forward pass and sampling are skipped entirely — the producer only runs the target model prefill. This avoids a block-count mismatch between producer and consumer that would otherwise cause the KV transfer trimming logic to drop the wrong cache block (see [#43996](https://github.com/vllm-project/vllm/issues/43996)).
+- **kv_consumer**: Retains full speculative decoding behavior — the drafter runs normally after receiving KV from the producer.
+
+Both instances must still be configured with the same `--speculative-config` so that the KV cache layout (number of layers, head dimensions) is compatible for transfer.
+
 ### KV Load Failure Policy
 
 The `kv_load_failure_policy` setting controls how the system handles failures when the decoder instance loads KV cache blocks from the prefiller instance:
