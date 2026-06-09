@@ -1,18 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright IBM Corp. 2025
-//
-// cpu_attn_nnpa.hpp
-//
-// NNPA attention backend for IBM Telum II.
-// Replaces VXE SIMD intrinsics with zDNN API calls
-// that offload to the Telum II on-chip AI accelerator.
-//
-// Operation mapping:
-//   Q x K^T  ->  zdnn_matmul_op()  ->  NNPA_MATMUL_OP
-//   softmax  ->  zdnn_softmax()    ->  NNPA_SOFTMAX
-//   P x V    ->  zdnn_matmul_op()  ->  NNPA_MATMUL_OP
-//
-// Reference: cpu_attn_vxe.hpp (VXE/s390x SIMD)
 
 #ifndef CPU_ATTN_NNPA_HPP
 #define CPU_ATTN_NNPA_HPP
@@ -63,9 +48,6 @@ namespace {
 //   5. zdnn_transform_origtensor       — convert result back → FP32
 //   6. zdnn_free_ztensor_buffer        — release internal buffer
 //
-// Why DLFLOAT16?
-//   Telum II NNPA operates in DLFLOAT16 (IBM 16-bit float).
-//   zDNN handles the conversion transparently — you always pass FP32.
 // ─────────────────────────────────────────────────────────────────────────────
 struct NNPATensor {
   zdnn_ztensor     zt;
@@ -128,20 +110,6 @@ struct NNPATensor {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// nnpa_matmul
-//
-// Computes: C = A × B  (with zero bias)
-// Offloads to Telum II via zdnn_matmul_op → NNPA_MATMUL_OP instruction.
-//
-// Parameters:
-//   A    [s, m, k]  — first input  (Q tile or attention weights P)
-//   B    [s, k, n]  — second input (K^T tile or V tile)
-//   C    [s, m, n]  — output
-//
-// CRITICAL: zdnn_matmul_op requires a real bias tensor — NOT NULL.
-// Passing NULL causes an illegal instruction crash on Telum II hardware.
-// We always allocate a zero bias tensor of shape [s, 1, n].
-// ─────────────────────────────────────────────────────────────────────────────
 static void nnpa_matmul(const float* A, const float* B, float* C,
                         uint32_t s, uint32_t m, uint32_t k, uint32_t n,
                         int64_t lda=0, int64_t ldb=0, int64_t ldc=0) {
@@ -176,7 +144,6 @@ static void nnpa_matmul(const float* A, const float* B, float* C,
   }
   B = b_buf;
 
-  // B is already [k, n] row-major — zdnn reads it correctly
 
   // Debug: verify A and B before zdnn
   {FILE* dbg=fopen("/tmp/b_layout.txt","a"); if(dbg){
@@ -250,16 +217,6 @@ static void nnpa_matmul(const float* A, const float* B, float* C,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// nnpa_softmax
-//
-// Computes row-wise softmax on a [rows, cols] float matrix.
-// Offloads to Telum II via zdnn_softmax → NNPA_SOFTMAX instruction.
-//
-// zDNN softmax uses ZDNN_3DS layout [s, rows, cols] with s=1.
-// Softmax normalizes across the innermost dimension (cols) —
-// exactly what attention requires:
-//   softmax(scores[q_head, :])  for each query head independently.
-// ─────────────────────────────────────────────────────────────────────────────
 static void nnpa_softmax(const float* input, float* output,
                          uint32_t rows, uint32_t cols) {
   NNPATensor tIn, tOut;
@@ -276,18 +233,6 @@ static void nnpa_softmax(const float* input, float* output,
   tOut.store(output);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TileGemmNNPA
-//
-// NNPA equivalent of TileGemmS390X from cpu_attn_vxe.hpp.
-// Provides the gemm() template method required by AttentionMainLoop<>.
-//
-// Two phases:
-//   QK phase: compute Q × K^T → attention scores
-//   PV phase: compute P × V   → attention output
-//
-// Template parameter:
-//   kv_cache_t — data type of K/V cache (float, BFloat16, Half, fp8)
 // ─────────────────────────────────────────────────────────────────────────────
 template <typename kv_cache_t>
 class TileGemmNNPA {
@@ -324,10 +269,6 @@ class TileGemmNNPA {
       }
     }
 
-    // N = number of output columns
-    // QK phase: N = block_size (number of KV tokens)
-    // PV phase: N = HeadDimAlignment (32) — one head_dim group per call
-    //           ldc=head_dim=64 is the OUTPUT stride, not the group size
     const int32_t N = (phase == AttentionGemmPhase::QK)
                           ? block_size
                           : NNPA_HEAD_SIZE_ALIGNMENT;
