@@ -38,6 +38,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
+from vllm.v1.kv_offload.cpu.common import CPUOffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -109,7 +110,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
-                spec=self,
+                config=CPUOffloadingConfig(
+                    num_blocks=self.num_blocks,
+                    eviction_policy=self.eviction_policy,
+                    enable_events=self.enable_events,
+                    store_threshold=self.store_threshold,
+                    max_tracker_size=self.max_tracker_size,
+                    metric_definitions=self.metric_definitions,
+                ),
                 mmap_region=scheduler_mmap,
             )
 

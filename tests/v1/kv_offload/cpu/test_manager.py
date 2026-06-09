@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -16,7 +16,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingConfig
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
@@ -33,18 +33,6 @@ def make_req_context(
 _EMPTY_REQ_CTX = make_req_context()
 
 
-@dataclass
-class FakeCPUOffloadingSpec:
-    num_blocks: int = 4
-    eviction_policy: str = "lru"
-    enable_events: bool = False
-    store_threshold: int = 0
-    max_tracker_size: int = 64_000
-    metric_definitions: dict[str, OffloadingMetricMetadata] = field(
-        default_factory=dict
-    )
-
-
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
@@ -54,7 +42,7 @@ def make_cpu_manager(
     metric_definitions: dict[str, OffloadingMetricMetadata] | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
-        FakeCPUOffloadingSpec(
+        CPUOffloadingConfig(
             num_blocks=num_blocks,
             eviction_policy=cache_policy,
             enable_events=enable_events,

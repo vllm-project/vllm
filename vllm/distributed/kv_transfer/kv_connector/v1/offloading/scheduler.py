@@ -22,6 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     STORE_SIZE,
     STORE_TIME,
     OffloadingConnectorStats,
+    get_connector_metric_definitions,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -274,7 +275,10 @@ class OffloadingConnectorScheduler:
     ):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
-        self._offloading_metric_metadata = spec.metric_definitions
+        self._offloading_metric_metadata = {
+            **spec.metric_definitions,
+            **get_connector_metric_definitions(),
+        }
         self._connector_stats: OffloadingConnectorStats | None = None
 
         full_attention_groups: list[int] = []

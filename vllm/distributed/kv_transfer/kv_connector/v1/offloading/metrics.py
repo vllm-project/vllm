@@ -203,8 +203,11 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
         spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        extra_config = kv_transfer_config.kv_connector_extra_config
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
-            **spec_cls.build_metric_definitions(vllm_config),
+            **spec_cls.build_metric_definitions(extra_config),
             **get_connector_metric_definitions(),
         }
         from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
+from typing import Any
 
 from typing_extensions import override
 
@@ -17,12 +18,14 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadingSpec,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    METRIC_STORES_SKIPPED,
+    CPULoadStoreSpec,
+    CPUOffloadingConfig,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
-
-METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -30,14 +33,8 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     @classmethod
     def build_metric_definitions(
-        cls, spec: OffloadingSpec | VllmConfig
+        cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
-        if hasattr(spec, "extra_config"):
-            extra_config = spec.extra_config
-        else:
-            kv_transfer_config = spec.kv_transfer_config
-            assert kv_transfer_config is not None
-            extra_config = kv_transfer_config.kv_connector_extra_config
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold < 2:
             return {}
@@ -113,7 +110,16 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            self._manager = CPUOffloadingManager(self)
+            self._manager = CPUOffloadingManager(
+                CPUOffloadingConfig(
+                    num_blocks=self.num_blocks,
+                    eviction_policy=self.eviction_policy,
+                    enable_events=self.enable_events,
+                    store_threshold=self.store_threshold,
+                    max_tracker_size=self.max_tracker_size,
+                    metric_definitions=self.metric_definitions,
+                )
+            )
         return self._manager
 
     def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
-from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import override
 
@@ -19,13 +18,14 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    METRIC_STORES_SKIPPED,
+    CPULoadStoreSpec,
+    CPUOffloadingConfig,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-
-if TYPE_CHECKING:
-    from vllm.v1.kv_offload.base import OffloadingSpec
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
@@ -45,18 +45,15 @@ class CPUOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
-        spec: "OffloadingSpec",
+        config: CPUOffloadingConfig,
     ):
-        super().__init__(spec)
-        cpu_spec = cast(Any, spec)
+        self.config = config
         self.medium: str = CPULoadStoreSpec.medium()
-        self._num_blocks: int = cpu_spec.num_blocks
+        self._num_blocks: int = config.num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
-        self.events: list[OffloadingEvent] | None = (
-            [] if cpu_spec.enable_events else None
-        )
-        cache_policy = cpu_spec.eviction_policy
+        self.events: list[OffloadingEvent] | None = [] if config.enable_events else None
+        cache_policy = config.eviction_policy
         policy_cls = _CACHE_POLICIES.get(cache_policy)
         if policy_cls is None:
             raise ValueError(
@@ -64,8 +61,8 @@ class CPUOffloadingManager(OffloadingManager):
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
         self._policy: CachePolicy = policy_cls(cache_capacity=self._num_blocks)
-        self.store_threshold: int = cpu_spec.store_threshold
-        self.max_tracker_size: int = cpu_spec.max_tracker_size
+        self.store_threshold: int = config.store_threshold
+        self.max_tracker_size: int = config.max_tracker_size
 
         # metrics
         self.stores_skipped_in_current_batch: int = 0
@@ -268,12 +265,14 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     def get_stats(self) -> KVConnectorStats | None:
-        if not self.spec.metric_definitions:
+        if not self.config.metric_definitions:
             return None
 
-        stats = OffloadingConnectorStats(metric_metadata=self.spec.metric_definitions)
+        stats = OffloadingConnectorStats(
+            metric_metadata=self.config.metric_definitions
+        )
         stats.increase_counter(
-            "vllm:kv_offload_stores_skipped",
+            METRIC_STORES_SKIPPED,
             self.stores_skipped_in_current_batch,
         )
         self.stores_skipped_in_current_batch = 0

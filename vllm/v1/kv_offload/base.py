@@ -408,7 +408,7 @@ class OffloadingSpec(ABC):
 
     @classmethod
     def build_metric_definitions(
-        cls, spec: "OffloadingSpec | VllmConfig"
+        cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
@@ -424,7 +424,7 @@ class OffloadingSpec(ABC):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
-        self.metric_definitions = self.build_metric_definitions(self)
+        self.metric_definitions = self.build_metric_definitions(self.extra_config)
 
         # When True, only prompt (prefill) blocks are offloaded; decode-phase
         # blocks (KV generated after the prompt) are skipped. Useful when prior

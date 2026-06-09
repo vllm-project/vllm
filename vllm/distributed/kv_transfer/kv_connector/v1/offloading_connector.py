@@ -26,7 +26,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
-    get_connector_metric_definitions,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
@@ -58,7 +57,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
-        spec.metric_definitions.update(get_connector_metric_definitions())
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
