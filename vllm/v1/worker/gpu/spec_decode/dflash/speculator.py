@@ -41,7 +41,6 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Each request emits exactly (bonus + N mask) query tokens per step.
         self.num_query_per_req = 1 + self.num_speculative_steps
-        self.max_query_tokens = self.max_num_reqs * self.num_query_per_req
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -207,11 +206,12 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
+        assert num_query_per_req is None  # Omitted for DFlash, read from self instead
         return super()._build_draft_attn_metadata(
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
-            num_query_per_req=num_query_per_req or self.num_query_per_req,
+            num_query_per_req=self.num_query_per_req,
             causal=causal,
         )
 
@@ -290,6 +290,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
+        assert self.draft_kv_cache_group_id >= 0
         query_slot_mapping = self.block_tables.slot_mappings[
             self.draft_kv_cache_group_id
         ]
