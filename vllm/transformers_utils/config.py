@@ -5,14 +5,14 @@ import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
-from functools import cache, partial
+from functools import cache, partial, wraps
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
-from huggingface_hub import constants, get_safetensors_metadata
+from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
@@ -43,6 +43,7 @@ from .gguf_utils import (
 from .repo_utils import (
     file_or_path_exists,
     get_hf_file_to_dict,
+    hf_api,
     list_repo_files,
     try_get_local_file,
     with_retry,
@@ -94,6 +95,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
+    cosmos3_omni="Cosmos3Config",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
@@ -101,6 +103,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
+    hyperclovax="HyperCLOVAXConfig",
     hyperclovax_vlm="HCXVisionConfig",
     hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
@@ -111,9 +114,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    jais="JAISConfig",
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
+    mellum="MellumConfig",
     midashenglm="MiDashengLMConfig",
     moondream3="Moondream3Config",
     eagle="EAGLEConfig",
@@ -137,6 +140,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+
+_PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -168,6 +173,34 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
     finally:
         constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
+
+
+def _patch_hf_transformers_validate_rope():
+    """Transformers v5 moved the ignore_keys option from the method signature of
+    validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
+    in the PreTrainedConfig class. This is a patch to make older versions of
+    validate_rope() with the ignore_keys parameter work with newer versions of
+    hf transformers (from v5 onwards)
+    """
+
+    if Version(version("transformers")) >= Version("5.0.0"):
+        if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
+            return
+
+        _original_validate_rope = PretrainedConfig.validate_rope
+
+        @wraps(_original_validate_rope)
+        def patched_validate_rope(self, *args, **kwargs):
+            ignore_keys_param = kwargs.pop("ignore_keys", None)
+            original_ignore_keys = self.ignore_keys_at_rope_validation
+            self.ignore_keys_at_rope_validation = (
+                original_ignore_keys or ignore_keys_param
+            )
+            result = _original_validate_rope(self, *args, **kwargs)
+            return result
+
+        patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
+        PretrainedConfig.validate_rope = patched_validate_rope
 
 
 class HFConfigParser(ConfigParserBase):
@@ -208,6 +241,9 @@ class HFConfigParser(ConfigParserBase):
                 dummy_config = PretrainedConfig(**dummy_kwargs)
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
+
+        if model_type in _PATCH_HF_VALIDATE_ROPE:
+            _patch_hf_transformers_validate_rope()
 
         if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -429,9 +465,9 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         if "rope_type" not in rope_parameters and "type" in rope_parameters:
             rope_parameters["rope_type"] = rope_parameters["type"]
             logger.info("Replacing legacy 'type' key with 'rope_type'")
-        # Case 3: No rope_type field at all - cannot determine RoPE type, raise error
+        # Case 3: No rope_type field present - nothing to patch
         if "rope_type" not in rope_parameters:
-            raise ValueError("rope_parameters should have a 'rope_type' key")
+            return
         # Patch legacy rope_type values with warning
         if rope_parameters["rope_type"] == "su":
             rope_parameters["rope_type"] = "longrope"
@@ -1142,7 +1178,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata, model, revision=revision
+        hf_api().get_safetensors_metadata, model, revision=revision
     )
 
     try:
@@ -1236,7 +1272,7 @@ def get_safetensors_params_metadata(
     # local HF cache: weights may already be cached from a prior run, and
     # weight loading itself uses the same cache.
     try:
-        local_dir = huggingface_hub.snapshot_download(
+        local_dir = hf_api().snapshot_download(
             repo_id=model,
             revision=revision,
             allow_patterns=["*.safetensors"],

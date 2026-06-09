@@ -1322,7 +1322,7 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts=num_experts,
         experts_per_token=topk,
         hidden_dim=hidden_size,
-        intermediate_size_per_partition=intermediate_size,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
