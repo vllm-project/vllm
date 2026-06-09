@@ -250,6 +250,66 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                     dst_tensor.copy_(cpu_tensor, non_blocking=True)
 
 
+class TorchDistXCCLStagedEplbCommunicator(EplbCommunicator):
+    """EPLB communicator using XCCL device-to-device P2P on XPU."""
+
+    def __init__(
+        self,
+        ep_group: ProcessGroup,
+        stream: torch.xpu.Stream | None = None,
+    ) -> None:
+        self._ep_group = ep_group
+        self._stream = stream
+        self._ops: list[tuple[str, torch.Tensor, int]] = []
+        self._log_initialized()
+
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("send", tensor, dst_rank))
+
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("recv", tensor, src_rank))
+
+    def execute(self) -> None:
+        if not self._ops:
+            return
+
+        p2p_ops: list[P2POp] = []
+        try:
+            for op, tensor, peer_rank in self._ops:
+                send_or_recv = (
+                    torch.distributed.isend
+                    if op == "send"
+                    else torch.distributed.irecv
+                )
+                p2p_ops.append(
+                    P2POp(
+                        send_or_recv,
+                        tensor,
+                        peer_rank,
+                        self._ep_group,
+                    )
+                )
+        finally:
+            self._ops.clear()
+
+        with torch.xpu.stream(self._stream):
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
+                req.wait()
+
+
 class NixlEplbCommunicator(EplbCommunicator):
     """EPLB communicator backed by NIXL READ transfers."""
 
@@ -639,7 +699,7 @@ def create_eplb_communicator(
         group_coordinator: Process-group coordinator that provides the
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
-            ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
+            ``"torch_gloo"``, ``"torch_xccl"``, ``"pynccl"``, or ``"nixl"``).
             Falls back to ``"torch_nccl"`` when *None*.
             Stateless (elastic EP) groups only support ``"torch_nccl"``
             and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
@@ -739,6 +799,8 @@ def create_eplb_communicator(
         return TorchDistGlooStagedEplbCommunicator(
             cpu_group=group_coordinator.cpu_group,
         )
+    elif backend == "torch_xccl":
+        return TorchDistXCCLStagedEplbCommunicator(ep_group=torch_group)
     elif backend == "torch_nccl":
         return TorchDistNcclEplbCommunicator(ep_group=torch_group)
     elif backend == "pynccl":

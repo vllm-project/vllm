@@ -36,7 +36,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -92,9 +94,11 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    - None: Auto-select backend ("torch_xccl" on XPU, "torch_gloo" for
+      async, "torch_nccl" for sync)
     """
 
     @model_validator(mode="after")
@@ -911,6 +915,9 @@ class ParallelConfig:
                 # (torch.distributed.batch_isend_irecv doesn't
                 # support stateless mode), so we use PyNCCL backend
                 self.eplb_config.communicator = "pynccl"
+            elif current_platform.is_xpu():
+                # On XPU, use the device-native XCCL P2P backend.
+                self.eplb_config.communicator = "torch_xccl"
             else:
                 # Avoid torch_nccl: NCCL is fundamentally incompatible
                 # with async EPLB due to multi-stream conflicts, and
