@@ -569,6 +569,7 @@ def test_fp4_marlin_linear_nvfp4_w4a16_padded_shape():
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
 )
+@pytest.mark.usefixtures("default_vllm_config")
 def test_fp4_marlin_linear_mxfp4_w4a8_keeps_logical_shape():
     if not current_platform.is_device_capability(
         89
