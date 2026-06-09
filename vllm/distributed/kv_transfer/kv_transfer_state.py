@@ -56,6 +56,7 @@ def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
     the same model-parallel engine share the same value.
     """
     from vllm.distributed.parallel_state import (
+        get_pp_group,
         get_tp_group,
     )
 
@@ -64,10 +65,6 @@ def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
         vllm_config.kv_transfer_config.engine_id, src=0
     )
     if vllm_config.parallel_config.pipeline_parallel_size > 1:
-        from vllm.distributed.parallel_state import (
-            get_pp_group,
-        )
-
         synced_id = get_pp_group().broadcast_object(synced_id, src=0)
     vllm_config.kv_transfer_config.engine_id = synced_id
 
