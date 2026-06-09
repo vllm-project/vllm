@@ -31,6 +31,8 @@ def run_and_test_dummy_opt_api_server(model, tp=1):
             ],
             temperature=0,
         )
+        if not completion.choices:
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         generated_text = completion.choices[0].message.content
         assert generated_text is not None
         # make sure only the first token is generated

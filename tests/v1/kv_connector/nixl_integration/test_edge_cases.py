@@ -43,6 +43,8 @@ def test_edge_cases():
     completion = proxy_client.completions.create(
         model=MODEL, prompt=SHORT_PROMPT, temperature=0
     )
+    if not completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     proxy_response = completion.choices[0].text
     completion = prefill_client.completions.create(
         model=MODEL, prompt=SHORT_PROMPT, temperature=0

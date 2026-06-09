@@ -71,6 +71,8 @@ def can_initialize(
             max_tokens=2,
         )
         print(completion)
+        if not completion.choices:
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         assert completion.choices[0].text is not None
 
 

@@ -63,14 +63,15 @@ def _complete(client: openai.OpenAI, prompt: str, max_tokens: int = 20):
         max_tokens=max_tokens,
         temperature=0,
     )
+    if not resp.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     return resp.choices[0].text, resp.usage.prompt_tokens
 
 
 # ── Prometheus metrics helpers ────────────────────────────────────────────
 
 _METRIC_RE = re.compile(
-    r'vllm:prompt_tokens_by_source_total\{.*?source="([^"]+)".*?\}\s+'
-    r"([\d.eE+\-]+)"
+    r'vllm:prompt_tokens_by_source_total\{.*?source="([^"]+)".*?\}\s+' r"([\d.eE+\-]+)"
 )
 
 
@@ -217,9 +218,9 @@ def test_short_prompt_correctness():
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
     )
-    assert n1 - n0 > 0, (
-        f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
-    )
+    assert (
+        n1 - n0 > 0
+    ), f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
 
 
 def test_block_boundary_correctness():
@@ -239,9 +240,9 @@ def test_block_boundary_correctness():
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
     )
-    assert n1 - n0 > 0, (
-        f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
-    )
+    assert (
+        n1 - n0 > 0
+    ), f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
 
 
 def test_above_block_boundary_correctness():
@@ -261,9 +262,9 @@ def test_above_block_boundary_correctness():
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
     )
-    assert n1 - n0 > 0, (
-        f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
-    )
+    assert (
+        n1 - n0 > 0
+    ), f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
 
 
 def test_multi_block_correctness():
@@ -283,9 +284,9 @@ def test_multi_block_correctness():
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
     )
-    assert n1 - n0 > 0, (
-        f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
-    )
+    assert (
+        n1 - n0 > 0
+    ), f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -309,18 +310,18 @@ def test_cold_decode_no_cache_hit_metrics():
     print(f"COLD DECODE: {P} prompt tokens, metrics delta: {d}")
     print(f"  nixl_bytes_delta={n1 - n0}")
     assert len(proxy_text) > 0, "proxy returned empty response"
-    assert d["external_kv_transfer"] == P, (
-        f"expected external_kv_transfer={P}, got {d['external_kv_transfer']}"
-    )
-    assert d["local_compute"] == 0, (
-        f"expected local_compute=0, got {d['local_compute']}"
-    )
-    assert d["local_cache_hit"] == 0, (
-        f"expected local_cache_hit=0, got {d['local_cache_hit']}"
-    )
-    assert n1 - n0 > 0, (
-        f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
-    )
+    assert (
+        d["external_kv_transfer"] == P
+    ), f"expected external_kv_transfer={P}, got {d['external_kv_transfer']}"
+    assert (
+        d["local_compute"] == 0
+    ), f"expected local_compute=0, got {d['local_compute']}"
+    assert (
+        d["local_cache_hit"] == 0
+    ), f"expected local_cache_hit=0, got {d['local_cache_hit']}"
+    assert (
+        n1 - n0 > 0
+    ), f"expected nixl_bytes_transferred to increase, got delta={n1 - n0}"
 
 
 def test_full_decode_gpu_cache_hit_metrics():
@@ -341,16 +342,16 @@ def test_full_decode_gpu_cache_hit_metrics():
     print(f"FULL CACHE HIT: {P} tokens, cached={cached}, nixl={expected_nixl}")
     print(f"  metrics delta: {d}, nixl_bytes_delta={n1 - n0}")
     assert len(proxy_text) > 0, "proxy returned empty response"
-    assert d["local_cache_hit"] == cached, (
-        f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
-    )
+    assert (
+        d["local_cache_hit"] == cached
+    ), f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
     assert d["external_kv_transfer"] == expected_nixl, (
         f"expected external_kv_transfer={expected_nixl}, "
         f"got {d['external_kv_transfer']}"
     )
-    assert d["local_compute"] == 0, (
-        f"expected local_compute=0, got {d['local_compute']}"
-    )
+    assert (
+        d["local_compute"] == 0
+    ), f"expected local_compute=0, got {d['local_compute']}"
     assert n1 - n0 > 0, (
         f"expected nixl_bytes_transferred to increase (partial NIXL for "
         f"uncached tail), got delta={n1 - n0}"
@@ -383,12 +384,12 @@ def test_partial_decode_gpu_cache_hit_metrics():
         f"expected external_kv_transfer={expected_nixl}, "
         f"got {d['external_kv_transfer']}"
     )
-    assert d["local_cache_hit"] == cached, (
-        f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
-    )
-    assert d["local_compute"] == 0, (
-        f"expected local_compute=0, got {d['local_compute']}"
-    )
+    assert (
+        d["local_cache_hit"] == cached
+    ), f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
+    assert (
+        d["local_compute"] == 0
+    ), f"expected local_compute=0, got {d['local_compute']}"
     assert n1 - n0 > 0, (
         f"expected nixl_bytes_transferred to increase (NIXL for uncached "
         f"tail), got delta={n1 - n0}"
@@ -409,15 +410,15 @@ def test_decode_direct_all_local_compute():
     print(f"DIRECT DECODE: {text!r} ({P} tokens), metrics delta: {d}")
     print(f"  nixl_bytes_delta={n1 - n0}")
     assert len(text.strip()) > 0, "empty output from direct decode"
-    assert d["local_compute"] == P, (
-        f"expected local_compute={P}, got {d['local_compute']}"
-    )
-    assert d["external_kv_transfer"] == 0, (
-        f"expected external_kv_transfer=0, got {d['external_kv_transfer']}"
-    )
-    assert n1 - n0 == 0, (
-        f"expected no nixl_bytes_transferred for direct decode, got delta={n1 - n0}"
-    )
+    assert (
+        d["local_compute"] == P
+    ), f"expected local_compute={P}, got {d['local_compute']}"
+    assert (
+        d["external_kv_transfer"] == 0
+    ), f"expected external_kv_transfer=0, got {d['external_kv_transfer']}"
+    assert (
+        n1 - n0 == 0
+    ), f"expected no nixl_bytes_transferred for direct decode, got delta={n1 - n0}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

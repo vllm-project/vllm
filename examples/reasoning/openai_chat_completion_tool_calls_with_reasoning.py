@@ -115,6 +115,8 @@ def main():
     tool_calls = client.chat.completions.create(
         messages=messages, model=model, tools=tools
     )
+    if not tool_calls.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     print(f"reasoning: {tool_calls.choices[0].message.reasoning}")
     print(f"function name: {tool_calls.choices[0].message.tool_calls[0].function.name}")
     print(

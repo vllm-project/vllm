@@ -67,6 +67,8 @@ def run_simple_prompt(
             temperature=0.0,
             seed=42,
         )
+        if not completion.choices:
+            raise ValueError("LLM returned empty response")  # pact: guard empty choices list
         return completion.choices[0].message.content
     else:
         completion = client.completions.create(
@@ -171,9 +173,9 @@ def main():
         assert len(baseline_outputs) == len(output_strs)
         for prompt, output in baseline_outputs.items():
             assert prompt in output_strs, f"{prompt} not included"
-            assert output == output_strs[prompt], (
-                f"baseline_output: {output} != PD output: {output_strs[prompt]}"
-            )
+            assert (
+                output == output_strs[prompt]
+            ), f"baseline_output: {output} != PD output: {output_strs[prompt]}"
 
 
 if __name__ == "__main__":

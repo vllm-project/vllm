@@ -105,6 +105,7 @@ if current_platform.is_rocm():
                 yield
             finally:
                 amdsmi_shut_down()
+
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
@@ -120,6 +121,7 @@ elif current_platform.is_cuda():
             yield
         finally:
             nvmlShutdown()
+
 else:
 
     @contextmanager
@@ -873,6 +875,8 @@ def _test_completion(
         model=model, prompt=prompt, max_tokens=5, temperature=0.0
     )
 
+    if not completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "single_completion",
@@ -942,6 +946,8 @@ def _test_completion(
         temperature=0.0,
     )
 
+    if not batch.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "simple_list",
@@ -987,6 +993,8 @@ def _test_completion_close(
         model=model, prompt=prompt, max_tokens=1, logprobs=5, temperature=0.0
     )
 
+    if not completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     logprobs = completion.choices[0].logprobs.top_logprobs[0]
     logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
@@ -1014,6 +1022,8 @@ def _test_chat(
         model=model, messages=messages, max_tokens=5, temperature=0.0
     )
 
+    if not chat_response.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     results.append(
         {
             "test": "completion_close",
@@ -1076,6 +1086,8 @@ def _test_image_text(
         logprobs=True,
         top_logprobs=5,
     )
+    if not chat_completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     for x in top_logprobs:

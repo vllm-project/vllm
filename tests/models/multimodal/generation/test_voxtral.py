@@ -140,6 +140,8 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
         )
 
     assert len(completion.choices) == 1
+    if not completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     choice = completion.choices[0]
     assert choice.finish_reason == "length"
     assert choice.message.content == offline_text, (

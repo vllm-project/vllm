@@ -146,9 +146,9 @@ def test_spec_decode_acceptance_length():
     rtol = config.rtol if config.rtol is not None else DEFAULT_RTOL
 
     prompts = _get_mt_bench_prompts()
-    assert len(prompts) == DEFAULT_NUM_PROMPTS, (
-        f"Expected {DEFAULT_NUM_PROMPTS} prompts, got {len(prompts)}"
-    )
+    assert (
+        len(prompts) == DEFAULT_NUM_PROMPTS
+    ), f"Expected {DEFAULT_NUM_PROMPTS} prompts, got {len(prompts)}"
 
     client = openai.OpenAI(api_key="EMPTY", base_url=PROXY_BASE_URL)
     for i, prompt in enumerate(prompts):
@@ -164,6 +164,8 @@ def test_spec_decode_acceptance_length():
             extra_body={"add_special_tokens": False},
         )
         if i < 3:
+            if not resp.choices:
+                raise ValueError("LLM returned empty response")  # pact: guard empty choices list
             text = resp.choices[0].text.strip()[:100]
             print(f"  [{i}] {prompt[:60]}... -> {text}...")
 

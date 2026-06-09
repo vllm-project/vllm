@@ -123,6 +123,8 @@ def main():
         messages=messages, model=model, tools=tools, tool_choice="required"
     )
 
+    if not chat_completion.choices:
+        raise ValueError("LLM returned empty response")  # pact: guard empty choices list
     print(chat_completion.choices[0].message.tool_calls)
 
 
