@@ -1211,6 +1211,10 @@ class MLACommonPrefillMetadata:
         # New for MLA (compared to FlashAttention)
         # For handling chunked prefill
         cu_seq_lens: torch.Tensor
+        # CPU mirror of cu_seq_lens (pin-memory int32 [num_chunks, num_prefills+1]).
+        # Lets prefill backends that build host-side metadata (e.g. AITER_ASM PS
+        # scheduler) avoid a DtoH copy + host sync per layer per chunk.
+        cu_seq_lens_cpu: torch.Tensor
         starts: torch.Tensor
         seq_tot: list[int]
         max_seq_lens: list[int]
@@ -1229,6 +1233,10 @@ class MLACommonPrefillMetadata:
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
+    # CPU mirror of query_start_loc (int32 [num_prefills+1]). Mirrors
+    # cu_seq_lens_cpu on ChunkedContextMetadata; populated unconditionally so
+    # PS backends don't need a per-layer DtoH copy.
+    query_start_loc_cpu: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     q_data_type: torch.dtype | None = None
@@ -1783,6 +1791,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens_cpu=cu_seq_lens_cpu,
                         starts=local_chunk_starts.to(device, non_blocking=True),
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -1804,6 +1813,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 else:
                     chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens_cpu=cu_seq_lens_cpu,
                         starts=chunk_starts.to(device, non_blocking=True),
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -1824,6 +1834,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
+                query_start_loc_cpu=prefill_query_start_loc_cpu,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
                 output_dtype=self.model_config.dtype,
