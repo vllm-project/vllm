@@ -653,6 +653,17 @@ def maybe_override_with_speculators(
         trust_remote_code)
     """
     disable_verifier_trust_remote_code = False
+
+    def disable_trust_remote_code_for_gguf_config() -> bool:
+        if not disable_verifier_trust_remote_code or not trust_remote_code:
+            return trust_remote_code
+        logger.warning_once(
+            "Disabling `trust_remote_code` because model config was selected "
+            "from a GGUF-derived config source. Pass an explicit "
+            "`--hf-config-path` to opt in for that repository.",
+        )
+        return False
+
     if check_gguf_file(model):
         if hf_config_path is None:
             gguf_repo = Path(model).parent
@@ -706,6 +717,7 @@ def maybe_override_with_speculators(
 
     if speculators_config is None:
         # No speculators config found, return original values
+        trust_remote_code = disable_trust_remote_code_for_gguf_config()
         return model, tokenizer, vllm_speculative_config, trust_remote_code
 
     # Speculators format detected - process overrides
@@ -721,15 +733,7 @@ def maybe_override_with_speculators(
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
-    if disable_verifier_trust_remote_code and trust_remote_code:
-        logger.warning_once(
-            "Disabling `trust_remote_code` for speculators verifier model "
-            "'%s' because it was selected from a GGUF-derived speculators "
-            "config. Pass "
-            "an explicit `--hf-config-path` to opt in for that repository.",
-            verifier_model,
-        )
-        trust_remote_code = False
+    trust_remote_code = disable_trust_remote_code_for_gguf_config()
 
     return model, tokenizer, speculative_config, trust_remote_code
 

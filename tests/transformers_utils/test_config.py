@@ -141,6 +141,49 @@ def test_remote_gguf_speculators_uses_gguf_parser_fallback(monkeypatch):
     assert speculative_config is None
 
 
+def test_remote_gguf_parser_fallback_without_speculators_disables_trust_remote_code(
+    monkeypatch,
+):
+    from vllm.transformers_utils import config as config_module
+
+    _patch_config_source(monkeypatch, config_module, "org/spec-GGUF")
+    _patch_gguf_file(monkeypatch, config_module, "spec-UD-IQ4_NL.gguf")
+    monkeypatch.setattr(
+        config_module,
+        "file_or_path_exists",
+        lambda model, config_name, revision=None: False,
+    )
+    calls = _patch_config_dict(
+        monkeypatch,
+        config_module,
+        {"model_type": "qwen3_5_moe"},
+    )
+
+    model, tokenizer, speculative_config, trust_remote_code = (
+        maybe_override_with_speculators(
+            "org/spec-GGUF:UD-IQ4_NL",
+            tokenizer=None,
+            trust_remote_code=True,
+            revision="gguf-rev",
+        )
+    )
+
+    assert calls == [
+        (
+            "org/spec-GGUF",
+            "gguf-rev",
+            {
+                "gguf_file": "spec-UD-IQ4_NL.gguf",
+                "local_files_only": False,
+            },
+        )
+    ]
+    assert trust_remote_code is False
+    assert model == "org/spec-GGUF:UD-IQ4_NL"
+    assert tokenizer is None
+    assert speculative_config is None
+
+
 def test_remote_gguf_parser_speculators_disables_trust_remote_code(monkeypatch):
     from vllm.transformers_utils import config as config_module
 
