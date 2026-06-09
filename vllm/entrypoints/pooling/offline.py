@@ -286,50 +286,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
-    def reward(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        /,
-        *,
-        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[PoolingRequestOutput]:
-        """
-        Generate rewards for each prompt.
-
-        Args:
-            prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompt.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
-            use_tqdm: If `True`, shows a tqdm progress bar.
-                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
-                it is used to create the progress bar.
-                If `False`, no progress bar is created.
-            lora_request: LoRA request to use for generation, if any.
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
-
-        Returns:
-            A list of `PoolingRequestOutput` objects containing the
-            pooled hidden states in the same order as the input prompts.
-        """
-        logger.warning_once(
-            "`llm.reward` api is deprecated and will be removed in v0.23. "
-            'Please use `LLM.encode` with `pooling_task="classify"` or '
-            '`pooling_task="token_classify"` instead.'
-        )
-        return self.encode(
-            prompts,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-            pooling_params=pooling_params,
-            pooling_task="token_classify",
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
     def score(
         self,
         data_1: ScoreInput | list[ScoreInput],
