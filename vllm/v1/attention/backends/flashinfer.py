@@ -91,6 +91,16 @@ trtllm_gen_workspace_buffer = None
 def _is_sm120_nvfp4_xqa_path(is_kvcache_nvfp4: bool) -> bool:
     return is_kvcache_nvfp4 and current_platform.is_device_capability_family(120)
 
+def _validate_sm120_nvfp4_xqa_page_size(page_size: int) -> None:
+    if page_size not in (64, 128):
+        raise ValueError(
+            "SM120 NVFP4 direct XQA currently supports only "
+            f"block_size/page_size=64 or 128. Got {page_size}. "
+            "Set `--block-size 64` or `--block-size 128`; page_size=16 "
+            "and page_size=32 are known to produce incorrect decode results "
+            "on this path."
+        )
+
 def _normalize_nvfp4_global_scale(
     scale: torch.Tensor | float,
     device: torch.device,
@@ -745,6 +755,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
         self.use_xqa_nvfp4 = _is_sm120_nvfp4_xqa_path(self.is_kvcache_nvfp4)
+        if self.use_xqa_nvfp4:
+            _validate_sm120_nvfp4_xqa_page_size(self.page_size)
 
         if (
             can_use_trtllm
@@ -1480,6 +1492,8 @@ class FlashInferImpl(AttentionImpl):
         self.page_size = (
             vllm_config.cache_config.block_size if vllm_config is not None else 0
         )
+        if self.use_xqa_nvfp4 and self.page_size:
+            _validate_sm120_nvfp4_xqa_page_size(self.page_size)
         self.supports_quant_query_input = (
             self.support_trtllm_attn
             and vllm_config is not None
