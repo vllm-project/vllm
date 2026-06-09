@@ -617,11 +617,6 @@ class Lfm2VLForConditionalGeneration(
         orig_to_new_prefix={
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
-            "model.vision_tower.embeddings.": "vision_tower.vision_model.embeddings.",
-            "model.vision_tower.encoder.": "vision_tower.vision_model.encoder.",
-            "model.vision_tower.post_layernorm.": (
-                "vision_tower.vision_model.post_layernorm."
-            ),
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
         }
