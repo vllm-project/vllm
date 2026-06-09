@@ -2449,7 +2449,9 @@ class GPUModelRunner(
                     LinearAttentionMetadataBuilder,
                 ),
             ):
-                assert ubid is None, "UBatching not supported with spec decode metadata yet"
+                assert ubid is None, (
+                    "UBatching not supported with spec decode metadata yet"
+                )
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                     num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[

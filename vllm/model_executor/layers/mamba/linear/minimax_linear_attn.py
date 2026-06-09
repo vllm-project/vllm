@@ -41,9 +41,7 @@ def clear_linear_attention_cache_for_new_sequences(
         q_start = attn_metadata.query_start_loc[num_decodes + prefill_idx]
         q_end = attn_metadata.query_start_loc[num_decodes + prefill_idx + 1]
         query_len = q_end - q_start
-        context_len = (
-            attn_metadata.seq_lens[num_decodes + prefill_idx] - query_len
-        )
+        context_len = attn_metadata.seq_lens[num_decodes + prefill_idx] - query_len
         if context_len == 0:
             if prefill_state_indices is not None:
                 block_to_clear = prefill_state_indices[prefill_idx]
@@ -130,33 +128,23 @@ def _linear_attn_decode_spec_step_kernel(
     kv_mask = qk_mask[:, None] & v_mask[None, :]
 
     q = tl.load(
-        q_ptr
-        + token_idx * q_b_stride
-        + head_id * q_h_stride
-        + qk_offsets * q_d_stride,
+        q_ptr + token_idx * q_b_stride + head_id * q_h_stride + qk_offsets * q_d_stride,
         mask=qk_mask,
         other=0.0,
     )
     k = tl.load(
-        k_ptr
-        + token_idx * k_b_stride
-        + head_id * k_h_stride
-        + qk_offsets * k_d_stride,
+        k_ptr + token_idx * k_b_stride + head_id * k_h_stride + qk_offsets * k_d_stride,
         mask=qk_mask,
         other=0.0,
     )
     v = tl.load(
-        v_ptr
-        + token_idx * v_b_stride
-        + head_id * v_h_stride
-        + v_offsets * v_d_stride,
+        v_ptr + token_idx * v_b_stride + head_id * v_h_stride + v_offsets * v_d_stride,
         mask=v_mask,
         other=0.0,
     )
 
     cache_offsets = (
-        qk_offsets[:, None] * cache_d0_stride
-        + v_offsets[None, :] * cache_d1_stride
+        qk_offsets[:, None] * cache_d0_stride + v_offsets[None, :] * cache_d1_stride
     )
     src_cache_ptr = (
         kv_cache_ptr
@@ -359,9 +347,7 @@ def linear_attention_prefill_and_mix(
         hidden.insert(0, hidden_decode)
 
     if not hidden:
-        return torch.empty(
-            (0, q.size(1) * q.size(2)), device=q.device, dtype=q.dtype
-        )
+        return torch.empty((0, q.size(1) * q.size(2)), device=q.device, dtype=q.dtype)
 
     hidden = torch.concat(hidden, dim=0).contiguous()
     return hidden
