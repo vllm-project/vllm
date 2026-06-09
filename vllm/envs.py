@@ -246,6 +246,9 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
+    VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
+    VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
+    VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
@@ -1839,6 +1842,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
+    ),
+    # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
+    "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0"))
+    ),
+    # DeepEP v2: use fewer SMs at slight throughput cost
+    "VLLM_DEEPEP_V2_PREFER_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_PREFER_OVERLAP", "0"))
+    ),
+    # DeepEP v2: trade precision for transfer size in combine
+    "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
     ),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.

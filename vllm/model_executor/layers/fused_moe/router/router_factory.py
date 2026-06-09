@@ -41,7 +41,6 @@ def create_fused_moe_router(
     top_k: int,
     global_num_experts: int,
     renormalize: bool = True,
-    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     # grouped topk parameters
     use_grouped_topk: bool = False,
     num_expert_group: int | None = None,
@@ -77,7 +76,6 @@ def create_fused_moe_router(
         top_k: Number of experts to select per token
         global_num_experts: Total number of experts in the model
         renormalize: Whether to renormalize the routing weights
-        indices_type_getter: Function to get the desired indices dtype
         routing_method_type: Optional explicit routing method type
 
     Grouped topk arguments:
@@ -116,7 +114,6 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
 
     if zero_expert_type is not None:
@@ -136,7 +133,6 @@ def create_fused_moe_router(
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            indices_type_getter=indices_type_getter,
         )
 
     if use_grouped_topk:
@@ -157,7 +153,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            indices_type_getter=indices_type_getter,
         )
         if (
             grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
@@ -179,7 +174,6 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            indices_type_getter=indices_type_getter,
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -192,7 +186,6 @@ def create_fused_moe_router(
             e_score_correction_bias=e_score_correction_bias,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            indices_type_getter=indices_type_getter,
             scoring_func=scoring_func,
             hash_indices_table=hash_indices_table,
         )
@@ -209,7 +202,6 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             renormalize=renormalize,
             scoring_func=scoring_func,
-            indices_type_getter=indices_type_getter,
         )
 
     return FusedTopKRouter(
@@ -218,5 +210,4 @@ def create_fused_moe_router(
         eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        indices_type_getter=indices_type_getter,
     )
