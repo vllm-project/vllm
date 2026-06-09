@@ -36,13 +36,10 @@ def _get_memory_utilization(device: torch.device) -> float:
 def maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(
     device: torch.device,
 ) -> None:
-    if not current_platform.is_cuda_alike() or device.type != "cuda":
+    if device.type != "cuda":
         return
 
-    if device.index is None:
-        return
-
-    if not current_platform.is_integrated_gpu(device.index):
+    if device.index is None or not current_platform.is_integrated_gpu(device.index):
         return
 
     memory_utilization = _get_memory_utilization(device)
