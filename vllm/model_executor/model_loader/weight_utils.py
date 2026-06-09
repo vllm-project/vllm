@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
@@ -23,14 +23,17 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
-from vllm.config.load import LoadConfig
+from vllm.config.load import (
+    DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    LoadConfig,
+)
 from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
@@ -42,6 +45,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
+from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -296,12 +300,10 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
-        if model_config.quantization_config is not None:
-            raise ValueError(
-                "Setting `quantization_config` for online "
-                "quantization when the model checkpoint already "
-                "has a `quantization_config` is not supported"
-            )
+        # `model_config.quantization_config` may be set alongside a checkpoint
+        # quant config: the checkpoint determines `quant_cls`, and the user's
+        # QuantizationConfigArgs is consulted by individual quant methods
+        # (e.g. for activation overrides via the MXFP4 oracle).
 
         # For modelopt_mixed, config.json's quantization_config may or may
         # not contain the per-layer quantized_layers map.  Newer checkpoints
@@ -326,12 +328,6 @@ def get_quant_config(
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
-            if model_config.quantization_config is not None:
-                raise ValueError(
-                    "Setting `quantization_config` for online "
-                    "quantization when the model checkpoint already "
-                    "has a `quantization_config` is not supported"
-                )
             return quant_cls.from_config_file(quantization_config_file)
         else:
             raise NotImplementedError(
@@ -342,12 +338,6 @@ def get_quant_config(
     quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
-            if model_config.quantization_config is not None:
-                raise ValueError(
-                    "Setting `quantization_config` for online "
-                    "quantization when the model checkpoint already "
-                    "has a `quantization_config` is not supported"
-                )
             return quant_cls.from_config_dict_json(quantization_config_json)
         else:
             raise NotImplementedError(
@@ -356,17 +346,15 @@ def get_quant_config(
                 f"{quant_cls}"
             )
 
-    # Online quantization doesn't read from checkpoint configs — it quantizes
+    # Online quantization doesn't read from checkpoint configs - it quantizes
     # fp16/bf16 weights on the fly during loading.
     if model_config.quantization_config is not None:
-        from vllm.config.quantization import OnlineQuantizationConfigArgs
+        from vllm.config.quantization import QuantizationConfigArgs
         from vllm.model_executor.layers.quantization.online.base import (
             OnlineQuantizationConfig,
         )
 
-        assert isinstance(
-            model_config.quantization_config, OnlineQuantizationConfigArgs
-        )
+        assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
     # Inflight BNB quantization
@@ -385,7 +373,7 @@ def get_quant_config(
     if not is_local:
         # Download the config files.
         with get_lock(model_config.model, load_config.download_dir):
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_config.model,
                 revision=model_config.revision,
                 allow_patterns="*.json",
@@ -443,7 +431,7 @@ def get_sparse_attention_config(
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_name_or_path,
                 revision=model_config.revision,
                 allow_patterns="*.json",
@@ -546,7 +534,7 @@ def download_weights_from_hf(
         # Attempt to reduce allow_patterns to a single pattern
         # so we only have to call snapshot_download once.
         try:
-            fs = HfFileSystem()
+            fs = hf_fs()
             file_list = fs.ls(
                 os.path.join(model_name_or_path, subfolder or ""),
                 detail=False,
@@ -558,7 +546,7 @@ def download_weights_from_hf(
             # unnecessary files (e.g., from subdirectories like "original/").
             index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
             if "*.safetensors" in allow_patterns and index_file in file_list:
-                index_path = hf_hub_download(
+                index_path = hf_api().hf_hub_download(
                     repo_id=model_name_or_path,
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
@@ -594,7 +582,7 @@ def download_weights_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
         for allow_pattern in allow_patterns:
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_name_or_path,
                 allow_patterns=allow_pattern,
                 ignore_patterns=ignore_patterns,
@@ -643,7 +631,7 @@ def download_safetensors_index_file_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         try:
             # Download the safetensors index file.
-            hf_hub_download(
+            hf_api().hf_hub_download(
                 repo_id=model_name_or_path,
                 filename=index_file,
                 cache_dir=cache_dir,
@@ -810,40 +798,57 @@ def _get_fs_type(files: list[str]) -> str:
         return ""
 
 
-def _prefetch_checkpoint(file_path: str) -> None:
+def _prefetch_checkpoint(
+    file_path: str,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
-    Reads the file in 16MB blocks so the kernel caches its pages before
-    workers load the same file.
+    Reads the file in blocks so the kernel caches its pages before workers load
+    the same file.
     """
-    block_size = 16 * 1024 * 1024  # 16MB
+    if block_size < 1:
+        raise ValueError("safetensors prefetch block size must be >= 1")
+
     with open(file_path, "rb") as f:
         while f.read(block_size):
             pass
 
 
-def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
+def _prefetch_all_checkpoints(
+    sorted_files: list[str],
+    num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+) -> None:
     """Start prefetching checkpoint files into page cache in a background thread."""
+    if num_prefetch_threads < 1:
+        raise ValueError("safetensors prefetch num threads must be >= 1")
+    if block_size < 1:
+        raise ValueError("safetensors prefetch block size must be >= 1")
+
     if torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
     else:
         rank = 0
         world_size = 1
-    num_prefetch_threads = 8
     paths_to_prefetch = sorted_files[rank::world_size]
     total_for_rank = len(paths_to_prefetch)
 
     async def _prefetch_all() -> None:
-        semaphore = asyncio.Semaphore(num_prefetch_threads)
+        loop = asyncio.get_running_loop()
         completed = 0
         next_log_pct = 10
 
-        async def prefetch_one(path: str) -> None:
+        async def prefetch_one(
+            path: str,
+            executor: concurrent.futures.ThreadPoolExecutor,
+        ) -> None:
             nonlocal completed, next_log_pct
             try:
-                async with semaphore:
-                    await asyncio.to_thread(_prefetch_checkpoint, path)
+                await loop.run_in_executor(
+                    executor, _prefetch_checkpoint, path, block_size
+                )
                 completed += 1
                 if total_for_rank > 0 and next_log_pct <= 100:
                     pct = 100 * completed / total_for_rank
@@ -860,7 +865,12 @@ def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
                     "Failed to prefetch checkpoint file %r.", path, exc_info=True
                 )
 
-        await asyncio.gather(*(prefetch_one(p) for p in paths_to_prefetch))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_prefetch_threads
+        ) as executor:
+            await asyncio.gather(
+                *(prefetch_one(p, executor) for p in paths_to_prefetch)
+            )
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
@@ -871,7 +881,12 @@ def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
             elapsed,
         )
 
-    logger.info("Prefetching checkpoint files into page cache started (in background)")
+    logger.info(
+        "Prefetching checkpoint files into page cache started "
+        "(in background, num_threads=%d, block_size=%d bytes)",
+        num_prefetch_threads,
+        block_size,
+    )
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
@@ -880,6 +895,9 @@ def safetensors_weights_iterator(
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
+    *,
+    safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
+    safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -951,7 +969,11 @@ def safetensors_weights_iterator(
         )
 
     if should_prefetch:
-        _prefetch_all_checkpoints(sorted_files)
+        _prefetch_all_checkpoints(
+            sorted_files,
+            num_prefetch_threads=safetensors_prefetch_num_threads,
+            block_size=safetensors_prefetch_block_size,
+        )
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
@@ -1068,7 +1090,8 @@ def runai_safetensors_weights_iterator(
             mininterval=2,
         )
 
-        yield from tensor_iter
+        for name, tensor in tensor_iter:
+            yield name, tensor.clone()
 
 
 def _init_fastsafetensors_loader(
@@ -1518,6 +1541,11 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
     """
+    # Already in vLLM's expected form (e.g. weights pre-renamed by a
+    # `WeightsMapper` from the quant config). Skip the regex remap, which
+    # would otherwise double-apply the `.attn` prefix and drop the weight.
+    if name in params_dict:
+        return name
     if name.endswith(".kv_scale"):
         logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
@@ -1605,3 +1633,108 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
 
     # If there were no matches, return the untouched param name
     return name
+
+
+def maybe_remap_moe_expert_param_name(
+    name: str,
+    params_dict: dict[str, torch.nn.Parameter],
+) -> str:
+    """
+    Remap MoE expert parameter names to account for routed_experts hierarchy.
+
+    This handles the transition from the old FusedMoE structure where weights
+    were directly in the experts module, to the new MoERunner → RoutedExperts
+    structure.
+
+    Checkpoint weights have names like:
+        layers.0.mlp.experts.w13_weight
+    But actual parameters are now:
+        layers.0.mlp.experts.routed_experts.w13_weight
+
+    This function inserts 'routed_experts.' into the path when needed.
+
+    Args:
+        name: Parameter name from checkpoint
+        params_dict: Dictionary of model parameters (from named_parameters())
+
+    Returns:
+        Remapped parameter name if routed_experts hierarchy exists,
+        otherwise the original name
+    """
+    # Only remap if this looks like an expert parameter
+    if ".mlp.experts." not in name:
+        return name
+
+    # Skip if already has routed_experts
+    if ".mlp.experts.routed_experts." in name:
+        return name
+
+    # Expert parameter patterns to check
+    expert_param_suffixes = [
+        "w13_weight",
+        "w2_weight",
+        "w13_weight_scale",
+        "w2_weight_scale",
+        "w13_input_scale",
+        "w2_input_scale",
+        "w13_bias",
+        "w2_bias",
+        "w13_scale",
+        "w2_scale",
+        "w13_g_idx",
+        "w2_g_idx",
+        "w13_qweight",
+        "w2_qweight",
+        "w13_qzeros",
+        "w2_qzeros",
+        "w13_weight_shape",
+        "w2_weight_shape",
+    ]
+
+    # Check if this is an expert weight parameter
+    is_expert_param = any(
+        f".{suffix}" in name or name.endswith(suffix)
+        for suffix in expert_param_suffixes
+    )
+
+    if not is_expert_param:
+        return name
+
+    # Try inserting routed_experts
+    new_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+
+    # Only use the new name if it exists in the model
+    if new_name in params_dict:
+        return new_name
+
+    # Otherwise return original name (old checkpoint format or different structure)
+    return name
+
+
+def remap_moe_expert_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    params_dict: dict[str, torch.nn.Parameter],
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """
+    Wrapper generator that remaps MoE expert parameter names for backward compatibility.
+
+    This allows models with custom weight loading to automatically handle both old
+    and new checkpoint formats without needing model-specific remapping code.
+
+    Usage:
+        params_dict = dict(model.named_parameters())
+        for name, weight in remap_moe_expert_weights(weights, params_dict):
+            # name is automatically remapped if needed
+            param = params_dict[name]
+            ...
+
+    Args:
+        weights: Iterator of (name, tensor) tuples from checkpoint
+        params_dict: Dictionary of model parameters (from named_parameters())
+
+    Yields:
+        (remapped_name, tensor) tuples
+    """
+    for name, weight in weights:
+        remapped_name = maybe_remap_moe_expert_param_name(name, params_dict)
+        yield (remapped_name, weight)
