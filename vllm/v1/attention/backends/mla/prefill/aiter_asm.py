@@ -59,6 +59,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     # Process-wide cache of the kv_indices arange buffer, keyed by
     # (device, length, dtype). Reused across layers and chunks; sliced per call.
     _KV_INDICES_BUFFERS: dict[tuple, torch.Tensor] = {}
+    # Process-wide gate for the noncausal JIT warmup. Keyed by
+    # (device, num_heads, max_num_reqs, max_qlen, max_kvlen) so only the first
+    # MLA layer instance on a given rank actually fires the warmup kernel.
+    _WARMUP_DONE: set[tuple] = set()
 
     @staticmethod
     def get_name() -> str:
@@ -362,11 +366,125 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             "max_q_len": max_qlen,
         }
 
+    def _warmup_noncausal(self, device: torch.device) -> None:
+        """JIT-compile the noncausal PS pipeline before the first real chunk.
+
+        vLLM's profile_run only builds pure-prefill batches (context_len=0),
+        so it exercises causal new-tokens but never the noncausal context
+        chunk path. Without this, the first chunked-context request blocks
+        all TP ranks on hipModuleLoad of the noncausal hsaco (and on
+        module_ps_metadata's first build if the cache is cold), long enough
+        to trigger shm_broadcast timeouts on collectives.
+
+        Class-gated so only the first AiterAsmPrefillBackend instance on a
+        (device, shape) tuple fires the kernel; later layer instances and
+        later forward passes short-circuit.
+        """
+        warmup_key = (
+            str(device),
+            self.num_heads,
+            self._ps_max_num_reqs,
+            self._ps_max_qlen,
+            self._ps_max_context_kvlen,
+        )
+        if warmup_key in type(self)._WARMUP_DONE:
+            return
+        type(self)._WARMUP_DONE.add(warmup_key)
+
+        from vllm.platforms import current_platform
+
+        fp8_dtype = current_platform.fp8_dtype()
+        nhead = self.num_heads
+        head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        v_head_dim = self.v_head_dim
+        tile_q = _FP8_PREFILL_TILE_Q
+        # Minimum valid launch: 1 request, 1 Q-tile, 1 KV-granularity.
+        total_q = tile_q
+        total_k = _KVLEN_GRANULARITY
+
+        qo_indptr_cpu = torch.tensor([0, total_q], dtype=torch.int32)
+        kv_indptr_cpu = torch.tensor([0, total_k], dtype=torch.int32)
+        seq_lens_cpu = torch.tensor([total_k], dtype=torch.int32)
+
+        # Use the same _ps_max_* values production uses so the persistent
+        # buffer set this allocates is the same one run_prefill_context_chunk
+        # reuses later (no duplicate allocation).
+        ps = self._build_ps_for_chunk(
+            qo_indptr_cpu=qo_indptr_cpu,
+            kv_indptr_cpu=kv_indptr_cpu,
+            seq_lens_cpu=seq_lens_cpu,
+            is_causal=False,
+            device=device,
+            kind="context",
+            max_qlen=total_q,
+        )
+        ps["qo_indptr"] = qo_indptr_cpu.to(device)
+        ps["kv_indptr"] = kv_indptr_cpu.to(device)
+        ps["kv_indices"] = self._get_kv_indices_buf(device, total_k)
+
+        q = torch.zeros((total_q, nhead, head_dim), dtype=fp8_dtype, device=device)
+        k = torch.zeros((total_k, nhead, head_dim), dtype=fp8_dtype, device=device)
+        v = torch.zeros((total_k, nhead, v_head_dim), dtype=fp8_dtype, device=device)
+        out = torch.empty(
+            (total_q, nhead, v_head_dim), dtype=torch.bfloat16, device=device
+        )
+        num_partial_tiles = ps["num_partial_tiles"]
+        logits = torch.empty(
+            (num_partial_tiles * tile_q, nhead, v_head_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        attn_lse = torch.empty(
+            (num_partial_tiles * tile_q, nhead),
+            dtype=torch.float32,
+            device=device,
+        )
+        final_lse = torch.empty((total_q, nhead), dtype=torch.float32, device=device)
+        one_scale = torch.ones((), dtype=torch.float32, device=device)
+
+        self._mla_prefill_ps_asm_fwd(
+            q,
+            k,
+            v,
+            ps["qo_indptr"],
+            ps["kv_indptr"],
+            ps["kv_indices"],
+            ps["work_indptr"],
+            ps["work_info"],
+            ps["max_q_len"],
+            self.scale,
+            False,
+            logits,
+            attn_lse,
+            out,
+            one_scale,
+            one_scale,
+            one_scale,
+        )
+        self._mla_reduce_v1(
+            logits,
+            attn_lse,
+            ps["reduce_indptr"],
+            ps["reduce_final_map"],
+            ps["reduce_partial_map"],
+            tile_q,
+            out,
+            final_lse,
+        )
+        logger.info(
+            "AITER_ASM noncausal warmup complete (num_heads=%d, max_qlen=%d, "
+            "max_kvlen=%d)",
+            self.num_heads,
+            self._ps_max_qlen,
+            self._ps_max_context_kvlen,
+        )
+
     def prepare_metadata(self, prefill_metadata: "MLACommonPrefillMetadata") -> None:
         super().prepare_metadata(prefill_metadata)
 
         qo_indptr = prefill_metadata.query_start_loc  # device int32 [bs+1]
         device = qo_indptr.device
+        self._warmup_noncausal(device)
         # Use the CPU mirror the metadata builder already populated; avoids
         # one DtoH copy + host sync per layer per forward (~30x with DSV3).
         qo_indptr_cpu = prefill_metadata.query_start_loc_cpu.to(torch.int32)
