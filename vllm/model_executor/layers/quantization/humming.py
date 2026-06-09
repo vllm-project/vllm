@@ -423,7 +423,7 @@ class HummingLinearMethod(LinearMethodBase):
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
 
-                if self.weight_schema.hadamard_block_size == 0:
+                if self.weight_schema.hadamard_block_size == -1:
                     self.weight_schema = humming_update_schema_hadamard_block_size(
                         weight_schema=self.weight_schema,
                         input_schema=self.input_schema,
@@ -711,7 +711,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 has_global_scale = "TENSOR" in str(weight_schema.weight_scale_type)
 
-                if weight_schema.hadamard_block_size == 0:
+                if weight_schema.hadamard_block_size == -1:
                     weight_schema = humming_update_schema_hadamard_block_size(
                         weight_schema=weight_schema,
                         input_schema=input_schema,
