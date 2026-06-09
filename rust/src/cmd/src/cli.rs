@@ -248,7 +248,6 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_keys = sanitize_api_keys(self.api_key);
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -273,7 +272,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
-            api_keys,
+            api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -293,7 +292,6 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_keys = sanitize_api_keys(self.api_key);
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -317,7 +315,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
-            api_keys,
+            api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -327,10 +325,6 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
-}
-
-fn sanitize_api_keys(api_keys: Vec<String>) -> Vec<String> {
-    api_keys.into_iter().filter(|key| !key.is_empty()).collect()
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
