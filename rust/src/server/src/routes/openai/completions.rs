@@ -44,12 +44,12 @@ pub async fn completions(
     let stream = body.stream;
     let logprobs = body.logprobs;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let prepared =
-        match prepare_completion_request(body, state.served_model_names(), request_context) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+    let prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
     let request_span = tracing::info_span!(
         "completions",
         request_id = %prepared.request_id,
