@@ -18,7 +18,11 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -1220,7 +1224,7 @@ class DeepseekV4Model(nn.Module):
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
