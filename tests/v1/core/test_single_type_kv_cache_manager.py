@@ -14,9 +14,15 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    SinkFullAttentionManager,
     SlidingWindowManager,
+    get_manager_for_kv_cache_spec,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -44,6 +50,39 @@ def get_chunked_local_attention_manager(
         scheduler_block_size=chunked_local_attention_spec.block_size,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_sink_full_attention_manager_accepts_scheduler_block_size():
+    # Regression test: SinkFullAttentionManager.__init__ must accept the
+    # scheduler_block_size kwarg threaded through every manager by #44165.
+    # Before the fix it took fixed positional args and no **kwargs, so the
+    # coordinator's get_manager_for_kv_cache_spec(... scheduler_block_size=...)
+    # call raised TypeError at engine startup for any sink-attention model.
+    block_size = 16
+    spec = SinkFullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sink_len=block_size,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    # Build via the factory exactly as KVCacheCoordinator does at startup.
+    manager = get_manager_for_kv_cache_spec(
+        kv_cache_spec=spec,
+        max_num_batched_tokens=2048,
+        max_model_len=2048,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    assert isinstance(manager, SinkFullAttentionManager)
+    # The kwarg must reach the base manager, not be dropped/misplaced.
+    assert manager.scheduler_block_size == block_size
+    assert len(manager.sink_blocks) == spec.sink_len // block_size
 
 
 def test_chunked_local_attention_possible_cached_prefix():
