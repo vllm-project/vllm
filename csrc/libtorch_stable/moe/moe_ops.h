@@ -64,13 +64,13 @@ torch::stable::Tensor moe_wna16_gemm(
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     const torch::stable::Tensor& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    const torch::stable::Tensor& bias, int64_t scoring_func = 0);
+    const torch::stable::Tensor& bias, int64_t scoring_func);
 #endif
 
 bool moe_permute_unpermute_supported();
 
 int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
-                                        int64_t n_expert);
+                                        int64_t num_expert);
 
 void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   const torch::stable::Tensor& dst2src_map,

@@ -876,30 +876,23 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
   }
 
   MARLIN_NAMESPACE_NAME::marlin_mm(
-      const_cast<void*>(a.const_data_ptr()),
-      const_cast<void*>(b_q_weight.const_data_ptr()), c.mutable_data_ptr(),
-      c_tmp.mutable_data_ptr(), const_cast<void*>(b_bias.const_data_ptr()),
-      const_cast<void*>(a_scales.const_data_ptr()),
-      const_cast<void*>(b_scales.const_data_ptr()),
-      const_cast<void*>(global_scale.const_data_ptr()),
-      const_cast<void*>(b_zeros.const_data_ptr()),
-      const_cast<void*>(g_idx.const_data_ptr()),
-      const_cast<void*>(perm.const_data_ptr()), a_tmp.mutable_data_ptr(),
-      const_cast<void*>(sorted_token_ids.const_data_ptr()),
-      const_cast<void*>(expert_ids.const_data_ptr()),
-      const_cast<void*>(num_tokens_past_padded.const_data_ptr()),
-      const_cast<void*>(topk_weights.const_data_ptr()), moe_block_size,
-      num_experts, top_k, mul_topk_weights, size_m, size_n, size_k,
-      workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
-      has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
-      get_current_cuda_stream(dev), thread_k, thread_n, sms, blocks_per_sm,
-      use_atomic_add, use_fp32_reduce, is_zp_float);
+      a.const_data_ptr(), b_q_weight.const_data_ptr(), c.mutable_data_ptr(),
+      c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
+      a_scales.mutable_data_ptr(), b_scales.mutable_data_ptr(),
+      global_scale.mutable_data_ptr(), b_zeros.mutable_data_ptr(),
+      g_idx.mutable_data_ptr(), perm.mutable_data_ptr(),
+      a_tmp.mutable_data_ptr(), sorted_token_ids.mutable_data_ptr(),
+      expert_ids.mutable_data_ptr(), num_tokens_past_padded.mutable_data_ptr(),
+      topk_weights.mutable_data_ptr(), moe_block_size, num_experts, top_k,
+      mul_topk_weights, size_m, size_n, size_k, workspace.mutable_data_ptr(),
+      a_type, b_type, c_type, s_type, has_bias, has_act_order, is_k_full,
+      has_zp, num_groups, group_size, dev, get_current_cuda_stream(dev),
+      thread_k, thread_n, sms, blocks_per_sm, use_atomic_add, use_fp32_reduce,
+      is_zp_float);
 
   return c;
 }
 
-#ifndef USE_ROCM
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_wna16_marlin_gemm", TORCH_BOX(&moe_wna16_marlin_gemm));
 }
-#endif

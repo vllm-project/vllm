@@ -710,7 +710,7 @@ void topk_softplus_sqrt(
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
-  torch::stable::accelerator::DeviceGuard guard(
+  const torch::stable::accelerator::DeviceGuard guard(
       gating_output.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(gating_output.get_device_index());
