@@ -197,7 +197,7 @@ class Platform:
         # for ROCm, but currently we don't have a way to detect the
         # exact GPU model statelessly here. So we return True for
         # all ROCm platforms for now.
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
     def is_cumem_allocator_available(self) -> bool:
         try:
@@ -697,6 +697,13 @@ class Platform:
                 "exactly equal.",
                 mamba_padding_pct,
             )
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Register custom KVCacheSpec class on current platform.
+        """
+        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

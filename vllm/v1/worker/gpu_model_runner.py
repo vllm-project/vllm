@@ -104,7 +104,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import group_and_batch_mm_kwargs
+from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -153,6 +153,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_attn_backend_cache_dtype_str,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -504,7 +505,10 @@ class GPUModelRunner(
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
         # Sampler
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+        )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -1875,9 +1879,8 @@ class GPUModelRunner(
         SpecDecodeMetadata | None,
     ]:
         """
-        :return: tuple[
-            logits_indices, spec_decode_metadata,
-        ]
+        Returns:
+            tuple[logits_indices, spec_decode_metadata]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2202,7 +2205,8 @@ class GPUModelRunner(
         slot_mappings: dict[int, torch.Tensor] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
-        :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
+        Returns:
+            tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
@@ -2467,6 +2471,8 @@ class GPUModelRunner(
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
                 for mm_feature in req_state.mm_features:
+                    if mm_feature.modality == "audio":
+                        continue
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
@@ -2498,9 +2504,11 @@ class GPUModelRunner(
         num_common_prefix_blocks: list[int],
     ) -> list[list[int]] | None:
         """
-        :return: Optional[cascade_attn_prefix_lens]
-            cascade_attn_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
-            None if we should not use cascade attention
+        Returns:
+            Optional[cascade_attn_prefix_lens]
+                cascade_attn_prefix_lens is 2D:
+                ``[kv_cache_group_id][attn_group_idx]``,
+                None if we should not use cascade attention
         """
 
         use_cascade_attn = False
@@ -3101,22 +3109,17 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
-            for mm_feature in req_state.mm_features:
+            mm_features = req_state.mm_features
+            lo, hi = get_mm_features_in_window(
+                mm_features,
+                start=num_computed_tokens,
+                end=num_computed_tokens + num_scheduled_tokens,
+            )
+            for i in range(lo, hi):
+                mm_feature = mm_features[i]
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
-
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(
@@ -5324,11 +5327,12 @@ class GPUModelRunner(
         """
         Reload weights from a weights iterator or from disk
 
-        :param weights_iterator: weights to load into model
-        :param weights_path: path to load weights from if weights_iterator is not
-            provided. Use path of original model if neither is provided.
-        :param is_checkpoint_format: set to False if weights have already been processed
-            into kernel format (repacking, renaming, etc.)
+        Args:
+            weights_iterator: weights to load into model
+            weights_path: path to load weights from if weights_iterator is not
+                provided. Use path of original model if neither is provided.
+            is_checkpoint_format: set to False if weights have already been
+                processed into kernel format (repacking, renaming, etc.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation
@@ -5790,6 +5794,9 @@ class GPUModelRunner(
                     num_scheduled_tokens, self.query_pos.np
                 )
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
+                    cum_num_tokens[-1]
+                )
                 self.query_start_loc.copy_to_gpu()
 
                 # Sync block table CPU->GPU so cleared rows from
@@ -6241,6 +6248,7 @@ class GPUModelRunner(
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
+        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
 
@@ -7393,13 +7401,13 @@ class GPUModelRunner(
         self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe.layer import MoERunner
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
+            if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 
                 def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):
