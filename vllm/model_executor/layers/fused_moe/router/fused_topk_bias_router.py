@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -169,6 +168,14 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
+    # The topk kernel dispatches dtype based on topk_ids (set by
+    # indices_type) and assumes input_tokens/hash_indices_table match.
+    if indices_type is not None:
+        if input_tokens is not None and input_tokens.dtype != indices_type:
+            input_tokens = input_tokens.to(dtype=indices_type)
+        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
+            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
@@ -300,7 +307,6 @@ class FusedTopKBiasRouter(BaseRouter):
         renormalize: bool = True,
         routed_scaling_factor: float = 1.0,
         eplb_state: EplbLayerState | None = None,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         *,
         scoring_func: str = "sigmoid",
         hash_indices_table: torch.Tensor | None = None,
@@ -309,7 +315,6 @@ class FusedTopKBiasRouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize
@@ -326,6 +331,7 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=None,
             has_e_score_bias=True,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
