@@ -35,7 +35,7 @@ def humming_update_schema_hadamard_block_size(
     while shape_k % block_size > 0:
         block_size = block_size // 2
 
-    return dataclasses.replace(hadamard_block_size=block_size)
+    return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
 
 
 def humming_choose_hadamard_block_size(

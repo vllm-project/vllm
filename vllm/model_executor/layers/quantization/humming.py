@@ -599,8 +599,9 @@ class HummingLinearMethod(LinearMethodBase):
         force_requant = self.force_weight_schema is not None
         if force_requant and self.weight_schema != self.force_weight_schema:
             force_weight_schema = self.force_weight_schema
+            assert isinstance(force_weight_schema, HummingWeightSchema)
             force_input_schema = self.force_input_schema or self.input_schema
-            if force_weight_schema.hadamard_block_size == 0:
+            if force_weight_schema.hadamard_block_size == -1:
                 force_weight_schema = humming_update_schema_hadamard_block_size(
                     weight_schema=force_weight_schema,
                     input_schema=force_input_schema,
@@ -903,8 +904,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
             force_requant = self.force_weight_schema is not None
             if force_requant and weight_schema != self.force_weight_schema:
                 force_weight_schema = self.force_weight_schema
+                assert isinstance(force_weight_schema, HummingWeightSchema)
                 force_input_schema = self.force_input_schema or input_schema
-                if force_weight_schema.hadamard_block_size == 0:
+                if force_weight_schema.hadamard_block_size == -1:
                     force_weight_schema = humming_update_schema_hadamard_block_size(
                         weight_schema=force_weight_schema,
                         input_schema=force_input_schema,
@@ -963,8 +965,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         # use moe modular
         experts: HummingIndexedExperts | HummingGroupedExperts
-        layer.ensure_moe_quant_config_init()
-        assert self.moe_quant_config is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if get_humming_moe_gemm_type() == "indexed":
             experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
         else:
@@ -979,7 +980,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 
         activation_format = prepare_finalize.activation_format
-        layer.ensure_moe_quant_config_init()
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             return BatchedHummingGroupedExperts(
                 layer=layer,
