@@ -797,7 +797,8 @@ class ParallelConfig:
                 raise ValueError(
                     "Elastic EP requires the pynccl communicator, which is "
                     "incompatible with async EPLB due to NCCL multi-stream "
-                    "conflicts. Disable async EPLB to use elastic EP."
+                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
+                    "to use elastic EP."
                 )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
