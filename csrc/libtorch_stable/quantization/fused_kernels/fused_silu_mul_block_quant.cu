@@ -60,26 +60,22 @@ __launch_bounds__(kThreadsPerBlock) silu_and_mul_per_block_quant_kernel(
   int const warp_id = tid / kLogicalWarpSize;
   int const lane_id = tid & (kLogicalWarpSize - 1);
   int const token_idx = blockIdx.x;
+  int const group_idx = blockIdx.y;
+  int const tid = threadIdx.x;  // tid in [0, group_size)
   int const num_tokens = gridDim.x;
-  // num_groups is no longer gridDim.y (we pack kWarpsPerBlock groups per
-  // block), so recover it from the compile-time group_size.
-  int const num_groups = hidden_size / group_size;
-  int const group_idx = blockIdx.y * kWarpsPerBlock + warp_id;
-  if (group_idx >= num_groups) return;  // whole warp exits together (no sync)
 
-  // Input layout: [gate || up] concatenated along the last dimension. Each lane
-  // owns the EPT contiguous elements at group_start + lane_id * EPT, so the
-  // warp reads the whole group as one fully-coalesced wide load for gate and
-  // for up.
+  // Input layout: [gate || up] concatenated along last dimension
   int const input_stride = hidden_size * 2;
   int const group_start = group_idx * group_size;
-  int const lane_base = group_start + lane_id * EPT;
+
+  // Pointers to this token's data
   scalar_t const* token_input_gate =
-      input + token_idx * input_stride + lane_base;
+      input + token_idx * input_stride + group_start;
   scalar_t const* token_input_up = token_input_gate + hidden_size;
-  scalar_out_t* token_output = out + token_idx * hidden_size + lane_base;
+  scalar_out_t* token_output = out + token_idx * hidden_size + group_start;
 
   // Scale pointer for this group
+  int const num_groups = gridDim.y;
   float* group_scale_ptr = is_scale_transposed
                                ? scales + group_idx * num_tokens + token_idx
                                : scales + token_idx * num_groups + group_idx;
@@ -115,34 +111,34 @@ __launch_bounds__(kThreadsPerBlock) silu_and_mul_per_block_quant_kernel(
                                                    offset, kLogicalWarpSize));
   }
 
-  // Step 3: compute the group scale in registers; lane 0 writes it to global.
-  float const group_max = thread_max;
-  float const quant_range = quant_type_max_v<scalar_out_t>;
-  float group_scale = group_max / quant_range;
+  // Step 3: Compute scale (thread 0), broadcast via shared memory
+  if (tid == 0) {
+    float group_max = shared_max[0];
 
-  // Apply scale upper bound if provided
-  if (scale_ub != nullptr) {
-    group_scale = fminf(group_scale, *scale_ub);
-  }
+    float const quant_range = quant_type_max_v<scalar_out_t>;
+    float group_scale = group_max / quant_range;
 
-  // Use minimum safe scaling factor
-  group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    // Apply scale upper bound if provided
+    if (scale_ub != nullptr) {
+      group_scale = fminf(group_scale, *scale_ub);
+    }
 
-  if (lane_id == 0) {
+    // Use minimum safe scaling factor
+    group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+
+    // Store scale to global memory
     *group_scale_ptr = group_scale;
-  }
 
-  // Step 4: quantize the EPT owned elements and write them with one wide store.
-  struct alignas(sizeof(scalar_out_t) * EPT) OutVec {
-    scalar_out_t q[EPT];
-  };
-  OutVec out_v;
-#pragma unroll
-  for (int k = 0; k < EPT; ++k) {
-    out_v.q[k] = vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result[k],
-                                                                  group_scale);
+    // Reuse shared_max[0] to broadcast scale
+    shared_max[0] = group_scale;
   }
-  *reinterpret_cast<OutVec*>(token_output) = out_v;
+  __syncthreads();
+
+  float group_scale = shared_max[0];
+
+  // Step 4: Quantize and write output
+  token_output[tid] =
+      vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result, group_scale);
 }
 
 }  // namespace vllm
