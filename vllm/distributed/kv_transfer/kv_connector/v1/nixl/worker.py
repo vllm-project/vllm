@@ -1439,14 +1439,25 @@ class NixlConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        # Compute block_size_ratio from actual byte-per-block values so that
-        # heterogeneous TP works even when block_size carries byte values
-        # (e.g. hybrid MLA+GDN models where block_size differs across TP
-        # configs).  _build_fa_remote already uses nixl_agent_meta.block_lens
-        # directly, so this ratio is only needed for handler registration and
-        # descriptor-ID computation.
+        # Compute block_size_ratio.
+        #
+        # For dual-purpose HMA regions (MLA+GDN sharing one backing tensor),
+        # block_len_per_layer stores the KDA/SSM stride which differs from the
+        # attention stride.  The token-level block_size is the same across TP,
+        # so transfer_topo.block_size_ratio returns 1 even though byte-level
+        # strides differ.  Use byte-level comparison only for these models so
+        # that mamba descriptor building and desc-ID computation see the
+        # correct ratio.
+        #
+        # For standard attention (Qwen, etc.), the byte-level difference comes
+        # purely from KV head count, which num_attn_reads and the split-handle
+        # mechanism already handle correctly.  Using byte-level ratio here
+        # would cause double reduction in _build_fa_remote (once by
+        # block_size_ratio and once by num_attn_reads), producing remote
+        # descriptors that are half the size of local split descriptors.
         if (
-            self.block_len_per_layer
+            self._attn_block_len  # Only for dual-purpose HMA regions
+            and self.block_len_per_layer
             and nixl_agent_meta.block_lens
             and self.block_len_per_layer[0] != nixl_agent_meta.block_lens[0]
         ):
