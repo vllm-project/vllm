@@ -46,6 +46,7 @@ class SingleTypeKVCacheManager(ABC):
         pcp_world_size: int = 1,
         max_admission_blocks_per_request: int | None = None,
         max_model_len: int | None = None,
+        max_num_seqs: int | None = None,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -74,6 +75,7 @@ class SingleTypeKVCacheManager(ABC):
         self.enable_caching = enable_caching
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         self.max_model_len = max_model_len
+        self.max_num_seqs = max_num_seqs
         self.cache_alignment_tokens = self.block_size
         self.new_block_ids: list[int] = []
 
@@ -684,6 +686,23 @@ class MLAAttentionManager(FullAttentionManager):
             or self.kv_cache_spec.cache_dtype_str == "fp8_ds_mla"
             or self.kv_cache_spec.compress_ratio > 1
         )
+
+    def _max_protected_prompt_blocks(self) -> int | None:
+        if self.max_num_seqs is None:
+            return super()._max_protected_prompt_blocks()
+        if self.max_model_len is None:
+            return None
+
+        prompt_blocks = cdiv(max(1, self.max_model_len), self.block_size)
+        target_reqs = max(2, self.max_num_seqs)
+        target_blocks = target_reqs * prompt_blocks
+
+        # Keep one max-length request worth of blocks available for new work
+        # before the generic allocation path has to release protected prompts.
+        pool_blocks = max(0, self.block_pool.num_gpu_blocks - 1)
+        if pool_blocks <= prompt_blocks:
+            return pool_blocks
+        return min(target_blocks, pool_blocks - prompt_blocks)
 
     def cache_blocks(
         self,
@@ -1500,6 +1519,7 @@ class SinkFullAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         max_model_len: int | None = None,
+        max_num_seqs: int | None = None,
     ):
         super().__init__(
             kv_cache_spec,
@@ -1510,6 +1530,7 @@ class SinkFullAttentionManager(FullAttentionManager):
             dcp_world_size,
             pcp_world_size,
             max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
@@ -1521,6 +1542,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_num_batched_tokens: int,
     max_model_len: int,
+    max_num_seqs: int | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -1542,6 +1564,7 @@ def get_manager_for_kv_cache_spec(
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
     kwargs["max_model_len"] = max_model_len
+    kwargs["max_num_seqs"] = max_num_seqs
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
     # chunks; the runtime admission cap must match the recycling-aware bound
     # the startup pool sizer uses (single source of truth: the spec method).

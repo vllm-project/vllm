@@ -246,6 +246,7 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=self.pcp_world_size,
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=self.scheduler_config.max_num_seqs,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )

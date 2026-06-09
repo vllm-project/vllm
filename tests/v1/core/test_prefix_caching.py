@@ -127,6 +127,27 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
+def make_mla_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=512,
+                    dtype=torch.float8_e4m3fn,
+                    cache_dtype_str="fp8_ds_mla",
+                    compress_ratio=2,
+                    model_version="deepseek_v4",
+                ),
+            )
+        ],
+    )
+
+
 def make_kv_cache_config_hybrid_model(
     block_size: int,
     num_blocks: int,
@@ -1652,6 +1673,38 @@ def test_cache_blocks_multi_group():
         block_pool.get_cached_block(req.block_hashes[2], kv_cache_group_ids=[0, 1])
         is None
     )
+
+
+def test_deepseek_v4_mla_prompt_protection_scales_with_max_num_seqs():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_mla_kv_cache_config(block_size=block_size, num_blocks=64),
+        max_model_len=16,
+        max_num_batched_tokens=16,
+        max_num_seqs=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    mla_manager = manager.coordinator.single_type_managers[0]
+
+    assert mla_manager._max_protected_prompt_blocks() == 16
+
+
+def test_deepseek_v4_mla_prompt_protection_leaves_allocation_headroom():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_mla_kv_cache_config(block_size=block_size, num_blocks=15),
+        max_model_len=16,
+        max_num_batched_tokens=16,
+        max_num_seqs=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    mla_manager = manager.coordinator.single_type_managers[0]
+
+    assert mla_manager._max_protected_prompt_blocks() == 10
 
 
 def test_mm_prefix_caching():

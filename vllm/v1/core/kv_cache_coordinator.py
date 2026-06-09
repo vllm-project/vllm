@@ -75,6 +75,7 @@ class KVCacheCoordinator(ABC):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        max_num_seqs: int | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
@@ -115,6 +116,7 @@ class KVCacheCoordinator(ABC):
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
+                max_num_seqs=max_num_seqs,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -361,6 +363,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        max_num_seqs: int | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -374,6 +377,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=max_num_seqs,
             metrics_collector=metrics_collector,
         )
         self.num_single_type_manager = len(self.single_type_managers)
@@ -411,6 +415,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        max_num_seqs: int | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -424,6 +429,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=max_num_seqs,
             metrics_collector=metrics_collector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -497,6 +503,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        max_num_seqs: int | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -510,6 +517,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=max_num_seqs,
             metrics_collector=metrics_collector,
         )
         # hash_block_size: the block size used to compute block hashes.
@@ -761,6 +769,7 @@ def get_kv_cache_coordinator(
     pcp_world_size: int,
     scheduler_block_size: int,
     hash_block_size: int,
+    max_num_seqs: int | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
@@ -774,6 +783,7 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=max_num_seqs,
             metrics_collector=metrics_collector,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
@@ -788,6 +798,7 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            max_num_seqs=max_num_seqs,
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
@@ -801,5 +812,6 @@ def get_kv_cache_coordinator(
         pcp_world_size=pcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
+        max_num_seqs=max_num_seqs,
         metrics_collector=metrics_collector,
     )
