@@ -139,11 +139,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # Populated by prepare_metadata before each forward pass.
         self._new_tokens_ps: dict | None = None
 
-        # Optional static cap on num_partial_tiles. Left None here; the
-        # per-build path in _build_ps_for_chunk falls back to a
-        # reduce_indptr[-1].item() sync when this is None.
-        self._num_partial_tiles_max: int | None = None
-
         # Worst-case sizes used to pre-allocate persistent PS buffers.
         #
         # AITER's get_ps_metadata_info_v1 sizes work buffers as
@@ -272,6 +267,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                 dtype=reduce_partial_map_dtype,
                 device=device,
             ),
+            # AITER bounds the active partial-tile count (reduce_indptr[-1])
+            # by reduce_partial_map_size (see get_ps_metadata_info_v1 in
+            # aiter/ops/attention.py: max_partials == per_cluster_work).
+            # Stash the cap here so _build_ps_for_chunk can use it instead
+            # of a per-build DtoH sync on reduce_indptr[-1].
+            "num_partial_tiles_max": int(reduce_partial_map_size),
         }
         type(self)._SHARED_BUFFERS[cache_key] = buffers
         logger.info(
@@ -342,16 +343,14 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         )
 
         # reduce_indptr[-1] counts the K-split partial tiles emitted by the
-        # PS scheduler. When the workspace reservation probe has populated a
-        # worst-case cap, use it directly to avoid a per-build host sync;
-        # _run_kernel sizes the logits/attn_lse views to this cap regardless,
-        # and the reduce kernel reads only the live count via reduce_indptr.
-        # Fall back to the synchronous read if the probe never ran (e.g. it
-        # failed at init).
-        if self._num_partial_tiles_max is not None:
-            num_partial_tiles = self._num_partial_tiles_max
-        else:
-            num_partial_tiles = int(buffers["reduce_indptr"][-1].item())
+        # PS scheduler. Reading it would force a DtoH sync per layer per
+        # chunk. Use the static upper bound returned by
+        # get_ps_metadata_info_v1 (reduce_partial_map_size) instead: it
+        # bounds reduce_indptr[-1] by construction, so sizing
+        # logits/attn_lse to it is safe. The reduce kernel only consumes
+        # the live count via reduce_indptr, so over-sizing is harmless
+        # (extra rows are never read).
+        num_partial_tiles = buffers["num_partial_tiles_max"]
 
         return {
             "work_indptr": buffers["work_indptr"],
