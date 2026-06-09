@@ -255,22 +255,20 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
 # build stage doesn't need the rust toolchain, protoc, or the rust source.
-# This stage runs in parallel with csrc-build/extensions-build.
-FROM ${BUILD_BASE_IMAGE} AS rust-build
+# This stage reuses the Python environment from base and runs in parallel with
+# csrc-build/extensions-build.
+FROM base AS rust-build
 ARG BUILD_OS
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install a basic C toolchain (some rust crates compile C in their build.rs
-# scripts) and unzip (used to extract the pinned protoc release below).
+# Install native tools needed only for Rust/protoc builds.
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         dnf install -y --setopt=install_weak_deps=False \
-            ca-certificates curl git gcc gcc-c++ make unzip python3 python3-pip \
+            make unzip \
         && dnf clean all && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
         && apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential unzip python3 python3-pip \
+            make unzip \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -280,7 +278,8 @@ RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 WORKDIR /workspace
 
 COPY requirements/build/rust.txt requirements/build/rust.txt
-RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 -r requirements/build/rust.txt
 
 # Copy only the Rust build inputs. The binary is the sole artifact we need.
 COPY rust rust
