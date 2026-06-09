@@ -1425,7 +1425,7 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_loaded=(),       # no CPU loads must happen
+        expected_loaded=(),  # no CPU loads must happen
         expected_stored=(0, 1, 2),  # tokens still offloaded to CPU
         expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
