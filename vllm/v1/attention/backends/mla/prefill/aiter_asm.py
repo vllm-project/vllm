@@ -148,17 +148,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         #
         # AITER's get_ps_metadata_info_v1 sizes work buffers as
         # qo_tile_cnt = batch_size * ceil(max_qlen / qlen_granularity).
-        # The actual ceiling on total Q tiles a forward pass can produce is
-        # max(B, total_Q / qlen_granularity + B), since (a) each request
-        # always contributes at least one boundary partial tile and
-        # (b) total Q across the batch is bounded by max_num_batched_tokens.
-        # Passing batch_size=max_num_seqs, max_qlen=qlen_granularity gives
-        # qo_tile_cnt = max_num_seqs, which dominates both terms for typical
-        # configs (max_num_seqs >= max_num_batched_tokens / qlen_granularity).
-        # The naive bound batch_size=max_num_seqs, max_qlen=max_num_batched_tokens
-        # over-provisions by ~32x for no benefit.
+        # The real upper bound on Q-tiles a forward can emit is
+        # sum_i ceil(q_i / qlen_granularity) <= total_Q / qlen_granularity + B,
+        # where total_Q <= max_num_batched_tokens and B <= max_num_seqs. The
+        # buffer must dominate that. Sizing with batch_size=max_num_seqs and
+        # max_qlen=max_num_batched_tokens gives
+        # qo_tile_cnt = max_num_seqs * ceil(max_num_batched_tokens / 256),
+        # which dominates the bound and matches the original PR (#42509).
         self._ps_max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self._ps_max_qlen = _FP8_PREFILL_TILE_Q
+        self._ps_max_qlen = vllm_config.scheduler_config.max_num_batched_tokens
         # Worst-case K length for a context chunk per sequence. Bounded by
         # the chunked-prefill workspace size, since the scheduler sets
         # max_context_chunk = chunked_prefill_workspace_size //
@@ -190,7 +188,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # build and consume within run_prefill_context_chunk. Sharing one
         # buffer set would let the context loop overwrite the new-tokens PS
         # metadata before the new-tokens kernel reads it.
-
 
     def _get_kv_indices_buf(self, device: torch.device, length: int) -> torch.Tensor:
         """Return a [0, 1, ..., length-1] int32 view into a shared arange buffer.
