@@ -189,9 +189,6 @@ class BlockTable:
     def clear(self) -> None:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
-        self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
-        self.slot_mapping.cpu.fill_(PAD_SLOT_ID)
-        self.num_blocks_per_row.fill(0)
 
     @staticmethod
     def map_to_kernel_blocks(

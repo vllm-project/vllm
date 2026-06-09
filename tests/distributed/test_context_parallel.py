@@ -251,7 +251,6 @@ def _test_cp_gsm8k(
 
         # Validate accuracy is reasonable
         accuracy = results["accuracy"]
-        print(f"========accuracy====== {accuracy}", flush=True)
         min_accuracy = MIN_ACCURACY[model_id]
         assert accuracy >= min_accuracy, (
             f"TP+DCP accuracy too low: {accuracy:.3f} < {min_accuracy:.3f}"

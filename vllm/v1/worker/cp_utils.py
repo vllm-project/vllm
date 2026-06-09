@@ -31,14 +31,6 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1:
-                if hasattr(layer_impl, "supports_dcp") and not layer_impl.supports_dcp:
-                    logger.debug(
-                        "Layer %s (impl: %s) does not support DCP. "
-                        "DCP will only be applied to supported layers.",
-                        layer_name,
-                        layer_impl.__class__.__name__,
-                    )
-                    continue
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
