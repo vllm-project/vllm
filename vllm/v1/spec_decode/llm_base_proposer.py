@@ -32,6 +32,10 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    empty_exponential_noise_like,
+    sample_with_exponential_noise,
+)
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
@@ -66,6 +70,7 @@ class SpecDecodeBaseProposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self._share_mtp_indices = False
 
         self.device = device
         self.dtype = vllm_config.model_config.dtype
@@ -113,10 +118,11 @@ class SpecDecodeBaseProposer:
         self.use_local_argmax_reduction: bool = (
             self.speculative_config.use_local_argmax_reduction
         )
+        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.token_arange_np = np.arange(self.max_num_tokens)
+        self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
         # Can be specialized by methods like DFlash to reduce the limit
         self.max_query_tokens = self.max_num_tokens
@@ -225,6 +231,11 @@ class SpecDecodeBaseProposer:
             device=device,
             with_numpy=True,
         )
+        self._enable_probabilistic_draft_probs = (
+            self.speculative_config.rejection_sample_method == "standard"
+            and self.speculative_config.draft_sample_method == "probabilistic"
+        )
+        self._last_draft_probs: torch.Tensor | None = None
 
         self._slot_mapping_buffer = torch.zeros(
             self.max_positions,
@@ -235,6 +246,10 @@ class SpecDecodeBaseProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
+            from vllm.models.deepseek_v4.amd.rocm import (
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
+            )
             from vllm.v1.attention.backends.mla.indexer import (
                 DeepseekV32IndexerMetadata,
             )
@@ -247,6 +262,8 @@ class SpecDecodeBaseProposer:
                 TritonAttentionMetadata,
                 RocmAttentionMetadata,
                 ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterMLASparseMetadata,
+                DeepseekV4ROCMAiterSparseSWAMetadata,
                 DeepseekV32IndexerMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
@@ -389,6 +406,32 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
+    def _sample_from_logits(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not self._enable_probabilistic_draft_probs:
+            return logits.argmax(dim=-1), None
+        if sampling_metadata.all_greedy:
+            return logits.argmax(dim=-1), None
+        return compute_probs_and_sample_next_token(
+            logits, sampling_metadata, self.use_fp64_gumbel
+        )
+
+    def _sample_draft_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
+            return self._greedy_sample(hidden_states), None
+        logits = self.model.compute_logits(hidden_states)
+        return self._sample_from_logits(logits, sampling_metadata)
+
+    def take_last_draft_probs(self) -> torch.Tensor | None:
+        return self._last_draft_probs
+
     def propose(
         self,
         # [num_tokens]
@@ -408,6 +451,7 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
@@ -447,6 +491,11 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        # Step 0 of index_share_for_mtp_iteration: let the MTP layer
+        # compute its own indices (skip_topk=False) so subsequent steps
+        # can reuse them.
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+            self.model.model.set_skip_topk(False)
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -465,11 +514,22 @@ class SpecDecodeBaseProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
 
+        # After step 0: switch to reuse mode so steps 1+ skip the indexer
+        # and read the indices that step 0 just wrote into the shared buffer.
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+            self.model.model.set_skip_topk(True)
+
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids = self._greedy_sample(sample_hidden_states)
+            draft_token_ids, draft_probs = self._sample_draft_tokens(
+                sample_hidden_states, sampling_metadata
+            )
+            if draft_probs is not None:
+                self._last_draft_probs = draft_probs.view(
+                    -1, self.num_speculative_tokens, draft_probs.shape[-1]
+                ).contiguous()
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
@@ -484,7 +544,10 @@ class SpecDecodeBaseProposer:
             # (which read via _get_positions) use the correct values.
             self.positions[:batch_size] = positions
 
-        draft_token_ids = self._greedy_sample(sample_hidden_states)
+        draft_token_ids, draft_probs = self._sample_draft_tokens(
+            sample_hidden_states, sampling_metadata
+        )
+        draft_probs_list = None if draft_probs is None else [draft_probs]
 
         if self.allowed_attn_types is not None:
             for group_md in per_group_attn_metadata:
@@ -584,11 +647,18 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            draft_token_ids, draft_probs = self._sample_draft_tokens(
+                last_hidden_states[:batch_size], sampling_metadata
+            )
+            if draft_probs is not None:
+                assert draft_probs_list is not None
+                draft_probs_list.append(draft_probs)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        if draft_probs_list is not None:
+            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
         return draft_token_ids
 
     def _update_positions_dependent_metadata(
@@ -1172,6 +1242,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "InternS2PreviewForConditionalGeneration",
                 "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
@@ -1179,6 +1250,8 @@ class SpecDecodeBaseProposer:
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4UnifiedForConditionalGeneration",
+                "Step3p7ForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1356,15 +1429,33 @@ class SpecDecodeBaseProposer:
                         )
 
         if hasattr(target_language_model.model, "topk_indices_buffer"):
+            target_buffer = target_language_model.model.topk_indices_buffer
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = (
-                target_language_model.model.topk_indices_buffer
-            )
+            self.model.model.topk_indices_buffer = target_buffer
+            # Also share at per-module level so that the indexer and
+            # sparse-attention backends in each MTP layer read from
+            # the target model's buffer.
+            for _, module in self.model.model.named_modules():
+                if hasattr(module, "topk_indices_buffer"):
+                    module.topk_indices_buffer = target_buffer
             logger.info(
                 "Detected MTP model with topk_indices_buffer. "
                 "Sharing target model topk_indices_buffer with the draft model."
             )
+
+        # Detect index_share_for_mtp_iteration: when True, the proposer
+        # toggles skip_topk so step 0 computes MTP's own indices and
+        # steps 1+ reuse them.
+        spec_config = self.vllm_config.speculative_config
+        draft_hf_config = (
+            spec_config.draft_model_config.hf_config
+            if spec_config is not None
+            else None
+        )
+        self._share_mtp_indices = getattr(
+            draft_hf_config, "index_share_for_mtp_iteration", False
+        )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
@@ -1601,6 +1692,7 @@ class SpecDecodeBaseProposer:
 def compute_probs_and_sample_next_token(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    use_fp64_gumbel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if sampling_metadata.all_greedy:
         # For greedy requests, draft_probs is not used in rejection sampling.
@@ -1627,11 +1719,11 @@ def compute_probs_and_sample_next_token(
     # of the generated tokens after rejection sampling.
 
     # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
+    q = empty_exponential_noise_like(probs, use_fp64_gumbel)
     q.exponential_()
     # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
     # will be used later for rejection sampling.
-    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
+    next_token_ids = sample_with_exponential_noise(probs.clone(), q)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)
