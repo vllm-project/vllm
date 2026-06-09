@@ -58,6 +58,10 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
         # the rest of the stream is content and the orchestrator's
         # is_reasoning_end check must return True for every subsequent delta.
         self._implicit_end_seen: bool = False
+        # Text deltas may split the DSML marker itself, for example
+        # "<｜DSML｜tool" then "_calls>". Hold such suffixes back so they do
+        # not leak into reasoning before the next delta disambiguates them.
+        self._pending_implicit_marker_prefix: str = ""
 
     def _find_implicit_end_marker(self, text: str) -> tuple[str, int] | None:
         """Return ``(marker, index)`` of the earliest implicit end marker in
@@ -71,6 +75,46 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
             if earliest is None or idx < earliest[1]:
                 earliest = (marker, idx)
         return earliest
+
+    def _partial_implicit_end_marker_suffix(self, text: str) -> str:
+        """Return the longest suffix of ``text`` that prefixes a DSML marker."""
+        best = ""
+        for marker in self.implicit_end_markers:
+            max_len = min(len(marker) - 1, len(text))
+            for length in range(max_len, 0, -1):
+                suffix = text[-length:]
+                if marker.startswith(suffix):
+                    if length > len(best):
+                        best = suffix
+                    break
+        return best
+
+    def _extract_pending_implicit_marker_delta(
+        self, delta_text: str
+    ) -> DeltaMessage | None:
+        pending = self._pending_implicit_marker_prefix
+        combined = pending + delta_text
+
+        marker = self._find_implicit_end_marker(combined)
+        if marker is not None and marker[1] == 0:
+            self._pending_implicit_marker_prefix = ""
+            self._implicit_end_seen = True
+            return DeltaMessage(content=combined)
+
+        if any(marker.startswith(combined) for marker in self.implicit_end_markers):
+            self._pending_implicit_marker_prefix = combined
+            return None
+
+        # The withheld suffix was a false alarm. Emit it as reasoning, while
+        # still guarding against a new marker prefix at the end of this delta.
+        partial = self._partial_implicit_end_marker_suffix(combined)
+        if partial:
+            self._pending_implicit_marker_prefix = partial
+            reasoning = combined[: -len(partial)]
+        else:
+            self._pending_implicit_marker_prefix = ""
+            reasoning = combined
+        return DeltaMessage(reasoning=reasoning) if reasoning else None
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Honor the explicit </think> contract first.
@@ -134,6 +178,9 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
         ):
             return ret
 
+        if self._pending_implicit_marker_prefix:
+            return self._extract_pending_implicit_marker_delta(delta_text)
+
         # Sticky: marker observed in an earlier delta — everything here is
         # content for the tool parser.
         if self._implicit_end_seen:
@@ -141,11 +188,19 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
 
         marker_in_current = self._find_implicit_end_marker(current_text)
         if marker_in_current is None:
-            # No marker anywhere; parent's classification stands.
+            partial = self._partial_implicit_end_marker_suffix(current_text)
+            if partial:
+                partial_start = len(current_text) - len(partial)
+                if partial_start >= len(previous_text):
+                    self._pending_implicit_marker_prefix = partial
+                    reasoning = delta_text[: -len(partial)] or None
+                    return DeltaMessage(reasoning=reasoning) if reasoning else None
+            # No marker or holdable marker prefix; parent's classification stands.
             return ret
 
         # First sighting of the implicit end marker.
         self._implicit_end_seen = True
+        self._pending_implicit_marker_prefix = ""
         _marker_str, marker_idx_current = marker_in_current
         # Position within delta_text where the marker begins.
         marker_idx_delta = marker_idx_current - len(previous_text)
