@@ -264,6 +264,8 @@ async def send_request(
         payload["max_tokens"] = max_tokens
 
     request_headers = {"Content-Type": "application/json"}
+    if conversation_id is not None:
+        request_headers["X-Session-ID"] = str(conversation_id)
     if headers is not None:
         request_headers.update(headers)
 
