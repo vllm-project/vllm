@@ -583,6 +583,9 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._is_ssm_region = []
+    worker._is_attn_region = []
+    worker._attn_block_len = {}
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
     )
@@ -1209,11 +1212,14 @@ class TestBuildFaRemoteDualPurpose:
     @pytest.mark.cpu_test
     def test_dual_purpose_uses_local_mla_stride(self):
         """Remote FA descs for dual-purpose use local MLA stride."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
         worker = _make_mock_worker_for_desc(
             block_len_per_layer=[200],
             _is_ssm_region=[True],
             _is_attn_region=[True],
             _attn_block_len={0: 256},
+            _group_spec_types=(FullAttentionSpec, MambaSpec),
         )
         plan = MagicMock()
         plan.source_ranks_per_group = (MagicMock(),)
@@ -1232,11 +1238,14 @@ class TestBuildFaRemoteDualPurpose:
     @pytest.mark.cpu_test
     def test_no_ratio_scaling_for_dual_purpose(self):
         """Dual-purpose: block_size_ratio doesn't scale MLA stride."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
         worker = _make_mock_worker_for_desc(
             block_len_per_layer=[200],
             _is_ssm_region=[True],
             _is_attn_region=[True],
             _attn_block_len={0: 256},
+            _group_spec_types=(FullAttentionSpec, MambaSpec),
         )
         plan = MagicMock()
         plan.source_ranks_per_group = (MagicMock(),)
