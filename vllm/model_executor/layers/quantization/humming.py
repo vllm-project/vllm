@@ -10,13 +10,11 @@ import torch
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
     RoutedExperts,
     SharedExperts,
-)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -44,8 +42,9 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
-if current_platform.is_cuda():
+if has_humming() and current_platform.is_cuda():
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
