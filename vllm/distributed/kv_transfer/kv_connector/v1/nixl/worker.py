@@ -1500,11 +1500,26 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for handle_data in self._build_local_splits_from_plan(
-                plan,
-                self.src_blocks_data,
-                self.num_descs,
+            for split_idx, handle_data in enumerate(
+                self._build_local_splits_from_plan(
+                    plan,
+                    self.src_blocks_data,
+                    self.num_descs,
+                )
             ):
+                # Debug: log split handle mamba descriptor sizes
+                if self._has_mamba and abs(tp_ratio) != 1:
+                    fa_count = self.num_descs
+                    mamba_part = handle_data[fa_count:]
+                    logger.info(
+                        "HETEROTP local split[%d]: total=%d, fa=%d, "
+                        "mamba=%d, first_mamba_sizes=%s",
+                        split_idx,
+                        len(handle_data),
+                        fa_count,
+                        len(mamba_part),
+                        [s for _, s, _ in mamba_part[:8]],
+                    )
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
                 )
@@ -1536,13 +1551,28 @@ class NixlConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            blocks_data.extend(
-                self._build_mamba_remote(
-                    nixl_agent_meta,
-                    tp_ratio,
-                    transfer_info,
-                )
+            mamba_remote = self._build_mamba_remote(
+                nixl_agent_meta,
+                tp_ratio,
+                transfer_info,
             )
+            # Debug: log mamba descriptor sizes for hetero-TP diagnosis
+            if abs(tp_ratio) != 1 and mamba_remote:
+                fa_count = len(blocks_data)
+                logger.info(
+                    "HETEROTP remote descs: fa=%d, mamba=%d, "
+                    "first_mamba_sizes=%s, "
+                    "ssm_sizes_remote=%s, ssm_sizes_local=%s, "
+                    "tp_ratio=%s, block_size_ratio=%s",
+                    fa_count,
+                    len(mamba_remote),
+                    [s for _, s, _ in mamba_remote[:8]],
+                    nixl_agent_meta.ssm_sizes,
+                    self._mamba_ssm_size,
+                    tp_ratio,
+                    block_size_ratio,
+                )
+            blocks_data.extend(mamba_remote)
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
