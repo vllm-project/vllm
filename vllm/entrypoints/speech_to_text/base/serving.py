@@ -3,7 +3,6 @@
 import asyncio
 import io
 import math
-import os
 import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
@@ -78,11 +77,7 @@ logger = init_logger(__name__)
 
 
 def _get_stt_preprocess_max_workers() -> int:
-    # 2 threads was found to be the sweet spot for the best performance.
-    # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
-    default_workers = max(1, min(os.cpu_count() or 1, 2))
-    configured_workers = os.getenv("VLLM_STT_PREPROCESS_MAX_WORKERS")
-    num_workers = int(configured_workers) if configured_workers else default_workers
+    num_workers = envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS
     logger.info("Using %d worker(s) for STT preprocess.", num_workers)
     return num_workers
 
@@ -149,12 +144,15 @@ class OpenAISpeechToText(OpenAIServing):
         # we keep separate thread pool for frontend preprocessing instead
         # of reusing the one from Renderer which showed lower throughput
         # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
-        self._preprocess_max_workers = _get_stt_preprocess_max_workers()
+        num_audio_preprocess_workers = envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS
+        logger.info(
+            "Using %d worker(s) for audio preprocess.", num_audio_preprocess_workers
+        )
         self._preprocess_executor = ThreadPoolExecutor(
-            max_workers=self._preprocess_max_workers,
+            max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
         )
-        self._preprocess_semaphore = asyncio.Semaphore(self._preprocess_max_workers)
+        self._preprocess_semaphore = asyncio.Semaphore(num_audio_preprocess_workers)
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
