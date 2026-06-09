@@ -26,6 +26,7 @@ from .utils import (
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
+    get_generated_token_count,
 )
 
 logger = init_logger(__name__)
@@ -82,6 +83,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        min_tokens = params.min_tokens
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -168,6 +170,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
+                        min_tokens=min_tokens,
                     )
                     if should_stop:
                         break
@@ -201,6 +204,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
+        min_tokens: int,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -302,6 +306,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
                         if allowed is not None and token_id not in allowed:
+                            continue
+                        generated_tokens = get_generated_token_count(current_beam)
+                        if (
+                            token_id == eos_token_id
+                            and not ignore_eos
+                            and generated_tokens < min_tokens
+                        ):
                             continue
                         new_beam = BeamSearchSequence(
                             current_beam.orig_prompt,

@@ -1099,5 +1099,17 @@ class BeamSearchParams(
     ignore_eos: bool = False
     temperature: float = 0.0
     length_penalty: float = 1.0
+    min_tokens: int = 0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+
+    def __post_init__(self) -> None:
+        if self.min_tokens < 0:
+            raise ValueError(
+                f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
+            )
+        if self.min_tokens > self.max_tokens:
+            raise ValueError(
+                f"min_tokens must be less than or equal to "
+                f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )

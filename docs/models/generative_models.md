@@ -71,7 +71,7 @@ from vllm import LLM
 from vllm.sampling_params import BeamSearchParams
 
 llm = LLM(model="facebook/opt-125m")
-params = BeamSearchParams(beam_width=5, max_tokens=50)
+params = BeamSearchParams(beam_width=5, max_tokens=50, min_tokens=5)
 outputs = llm.beam_search([{"prompt": "Hello, my name is "}], params)
 
 for output in outputs:
