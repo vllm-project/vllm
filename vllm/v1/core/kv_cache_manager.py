@@ -132,6 +132,7 @@ class KVCacheManager:
             max_in_flight_tokens = max_model_len
 
         self.enable_caching = enable_caching
+        self.enable_kv_cache_events = enable_kv_cache_events
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
@@ -230,6 +231,26 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+
+        # When kv_cache_report_mode is "full", emit BlockStored events
+        # for the reused prefix cache blocks so that external consumers
+        # (e.g. gateway) can learn about them.
+        if (
+            num_new_computed_tokens > 0
+            and self.enable_kv_cache_events
+            and getattr(request, "kv_cache_report_mode", "incremental") == "full"
+        ):
+            for group_idx, group_blocks in enumerate(computed_blocks):
+                num_blocks = len(group_blocks)
+                if num_blocks > 0:
+                    group = self.kv_cache_config.kv_cache_groups[group_idx]
+                    block_size = group.kv_cache_spec.block_size
+                    self.block_pool.emit_cached_block_events(
+                        request,
+                        num_blocks,
+                        block_size,
+                        group_idx,
+                    )
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
