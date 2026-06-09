@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from io import BytesIO
 from pathlib import Path
 
@@ -70,27 +69,39 @@ def load_audio_pyav(
             stream = container.streams.audio[0]
             stream.thread_type = "AUTO"
             native_sr = stream.rate
-            sr = sr or native_sr
+            # Coerce to int: the `sr` type hint allows float, but
+            # av.AudioResampler(rate=...) expects an int (a float can raise
+            # TypeError on some PyAV versions). Doing it here also keeps the
+            # returned sample rate an int, consistent with
+            # load_audio_soundfile.
+            sr = int(round(sr or native_sr))
 
             chunks: list[npt.NDArray] = []
-            needs_resampling = not math.isclose(
-                float(sr),
-                float(native_sr),
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            )
-            resampler = (
-                av.AudioResampler(format="fltp", layout="mono", rate=sr)
-                if needs_resampling
-                else None
+            # Always decode through an AudioResampler set to float planar
+            # ("fltp"). Besides resampling, the resampler normalises the
+            # sample FORMAT: integer-PCM sources (the common WAV case) are
+            # converted to float32 in [-1, 1].
+            #
+            # The previous code only used the resampler when the sample
+            # rate actually changed; otherwise it appended
+            # ``frame.to_ndarray()`` directly. For an int16-PCM stream that
+            # returns raw int16 samples, and the subsequent
+            # ``.astype(np.float32)`` casts WITHOUT scaling — yielding a
+            # waveform at ~±32768 instead of ±1.0 (32768x too loud). Every
+            # downstream log-mel feature is then shifted by ~ln(32768)≈10.4,
+            # which is exactly what corrupts Gemma 4 audio/ASR (the model
+            # receives out-of-distribution features and hallucinates).
+            resampler = av.AudioResampler(
+                format="fltp",
+                layout="mono" if mono else stream.layout,
+                rate=sr,
             )
             for frame in container.decode(stream):
-                if needs_resampling:
-                    assert resampler is not None
-                    for out_frame in resampler.resample(frame):
-                        chunks.append(out_frame.to_ndarray())
-                else:
-                    chunks.append(frame.to_ndarray())
+                for out_frame in resampler.resample(frame):
+                    chunks.append(out_frame.to_ndarray())
+            # Flush samples buffered inside the resampler.
+            for out_frame in resampler.resample(None):
+                chunks.append(out_frame.to_ndarray())
     except ValueError:
         raise
     except Exception as e:
