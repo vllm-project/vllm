@@ -13,7 +13,7 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::record_scheduler_stats;
+use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::protocol::{
@@ -303,6 +303,8 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
+    let mut lora_info = LoraInfoExporter::default();
+
     let result: Result<()> = async {
         loop {
             let outputs = match output_rx.recv().await {
@@ -356,6 +358,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                             batch.engine_index,
                             scheduler_stats,
                         );
+                        lora_info.record(&METRICS.scheduler, batch.engine_index, scheduler_stats);
                     }
                 }
                 ClassifiedEngineCoreOutputs::Utility(utility) => {
