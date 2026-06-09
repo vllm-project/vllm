@@ -7,11 +7,13 @@ ColBERT-style late interaction scoring (MaxSim). It produces per-token
 embeddings for both text and image inputs.
 """
 
+from importlib.metadata import version
 from io import BytesIO
 
 import pybase64 as base64
 import pytest
 import torch
+from packaging.version import Version
 from PIL import Image
 
 from vllm.entrypoints.chat_utils import (
@@ -22,7 +24,8 @@ from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 
-pytestmark = pytest.mark.skip(
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
     reason="ColQwen3 model's weight tying is incompatible with "
     "transformers v5 (missing all_tied_weights_keys)"
 )

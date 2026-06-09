@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from importlib.metadata import version
+
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
+from packaging.version import Version
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -12,7 +15,8 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
 
-pytestmark = pytest.mark.skip(
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
     reason="InternVisionModel's custom code is incompatible with "
     "transformers v5 (missing all_tied_weights_keys)"
 )
