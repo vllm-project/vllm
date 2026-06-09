@@ -261,11 +261,26 @@ class TestGGUFModelLoader:
         assert gguf_to_hf_name_map["blk.1.ffn_gate_inp.scale"] == (
             "model.language_model.layers.1.router.scale"
         )
+        assert gguf_to_hf_name_map["blk.1.ffn_gate_inp.weight"] == (
+            "model.language_model.layers.1.router.proj.weight"
+        )
         assert gguf_to_hf_name_map["blk.1.ffn_down_exps.scale"] == (
             "model.language_model.layers.1.router.per_expert_scale"
         )
         assert gguf_to_hf_name_map["blk.1.ffn_gate_up_exps.weight"] == (
-            "model.language_model.layers.1.experts.gate_up_proj.weight"
+            "model.language_model.layers.1.experts.gate_up_proj"
+        )
+        assert gguf_to_hf_name_map["blk.1.ffn_down_exps.weight"] == (
+            "model.language_model.layers.1.experts.down_proj"
+        )
+        assert gguf_to_hf_name_map["blk.1.post_ffw_norm_1.weight"] == (
+            "model.language_model.layers.1.post_feedforward_layernorm_1.weight"
+        )
+        assert gguf_to_hf_name_map["blk.1.post_ffw_norm_2.weight"] == (
+            "model.language_model.layers.1.post_feedforward_layernorm_2.weight"
+        )
+        assert gguf_to_hf_name_map["blk.1.pre_ffw_norm_2.weight"] == (
+            "model.language_model.layers.1.pre_feedforward_layernorm_2.weight"
         )
         assert gguf_to_hf_name_map["v.blk.2.attn_q.weight"] == (
             "model.vision_tower.encoder.layers.2.self_attn.q_proj.linear.weight"

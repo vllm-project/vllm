@@ -67,14 +67,26 @@ def _add_gemma4_gguf_mappings(
                     f"{layer_prefix}.layer_scalar"
                 ),
                 f"blk.{idx}.ffn_gate_inp.scale": f"{layer_prefix}.router.scale",
+                f"blk.{idx}.ffn_gate_inp.weight": (
+                    f"{layer_prefix}.router.proj.weight"
+                ),
                 f"blk.{idx}.ffn_down_exps.scale": (
                     f"{layer_prefix}.router.per_expert_scale"
                 ),
                 f"blk.{idx}.ffn_gate_up_exps.weight": (
-                    f"{layer_prefix}.experts.gate_up_proj.weight"
+                    f"{layer_prefix}.experts.gate_up_proj"
                 ),
                 f"blk.{idx}.ffn_down_exps.weight": (
-                    f"{layer_prefix}.experts.down_proj.weight"
+                    f"{layer_prefix}.experts.down_proj"
+                ),
+                f"blk.{idx}.post_ffw_norm_1.weight": (
+                    f"{layer_prefix}.post_feedforward_layernorm_1.weight"
+                ),
+                f"blk.{idx}.post_ffw_norm_2.weight": (
+                    f"{layer_prefix}.post_feedforward_layernorm_2.weight"
+                ),
+                f"blk.{idx}.pre_ffw_norm_2.weight": (
+                    f"{layer_prefix}.pre_feedforward_layernorm_2.weight"
                 ),
             }
         )
