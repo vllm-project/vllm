@@ -4,7 +4,7 @@ import pytest
 
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
-from vllm.profiler.wrapper import WorkerProfiler
+from vllm.profiler.wrapper import TorchProfilerWrapper, WorkerProfiler
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -25,6 +25,29 @@ class ConcreteWorkerProfiler(WorkerProfiler):
 
     def _stop(self) -> None:
         self.stop_call_count += 1
+
+
+class FakeTorchProfile:
+    def __init__(self, kwargs: dict[str, object] | None = None) -> None:
+        self.kwargs = kwargs or {}
+        self.start_call_count = 0
+        self.stop_call_count = 0
+        self.step_call_count = 0
+
+    def start(self) -> None:
+        self.start_call_count += 1
+
+    def stop(self) -> None:
+        self.stop_call_count += 1
+
+    def step(self) -> None:
+        self.step_call_count += 1
+
+    def key_averages(self) -> "FakeTorchProfile":
+        return self
+
+    def table(self, sort_by: str, row_limit: int | None = None) -> str:
+        return f"{sort_by}:{row_limit}"
 
 
 @pytest.fixture
@@ -337,15 +360,112 @@ def test_multi_window_parses_comma_separated_strings():
     assert config.get_iteration_windows() == [(30, 10), (100, 20)]
 
 
-def test_multi_window_rejects_torch_profiler(tmp_path):
-    """Multi-window is currently restricted to the cuda profiler."""
-    with pytest.raises(ValueError, match="Multiple profiling windows"):
-        ProfilerConfig(
-            profiler="torch",
-            torch_profiler_dir=str(tmp_path),
-            delay_iterations="0,50",
-            max_iterations="5,5",
-        )
+def test_multi_window_allows_torch_profiler(tmp_path):
+    """Multi-window profiling is supported by the torch profiler."""
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        delay_iterations="0,50",
+        max_iterations="5,5",
+    )
+    assert config.get_iteration_windows() == [(0, 5), (50, 5)]
+
+
+def test_torch_multi_window_uses_new_profiler_per_window(tmp_path, monkeypatch):
+    """Each torch profiling window needs a fresh profiler object."""
+    fake_profiles: list[FakeTorchProfile] = []
+
+    def fake_profile(**kwargs: object) -> FakeTorchProfile:
+        assert "activities" in kwargs
+        profile = FakeTorchProfile(kwargs)
+        fake_profiles.append(profile)
+        return profile
+
+    monkeypatch.setattr("vllm.profiler.wrapper.torch.profiler.profile", fake_profile)
+
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_dump_cuda_time_total=False,
+        delay_iterations="0,3",
+        max_iterations="2,2",
+    )
+    profiler = TorchProfilerWrapper(
+        config,
+        worker_name="worker",
+        local_rank=1,
+        activities=["CPU"],
+        on_trace_ready=lambda _: None,
+    )
+
+    profiler.start()
+    profiler.step()
+    profiler.step()
+    assert len(fake_profiles) == 1
+    assert fake_profiles[0].stop_call_count == 1
+    assert (tmp_path / "profiler_out_1_window_0.txt").exists()
+    assert profiler.profiler is None
+
+    profiler.step()
+    assert len(fake_profiles) == 2
+    assert fake_profiles[1].start_call_count == 1
+
+    profiler.step()
+    assert fake_profiles[1].stop_call_count == 1
+    assert (tmp_path / "profiler_out_1_window_1.txt").exists()
+    assert profiler.profiler is None
+
+
+def test_torch_multi_window_resets_schedule_per_window(tmp_path, monkeypatch):
+    """Torch wait/warmup schedule accounting resets for every profiling window."""
+    fake_profiles: list[FakeTorchProfile] = []
+
+    def fake_profile(**kwargs: object) -> FakeTorchProfile:
+        profile = FakeTorchProfile(kwargs)
+        fake_profiles.append(profile)
+        return profile
+
+    monkeypatch.setattr("vllm.profiler.wrapper.torch.profiler.profile", fake_profile)
+
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_dump_cuda_time_total=False,
+        delay_iterations="0,3",
+        max_iterations="1,1",
+        wait_iterations=1,
+        warmup_iterations=1,
+    )
+    profiler = TorchProfilerWrapper(
+        config,
+        worker_name="worker",
+        local_rank=1,
+        activities=["CPU"],
+        on_trace_ready=lambda _: None,
+    )
+
+    profiler.start()
+    profiler.step()
+    assert len(fake_profiles) == 1
+    assert fake_profiles[0].step_call_count == 1
+    assert fake_profiles[0].stop_call_count == 0
+    assert fake_profiles[0].kwargs["schedule"] is not None
+
+    profiler.step()
+    assert fake_profiles[0].step_call_count == 2
+    assert fake_profiles[0].stop_call_count == 1
+    assert profiler.profiler is None
+
+    profiler.step()
+    assert len(fake_profiles) == 2
+    assert fake_profiles[1].step_call_count == 1
+    assert fake_profiles[1].stop_call_count == 0
+    assert fake_profiles[1].kwargs["schedule"] is not None
+
+    profiler.step()
+    assert fake_profiles[1].step_call_count == 2
+    assert fake_profiles[1].stop_call_count == 1
+    assert profiler.profiler is None
 
 
 def test_multi_window_rejects_length_mismatch():

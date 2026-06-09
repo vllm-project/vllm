@@ -107,6 +107,21 @@ The windows must be ordered and non-overlapping. Every non-final
 window open until `/stop_profile`, preserving the scalar `max_iterations=0`
 behavior.
 
+The same syntax is supported by the torch profiler:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler":"torch",
+                        "torch_profiler_dir":"./vllm_profile",
+                        "delay_iterations":"10,100",
+                        "max_iterations":"20,100"}'
+```
+
+When using torch profiler schedule options such as `wait_iterations` or
+`warmup_iterations`, the schedule is applied inside each profiling window. vLLM
+creates a fresh torch profiler instance for every window, so torch outputs one
+trace per captured range.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.

@@ -80,7 +80,7 @@ class ProfilerConfig:
     May also be a comma-separated string (e.g. `"30,100"`) to define multiple
     profiling windows. Each value is paired positionally with `max_iterations`,
     and each value is measured from `/start_profile`.
-    Multi-window mode requires `profiler='cuda'`.
+    Multi-window mode is supported for `profiler='cuda'` and `profiler='torch'`.
     """
 
     max_iterations: int | str = Field(default=0)
@@ -169,10 +169,10 @@ class ProfilerConfig:
             ) from e
 
     def _validate_multi_window_config(self, windows: list[tuple[int, int]]) -> None:
-        if self.profiler != "cuda":
+        if self.profiler not in ("cuda", "torch"):
             raise ValueError(
                 "Multiple profiling windows are only supported when "
-                f"profiler='cuda', got profiler={self.profiler!r}"
+                f"profiler is 'cuda' or 'torch', got profiler={self.profiler!r}"
             )
 
         for i, (delay, max_iters) in enumerate(windows):
