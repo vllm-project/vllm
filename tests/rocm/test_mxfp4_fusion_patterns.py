@@ -15,6 +15,7 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 
 # -- Test 1: Probe/op availability ------------------------------------------
 
+
 def test_feature_probe_rmsnorm_matches_aiter_triton():
     """has_fused_rmsnorm_mxfp4_quant must agree with actual importability of
     aiter.ops.triton.fused_mxfp4_quant.fused_rms_mxfp4_quant."""

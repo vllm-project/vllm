@@ -134,8 +134,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 )
                 if self._f3_fusion_enabled:
                     logger.info(
-                        "F3 fused RoPE+KV-cache dispatch auto-enabled "
-                        "(prefix=%s)", prefix
+                        "F3 fused RoPE+KV-cache dispatch auto-enabled (prefix=%s)",
+                        prefix,
                     )
             except Exception:
                 pass  # aiter not available; stay False

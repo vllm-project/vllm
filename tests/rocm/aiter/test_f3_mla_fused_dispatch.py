@@ -75,9 +75,7 @@ class TestHasFusedRopeMlaKvCache:
         from vllm._aiter_ops import rocm_aiter_ops
 
         result = rocm_aiter_ops.has_fused_rope_mla_kv_cache()
-        assert isinstance(result, bool), (
-            f"Expected bool, got {type(result).__name__}"
-        )
+        assert isinstance(result, bool), f"Expected bool, got {type(result).__name__}"
 
     def test_probe_false_when_kernel_absent(self, monkeypatch):
         """When the aiter import is mocked to fail, probe must return False."""
@@ -117,13 +115,11 @@ def test_mla_wrapper_f3_enabled_via_probe():
     from vllm._aiter_ops import rocm_aiter_ops
 
     f3 = bool(
-        rocm_aiter_ops.is_mla_enabled()
-        and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+        rocm_aiter_ops.is_mla_enabled() and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
     )
     if rocm_aiter_ops.has_fused_rope_mla_kv_cache():
         assert f3 is True, (
-            "_f3_fusion_enabled should be True when kernel present "
-            "(no env var needed)"
+            "_f3_fusion_enabled should be True when kernel present (no env var needed)"
         )
     # When kernel is absent the probe already returned False — f3 must be False
     else:
@@ -395,10 +391,7 @@ class TestDoRopeAndKVCacheUpdate:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not current_platform.is_rocm(),
-    reason="ROCm-specific tests"
-)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests")
 def test_f3_fused_replaces_two_ops():
     """F3 fires fused_rope_and_mla_kv_cache_write, bypassing the separate
     rotary_emb call.
@@ -449,10 +442,19 @@ def test_f3_fused_replaces_two_ops():
         # Simulate the forward dispatch: if f3 → call fused, else call rotary_emb
         if f3_enabled:
             rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
-                q_nope=None, q_pe=None, kv_c=None, k_pe=None,
-                kv_cache=None, q_out=None, slot_mapping=None,
-                k_scale=None, q_scale=None, positions=None,
-                cos_cache=None, sin_cache=None, is_neox=True,
+                q_nope=None,
+                q_pe=None,
+                kv_c=None,
+                k_pe=None,
+                kv_cache=None,
+                q_out=None,
+                slot_mapping=None,
+                k_scale=None,
+                q_scale=None,
+                positions=None,
+                cos_cache=None,
+                sin_cache=None,
+                is_neox=True,
             )
         else:
             rope_call_count += 1  # would have called rotary_emb
@@ -465,8 +467,10 @@ def test_f3_fused_replaces_two_ops():
             f"rotary_emb must NOT be called when F3 is enabled, "
             f"got {rope_call_count} calls"
         )
-        print(f"PASS: fused_calls={fused_call_count}, rope_calls={rope_call_count} "
-              f"(F3 replaces 2 ops with 1)")
+        print(
+            f"PASS: fused_calls={fused_call_count}, rope_calls={rope_call_count} "
+            f"(F3 replaces 2 ops with 1)"
+        )
     finally:
         rocm_aiter_ops.fused_rope_and_mla_kv_cache_write = classmethod(
             lambda cls, **kw: original_fused(cls, **kw)

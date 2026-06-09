@@ -591,17 +591,12 @@ class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
     RocmAiterRMSNormQuantFusionPass is not AR-gated.
     """
 
-    def __init__(self, hidden_size=256, eps=1e-6,
-                 dtype=torch.bfloat16):
+    def __init__(self, hidden_size=256, eps=1e-6, dtype=torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.norm_weight_0 = torch.nn.Parameter(
-            torch.ones(hidden_size, dtype=dtype)
-        )
-        self.norm_weight_1 = torch.nn.Parameter(
-            torch.ones(hidden_size, dtype=dtype)
-        )
+        self.norm_weight_0 = torch.nn.Parameter(torch.ones(hidden_size, dtype=dtype))
+        self.norm_weight_1 = torch.nn.Parameter(torch.ones(hidden_size, dtype=dtype))
 
     def forward(self, x: torch.Tensor, residual: torch.Tensor):
         # Site 0: no-residual — exercises AiterRMSNormMXFP4QuantPattern
@@ -650,18 +645,14 @@ def test_mxfp4_patterns_fire_on_model(monkeypatch):
         torch.set_default_dtype(torch.bfloat16)
         set_random_seed(42)
 
-        model = _AiterRMSNormMXFP4QuantModel(
-            hidden_size=hidden_size, eps=eps
-        ).cuda()
+        model = _AiterRMSNormMXFP4QuantModel(hidden_size=hidden_size, eps=eps).cuda()
 
         fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
         noop_pass = NoOpEliminationPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
 
-        x = torch.randn(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
-        )
+        x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
         residual = torch.randn(
             num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
         )
@@ -672,14 +663,18 @@ def test_mxfp4_patterns_fire_on_model(monkeypatch):
         compiled(x, residual)
 
     # Both fused ops must appear in the post-pass graph
-    backend.check_after_ops([
-        rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op(),
-        rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op(),
-    ])
+    backend.check_after_ops(
+        [
+            rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op(),
+            rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op(),
+        ]
+    )
     # Standalone quant must be absent from the post-pass graph (mirrors PR#42864)
-    backend.check_not_in_after_ops([
-        rocm_aiter_ops.get_dynamic_mxfp4_quant_op(),
-    ])
+    backend.check_not_in_after_ops(
+        [
+            rocm_aiter_ops.get_dynamic_mxfp4_quant_op(),
+        ]
+    )
     # Standalone quant must be fully eliminated from before→after
     backend.check_before_ops(
         [rocm_aiter_ops.get_dynamic_mxfp4_quant_op()],
