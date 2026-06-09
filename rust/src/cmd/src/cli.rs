@@ -221,6 +221,7 @@ impl SharedRuntimeArgs {
         Duration::from_secs(self.shutdown_timeout)
     }
 
+    /// Apply fallback logic for API key configuration from env variables.
     fn apply_env_api_key_fallback(&mut self) {
         if self.api_key.is_empty()
             && let Ok(api_key) = std::env::var("VLLM_API_KEY")
