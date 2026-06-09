@@ -69,10 +69,16 @@ pub async fn completions(
     {
         Ok(stream) => stream,
         Err(error) => {
-            return server_error!(
-                "failed to submit completion request: {}",
-                error.to_report_string()
-            )
+            return match &error {
+                vllm_text::Error::EmptyPromptTokenIds { .. }
+                | vllm_text::Error::PromptTooLong { .. } => {
+                    ApiError::invalid_request(error.to_report_string(), Some("prompt"))
+                }
+                _ => server_error!(
+                    "failed to submit completion request: {}",
+                    error.to_report_string()
+                ),
+            }
             .into_response();
         }
     };
