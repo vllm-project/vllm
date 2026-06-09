@@ -94,10 +94,16 @@ __launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
   // Step 2: per-group abs-max via warp-shuffle. fmaxf is order-invariant, so
   // the group max (and therefore the scale) is bit-identical to the tree
   // reduction.
+#ifdef USE_ROCM
+  uint64_t const shfl_mask = uint64_t(0xffffffffu)
+                             << ((threadIdx.x % warpSize / 32) * 32);
+#else
+  uint32_t const shfl_mask = 0xffffffffu;
+#endif
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
     thread_max =
-        fmaxf(thread_max, __shfl_xor_sync(0xffffffffu, thread_max, offset));
+        fmaxf(thread_max, __shfl_xor_sync(shfl_mask, thread_max, offset, 32));
   }
 
   // Step 3: compute the group scale in registers; lane 0 writes it to global.
