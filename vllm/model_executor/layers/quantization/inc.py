@@ -422,6 +422,20 @@ class INCConfig(QuantizationConfig):
                 "INC W4A16 on XPU only supports symmetric quantization for now."
             )
 
+        if isinstance(layer, RoutedExperts):
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config,
+            )
+
+            config = {
+                "quant_method": "gptq",
+                "bits": weight_bits,
+                "group_size": group_size,
+                "sym": sym,
+                "lm_head": False,
+            }
+            return MoeWNA16Config.from_config(config).get_quant_method(layer, prefix)
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             is_ark_available, ark_error, _, _ = get_ark_state()
             if is_ark_available:
