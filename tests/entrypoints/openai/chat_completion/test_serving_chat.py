@@ -2047,3 +2047,185 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.skip_global_cleanup
+class TestCreateRemainingArgsDelta:
+    """Tests for _create_remaining_args_delta helper function.
+
+    This helper is used when streaming remaining tool-call arguments at finish
+    time. Continuation chunks must not re-emit id/type/name metadata.
+    """
+
+    def test_continuation_omits_id_type_name_by_default(self):
+        """Continuation chunks should only include argument deltas."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_abc123",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="get_weather",
+                        arguments='{"location": "Paris"}',
+                    ),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '", "unit": "celsius"}', 0
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 0
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert tc.function.arguments == '", "unit": "celsius"}'
+        serialized = tc.model_dump(exclude_unset=True)
+        assert "id" not in serialized
+        assert "type" not in serialized
+        assert "name" not in serialized["function"]
+
+    def test_uses_fallback_metadata_for_first_chunk(self):
+        """The caller may explicitly include metadata for a first chunk."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_first",
+                    type="function",
+                    function=DeltaFunctionCall(name="func_a", arguments="{}"),
+                ),
+                DeltaToolCall(
+                    index=1,
+                    id="call_second",
+                    type="function",
+                    function=DeltaFunctionCall(name="func_b", arguments="{}"),
+                ),
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta,
+            '{"extra": true}',
+            1,
+            fallback_tool_call_id="call_second",
+            fallback_tool_call_type="function",
+            fallback_tool_call_name="func_b",
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 1
+        assert tc.id == "call_second"
+        assert tc.function.name == "func_b"
+
+    def test_no_matching_tool_call(self):
+        """Test graceful handling when no matching tool call is found."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_zero",
+                    type="function",
+                    function=DeltaFunctionCall(name="func", arguments="{}"),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"arg": 1}', 5
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 5
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert tc.function.arguments == '{"arg": 1}'
+
+    def test_function_is_none(self):
+        """Test handling when original tool call has no function."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_nofunc",
+                    type="function",
+                    function=None,
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"data": "value"}', 0
+        )
+
+        assert len(result.tool_calls) == 1
+        tc = result.tool_calls[0]
+        assert tc.index == 0
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert tc.function.arguments == '{"data": "value"}'
+
+    def test_terminal_argument_chunk_requires_finish_split(self):
+        """A final argument fragment should be sent before the finish chunk."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        delta_message = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    function=DeltaFunctionCall(arguments='"}'),
+                )
+            ]
+        )
+
+        assert OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            delta_message, "tool_calls"
+        )
+        assert not OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            delta_message, None
+        )
+
+    def test_empty_finish_chunk_does_not_require_split(self):
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+
+        assert not OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            DeltaMessage(), "tool_calls"
+        )
