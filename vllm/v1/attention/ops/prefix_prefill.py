@@ -749,7 +749,7 @@ def context_attention_fwd(
             b_start_loc,
             b_seq_len,
             alibi_slopes,
-            v_cache.shape[2],
+            v_cache.shape[3],
             o,
             b_loc.stride(0),
             b_loc.stride(1),
@@ -790,7 +790,7 @@ def context_attention_fwd(
     if current_platform.is_rocm():
         extra_kargs = {}
 
-    real_block_size = v_cache.shape[2]
+    real_block_size = v_cache.shape[3]
     is_pow2 = real_block_size > 0 and (real_block_size & (real_block_size - 1) == 0)
     # For standard models involving powers of 2,
     # follow the original logic (Llama 128/64)
