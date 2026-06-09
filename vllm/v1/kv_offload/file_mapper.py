@@ -4,6 +4,7 @@
 import hashlib
 import json
 
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
@@ -81,6 +82,12 @@ class FileMapper:
             }
             for group in kv_cache_config.kv_cache_groups
         ]
+        # Only a single full-attention group is parallelism-invariant; other
+        # layouts (multi-group, replicated MLA/small-GQA) keep per-layout paths.
+        groups = kv_cache_config.kv_cache_groups
+        parallel_agnostic = parallel_agnostic and (
+            len(groups) == 1 and isinstance(groups[0].kv_cache_spec, FullAttentionSpec)
+        )
         return cls(
             root_dir=root_dir,
             model_name=vllm_config.model_config.model,
