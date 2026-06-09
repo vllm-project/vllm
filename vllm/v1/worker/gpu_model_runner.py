@@ -5793,36 +5793,18 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        mixed_prefill_tokens_list: list[int] | None = None
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
-            # first half decode tokens, second half one or more prefills.
-            # Split synthetic prefill requests so each stays within the
-            # per-request max_model_len capacity.
-            max_prefill_tokens_per_req = max(1, self.max_model_len - 1)
+            # first half decode tokens, second half one prefill
             num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
-            while True:
-                num_prefill_tokens = num_tokens - num_decode_tokens
-                num_prefill_reqs = cdiv(num_prefill_tokens, max_prefill_tokens_per_req)
-                if num_decode_tokens + num_prefill_reqs <= max_num_reqs:
-                    break
-                assert num_decode_tokens > 0
-                num_decode_tokens -= 1
+            num_prefill_tokens = num_tokens - num_decode_tokens
+            num_reqs = num_decode_tokens + 1
 
-            prefill_tokens_per_req = num_prefill_tokens // num_prefill_reqs
-            mixed_prefill_tokens_list = [prefill_tokens_per_req] * num_prefill_reqs
-            for req_idx in range(num_prefill_tokens % num_prefill_reqs):
-                mixed_prefill_tokens_list[req_idx] += 1
-
-            num_reqs = num_decode_tokens + num_prefill_reqs
-
-            # Create decode requests (1 token each) followed by prefill
-            # requests that collectively keep the mixed warmup shape.
-            num_scheduled_tokens_list = [
-                1
-            ] * num_decode_tokens + mixed_prefill_tokens_list
-            max_query_len = max(mixed_prefill_tokens_list)
+            # Create decode requests (1 token each) followed by prefill request
+            num_scheduled_tokens_list = [1] * num_decode_tokens + [num_prefill_tokens]
+            # Note: Overriding max_query_len to be the prefill tokens
+            max_query_len = num_prefill_tokens
         elif uniform_decode:
             assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
@@ -5931,21 +5913,15 @@ class GPUModelRunner(
                     # In the mixed batch mode (used for FI warmup), we use
                     # shorter sequence lengths to run faster.
                     # TODO(luka) better system for describing dummy batches
-                    assert mixed_prefill_tokens_list is not None
                     if dcp_dummy_context_len > 0:
-                        seq_lens = [  # type: ignore[assignment]
-                            1 + dcp_dummy_context_len
-                        ] * num_decode_tokens + [
-                            num_prefill_tokens + dcp_dummy_context_len
-                            for num_prefill_tokens in mixed_prefill_tokens_list
-                        ]
+                        seq_lens = torch.tensor(  # type: ignore[assignment]
+                            [1 + dcp_dummy_context_len] * num_decode_tokens
+                            + [num_prefill_tokens + dcp_dummy_context_len],
+                            dtype=torch.int,
+                        )
                     else:
                         seq_lens = torch.tensor(  # type: ignore[assignment]
-                            [1] * num_decode_tokens
-                            + [
-                                num_prefill_tokens + 1
-                                for num_prefill_tokens in mixed_prefill_tokens_list
-                            ],
+                            [1] * num_decode_tokens + [num_prefill_tokens + 1],
                             dtype=torch.int,
                         )
                 elif dcp_dummy_context_len > 0:
@@ -5969,12 +5945,17 @@ class GPUModelRunner(
                     # Fill every KV cache group with valid dummy block IDs.
                     # DCP graph warmup may exercise context attention, so
                     # block-table entries must point at allocated KV blocks.
+                    max_valid_block_id = self.kv_cache_config.num_blocks - 1
+                    assert max_valid_block_id > 0
                     for blk_table in self.input_batch.block_table.block_tables:
-                        num_alloc_blocks = (
+                        max_row_blocks = (
                             blk_table.max_num_blocks_per_req
                             // blk_table.blocks_per_kv_block
                         )
-                        block_ids = list(range(1, num_alloc_blocks + 1))
+                        block_ids = [
+                            (block_idx % max_valid_block_id) + 1
+                            for block_idx in range(max_row_blocks)
+                        ]
                         for req_idx in range(num_reqs):
                             blk_table.add_row(block_ids, req_idx)
                         blk_table.commit_block_table(num_reqs)
@@ -6431,6 +6412,40 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def _allocate_dcp_context_workspace(self) -> None:
+        if self.dcp_world_size <= 1 or not hasattr(self, "kv_cache_config"):
+            return
+
+        head_size = 0
+
+        def visit_spec(kv_cache_spec: KVCacheSpec) -> None:
+            nonlocal head_size
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                for inner_spec in kv_cache_spec.kv_cache_specs.values():
+                    visit_spec(inner_spec)
+            elif isinstance(kv_cache_spec, FullAttentionSpec):
+                head_size = max(head_size, kv_cache_spec.head_size)
+
+        for kv_cache_group in self.kv_cache_config.kv_cache_groups:
+            visit_spec(kv_cache_group.kv_cache_spec)
+
+        if head_size == 0:
+            return
+
+        # profile_run uses max_num_tokens, but it skips attention metadata and
+        # FlashAttention returns a zero output, so the DCP context-FA workspace
+        # is not allocated there. CUDA graph capture only covers configured
+        # graph sizes and cannot build a max-token mixed DCP batch for hybrid
+        # models because GDN full graphs are decode-only. Reserve the largest
+        # possible DCP context output before the workspace is locked.
+        num_heads = (
+            self.model_config.get_num_attention_heads(self.parallel_config)
+            * self.dcp_world_size
+        )
+        current_workspace_manager().get_simultaneous(
+            ((self.max_num_tokens, num_heads, head_size), self.model_config.dtype),
+        )
+
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
@@ -6732,7 +6747,7 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
-        self._reserve_dcp_attention_workspace()
+        self._allocate_dcp_context_workspace()
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -6780,37 +6795,6 @@ class GPUModelRunner(
             cuda_graph_size / (1 << 30),
         )
         return cuda_graph_size
-
-    def _reserve_dcp_attention_workspace(self) -> None:
-        if self.dcp_world_size <= 1 or not hasattr(self, "kv_cache_config"):
-            return
-
-        head_size = 0
-        for kv_cache_group in self.kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, FullAttentionSpec):
-                head_size = max(head_size, kv_cache_spec.head_size)
-            elif isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                head_size = max(
-                    head_size,
-                    *(
-                        spec.head_size
-                        for spec in kv_cache_spec.kv_cache_specs.values()
-                        if isinstance(spec, FullAttentionSpec)
-                    ),
-                    0,
-                )
-
-        if head_size == 0:
-            return
-
-        num_heads = (
-            self.model_config.get_num_attention_heads(self.parallel_config)
-            * self.dcp_world_size
-        )
-        current_workspace_manager().get_simultaneous(
-            ((self.max_num_tokens, num_heads, head_size), self.model_config.dtype),
-        )
 
     def _warmup_and_capture(
         self,
@@ -7156,6 +7140,14 @@ class GPUModelRunner(
                 metadata.mm_prefix_range_tensor = shared_tensor
 
     def _get_max_num_blocks_per_req(self, kv_cache_spec: KVCacheSpec) -> int:
+        if (
+            isinstance(kv_cache_spec, MambaSpec)
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            return (
+                cdiv(self.model_config.max_model_len, kv_cache_spec.block_size)
+                + kv_cache_spec.num_speculative_blocks
+            )
         return cdiv(
             kv_cache_spec.max_memory_usage_bytes(self.vllm_config),
             kv_cache_spec.page_size_bytes,
