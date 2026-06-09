@@ -19,9 +19,13 @@ from tests.models.utils import check_logprobs_close
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.attention.attention import (
+    _checkpoint_has_fp8_kv_scales,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -708,3 +712,13 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def test_compressed_tensors_fp8_e5m2_kv_cache_gate():
+    # #39137: weight-only compressed-tensors declares no kv_cache_scheme, so
+    # fp8_e5m2 KV cache must be allowed; an fp8 kv_cache_scheme stays rejected.
+    method = CompressedTensorsKVCacheMethod(Mock(kv_cache_scheme=None))
+    assert _checkpoint_has_fp8_kv_scales(method) is False
+
+    method.quant_config.kv_cache_scheme = {"num_bits": 8, "type": "float"}
+    assert _checkpoint_has_fp8_kv_scales(method) is True
