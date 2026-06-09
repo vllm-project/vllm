@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=r32_sp2048_sd256_pp2_tp4_qwen3-235b
+#SBATCH --job-name=test_flexible
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
-#SBATCH --time=02:00:00
+#SBATCH --time=00:45:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -17,12 +17,18 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-235b-a22b-tp4-pp2-workers-nsys-arc-slurm-tmp-v2"
+SCRIPT_VERSION="test-flexible-r32-sp128-sd128-pp2-tp4-ray-ready-v1"
 
 # Configuration:
 #   2 nodes x 4 H100s/node = 8 total GPUs
 #   TP=4 within each node
 #   PP=2 across the two nodes
+#
+# Ray bring-up safeguards:
+#   1. Start the Ray head and wait until it appears alive in GCS.
+#   2. Start workers only after the head is ready.
+#   3. Wait until every expected Ray node is alive before starting vLLM.
+#   4. Fail immediately if a Ray head or worker srun step exits early.
 #
 # Layout:
 #   htc-g059: 4-GPU TP group for PP stage 0
@@ -78,9 +84,14 @@ WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 # Ray compiled-DAG get timeout. Nsight + cold-start can exceed Ray's default 300s.
-RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-900}"
+RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-1400}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-${RAY_CGRAPH_GET_TIMEOUT}}"
 export RAY_CGRAPH_submit_timeout="${RAY_CGRAPH_submit_timeout:-1800}"
+
+# Fail closed instead of relying on fixed sleeps during Ray bring-up.
+RAY_HEAD_READY_TIMEOUT_S="${RAY_HEAD_READY_TIMEOUT_S:-240}"
+RAY_CLUSTER_READY_TIMEOUT_S="${RAY_CLUSTER_READY_TIMEOUT_S:-300}"
+RAY_READY_POLL_S="${RAY_READY_POLL_S:-5}"
 
 # Short path for Ray. This stays in /tmp only as a symlink, not as real storage.
 RAY_TMP_LINK_PARENT="${RAY_TMP_LINK_PARENT:-/tmp}"
@@ -383,6 +394,154 @@ link="$2"
 rm -rf "${root}" "${link}" 2>/dev/null || true
 REMOTE_CLEAN
   done
+}
+
+# -----------------------------------------------------------------------------
+# Ray readiness helpers
+# -----------------------------------------------------------------------------
+
+wait_for_ray_head_ready() {
+  local timeout_s="${1:-240}"
+  local poll_s="${2:-5}"
+  local elapsed=0
+
+  echo "Waiting for Ray head to become ready at ${RAY_ADDRESS}..."
+
+  while [ "${elapsed}" -lt "${timeout_s}" ]; do
+    if [ -n "${HEAD_RAY_PID:-}" ] && ! kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+      echo "Error: Ray head srun step died before becoming ready." >&2
+      echo "Ray head stdout tail:" >&2
+      tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" >&2 2>/dev/null || true
+      echo "Ray head stderr tail:" >&2
+      tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" >&2 2>/dev/null || true
+      return 1
+    fi
+
+    if "${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+
+import ray
+
+address = os.environ["RAY_ADDRESS"]
+head_ip = os.environ["HEAD_NODE_IP"]
+
+try:
+    ray.init(address=address, ignore_reinit_error=True, logging_level="ERROR")
+    alive = [node for node in ray.nodes() if node.get("Alive")]
+    head = [
+        node for node in alive if node.get("NodeManagerAddress") == head_ip
+    ]
+
+    print("Ray nodes currently visible:")
+    for node in alive:
+        print(
+            f"  {node.get('NodeManagerAddress')} "
+            f"resources={node.get('Resources')}"
+        )
+
+    ray.shutdown()
+    sys.exit(0 if head else 1)
+except Exception as exc:
+    print(f"Ray head not ready yet: {type(exc).__name__}: {exc}")
+    try:
+        ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+    then
+      echo "Ray head is ready."
+      return 0
+    fi
+
+    elapsed=$((elapsed + poll_s))
+    echo "Ray head not ready yet; retrying in ${poll_s}s (${elapsed}/${timeout_s}s)..."
+    sleep "${poll_s}"
+  done
+
+  echo "Error: Ray head did not become ready within ${timeout_s}s." >&2
+  echo "Ray head stdout tail:" >&2
+  tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" >&2 2>/dev/null || true
+  echo "Ray head stderr tail:" >&2
+  tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" >&2 2>/dev/null || true
+  return 1
+}
+
+wait_for_ray_cluster_ready() {
+  local expected_nodes="${1}"
+  local timeout_s="${2:-300}"
+  local poll_s="${3:-5}"
+  local elapsed=0
+
+  echo "Waiting for Ray cluster to show ${expected_nodes} alive node(s)..."
+
+  while [ "${elapsed}" -lt "${timeout_s}" ]; do
+    if [ -n "${HEAD_RAY_PID:-}" ] && ! kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+      echo "Error: Ray head srun step died while waiting for cluster." >&2
+      return 1
+    fi
+
+    local dead_worker=0
+    for pid in ${WORKER_RAY_PIDS:-}; do
+      if ! kill -0 "${pid}" 2>/dev/null; then
+        dead_worker=1
+      fi
+    done
+
+    if [ "${dead_worker}" = "1" ]; then
+      echo "Error: at least one Ray worker srun step died while joining." >&2
+      for node in ${WORKER_NODES}; do
+        echo "Worker ${node} stdout tail:" >&2
+        tail -100 "${TRACE_RUN_DIR}/slurm_ray_worker_${node}.out" >&2 2>/dev/null || true
+        echo "Worker ${node} stderr tail:" >&2
+        tail -100 "${TRACE_RUN_DIR}/slurm_ray_worker_${node}.err" >&2 2>/dev/null || true
+      done
+      return 1
+    fi
+
+    if EXPECTED_RAY_NODES="${expected_nodes}" "${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+
+import ray
+
+address = os.environ["RAY_ADDRESS"]
+expected = int(os.environ["EXPECTED_RAY_NODES"])
+
+try:
+    ray.init(address=address, ignore_reinit_error=True, logging_level="ERROR")
+    alive = [node for node in ray.nodes() if node.get("Alive")]
+
+    print(f"Ray alive nodes: {len(alive)}/{expected}")
+    for node in alive:
+        print(
+            f"  {node.get('NodeManagerAddress')} "
+            f"resources={node.get('Resources')}"
+        )
+
+    ray.shutdown()
+    sys.exit(0 if len(alive) >= expected else 1)
+except Exception as exc:
+    print(f"Ray cluster not ready yet: {type(exc).__name__}: {exc}")
+    try:
+        ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+    then
+      echo "Ray cluster is ready with ${expected_nodes} alive node(s)."
+      return 0
+    fi
+
+    elapsed=$((elapsed + poll_s))
+    echo "Ray cluster not ready yet; retrying in ${poll_s}s (${elapsed}/${timeout_s}s)..."
+    sleep "${poll_s}"
+  done
+
+  echo "Error: Ray cluster did not reach ${expected_nodes} alive node(s) within ${timeout_s}s." >&2
+  return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -819,10 +978,10 @@ copy_ray_logs_from_node() {
 
 # SP = prompt / prefill token bucket
 # SD = decode / output tokens per request
-SP="${SP:-2048}"
-SD="${SD:-256}"
+SP="${SP:-128}"
+SD="${SD:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
-REQUEST_RATE="${REQUEST_RATE:-0.05}"
+REQUEST_RATE="${REQUEST_RATE:-1}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
@@ -836,7 +995,7 @@ HEAD_NODE="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)"
 export WORKER_NODES
 WORKER_NODES="$(scontrol show hostnames "$SLURM_NODELIST" | tail -n+2)"
 
-echo "=== vLLM multi-node Qwen3-235B host job ==="
+echo "=== vLLM multi-node Qwen3-30B host job ==="
 echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "Date: $(date -Is 2>/dev/null || date)"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
@@ -846,6 +1005,9 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 echo "HEAD_NODE=${HEAD_NODE}"
 echo "WORKER_NODES=${WORKER_NODES}"
 echo "RAY_CGRAPH_get_timeout=${RAY_CGRAPH_get_timeout}"
+echo "RAY_HEAD_READY_TIMEOUT_S=${RAY_HEAD_READY_TIMEOUT_S}"
+echo "RAY_CLUSTER_READY_TIMEOUT_S=${RAY_CLUSTER_READY_TIMEOUT_S}"
+echo "RAY_READY_POLL_S=${RAY_READY_POLL_S}"
 echo "RAY_TMP_LINK_PARENT=${RAY_TMP_LINK_PARENT}"
 echo "RAY_TMP_PREFIX=${RAY_TMP_PREFIX}"
 echo "ARC_RAY_REAL_TMP_PARENT=${ARC_RAY_REAL_TMP_PARENT:-<unset>}"
@@ -922,8 +1084,9 @@ else
 fi
 
 VENV_DIR="${REPO_ROOT}/.venv"
+PYTHON_BIN="${VENV_DIR}/bin/python"
 
-MODEL_ID="${MODEL_ID:-Qwen/Qwen3-235B-A22B-Instruct-2507}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
@@ -937,7 +1100,7 @@ TP="${TP:-${GPUS_PER_NODE}}"
 PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
 
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
@@ -974,8 +1137,9 @@ nsys --version || true
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "VENV_DIR=${VENV_DIR}"
 
-if [ ! -d "${VENV_DIR}" ]; then
-  python3 -m venv "${VENV_DIR}"
+if [ ! -x "${PYTHON_BIN}" ]; then
+  echo "Error: missing venv python at ${PYTHON_BIN}" >&2
+  exit 1
 fi
 
 source "${VENV_DIR}/bin/activate"
@@ -995,24 +1159,57 @@ echo "After venv: python=$(command -v python) ray=$(command -v ray 2>/dev/null |
 slurm_debug "PATH=${PATH}"
 slurm_debug "pip install starting (cuda + build + editable vllm)..."
 
-python -m pip install -U pip
-python -m pip install -r "${REPO_ROOT}/requirements/cuda.txt"
-python -m pip install -r "${REPO_ROOT}/requirements/build/cuda.txt"
+INSTALL_DEPS="${INSTALL_DEPS:-0}"
 
-RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
-echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
-python -m pip install "${RAY_REQUIREMENT}"
+if [ "${INSTALL_DEPS}" = "1" ]; then
+  echo "INSTALL_DEPS=1; installing dependencies and editable vLLM..."
 
-(
-  cd "${REPO_ROOT}" || exit 1
-  export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
-  python -m pip install -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}
-)
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "Error: INSTALL_DEPS=1 requires uv on PATH." >&2
+    exit 1
+  fi
+
+  uv pip install --python "${PYTHON_BIN}" --upgrade pip
+  uv pip install --python "${PYTHON_BIN}" -r "${REPO_ROOT}/requirements/cuda.txt"
+  uv pip install --python "${PYTHON_BIN}" -r "${REPO_ROOT}/requirements/build/cuda.txt"
+
+  RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
+  echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
+  uv pip install --python "${PYTHON_BIN}" "${RAY_REQUIREMENT}"
+
+  (
+    cd "${REPO_ROOT}" || exit 1
+    export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
+
+    # Avoid transient shared-filesystem Git/versioning failures.
+    export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-0.19.2.dev0}"
+    export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.19.2.dev0}"
+
+    install_ok=0
+    for attempt in 1 2 3; do
+      echo "Editable vLLM install attempt ${attempt}/3..."
+      if uv pip install --python "${PYTHON_BIN}" -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}; then
+        install_ok=1
+        break
+      fi
+      echo "Editable install failed on attempt ${attempt}; retrying in 30s..."
+      sleep 30
+    done
+
+    if [ "${install_ok}" != "1" ]; then
+      echo "Error: editable vLLM install failed after 3 attempts." >&2
+      exit 1
+    fi
+  )
+else
+  echo "INSTALL_DEPS=${INSTALL_DEPS}; skipping pip install steps and using existing venv."
+  RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
+fi
 
 RAY_BIN="${VENV_DIR}/bin/ray"
 if [ ! -x "${RAY_BIN}" ]; then
   echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
-  echo "Hint: source \"${VENV_DIR}/bin/activate\" && python -m pip install ray" >&2
+  echo "Hint: uv pip install --python \"${PYTHON_BIN}\" ray" >&2
   exit 1
 fi
 echo "Using RAY_BIN=${RAY_BIN}"
@@ -1154,7 +1351,7 @@ srun \
 HEAD_RAY_PID=$!
 
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
-sleep 20
+wait_for_ray_head_ready "${RAY_HEAD_READY_TIMEOUT_S}" "${RAY_READY_POLL_S}"
 
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
@@ -1252,15 +1449,16 @@ fi"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
 
-  sleep 20
 fi
+
+wait_for_ray_cluster_ready "${NUM_NODES}" "${RAY_CLUSTER_READY_TIMEOUT_S}" "${RAY_READY_POLL_S}"
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
 
-"${RAY_BIN}" status --address="${RAY_ADDRESS}" || echo "Warning: ray status failed; continuing with Python Ray node check."
+"${RAY_BIN}" status --address="${RAY_ADDRESS}" || echo "Warning: ray status failed; readiness check already passed."
 
-python - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import os
 import ray
 
@@ -1314,7 +1512,7 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   nsight_copy_msg "empty.nsys-rep and zero-byte reports are ignored"
 fi
 
-python -m vllm.entrypoints.openai.api_server \
+"${PYTHON_BIN}" -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_ID}" \
   --host "${HOST}" \
   --port "${PORT}" \
