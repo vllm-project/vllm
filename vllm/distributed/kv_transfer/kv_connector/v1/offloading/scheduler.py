@@ -77,9 +77,6 @@ class GroupOffloadConfig(NamedTuple):
     # than the MLA full-attention group).
     # None for full-attention groups or when the optimization doesn't apply.
     alignment_block_count: int | None = None
-    # If there is a KV cache group with MamabaSpec in "align" cache mode,
-    # here we record the mamba alignment requirement for offloading.
-    mamba_align_size: int | None = None
 
 
 def get_sliding_window_size_in_blocks(
@@ -95,6 +92,24 @@ def get_sliding_window_size_in_blocks(
 
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
+
+
+def resolve_mamba_align_size(spec: "OffloadingSpec") -> int | None:
+    """Scan all KV cache groups in *spec* and return the single mamba alignment
+    size, or None if no group requires mamba alignment.
+
+    For MambaSpec groups in "align" cache mode the hit window must be rounded
+    down to a multiple of the offloaded block size. Asserts that all such
+    groups agree on the same value.
+    """
+    mamba_align_size: int | None = None
+    for idx, gpu_block_size in enumerate(spec.gpu_block_size):
+        kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+            offload_block_size = gpu_block_size * spec.block_size_factor
+            assert mamba_align_size is None or mamba_align_size == offload_block_size
+            mamba_align_size = offload_block_size
+    return mamba_align_size
 
 
 class SchedulerOffloadConfig(NamedTuple):
@@ -140,12 +155,6 @@ class SchedulerOffloadConfig(NamedTuple):
                 return None
             return per_segment
 
-        def _mamba_alignment_size(kv_spec, offload_block_size) -> int | None:
-            if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
-                return offload_block_size
-            else:
-                return None
-
         return cls(
             num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
@@ -165,10 +174,6 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     alignment_block_count=_alignment_block_count(
                         gpu_block_size * spec.block_size_factor, sw
-                    ),
-                    mamba_align_size=_mamba_alignment_size(
-                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                        gpu_block_size * spec.block_size_factor,
                     ),
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
@@ -303,14 +308,7 @@ class OffloadingConnectorScheduler:
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
-        self._mamba_align_size: int | None = None
-        for gc in self.config.kv_group_configs:
-            if gc.mamba_align_size is not None:
-                assert (
-                    self._mamba_align_size is None
-                    or self._mamba_align_size == gc.mamba_align_size
-                )
-                self._mamba_align_size = gc.mamba_align_size
+        self._mamba_align_size: int | None = resolve_mamba_align_size(spec)
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
