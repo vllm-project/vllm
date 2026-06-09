@@ -21,6 +21,9 @@ pull_request_rules:
     - check-failure=pre-commit
     - -closed
     - -draft
+    - or:
+      - label=ready
+      - label=verified
   actions:
     comment:
       message: |
@@ -35,18 +38,6 @@ pull_request_rules:
         Then, commit the changes and push to your branch.
 
         For future commits, `pre-commit` will run automatically on changed files before each commit.
-
-        > [!TIP]
-        > <details>
-        > <summary>Is <code>mypy</code> failing?</summary>
-        > <br/>
-        > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
-        >
-        > ```bash
-        > # For mypy (substitute "3.10" with the failing version if needed)
-        > pre-commit run --hook-stage manual mypy-3.10
-        > ```
-        > </details>
 
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails

@@ -19,6 +19,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
@@ -193,6 +194,10 @@ requires_one_sided = pytest.mark.skipif(
 requires_ptrace = pytest.mark.skipif(
     not _has_sys_ptrace(),
     reason="SYS_PTRACE required (docker run --cap-add=SYS_PTRACE)",
+)
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(),
+    reason="DeepEP v2 (ElasticBuffer) not available or NCCL < 2.30.4",
 )
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
@@ -856,3 +861,76 @@ def _one_sided_data_worker(rank, world_size):
 def test_one_sided_dispatch_combine(world_size):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
     _spawn_workers(_one_sided_data_worker, world_size, dp_size=world_size)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: DeepEP v2 (ElasticBuffer) manager lifecycle
+# ---------------------------------------------------------------------------
+#
+# Tests DeepEPV2All2AllManager which wraps DeepEP's ElasticBuffer API using
+# the NCCL GIN backend. Requires DeepEP >= 2.0 and NCCL >= 2.30.4.
+#
+# Uses EP group because the DeepEP v2 manager is constructed with an
+# EP-scoped communicator in production. With tp=world_size the EP group
+# spans all ranks.
+# ---------------------------------------------------------------------------
+
+
+def _deepep_v2_lifecycle_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPV2All2AllManager,
+    )
+
+    cpu_group = get_ep_group().cpu_group
+    manager = DeepEPV2All2AllManager(cpu_group)
+
+    assert manager.rank == rank
+    assert manager.world_size == world_size
+    assert manager._num_sms is None
+
+    hidden_size = 7168
+    num_experts = world_size * 32
+    num_topk = 8
+    max_tokens = 256
+
+    handle_kwargs = dict(
+        num_max_tokens_per_rank=max_tokens,
+        hidden=hidden_size,
+        num_topk=num_topk,
+        num_experts=num_experts,
+        use_fp8_dispatch=False,
+    )
+
+    handle = manager.get_handle(handle_kwargs)
+    assert handle is not None
+    assert manager._num_sms is not None
+    assert manager._num_sms > 0
+
+    torch.distributed.barrier()
+
+    # get_handle again with same args should return cached handle
+    handle2 = manager.get_handle(dict(handle_kwargs))
+    assert handle2 is handle
+
+    torch.distributed.barrier()
+
+    # Destroy clears the cache
+    manager.destroy()
+    assert len(manager.handle_cache._cache) == 0
+
+    torch.distributed.barrier()
+
+    # Re-create after destroy
+    handle3 = manager.get_handle(dict(handle_kwargs))
+    assert handle3 is not None
+
+    torch.distributed.barrier()
+    manager.destroy()
+
+
+@requires_multi_gpu
+@requires_deep_ep_v2
+@pytest.mark.parametrize("world_size", [2])
+def test_deepep_v2_manager_lifecycle(world_size):
+    """Test DeepEP v2 ElasticBuffer manager init, caching, and destroy."""
+    _spawn_workers(_deepep_v2_lifecycle_worker, world_size)
