@@ -34,7 +34,7 @@ def get_and_check_output(output, expected_shape):
     return token_ids, hidden_states
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def predictable_llama_config_path(tmp_path_factory):
     """Create a minimal LlamaConfig for PredictableLlamaForCausalLM."""
     from transformers import LlamaConfig, LlamaTokenizerFast
@@ -78,86 +78,24 @@ def register_predictable_model():
     yield
 
 
-@create_new_process_for_each_test(method="fork")
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path
+    predictable_llama_config_path, tmp_path, monkeypatch
 ):
-    """Comprehensive test using a predictable dummy model with synthetic weights.
+    """Test hidden-state extraction with a predictable dummy model.
 
-    The PredictableLlamaForCausalLM outputs deterministic hidden states where
-    each layer produces values equal to (layer_index). This test verifies:
-    1. Hidden states are correctly extracted from requested layers
-    2. Values match the expected predictable pattern
-    3. Layer ordering is preserved correctly (non-sequential layer IDs)
-    4. Multiple prompts of different lengths produce consistent layer values
+    Tests 3 scenarios:
+
+    1. **Basic extraction**: non-sequential layer ordering, multiple prompts
+       of varying length — verifies correct layer association and
+       deterministic values.
+    2. **Chunked prefill**: max_num_batched_tokens=128 with ~500-token
+       prompts so each is split across multiple scheduler iterations —
+       verifies hidden states are reassembled correctly.
+    3. **Per-request options**: custom hidden_states_path and
+       include_output_tokens — verifies per-request kv_transfer_params
+       plumbing.
     """
-    # Test with non-sequential layer ordering to verify correct association
-    layer_ids = [5, 2, 10]
-    num_layers = len(layer_ids)
-
-    llm = LLM(
-        model=predictable_llama_config_path,
-        speculative_config={
-            "method": "extract_hidden_states",
-            "num_speculative_tokens": 1,
-            "draft_model_config": {
-                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
-            },
-        },
-        kv_transfer_config={
-            "kv_connector": "ExampleHiddenStatesConnector",
-            "kv_role": "kv_producer",
-            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
-        },
-        max_model_len=128,
-        enforce_eager=True,
-        trust_remote_code=True,
-        load_format="dummy",  # Don't try to load real weights
-    )
-
-    # Test with multiple prompts of different lengths
-    prompts = [
-        "Short",
-        "Medium length",
-        "Much longer prompt with many tokens",
-        "Much longer prompt with many tokens",  # repeated prompt
-    ]
-    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
-    hidden_size = llm.llm_engine.model_config.get_hidden_size()
-    outputs = llm.generate(prompts, sampling_params)
-
-    assert len(outputs) == len(prompts)
-
-    for output in outputs:
-        # hidden_states shape is [prompt_len, num_hidden_layers, hidden_size]
-        expected_shape = (
-            len(output.prompt_token_ids),
-            num_layers,
-            hidden_size,
-        )
-        _token_ids, hidden_states = get_and_check_output(output, expected_shape)
-
-        for idx, layer_id in enumerate(layer_ids):
-            layer_hidden = hidden_states[:, idx, :]
-            assert torch.allclose(
-                layer_hidden,
-                torch.full_like(layer_hidden, layer_id),
-                atol=1e-5,
-            ), (
-                f"Layer {layer_id} at position {idx} should output {float(layer_id)}, "
-                f"but got mean={layer_hidden.mean():.3f}, "
-                f"min={layer_hidden.min():.3f}, max={layer_hidden.max():.3f}"
-            )
-
-
-@create_new_process_for_each_test(method="fork")
-def test_extract_hidden_states_chunked_prefill(predictable_llama_config_path, tmp_path):
-    """Test that hidden states are correctly extracted under chunked prefill.
-
-    Sets max_num_batched_tokens to 128 and sends prompts with ~500 tokens
-    so that each prompt is split across multiple scheduler iterations.
-    Verifies that the hidden states are still correctly reassembled.
-    """
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
@@ -175,7 +113,10 @@ def test_extract_hidden_states_chunked_prefill(predictable_llama_config_path, tm
         kv_transfer_config={
             "kv_connector": "ExampleHiddenStatesConnector",
             "kv_role": "kv_producer",
-            "kv_connector_extra_config": {"shared_storage_path": tmp_path},
+            "kv_connector_extra_config": {
+                "shared_storage_path": tmp_path,
+                "allow_custom_save_path": True,
+            },
         },
         max_model_len=1024,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -184,20 +125,50 @@ def test_extract_hidden_states_chunked_prefill(predictable_llama_config_path, tm
         load_format="dummy",
     )
 
-    # Build prompts with ~500 tokens each to force chunking across
-    # multiple iterations with max_num_batched_tokens=128.
-    long_prompt = " ".join(["word"] * 500)
+    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+
+    # --- Scenario 1: basic extraction with non-sequential layers ----------
     prompts = [
+        "Short",
+        "Medium length",
+        "Much longer prompt with many tokens",
+        "Much longer prompt with many tokens",  # repeated prompt
+    ]
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    outputs = llm.generate(prompts, sampling_params)
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        expected_shape = (
+            len(output.prompt_token_ids),
+            num_layers,
+            hidden_size,
+        )
+        _token_ids, hidden_states = get_and_check_output(output, expected_shape)
+
+        for idx, layer_id in enumerate(layer_ids):
+            layer_hidden = hidden_states[:, idx, :]
+            assert torch.allclose(
+                layer_hidden,
+                torch.full_like(layer_hidden, layer_id),
+                atol=1e-5,
+            ), (
+                f"Layer {layer_id} at position {idx} should output "
+                f"{float(layer_id)}, but got mean="
+                f"{layer_hidden.mean():.3f}, min="
+                f"{layer_hidden.min():.3f}, max={layer_hidden.max():.3f}"
+            )
+
+    # --- Scenario 2: chunked prefill with long prompts --------------------
+    long_prompt = " ".join(["word"] * 500)
+    chunked_prompts = [
         long_prompt,
         long_prompt + " extra tokens here",
         "Short",
     ]
-    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
-    hidden_size = llm.llm_engine.model_config.get_hidden_size()
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(chunked_prompts, sampling_params)
 
-    assert len(outputs) == len(prompts)
-
+    assert len(outputs) == len(chunked_prompts)
     for output in outputs:
         prompt_len = len(output.prompt_token_ids)
         expected_shape = (prompt_len, num_layers, hidden_size)
@@ -219,48 +190,12 @@ def test_extract_hidden_states_chunked_prefill(predictable_llama_config_path, tm
                 f"max_num_batched_tokens={max_num_batched_tokens}"
             )
 
-
-@create_new_process_for_each_test(method="fork")
-def test_extract_hidden_states_per_request_options(
-    predictable_llama_config_path, tmp_path
-):
-    """Test per-request kv_transfer_params: include_output_tokens and
-    hidden_states_path."""
-
-    layer_ids = [2, 5, 10]
-    num_layers = len(layer_ids)
-
-    llm = LLM(
-        model=predictable_llama_config_path,
-        speculative_config={
-            "method": "extract_hidden_states",
-            "num_speculative_tokens": 1,
-            "draft_model_config": {
-                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
-            },
-        },
-        kv_transfer_config={
-            "kv_connector": "ExampleHiddenStatesConnector",
-            "kv_role": "kv_producer",
-            "kv_connector_extra_config": {
-                "shared_storage_path": tmp_path,
-                "allow_custom_save_path": True,
-            },
-        },
-        max_model_len=128,
-        enforce_eager=True,
-        trust_remote_code=True,
-        load_format="dummy",
-    )
-
-    hidden_size = llm.llm_engine.model_config.get_hidden_size()
+    # --- Scenario 3: per-request options ----------------------------------
     max_tokens = 5
     custom_path = os.path.join(tmp_path, "subdir", "custom.safetensors")
 
     sampling_params_list = [
-        # Default: prompt-only, auto-generated path
         SamplingParams(max_tokens=max_tokens, temperature=0.0),
-        # Custom path + include output tokens
         SamplingParams(
             max_tokens=max_tokens,
             temperature=0.0,
@@ -272,8 +207,8 @@ def test_extract_hidden_states_per_request_options(
             },
         ),
     ]
-    prompts = ["Short", "Medium length"]
-    outputs = llm.generate(prompts, sampling_params_list)
+    per_req_prompts = ["Short", "Medium length"]
+    outputs = llm.generate(per_req_prompts, sampling_params_list)
 
     # First output: prompt-only hidden states, default path
     out0 = outputs[0]
