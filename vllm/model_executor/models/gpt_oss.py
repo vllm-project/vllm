@@ -616,7 +616,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
                 # for amd-quark format that each expert is separated
                 # need to extract the parameter name with experts fused.
-                # example model: amd/gpt-oss-20b-MoE-Quark-W-MXFP4-A-FP8-KV-FP8
+                # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:
                     layer_id, expert_id = int(ids[0]), int(ids[-1])
                     parts.pop(len(parts) - 1 - parts[::-1].index(str(expert_id)))
