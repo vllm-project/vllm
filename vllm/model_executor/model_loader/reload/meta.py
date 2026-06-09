@@ -196,7 +196,7 @@ def get_numel_loaded(
     # the trailing parameter(s) (e.g. Mamba ``mixer.D``). Cap the count at the
     # destination size to keep the per-layer accounting correct.
     numel = counter.copied_numel
-    param = args.arguments.get("param")
+    param = args.arguments.get("param", None)
     if isinstance(param, torch.Tensor):
         numel = min(numel, param.numel())
     return numel, return_value
