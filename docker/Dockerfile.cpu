@@ -118,9 +118,9 @@ ENV CARGO_BUILD_JOBS=4
 # Build the release binary. Cache cargo registry/git and target/, but copy the
 # binary out of the target/ cache mount so it persists into the image layer
 # for later COPY --from=rust-build.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,target=/workspace/rust/target,sharing=locked \
     VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
 
 ######################### BUILD IMAGE #########################
@@ -164,6 +164,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+
+######################### TRITON-CPU BUILD IMAGE #########################
+FROM base AS vllm-triton-cpu-build
+
+WORKDIR /vllm-workspace
+
+RUN mkdir dist
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        git clone --recurse-submodules "https://github.com/triton-lang/triton-cpu.git"; \
+        cd triton-cpu; \
+        git checkout "270e696d"; \
+        uv build --wheel --out-dir=../dist; \
+    fi
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
@@ -257,7 +274,14 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install "$(realpath dist/*.whl)[audio,triton-cpu]"
+    uv pip install "$(realpath dist/*.whl)[audio]"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        uv pip install "$(realpath dist/*.whl)"; \
+    fi
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"

@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
 
@@ -76,7 +77,10 @@ def _make_runner(**overrides: Any) -> Any:
     runner.max_num_reqs = 8
     runner.max_num_tokens = 16
     runner.decode_query_len = 1
-    runner.kv_connector = SimpleNamespace(set_disabled=lambda *_: None)
+    runner.kv_connector = SimpleNamespace(
+        set_disabled=lambda *_: None,
+        post_forward=lambda *_, **__: None,
+    )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.pooling_runner = None
     runner.execute_model_state = None
@@ -163,7 +167,9 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
     runner.execute_model_state = SimpleNamespace(
-        input_batch=SimpleNamespace(num_reqs=2),
+        input_batch=SimpleNamespace(
+            num_reqs=2, idx_mapping=torch.zeros(2, dtype=torch.int32)
+        ),
         attn_metadata=None,
         slot_mappings_by_layer=None,
         hidden_states=None,
@@ -171,17 +177,19 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         finished_req_ids=set(),
         num_tokens_across_dp=None,
     )
-    runner.postprocess = lambda *args, **kwargs: events.append("postprocess")
-    runner.eplb.step = lambda *args, **kwargs: events.append("eplb")
-    monkeypatch.setattr(
-        mrv2,
-        "pp_receive",
-        lambda *args, **kwargs: (
-            torch.zeros((2, 1), dtype=torch.long),
-            torch.ones(2, dtype=torch.int32),
-            torch.zeros(2, dtype=torch.int32),
-        ),
-    )
+    runner.req_states = SimpleNamespace()
 
-    assert mrv2.GPUModelRunner.sample_tokens(runner, None) is None
-    assert events == ["postprocess", "eplb"]
+    def fake_receive(*args, **kwargs):
+        events.append("receive")
+        # all_decode_next=True, so model_state.postprocess_state is skipped.
+        return True
+
+    runner.pp_handler = SimpleNamespace(receive=fake_receive)
+    runner.postprocess_num_computed_tokens = lambda *args, **kwargs: events.append(
+        "postprocess_num_computed_tokens"
+    )
+    runner.eplb.step = lambda *args, **kwargs: events.append("eplb")
+
+    output = mrv2.GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
+    assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]

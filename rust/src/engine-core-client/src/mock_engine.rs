@@ -47,7 +47,8 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         max_model_len: DEFAULT_MOCK_MAX_MODEL_LEN,
         num_gpu_blocks: DEFAULT_MOCK_NUM_GPU_BLOCKS,
         dp_stats_address: None,
-        dtype: Some(ModelDtype::Float32),
+        dtype: ModelDtype::Float32,
+        vllm_version: "test-vllm-version".to_string(),
     }
 }
 

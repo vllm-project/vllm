@@ -339,15 +339,20 @@ mod tests {
     use super::{EngineRoutingState, RequestRegistry, UtilityRegistry};
     use crate::EngineId;
     use crate::client::state::EngineLoadSnapshot;
+    use crate::mock_engine::default_ready_response;
     use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
     use crate::transport::ConnectedEngine;
 
+    fn connected_engine(engine_id: EngineId) -> ConnectedEngine {
+        ConnectedEngine {
+            engine_id,
+            ready_response: default_ready_response(),
+        }
+    }
+
     #[test]
     fn registry_rejects_duplicate_request_ids() {
-        let mut registry = RequestRegistry::new(&[ConnectedEngine {
-            engine_id: EngineId::from(b"engine-0"),
-            ready_response: None,
-        }]);
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("req-1".to_string(), None).unwrap();
         let error = registry.register("req-1".to_string(), None).unwrap_err();
         assert!(matches!(
@@ -358,10 +363,7 @@ mod tests {
 
     #[test]
     fn registry_removes_finished_request_on_output() {
-        let mut registry = RequestRegistry::new(&[ConnectedEngine {
-            engine_id: EngineId::from(b"engine-0"),
-            ready_response: None,
-        }]);
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("req-1".to_string(), None).unwrap();
 
         let sender = registry.sender_for_output(&EngineCoreOutput {
@@ -376,10 +378,7 @@ mod tests {
 
     #[test]
     fn registry_closes_all_requests_on_failure() {
-        let mut registry = RequestRegistry::new(&[ConnectedEngine {
-            engine_id: EngineId::from(b"engine-0"),
-            ready_response: None,
-        }]);
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry.register("req-1".to_string(), None).unwrap();
         registry.register("req-2".to_string(), None).unwrap();
 
@@ -394,14 +393,8 @@ mod tests {
         let engine_0 = EngineId::from_engine_index(0);
         let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: engine_0.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_1.clone(),
-                ready_response: None,
-            },
+            connected_engine(engine_0.clone()),
+            connected_engine(engine_1.clone()),
         ]);
         let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
         let (chosen_1, _) = registry.register("req-2".to_string(), None).unwrap();
@@ -428,14 +421,8 @@ mod tests {
         let engine_0 = EngineId::from_engine_index(0);
         let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: engine_0.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_1.clone(),
-                ready_response: None,
-            },
+            connected_engine(engine_0.clone()),
+            connected_engine(engine_1.clone()),
         ]);
 
         let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
@@ -488,14 +475,8 @@ mod tests {
         let engine_0 = EngineId::from_engine_index(0);
         let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: engine_0.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_1.clone(),
-                ready_response: None,
-            },
+            connected_engine(engine_0.clone()),
+            connected_engine(engine_1.clone()),
         ]);
 
         assert!(registry.apply_scheduler_counts(
@@ -523,18 +504,9 @@ mod tests {
         let engine_1 = EngineId::from_engine_index(1);
         let engine_2 = EngineId::from_engine_index(2);
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: engine_0.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_1.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_2.clone(),
-                ready_response: None,
-            },
+            connected_engine(engine_0.clone()),
+            connected_engine(engine_1.clone()),
+            connected_engine(engine_2.clone()),
         ]);
 
         // Explicitly target rank 2 (third engine).
@@ -555,14 +527,8 @@ mod tests {
         let engine_0 = EngineId::from_engine_index(0);
         let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: engine_0.clone(),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: engine_1.clone(),
-                ready_response: None,
-            },
+            connected_engine(engine_0.clone()),
+            connected_engine(engine_1.clone()),
         ]);
 
         // Load-balance: first two go to engine_0 and engine_1.
@@ -577,14 +543,8 @@ mod tests {
     #[test]
     fn register_with_out_of_range_rank_returns_error() {
         let mut registry = RequestRegistry::new(&[
-            ConnectedEngine {
-                engine_id: EngineId::from_engine_index(0),
-                ready_response: None,
-            },
-            ConnectedEngine {
-                engine_id: EngineId::from_engine_index(1),
-                ready_response: None,
-            },
+            connected_engine(EngineId::from_engine_index(0)),
+            connected_engine(EngineId::from_engine_index(1)),
         ]);
 
         let error = registry.register("req-1".to_string(), Some(2)).unwrap_err();
@@ -600,10 +560,7 @@ mod tests {
     #[test]
     fn register_with_rank_on_single_engine_only_accepts_zero() {
         let engine_0 = EngineId::from_engine_index(0);
-        let mut registry = RequestRegistry::new(&[ConnectedEngine {
-            engine_id: engine_0.clone(),
-            ready_response: None,
-        }]);
+        let mut registry = RequestRegistry::new(&[connected_engine(engine_0.clone())]);
 
         let (chosen, _) = registry.register("req-ok".to_string(), Some(0)).unwrap();
         assert_eq!(chosen, engine_0);

@@ -34,11 +34,18 @@
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/offline_utils.py @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+
+# Rust Frontend
+/rust/ @BugenZhao @njhill
+/build_rust.sh @BugenZhao @njhill
+/rust-toolchain.toml @BugenZhao @njhill
+/.buildkite/test_areas/rust* @BugenZhao @njhill
 
 # Input/Output Processing
 /vllm/sampling_params.py @njhill @NickLucche
@@ -72,11 +79,13 @@
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
 # CI & building
-/.buildkite @Harry-Chen
-/docker/Dockerfile @Harry-Chen
+/.buildkite @Harry-Chen @khluu
+/docker/Dockerfile @Harry-Chen @khluu
+/pyproject.toml @khluu
+/setup.py @khluu
 
 # Test ownership
-/.buildkite/lm-eval-harness @mgoin 
+/.buildkite/lm-eval-harness @mgoin
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
