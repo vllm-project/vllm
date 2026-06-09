@@ -194,7 +194,13 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return is_fa_version_supported(4)
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        return (
+            vllm_config.attention_config.flash_attn_version == 4
+            and is_fa_version_supported(4)
+        )
 
     @classmethod
     def supports_sink(cls) -> bool:
