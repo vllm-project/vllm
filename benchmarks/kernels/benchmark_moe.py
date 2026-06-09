@@ -935,7 +935,6 @@ def main(args: argparse.Namespace):
             2048,
             3072,
             4096,
-            8192,  # cohere
         ]
     else:
         batch_sizes = args.batch_size
