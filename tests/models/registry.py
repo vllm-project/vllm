@@ -256,6 +256,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV3ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V3",
         trust_remote_code=True,
+        max_model_len=4096,
     ),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
     "DeepseekV4ForCausalLM": _HfExamplesInfo(
@@ -1449,6 +1450,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
         trust_remote_code=True,
+        max_model_len=4096,
     ),
     "EagleLlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -1564,6 +1566,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+        max_model_len=4096,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",

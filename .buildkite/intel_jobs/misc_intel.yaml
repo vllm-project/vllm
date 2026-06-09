@@ -98,7 +98,11 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_XPU_FUSED_MOE_USE_REF=1 &&
       cd tests &&
-      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM] &&
+      pytest -v -s models/test_initialization.py::test_can_initialize_small_subset[DeepSeekMTPModel] && 
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[DeepseekV3ForCausalLM] && 
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[DeepseekV32ForCausalLM]'
+
 
 - label: XPU CPU Offload
   timeout_in_minutes: 60

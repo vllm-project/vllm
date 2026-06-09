@@ -5,6 +5,9 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_weight_block_strategy,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -196,6 +199,58 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not current_platform.is_xpu():
             return False, "XPUFp8BlockScaledMM only support on XPU"
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        params = self._get_layer_params(layer)
+        # Fp8LinearMethod registered weight scale
+        # buffer as weight_scale_inv unlike compressed tensors.
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        scale_attr_name = (
+            params.WEIGHT_SCALE
+            if params.weight_scale_inv is None
+            else params.WEIGHT_SCALE_INV
+        )
+        new_weight, new_weight_scale = process_fp8_weight_block_strategy(
+            params.weight,
+            weight_scale,
+        )
+
+        N, K = new_weight.shape
+        bs = K // new_weight_scale.shape[1] if new_weight_scale.shape[1] > 0 else 1
+        n_padded = ((N + bs - 1) // bs) * bs
+
+        if n_padded != N:
+            # Block FP8 format requires N % bs == 0.
+            # Some model layers (e.g., DeepSeek MTP kv_a_proj_with_mqa with N=576)
+            # do not satisfy this condition, so we pad weight and scale at load time.
+            layer._xpu_fp8_original_n = N
+
+            new_weight = torch.nn.functional.pad(new_weight, (0, 0, 0, n_padded - N))
+            n_scale_pad = n_padded // bs - new_weight_scale.shape[0]
+            if n_scale_pad > 0:
+                new_weight_scale = torch.nn.functional.pad(
+                    new_weight_scale, (0, 0, 0, n_scale_pad)
+                )
+
+        replace_parameter(layer, params.WEIGHT, new_weight.data)
+        replace_parameter(layer, scale_attr_name, new_weight_scale.data)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        output = super().apply_weights(layer, x, bias, **kwargs)
+        original_n = getattr(layer, "_xpu_fp8_original_n", None)
+        if original_n is not None:
+            output = output[..., :original_n]
+        return output
 
     def apply_block_scaled_mm(
         self,
