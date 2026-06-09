@@ -12,15 +12,11 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import (
-    build_attn_metadata,
-    build_slot_mappings_by_layer,
-)
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -163,35 +159,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         return last_hidden_states
 
-    def sample_draft(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
-    ) -> torch.Tensor:
-        logits = self.model.compute_logits(hidden_states)
-        if draft_logits is not None:
-            # NOTE: We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling. draft_step is a per-token
-            # column tensor so we can sample all mask tokens in one kernel call.
-            return gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                positions + 1,
-                apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
-        else:
-            return logits.argmax(dim=-1)
-
     def _generate_draft(
         self,
         num_reqs: int,
@@ -229,38 +196,18 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        num_query_per_req: int | None = None,
+        causal: bool = False,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
-
-        # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
-        # Clamp keeps the series non-decreasing past num_reqs, which some
-        # attention backends require.
-        query_start_loc_cpu = (
-            torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
-            * self.num_query_per_req
+        return super()._build_draft_attn_metadata(
+            num_reqs,
+            num_reqs_padded,
+            num_tokens_padded,
+            num_query_per_req=num_query_per_req or self.num_query_per_req,
+            causal=causal,
         )
-        block_tables = [
-            x[:num_reqs_padded] for x in self.block_tables.input_block_tables
-        ]
-        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
-        attn_metadata = build_attn_metadata(
-            attn_groups=self.attn_groups,
-            num_reqs=num_reqs_padded,
-            num_tokens=num_tokens_padded,
-            query_start_loc_gpu=self.input_buffers.query_start_loc[
-                : num_reqs_padded + 1
-            ],
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=self.num_query_per_req,
-            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-            max_seq_len=self.draft_max_seq_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=self.kv_cache_config,
-            causal=False,
-        )
-        return attn_metadata
 
     @torch.inference_mode()
     def propose(
@@ -581,8 +528,10 @@ def prepare_dflash_inputs(
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
-    # Cover the longest possible per-request span (ctx + query).
-    max_tokens_per_req = input_batch.num_tokens + num_query_per_req
+    # Cover the longest possible per-request span (ctx + query). Use the max
+    # per-request query length, not the total token count across the batch.
+    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
+    max_tokens_per_req = max_target_query_len + num_query_per_req
     BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
     num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
     _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
