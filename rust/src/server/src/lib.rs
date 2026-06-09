@@ -42,6 +42,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             renderer: config.renderer,
+            language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
@@ -91,7 +92,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_log_requests(config.enable_log_requests)
             .with_request_id_headers(config.enable_request_id_headers)
-            .with_server_info(ServerInfoSnapshot::from_config(config)),
+            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_api_keys(config.api_keys.clone()),
     ))
 }
 

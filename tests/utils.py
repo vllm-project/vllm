@@ -538,11 +538,22 @@ class RemoteVLLMServer:
             if current_platform.is_rocm():
                 with _nvml():
                     handles = amdsmi_get_processor_handles()
-                    total_used = 0
-                    for handle in handles:
+                    devices = get_physical_device_indices(
+                        list(range(current_platform.device_count()))
+                    )
+                    total_used_mib = 0
+                    for device in devices:
+                        handle = handles[device]
                         vram_info = amdsmi_get_gpu_vram_usage(handle)
-                        total_used += vram_info["vram_used"]
-                    return total_used
+                        total_used_mib += vram_info["vram_used"]
+                    # amdsmi reports VRAM in MiB; convert to bytes so this
+                    # matches the CUDA/nvml branch (already bytes) and the
+                    # byte-based target in _wait_for_gpu_memory_release. Without
+                    # this, that wait compares MiB against a ~2e9-byte target,
+                    # is always satisfied instantly, and returns "released to
+                    # 0.00 GB" while the previous server's VRAM is still
+                    # resident -- OOMing the next server's startup on ROCm.
+                    return total_used_mib * 1024 * 1024
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
@@ -1428,6 +1439,18 @@ def wait_for_gpu_memory_to_clear(
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
+    if (
+        current_platform.is_rocm()
+        and threshold_ratio is not None
+        and threshold_ratio < 0.05
+    ):
+        # ROCm can keep a small runtime/driver footprint resident even after
+        # all model allocations are gone. On MI300 this has been observed
+        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
+        # near the amount of free memory needed by the next vLLM runner.
+        min_threshold_bytes = 4 * 1024**3
+        threshold_bytes = max(threshold_bytes or 0, min_threshold_bytes)
+
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
     devices = get_physical_device_indices(devices)
@@ -1454,15 +1477,26 @@ def wait_for_gpu_memory_to_clear(
             print(f"{k}={v}; ", end="")
         print("")
 
-        if threshold_bytes is not None:
-            is_free = lambda used, total: used <= threshold_bytes / 2**30
-            threshold = f"{threshold_bytes / 2**30} GiB"
+        if threshold_bytes is not None and threshold_ratio is not None:
+            threshold_gib = threshold_bytes / 2**30
+            threshold = f"max({threshold_gib:.2f} GiB, {threshold_ratio:.3f})"
+            all_free = all(
+                used <= max(threshold_gib, total * threshold_ratio)
+                for used, total in output_raw.values()
+            )
+        elif threshold_bytes is not None:
+            threshold_gib = threshold_bytes / 2**30
+            threshold = f"{threshold_gib} GiB"
+            all_free = all(used <= threshold_gib for used, _ in output_raw.values())
         else:
-            is_free = lambda used, total: used / total <= threshold_ratio
-            threshold = f"{threshold_ratio:.2f}"
+            assert threshold_ratio is not None
+            threshold = f"{threshold_ratio:.3f}"
+            all_free = all(
+                used / total <= threshold_ratio for used, total in output_raw.values()
+            )
 
         dur_s = time.time() - start_time
-        if all(is_free(used, total) for used, total in output_raw.values()):
+        if all_free:
             print(
                 f"Done waiting for free GPU memory on devices {devices=} "
                 f"({threshold=}) {dur_s=:.02f}"
@@ -1476,6 +1510,32 @@ def wait_for_gpu_memory_to_clear(
             )
 
         time.sleep(5)
+
+
+def wait_for_rocm_memory_to_settle(
+    *,
+    threshold_ratio: float = 0.1,
+    timeout_s: float = 240,
+) -> None:
+    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+
+    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    loads in a single test process can OOM the *next* engine/model startup
+    even after ``cleanup_dist_env_and_memory``. This gives the driver time to
+    actually release VRAM before the next allocation. No-op off ROCm.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    num_gpus = current_platform.device_count()
+    if num_gpus == 0:
+        return
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(num_gpus)),
+        threshold_ratio=threshold_ratio,
+        timeout_s=timeout_s,
+    )
 
 
 _P = ParamSpec("_P")
