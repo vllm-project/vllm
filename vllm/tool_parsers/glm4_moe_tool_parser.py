@@ -11,6 +11,7 @@ The fix streams string values incrementally as they arrive, providing a true
 streaming experience for long content.
 """
 
+import ast
 import json
 from collections.abc import Sequence
 from typing import Any
