@@ -1002,6 +1002,7 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
 @pytest.mark.parametrize(
     "vocab_size",
     [
+        100,  # below BLOCK_SIZE: single partial tile with many padding entries
         8193,  # BLOCK_SIZE + 1: only 1 valid entry in the last tile
         10000,  # non-aligned, moderate tail
         151936,  # real-world Qwen3 vocab size from the CVE report
@@ -1026,9 +1027,16 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
     target_probs = torch.rand(
         num_tokens, vocab_size, dtype=torch.float32, device=DEVICE_TYPE
     )
-    # Zero out all entries in the last (partial) tile so the only
-    # non-zero scores come from earlier, fully-covered tiles.
-    target_probs[:, last_tile_start:] = 0.0
+    if last_tile_start > 0:
+        # Zero out valid entries in the last partial tile so the only
+        # non-zero scores come from earlier, fully-covered tiles.
+        target_probs[:, last_tile_start:] = 0.0
+    else:
+        # vocab_size < BLOCK_SIZE: single tile. Concentrate all mass on
+        # entry 0 so the NO_DRAFT_PROBS path (which zeroes the draft
+        # token entry) can drive all valid scores to zero.
+        target_probs = torch.zeros_like(target_probs)
+        target_probs[:, 0] = 1.0
     # Re-normalize so it's a valid distribution.
     target_probs = target_probs / target_probs.sum(dim=-1, keepdim=True)
 
@@ -1037,9 +1045,16 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
     )
     draft_probs = torch.nn.functional.softmax(draft_probs, dim=-1)
 
-    draft_token_ids = torch.randint(
-        0, vocab_size, (num_tokens, 1), dtype=torch.int32, device=DEVICE_TYPE
-    )
+    if last_tile_start == 0:
+        # Force draft token to 0 so the NO_DRAFT_PROBS path zeroes the
+        # only non-zero entry, leaving all valid scores at zero.
+        draft_token_ids = torch.zeros(
+            num_tokens, 1, dtype=torch.int32, device=DEVICE_TYPE
+        )
+    else:
+        draft_token_ids = torch.randint(
+            0, vocab_size, (num_tokens, 1), dtype=torch.int32, device=DEVICE_TYPE
+        )
 
     temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE)
     generators = {
