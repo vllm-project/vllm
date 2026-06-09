@@ -27,8 +27,9 @@
 /vllm/config/cache.py @heheda12345
 
 # Config utils
-/vllm/engine/arg_utils.py @hmellor
 /vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
