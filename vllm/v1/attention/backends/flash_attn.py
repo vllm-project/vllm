@@ -194,13 +194,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        vllm_config = get_current_vllm_config_or_none()
-        if vllm_config is None:
-            return False
-        return (
-            vllm_config.attention_config.flash_attn_version == 4
-            and is_fa_version_supported(4)
-        )
+        return is_fa_version_supported(4)
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -833,7 +827,11 @@ class FlashAttentionImpl(AttentionImpl):
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
                 mm_aux = None
-                if mm_prefix_ranges is not None and attn_metadata.causal:
+                if (
+                    mm_prefix_ranges is not None
+                    and attn_metadata.causal
+                    and self.vllm_flash_attn_version == 4
+                ):
                     max_ranges = mm_prefix_ranges.shape[1]
                     mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
                     mm_aux = [mm_prefix_ranges]
