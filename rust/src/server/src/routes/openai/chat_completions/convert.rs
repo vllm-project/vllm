@@ -156,8 +156,7 @@ pub(crate) fn prepare_chat_request(
         return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
-
-fn normalize_generation_prompt_mode(
+pub(crate) fn normalize_generation_prompt_mode(
     add_generation_prompt: Option<bool>,
     continue_final_message: bool,
     messages: &[VllmChatMessage],
@@ -204,7 +203,7 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
 }
 
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
-fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
+pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
         ChatMessage::System { content, .. } => {
             Ok(VllmChatMessage::system(convert_content(content)?))
@@ -316,7 +315,7 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
     tools
         .unwrap_or_default()
         .into_iter()
