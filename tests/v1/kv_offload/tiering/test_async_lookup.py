@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for AsyncLookupManager."""
 
-import time
+import threading
 from collections.abc import Iterable
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
@@ -23,23 +23,17 @@ class InMemoryLookupManager(AsyncLookupManager):
     def __init__(self, existing_keys: set[OffloadKey] | None = None):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
+        self._results_ready = threading.Event()
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        return (k in self._existing for k in keys)
+        results = [k in self._existing for k in keys]
+        self._results_ready.set()
+        return results
 
 
 class TestAsyncLookupManager:
-    def _wait_for_drain(self, mgr: InMemoryLookupManager, timeout: float = 1.0):
-        """Spin until drain_results has something to apply."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not mgr._pending_results.empty():
-                return
-            time.sleep(0.01)
-        raise TimeoutError("Worker did not post results in time")
-
     def test_new_key_returns_none(self):
         mgr = InMemoryLookupManager()
         assert mgr.lookup(_key(1), _ctx()) is None
@@ -49,7 +43,8 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
         assert mgr.lookup(_key(1), _ctx()) is None
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         assert mgr.lookup(_key(1), _ctx()) is True
         mgr.shutdown()
 
@@ -57,7 +52,8 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager(existing_keys=set())
         assert mgr.lookup(_key(1), _ctx()) is None
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         assert mgr.lookup(_key(1), _ctx()) is False
         mgr.shutdown()
 
@@ -68,7 +64,8 @@ class TestAsyncLookupManager:
         for i in range(1, 5):
             assert mgr.lookup(_key(i), ctx) is None
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         assert mgr.lookup(_key(1), ctx) is True
         assert mgr.lookup(_key(2), ctx) is False
         assert mgr.lookup(_key(3), ctx) is True
@@ -80,7 +77,8 @@ class TestAsyncLookupManager:
         ctx = _ctx("req_a")
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         assert mgr.lookup(_key(1), ctx) is True
         mgr.cleanup("req_a")
         assert _key(1) not in mgr._lookup_state
@@ -93,7 +91,8 @@ class TestAsyncLookupManager:
         mgr.lookup(_key(1), ctx_a)
         mgr.lookup(_key(1), ctx_b)
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         # Drain so result is applied
         mgr.lookup(_key(1), ctx_a)
         mgr.cleanup("req_a")
@@ -122,7 +121,8 @@ class TestAsyncLookupManager:
         ctx = _ctx("req_a")
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
         mgr.lookup(_key(1), ctx)
         mgr.cleanup("nonexistent")
         assert _key(1) in mgr._lookup_state
@@ -136,13 +136,15 @@ class TestAsyncLookupManager:
         # Step 1: lookup key 1, flush
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
 
         # Step 2: lookup keys 2 and 3, flush
         mgr.lookup(_key(2), ctx)
         mgr.lookup(_key(3), ctx)
         mgr.flush()
-        self._wait_for_drain(mgr)
+        mgr._results_ready.wait()
+        mgr._results_ready.clear()
 
         # All results should be available
         assert mgr.lookup(_key(1), ctx) is True

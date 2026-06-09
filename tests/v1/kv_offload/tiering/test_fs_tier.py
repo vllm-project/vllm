@@ -91,25 +91,17 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 100) -> list:
     return results
 
 
-def async_lookup(
+def lookup_and_wait(
     tier: FileSystemTierManager,
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
-    timeout: float = 1.0,
 ) -> list[bool]:
-    """Perform a full async lookup cycle and return resolved results.
-
-    Calls lookup() for each key, flushes, waits for the worker, then
-    calls lookup() again to get the resolved True/False results.
-    """
+    """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
+    tier._lookup_manager._results_ready.clear()
     tier.on_schedule_end()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not tier._lookup_manager._pending_results.empty():
-            break
-        time.sleep(0.01)
+    tier._lookup_manager._results_ready.wait()
     return [tier.lookup(k, ctx) for k in keys]
 
 
@@ -167,7 +159,7 @@ def fs_tier(tmp_path):
 
 def test_lookup_empty_tier(fs_tier):
     tier, _ = fs_tier
-    results = async_lookup(tier, [key(1), key(2)])
+    results = lookup_and_wait(tier, [key(1), key(2)])
     assert results == [False, False]
 
 
@@ -178,7 +170,7 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert async_lookup(tier, [key(1)]) == [True]
+    assert lookup_and_wait(tier, [key(1)]) == [True]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
 
@@ -190,14 +182,14 @@ def test_store_then_load_roundtrip(fs_tier):
     store_results = drain(tier)
     assert all(r.success for r in store_results)
 
-    assert async_lookup(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
     job_l = make_job(2, [key(1), key(2)], [2, 3], is_promotion=True)
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
     # Blocks stay on disk after load
-    assert async_lookup(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
 
 def test_invalid_path_raises_at_construction():
@@ -233,7 +225,7 @@ def test_multiple_jobs_tracked_independently(fs_tier):
     results = drain(tier)
     job_ids = {r.job_id for r in results}
     assert job_ids == {1, 2}
-    assert async_lookup(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
 
 def test_multi_block_job_partial_failure(fs_tier):
