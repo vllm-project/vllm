@@ -823,12 +823,6 @@ class Lfm2VLForConditionalGeneration(
             },
         )
 
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
-
     def get_max_frames_per_video(self) -> int:
         return 0
 
