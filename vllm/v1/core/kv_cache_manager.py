@@ -112,6 +112,7 @@ class KVCacheManager:
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
@@ -147,6 +148,7 @@ class KVCacheManager:
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
         )
@@ -244,6 +246,7 @@ class KVCacheManager:
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
+        reserved_blocks: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -269,6 +272,11 @@ class KVCacheManager:
                 free blocks to hold the full sequence, accounting for prefix cache hits
                 and sliding window. Used as an admission gate to prevent over-admitting
                 requests when chunked prefill would otherwise only check the first chunk
+            reserved_blocks: Number of free blocks that must be left available for
+                other in-flight sequences to complete. The actual allocation is only
+                made if it fits within (free blocks - reserved_blocks). Used to gate
+                async KV-connector loads so their initial allocation cannot consume
+                blocks an already in-flight (prefilling) sequence is relying on.
 
         Blocks layout:
         ```
@@ -384,7 +392,8 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
+        if num_blocks_to_allocate > available_blocks:
             # Cannot allocate new blocks
             return None
 

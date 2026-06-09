@@ -20,9 +20,12 @@ def sanitize_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.T
     tensors will reference layers, and the WeakKeyDictionary will never evict entries,
     even when the model is deleted.
 
-    :param tensor: tensor to be sanitized
-    :param layer: layer whose references should be removed
-    :return: sanitized tensor
+    Args:
+        tensor: tensor to be sanitized
+        layer: layer whose references should be removed
+
+    Returns:
+        sanitized tensor
     """
     for key, value in tensor.__dict__.items():
         if isinstance(value, MethodType) and value.__self__ is layer:
@@ -38,10 +41,12 @@ def restore_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.Te
     Used by `restore_layer_on_meta` to add back layer references, allowing for proper
     weight loading.
 
-    :param tensor: tensor to be sanitized
-    :param layer: layer whose references should be removed
-    :return: sanitized tensor
+    Args:
+        tensor: tensor to be sanitized
+        layer: layer whose references should be removed
 
+    Returns:
+        sanitized tensor
     """
     for key, value in tensor.__dict__.items():
         if isinstance(value, MethodType) and value.__self__ is layer_ref_sentinel:

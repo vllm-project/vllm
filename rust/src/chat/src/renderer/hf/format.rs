@@ -5,7 +5,7 @@ use std::str::FromStr;
 use minijinja::machinery::ast::{Expr, ForLoop, Set, Stmt};
 use minijinja::machinery::{WhitespaceConfig, parse};
 use minijinja::syntax::SyntaxConfig;
-use serde_with::DeserializeFromStr;
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 /// Chat template content format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,7 +18,7 @@ pub enum ChatTemplateContentFormat {
 }
 
 /// Configurable chat-template content format selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
 pub enum ChatTemplateContentFormatOption {
     /// Detect the format from the template source.
     #[default]

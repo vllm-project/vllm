@@ -440,6 +440,7 @@ def test_fp8_reloading(
                 hidden_size=1,
                 intermediate_size=1,
             )
+            layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,

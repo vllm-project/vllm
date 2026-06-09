@@ -65,7 +65,7 @@ class AnthropicContentBlock(BaseModel):
 class AnthropicMessage(BaseModel):
     """Message structure"""
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 

@@ -11,7 +11,9 @@
 
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
+#if defined(CPU_CAPABILITY_AVX512)
 #include <immintrin.h>
+#endif
 namespace {
 
 using namespace at::vec;
