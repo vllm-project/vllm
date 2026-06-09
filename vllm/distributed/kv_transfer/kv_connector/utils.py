@@ -533,24 +533,12 @@ class TransferTopology:
         return -(remote_tp_size // self.tp_size)
 
     def block_size_ratio(self, remote_block_size: int) -> int:
-        """Calculate the block size ratio between local and remote.
-
-        Positive when local >= remote (local blocks are larger).
-        Negative when remote > local (remote blocks are larger).
-        """
-        if self.block_size == remote_block_size:
-            return 1
-        if self.block_size > remote_block_size:
-            assert self.block_size % remote_block_size == 0, (
-                f"Local block size {self.block_size} is not divisible "
-                f"by remote block size {remote_block_size}."
-            )
-            return self.block_size // remote_block_size
-        assert remote_block_size % self.block_size == 0, (
-            f"Remote block size {remote_block_size} is not divisible "
-            f"by local block size {self.block_size}."
+        """Calculate the block size ratio between local and remote."""
+        assert self.block_size % remote_block_size == 0, (
+            f"Local block size {self.block_size} is not divisible "
+            f"by remote block size {remote_block_size} or vice versa."
         )
-        return -(remote_block_size // self.block_size)
+        return self.block_size // remote_block_size
 
     def is_kv_replicated(
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0
