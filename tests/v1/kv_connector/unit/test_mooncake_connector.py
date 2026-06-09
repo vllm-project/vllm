@@ -24,14 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
-    get_mooncake_bootstrap_addr,
-    should_launch_bootstrap_server,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
-)
-from vllm.distributed.kv_transfer.kv_transfer_state import (
-    _sync_engine_id_across_tp,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -39,10 +34,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
-
-MOONCAKE_CONNECTOR_MODULE = (
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
-)
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -501,140 +492,6 @@ def bootstrap_server():
     server.shutdown()
 
 
-def test_mooncake_bootstrap_addr_uses_master_addr_for_internal_pp():
-    """Internal LB PP workers should register to the rank0 bootstrap server."""
-
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-    parallel_config = vllm_config.parallel_config
-    parallel_config.pipeline_parallel_size = 2
-    parallel_config.master_addr = "10.0.0.1"
-    parallel_config.data_parallel_master_ip = "10.0.0.2"
-    parallel_config.data_parallel_external_lb = False
-    parallel_config.data_parallel_hybrid_lb = False
-
-    host, _ = get_mooncake_bootstrap_addr(vllm_config)
-
-    assert host == "10.0.0.1"
-
-
-def test_mooncake_bootstrap_addr_preserves_non_pp_and_external_lb():
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-    parallel_config = vllm_config.parallel_config
-    parallel_config.master_addr = "10.0.0.1"
-    parallel_config.data_parallel_master_ip = "10.0.0.2"
-
-    parallel_config.pipeline_parallel_size = 1
-    parallel_config.data_parallel_external_lb = False
-    parallel_config.data_parallel_hybrid_lb = False
-    host, _ = get_mooncake_bootstrap_addr(vllm_config)
-    assert host == "10.0.0.2"
-
-    parallel_config.pipeline_parallel_size = 2
-    parallel_config.data_parallel_external_lb = True
-    host, _ = get_mooncake_bootstrap_addr(vllm_config)
-    assert host == "127.0.0.1"
-
-
-def test_should_launch_bootstrap_server_internal_lb_uses_global_first_rank():
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-    parallel_config = vllm_config.parallel_config
-    parallel_config.data_parallel_external_lb = False
-    parallel_config.data_parallel_hybrid_lb = False
-    parallel_config.data_parallel_index = 0
-
-    with (
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
-            return_value=True,
-        ),
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
-            return_value=True,
-        ),
-    ):
-        assert should_launch_bootstrap_server(vllm_config) is True
-
-    with (
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
-            return_value=False,
-        ),
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
-            return_value=True,
-        ),
-    ):
-        assert should_launch_bootstrap_server(vllm_config) is False
-
-    parallel_config.data_parallel_index = 1
-    with patch(
-        f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
-        return_value=True,
-    ):
-        assert should_launch_bootstrap_server(vllm_config) is False
-
-
-def test_should_launch_bootstrap_server_external_lb_uses_local_first_rank():
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-    parallel_config = vllm_config.parallel_config
-    parallel_config.data_parallel_external_lb = True
-    parallel_config.data_parallel_hybrid_lb = False
-
-    with (
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
-            return_value=False,
-        ),
-        patch(
-            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
-            return_value=True,
-        ),
-    ):
-        assert should_launch_bootstrap_server(vllm_config) is True
-
-    with patch(
-        f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
-        return_value=False,
-    ):
-        assert should_launch_bootstrap_server(vllm_config) is False
-
-
-def test_sync_engine_id_across_tp_includes_pp_group(monkeypatch):
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-    assert vllm_config.kv_transfer_config is not None
-    vllm_config.kv_transfer_config.engine_id = "local-engine"
-    fake_tp_group = SimpleNamespace(
-        broadcast_object=MagicMock(return_value="tp-engine")
-    )
-    fake_pp_group = SimpleNamespace(
-        broadcast_object=MagicMock(return_value="pp-engine")
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_tp_group",
-        lambda: fake_tp_group,
-    )
-    monkeypatch.setattr(
-        "vllm.distributed.parallel_state.get_pp_group",
-        lambda: fake_pp_group,
-    )
-
-    _sync_engine_id_across_tp(vllm_config)
-
-    fake_tp_group.broadcast_object.assert_called_once_with("local-engine", src=0)
-    fake_pp_group.broadcast_object.assert_called_once_with("tp-engine", src=0)
-    assert vllm_config.kv_transfer_config.engine_id == "pp-engine"
-
-
 @pytest.mark.asyncio
 async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
     """
@@ -653,7 +510,7 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert response.status_code == 200
         assert response.json() == {}
 
-    # Register a worker
+    # Register multiple PP workers from the same producer engine.
     payload1 = {
         "engine_id": "eng-1",
         "dp_rank": 0,
@@ -666,7 +523,19 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
 
-    # Query after registration
+    payload2 = {
+        "engine_id": "eng-1",
+        "dp_rank": 0,
+        "tp_rank": 0,
+        "pp_rank": 1,
+        "addr": "tcp://2.2.2.2:2222",
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{base_url}/register", json=payload2)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    # Query after registration should preserve the PP dimension.
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{base_url}/query")
         assert response.status_code == 200
@@ -674,6 +543,7 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert "0" in data
         assert data["0"]["engine_id"] == "eng-1"
         assert data["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
+        assert data["0"]["worker_addr"]["0"]["1"] == "tcp://2.2.2.2:2222"
 
     # Test failure: re-registering the same worker
     async with httpx.AsyncClient() as client:
