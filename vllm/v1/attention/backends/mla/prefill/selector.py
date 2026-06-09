@@ -32,6 +32,7 @@ class MLAPrefillSelectorConfig(NamedTuple):
 
     dtype: torch.dtype
     is_r1_compatible: bool
+    cache_dtype: str = "auto"
 
 
 def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
@@ -69,6 +70,14 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
+    elif device_capability.major == 9 and device_capability.minor == 5:
+        # AMD gfx950 (MI350). AITER ASM is preferred when the FP8 KV cache
+        # is enabled; validate_configuration filters it out otherwise so the
+        # selector falls through to FlashAttention.
+        return [
+            MLAPrefillBackendEnum.AITER_ASM,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
     else:  # Hopper (SM90) and older
         return [
             MLAPrefillBackendEnum.FLASH_ATTN,
@@ -104,6 +113,7 @@ def get_mla_prefill_backend(
     selector_config = MLAPrefillSelectorConfig(
         dtype=vllm_config.model_config.dtype,
         is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
     )
 
     if attention_config.mla_prefill_backend is not None:

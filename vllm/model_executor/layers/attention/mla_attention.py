@@ -1340,16 +1340,22 @@ def backend_supports_prefill_query_quantization() -> bool:
     - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
-    # FP8 prefill query quantization requires GB200 (device capability 100)
-    # for the necessary FP8 kernels at the moment.
-    if not current_platform.is_device_capability_family(100):
-        return False
-
     from vllm.config import get_current_vllm_config
     from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
     vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
+
+    # A backend that mandates FP8 Q always supports it (e.g. AITER ASM on
+    # gfx950, where the kernel rejects non-FP8 inputs).
+    if getattr(backend_cls, "requires_fp8_query_quantization", False):
+        return True
+
+    # FP8 prefill query quantization for the opt-in path currently requires
+    # GB200 (device capability 100) for the necessary FP8 kernels.
+    if not current_platform.is_device_capability_family(100):
+        return False
+
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
@@ -1424,6 +1430,30 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             and vllm_config.attention_config.use_prefill_query_quantization
             and backend_supports_prefill_query_quantization()
         )
+
+        # Some backends (e.g. AITER ASM on gfx950) only accept FP8 Q. Honor
+        # their declared requirement even when the user-facing flag is off.
+        if not use_fp8 and is_quantized_kv_cache(vllm_config.cache_config.cache_dtype):
+            from vllm.v1.attention.backends.mla.prefill import (
+                get_mla_prefill_backend,
+            )
+
+            try:
+                backend_cls = get_mla_prefill_backend(vllm_config)
+            except Exception:  # noqa: BLE001
+                backend_cls = None
+            if backend_cls is not None and getattr(
+                backend_cls, "requires_fp8_query_quantization", False
+            ):
+                use_fp8 = True
+                logger.info_once(
+                    "FP8 prefill attention auto-enabled: %s backend "
+                    "requires FP8 Q (use_prefill_query_quantization=%s, "
+                    "cache_dtype=%s).",
+                    backend_cls.get_name(),
+                    vllm_config.attention_config.use_prefill_query_quantization,
+                    vllm_config.cache_config.cache_dtype,
+                )
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
@@ -2091,7 +2121,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+                input_dtype = self.kv_b_proj.weight.dtype
+                # ROCm BlockScaledMM quantizes input internally, so cast to model dtype
+                if (
+                    current_platform.is_rocm()
+                    and input_dtype == current_platform.fp8_dtype()
+                ):
+                    assert prefill_metadata.output_dtype is not None
+                    input_dtype = prefill_metadata.output_dtype
+                kv_c_normed = kv_c_normed.to(input_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
