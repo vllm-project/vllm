@@ -292,12 +292,10 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build the release binary. Cache cargo registry/git and target/, but copy the
-# binary out of the target/ cache mount so it persists into the image layer
-# for later COPY --from=rust-build.
+# Build the release binary. Cache cargo registry/git, but not target/, because
+# stale target metadata can outlive source updates across BuildKit cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
     bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
@@ -341,6 +339,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 WORKDIR /workspace
 
 COPY pyproject.toml setup.py CMakeLists.txt ./
+COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py

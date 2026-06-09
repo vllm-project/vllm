@@ -125,7 +125,6 @@ ENV CARGO_BUILD_JOBS=4
 
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
     bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 

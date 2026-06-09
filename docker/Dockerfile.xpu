@@ -29,7 +29,6 @@ ENV CARGO_BUILD_JOBS=4
 
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
     bash build_rust.sh
 
 FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04 AS vllm-base

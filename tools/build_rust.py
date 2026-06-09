@@ -33,6 +33,7 @@ def build_binary(build_rust_args: list[str]) -> None:
     (ROOT_DIR / "vllm").mkdir(exist_ok=True)
     setup(
         name="vllm-rust-frontend-build",
+        packages=[],
         rust_extensions=rust_extensions(optional=False),
         script_args=["build_rust", "--quiet", "--inplace", *build_rust_args],
     )
