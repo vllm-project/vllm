@@ -202,31 +202,11 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
     weight_quant_key = kFp8StaticChannelSym
     activation_quant_key = kFp8DynamicTokenSym
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        super().create_weights(
-            layer,
-            input_size_per_partition,
-            output_partition_sizes,
-            input_size,
-            output_size,
-            params_dtype,
-            **extra_weight_attrs,
-        )
-
+    def __init__(self):
+        self.out_dtype = torch.get_default_dtype()
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
