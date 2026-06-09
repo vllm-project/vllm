@@ -377,7 +377,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
-        max_model_len=512,
+        max_model_len=4096,
         gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
