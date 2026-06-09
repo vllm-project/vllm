@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreEvent, EngineCoreEventType, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
@@ -29,33 +30,36 @@ def test_compute_request_modality():
     assert compute_request_modality([_Feature("image")]) == "image"
     assert compute_request_modality([_Feature("audio"), _Feature("audio")]) == "audio"
     assert compute_request_modality([_Feature("image"), _Feature("audio")]) == "mixed"
+    # A single modality is passed through as the model reports it.
+    assert compute_request_modality([_Feature("vision_chunk")]) == "vision_chunk"
 
 
-def test_finished_request_modality_tracking():
-    """modality flows through to FinishedRequestStats (defaults to text)."""
+def test_received_request_modality_tracking():
+    """A request's modality is recorded once when it is admitted (QUEUED)."""
     iteration_stats = IterationStats()
-    req_stats = RequestStateStats(arrival_time=0.0)
+    lora_states = LoRARequestStates()
+    queued = EngineCoreEvent(type=EngineCoreEventType.QUEUED, timestamp=1.0)
 
     # Image request.
-    iteration_stats.update_from_finished_request(
-        finish_reason=FinishReason.STOP,
-        request_id="img-req",
-        num_prompt_tokens=100,
-        max_tokens_param=10,
-        req_stats=req_stats,
-        modality="image",
+    iteration_stats.update_from_events(
+        req_id="img-req",
+        events=[queued],
+        is_prefilling=True,
+        req_stats=RequestStateStats(arrival_time=0.0, modality="image"),
+        lora_states=lora_states,
+        lora_name=None,
     )
-    # Text-only request: modality defaults to "text".
-    iteration_stats.update_from_finished_request(
-        finish_reason=FinishReason.STOP,
-        request_id="text-req",
-        num_prompt_tokens=100,
-        max_tokens_param=10,
-        req_stats=req_stats,
+    # Text-only request: modality defaults to text.
+    iteration_stats.update_from_events(
+        req_id="text-req",
+        events=[queued],
+        is_prefilling=True,
+        req_stats=RequestStateStats(arrival_time=0.0),
+        lora_states=lora_states,
+        lora_name=None,
     )
 
-    assert iteration_stats.finished_requests[0].modality == "image"
-    assert iteration_stats.finished_requests[1].modality == "text"
+    assert iteration_stats.received_requests == ["image", "text"]
 
 
 def test_prefill_kv_computed_with_cache():

@@ -175,11 +175,14 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
-        # Request-level input modality ("text", "image", "audio", "video", or
-        # "mixed"), used for the "modality" label on request metrics.
-        self.modality = modality
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        # The request-level input modality is recorded on the stats object so it
+        # can label the request_received metric when the request is admitted.
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time, modality=modality)
+            if log_stats
+            else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -817,7 +820,6 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
-            modality=req_state.modality,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

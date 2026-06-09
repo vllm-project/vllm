@@ -669,31 +669,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_generation_tokens, per_engine_labelvalues
         )
 
-        # Keyed by finish reason, then by input modality ("text", "image",
-        # "audio", "video", "mixed", ...), so that request rate can be split by
-        # input modality via the "modality" label, e.g.
-        # rate(vllm:request_success_total{modality="image"}).
-        # Only the "text" bucket is pre-created (so it appears as 0 in scrapes);
-        # every other modality a model reports is created lazily in
-        # _get_request_success_counter().
-        self._request_success_model_name = model_name
-        self.counter_request_success_base = self._counter_cls(
+        self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
+        counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
-            labelnames=labelnames + ["finished_reason", "modality"],
+            labelnames=labelnames + ["finished_reason"],
         )
-        self.counter_request_success: dict[
-            FinishReason, dict[str, dict[int, Counter]]
-        ] = {}
         for reason in FinishReason:
             self.counter_request_success[reason] = {
-                REQUEST_MODALITY_TEXT: {
-                    idx: self.counter_request_success_base.labels(
-                        model_name, str(idx), str(reason), REQUEST_MODALITY_TEXT
-                    )
-                    for idx in engine_indexes
-                }
+                idx: counter_request_success_base.labels(
+                    model_name, str(idx), str(reason)
+                )
+                for idx in engine_indexes
             }
+
+        # Count of requests received, split by input modality. The "text" bucket
+        # is pre-created per engine (so it appears as 0 in scrapes); other
+        # modalities are created lazily by prometheus_client on first .labels().
+        self._request_received_model_name = model_name
+        self.counter_request_received = self._counter_cls(
+            name="vllm:request_received",
+            documentation="Count of received requests, by input modality.",
+            labelnames=labelnames + ["modality"],
+        )
+        for idx in engine_indexes:
+            self.counter_request_received.labels(
+                model_name, str(idx), REQUEST_MODALITY_TEXT
+            )
 
         #
         # Histograms of counts
@@ -1068,31 +1070,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             metrics_info["engine"] = str(engine_index)
             info_gauge.labels(**metrics_info).set(1)
 
-    def _get_request_success_counter(
-        self, reason: "FinishReason", modality: str, engine_idx: int
-    ) -> Counter:
-        """Get the request-success counter for a (reason, modality, engine).
-
-        Modality buckets outside the pre-registered common set are created
-        lazily so that uncommon model-reported modalities are still counted
-        without inflating cardinality up front.
-        """
-        by_modality = self.counter_request_success[reason]
-        per_engine = by_modality.get(modality)
-        if per_engine is None:
-            per_engine = {}
-            by_modality[modality] = per_engine
-        counter = per_engine.get(engine_idx)
-        if counter is None:
-            counter = self.counter_request_success_base.labels(
-                self._request_success_model_name,
-                str(engine_idx),
-                str(reason),
-                modality,
-            )
-            per_engine[engine_idx] = counter
-        return counter
-
     def record(
         self,
         scheduler_stats: SchedulerStats | None,
@@ -1214,12 +1191,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
-        for finished_request in iteration_stats.finished_requests:
-            self._get_request_success_counter(
-                finished_request.finish_reason,
-                finished_request.modality,
-                engine_idx,
+        for modality in iteration_stats.received_requests:
+            self.counter_request_received.labels(
+                self._request_received_model_name, str(engine_idx), modality
             ).inc()
+
+        for finished_request in iteration_stats.finished_requests:
+            self.counter_request_success[finished_request.finish_reason][
+                engine_idx
+            ].inc()
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
