@@ -211,6 +211,8 @@ def apply_fp4_marlin_linear(
         elif input_dtype != torch.float8_e4m3fn:
             raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
 
+        if marlin_size_k != size_k:
+            inputs = torch.nn.functional.pad(inputs, (0, marlin_size_k - size_k))
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         output = torch.empty(
             (reshaped_x.size(0), marlin_size_n),

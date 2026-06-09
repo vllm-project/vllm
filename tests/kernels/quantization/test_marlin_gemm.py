@@ -586,10 +586,11 @@ def test_fp4_marlin_linear_mxfp4_w4a8_keeps_logical_shape():
     size_m, size_n, size_k = 4, 128, 96
     group_size = 32
     dtype = torch.bfloat16
-    assert _get_fp4_marlin_padded_sizes(size_n, size_k) != (size_n, size_k)
+    marlin_size_n, marlin_size_k = _get_fp4_marlin_padded_sizes(size_n, size_k)
+    assert (marlin_size_n, marlin_size_k) != (size_n, size_k)
 
     a_input = rand_data((size_m, size_k), dtype=dtype)
-    b_weight = rand_data((size_k, size_n), dtype=dtype)
+    b_weight = rand_data((marlin_size_k, marlin_size_n), dtype=dtype)
     w_ref, marlin_q_w, marlin_s = rand_marlin_weight_mxfp4_like(
         b_weight.T, group_size, input_dtype=torch.float8_e4m3fn
     )
@@ -604,13 +605,14 @@ def test_fp4_marlin_linear_mxfp4_w4a8_keeps_logical_shape():
         size_n=size_n,
         size_k=size_k,
         input_dtype=torch.float8_e4m3fn,
-        marlin_size_n=size_n,
-        marlin_size_k=size_k,
+        marlin_size_n=marlin_size_n,
+        marlin_size_k=marlin_size_k,
     )
 
-    quant_input, input_scales = marlin_quant_input(a_input, torch.float8_e4m3fn)
+    padded_input = torch.nn.functional.pad(a_input, (0, marlin_size_k - size_k))
+    quant_input, input_scales = marlin_quant_input(padded_input, torch.float8_e4m3fn)
     input_ref = quant_input.to(input_scales.dtype) * input_scales.view(-1, 1)
-    output_ref = torch.matmul(input_ref.to(dtype), w_ref)
+    output_ref = torch.matmul(input_ref.to(dtype), w_ref)[..., :size_n].contiguous()
 
     assert output.shape == (size_m, size_n)
     max_diff = compute_max_diff(output, output_ref)
