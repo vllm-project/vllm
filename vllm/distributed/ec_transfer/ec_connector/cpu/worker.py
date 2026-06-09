@@ -76,9 +76,9 @@ class ECCPUWorker:
         block indices the scheduler pre-allocated in `meta.saves`.
 
         The copy runs on a dedicated stream and is followed by a stream
-        sync — unlike GPU-only ordering, CUDA stream ordering does not
-        cross process boundaries, so the scheduler process's NIXL thread
-        needs a real CPU-visible wait before it can WRITE these bytes.
+        sync: CUDA stream ordering does not reach a remote reader, so the
+        bytes must be CPU-visible in the mmap before a consumer's NIXL READ
+        can pull them.
         """
         block_indices = connector_metadata.saves.get(mm_hash)
         if block_indices is None:
@@ -120,9 +120,9 @@ class ECCPUWorker:
                 self._cpu_blocks[block_idx, : end - start].copy_(
                     src_bytes[start:end], non_blocking=True
                 )
-        # Cross-process visibility: the scheduler's NIXL thread reads
-        # these bytes from a different process, so a GPU-side event is
-        # not sufficient.
+        # Cross-boundary visibility: a remote consumer pulls these bytes by
+        # NIXL READ, so a GPU-side event is not sufficient — the copy must be
+        # CPU-complete before the blocks are served.
         self._copy_stream.synchronize()
 
     def start_load_caches(

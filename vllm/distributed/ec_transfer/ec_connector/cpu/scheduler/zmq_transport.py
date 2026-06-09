@@ -15,7 +15,11 @@ import msgspec
 import zmq
 from zmq.utils.monitor import recv_monitor_message
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import XferAck, XferReq
+from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+    XferAck,
+    XferReq,
+    XferStatus,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import ConsumerPeer, PeerAddr
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
@@ -126,11 +130,19 @@ class ZmqProducerTransport:
         except (msgspec.DecodeError, msgspec.ValidationError):
             logger.warning("ec: dropped malformed XferReq")
             return
+        # Convert an escaped handler error into a NACK so the consumer fails
+        # over to local encode immediately instead of waiting out its timeout.
         try:
             ack = self._on_xfer_req(identity, req)
+        except Exception:
+            logger.exception(
+                "ec: handler failed for XferReq mm_hash=%s; NACKing", req.mm_hash
+            )
+            ack = XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INTERNAL)
+        try:
             self._router.send_multipart([identity, b"", self._encoder.encode(ack)])
         except Exception:
-            logger.exception("ec: failed handling XferReq mm_hash=%s", req.mm_hash)
+            logger.exception("ec: failed to send XferAck mm_hash=%s", req.mm_hash)
 
 
 class ZmqConsumerTransport:

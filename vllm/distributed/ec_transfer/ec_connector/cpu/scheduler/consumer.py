@@ -9,16 +9,23 @@ pulls the encoding into its mmap. A request is deferred until every feature it
 needs is either locally cached or has finished reading.
 """
 
-import contextlib
 import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import XferReq, XferStatus
+from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+    XferAck,
+    XferReq,
+    XferStatus,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
     evict_and_alloc,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr, PendingRead
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    PeerAddr,
+    PendingRead,
+    QuarantinedRead,
+)
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
     ECSharedRegion,
@@ -33,6 +40,12 @@ logger = init_logger(__name__)
 # How long to wait for an XferAck before giving up on a peer and encoding
 # the feature locally instead.
 CONSUMER_XFER_ACK_TIMEOUT_S = 2.0
+
+# How long to let an in-flight READ run before giving up on it. On expiry the
+# request falls back to local encode and its blocks are quarantined (NIXL has
+# no abort) until the transfer reports terminal. Kept below the producer pin
+# lease so the source stays pinned for the whole window.
+CONSUMER_READ_TIMEOUT_S = 20.0
 
 
 class ECCPUConsumer:
@@ -70,6 +83,9 @@ class ECCPUConsumer:
         self._ready: set[str] = set()
         self._loaded: dict[str, list[int]] = {}
         self._pending_reload: set[str] = set()
+        # Reads given up on while possibly still DMA-ing; blocks held until
+        # check_xfer_state reports terminal (see QuarantinedRead).
+        self._quarantine: list[QuarantinedRead] = []
 
     def has_cache_item(self, identifier: str) -> bool:
         """True iff the bytes for `identifier` are in our local mmap, either
@@ -244,7 +260,22 @@ class ECCPUConsumer:
             if pr is None:
                 continue
             if pr.read_handle is not None:
-                self._poll_read(mm_hash, pr)
+                # Poll the in-flight READ; only if it is still running past its
+                # budget do we give up. NIXL cannot abort it, so the blocks go
+                # to quarantine (not freed) until the transfer reports terminal.
+                if not self._poll_read(mm_hash, pr) and now > pr.deadline:
+                    logger.warning(
+                        "EC: READ for mm_hash=%s from %s:%d still in flight after "
+                        "%.0fs; quarantining and falling back to local encode",
+                        mm_hash,
+                        pr.addr[0],
+                        pr.addr[1],
+                        CONSUMER_READ_TIMEOUT_S,
+                    )
+                    self._quarantine.append(
+                        QuarantinedRead(pr.dst_indices, pr.read_handle)
+                    )
+                    self._remote_encodings[mm_hash] = None
             elif now > pr.deadline:
                 logger.warning(
                     "EC: no XferAck for mm_hash=%s from %s:%d within %.1fs; "
@@ -256,8 +287,9 @@ class ECCPUConsumer:
                 )
                 self._region.free(pr.dst_indices)
                 self._remote_encodings[mm_hash] = None
+        self._drain_quarantine()
 
-    def _handle_ack(self, addr: PeerAddr, ack: Any) -> None:
+    def _handle_ack(self, addr: PeerAddr, ack: XferAck) -> None:
         """Register the producer from the ack's fresh metadata and issue the
         READ on OK; tombstone and free the destination blocks on a NACK.
         """
@@ -317,6 +349,7 @@ class ECCPUConsumer:
             self._remote_encodings[ack.mm_hash] = None
             return
         pr.read_handle = handle
+        pr.deadline = time.monotonic() + CONSUMER_READ_TIMEOUT_S
         logger.debug(
             "EC: READ started mm_hash=%s n_blocks=%d peer=%s:%d",
             ack.mm_hash,
@@ -325,9 +358,11 @@ class ECCPUConsumer:
             addr[1],
         )
 
-    def _poll_read(self, mm_hash: str, pr: PendingRead) -> None:
-        """Check one in-flight READ; promote to `_ready` when it completes,
-        tombstone and free on failure.
+    def _poll_read(self, mm_hash: str, pr: PendingRead) -> bool:
+        """Check one in-flight READ. Returns True once it settles — promoted to
+        `_ready` on completion, or tombstoned + freed on failure — and False
+        while it is still in flight (`PROC`). A terminal state means no transfer
+        can still touch the blocks, so freeing on failure here is DMA-safe.
         """
         assert pr.read_handle is not None
         try:
@@ -341,46 +376,89 @@ class ECCPUConsumer:
             self._engine.release_xfer_handle(pr.read_handle)
             self._region.free(pr.dst_indices)
             self._remote_encodings[mm_hash] = None
-            return
+            return True
         if state == "DONE":
             self._engine.release_xfer_handle(pr.read_handle)
             self._ready.add(mm_hash)
             logger.debug("EC: read arrived mm_hash=%s", mm_hash)
-        elif state == "PROC":
-            return
-        else:
-            logger.warning(
-                "EC: READ for mm_hash=%s in unexpected state %r; "
-                "falling back to local encode",
-                mm_hash,
+            return True
+        if state == "PROC":
+            return False
+        logger.warning(
+            "EC: READ for mm_hash=%s in unexpected state %r; "
+            "falling back to local encode",
+            mm_hash,
+            state,
+        )
+        self._engine.release_xfer_handle(pr.read_handle)
+        self._region.free(pr.dst_indices)
+        self._remote_encodings[mm_hash] = None
+        return True
+
+    def _drain_quarantine(self) -> None:
+        """Release and free quarantined reads once their transfer is terminal.
+
+        A terminal state (DONE/ERR, or a raised exception meaning the handle is
+        no longer usable) guarantees nothing can still DMA into the blocks, so
+        they are safe to release and return to the region. Entries still in
+        `PROC` are kept for a later step.
+        """
+        still_pending: list[QuarantinedRead] = []
+        for q in self._quarantine:
+            try:
+                state = self._engine.check_xfer_state(q.read_handle)
+            except Exception:
+                logger.exception(
+                    "EC: check_xfer_state failed for quarantined read; "
+                    "releasing %d block(s)",
+                    len(q.dst_indices),
+                )
+                state = None
+            if state == "PROC":
+                still_pending.append(q)
+                continue
+            self._engine.release_xfer_handle(q.read_handle)
+            self._region.free(q.dst_indices)
+            logger.debug(
+                "EC: quarantined read settled (state=%s); freed %d block(s)",
                 state,
+                len(q.dst_indices),
             )
-            self._engine.release_xfer_handle(pr.read_handle)
-            self._region.free(pr.dst_indices)
-            self._remote_encodings[mm_hash] = None
+        self._quarantine = still_pending
 
     def on_peer_down(self, addr: PeerAddr) -> None:
-        """Tear down a peer and tombstone the reads bound to it, freeing the
-        destination blocks of any read that has not already completed.
+        """Tear down a peer and drop the reads bound to it so they retry.
+
+        A peer going down is a transport failure, not a verdict on the data, so
+        each affected read is forgotten (not tombstoned) and the next
+        ensure_cache_available retries it against the — possibly restarted —
+        producer; a still-dead producer then terminates via the XferAck
+        timeout instead of looping. Blocks of a read that already posted its
+        READ are quarantined (the transfer may still be DMA-ing); blocks of a
+        read still awaiting its XferAck are freed immediately. Reads that have
+        already completed (`_ready`) are left to be promoted.
         """
         evicted_agent_name = self._transport.evict_peer(addr)
-        n = 0
+        retrying = 0
+        quarantined = 0
         for mm_hash, pr in list(self._remote_encodings.items()):
             if pr is None or pr.addr != addr:
                 continue
             if mm_hash in self._ready:
                 continue
             if pr.read_handle is not None:
-                with contextlib.suppress(Exception):
-                    self._engine.release_xfer_handle(pr.read_handle)
-            self._region.free(pr.dst_indices)
-            self._remote_encodings[mm_hash] = None
-            n += 1
+                self._quarantine.append(QuarantinedRead(pr.dst_indices, pr.read_handle))
+                quarantined += 1
+            else:
+                self._region.free(pr.dst_indices)
+                retrying += 1
+            del self._remote_encodings[mm_hash]
         logger.info(
-            "EC: peer down addr=%s agent=%s tombstoned=%d",
+            "EC: peer down addr=%s agent=%s retrying=%d quarantined=%d",
             addr,
             evicted_agent_name,
-            n,
+            retrying,
+            quarantined,
         )
 
     def build_loads(self) -> dict[str, list[int]]:
@@ -415,6 +493,13 @@ class ECCPUConsumer:
         return loads
 
     def shutdown(self) -> None:
+        # on_peer_down may move in-flight reads into quarantine, so drain the
+        # peers first and release every quarantined handle afterwards. The
+        # region is torn down by the scheduler, so blocks need no freeing here.
+        # release_xfer_handle logs (and absorbs) any failure itself.
         for addr in list(self._transport._peer_pool):
             self.on_peer_down(addr)
+        for q in self._quarantine:
+            self._engine.release_xfer_handle(q.read_handle)
+        self._quarantine.clear()
         self._transport.shutdown()

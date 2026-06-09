@@ -37,8 +37,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Force-unpin backstop: a source pin whose completion notif never arrives
-# (consumer crash / network loss) is reclaimed after this many seconds.
-PRODUCER_PIN_LEASE_S = 10.0
+# (consumer crash / network loss) is reclaimed after this many seconds. Kept
+# above the consumer's read budget (CONSUMER_READ_TIMEOUT_S) plus round-trip
+# slack, so the source stays pinned until the consumer has stopped accepting
+# the read — otherwise a reused block could feed a stale-data completion.
+PRODUCER_PIN_LEASE_S = 30.0
 
 
 class ECCPUProducer:

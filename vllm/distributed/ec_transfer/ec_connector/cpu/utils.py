@@ -155,14 +155,32 @@ class PendingRead:
     `ensure_cache_available` to fall through to local encode.
 
     `read_handle is None` discriminates the two live phases — awaiting the
-    `XferAck` (guarded by `deadline`) vs. the NIXL READ in flight (polled via
-    `check_xfer_state`) — so no separate state enum is needed.
+    `XferAck` vs. the NIXL READ in flight — so no separate state enum is
+    needed. `deadline` (monotonic) bounds whichever phase is current: the
+    `XferAck` wait while `read_handle is None`, then the read budget once the
+    READ is posted (it is reset at that transition).
     """
 
     addr: PeerAddr
     dst_indices: list[int]
     deadline: float
     read_handle: int | None = None
+
+
+@dataclass
+class QuarantinedRead:
+    """Consumer-side blocks abandoned by a read but not yet safe to reuse.
+
+    NIXL cannot abort an in-flight transfer, so when the consumer gives up on
+    a read (deadline passed, or its peer went down) while the READ may still be
+    DMA-ing into `dst_indices`, the blocks and handle are parked here instead
+    of freed. They are polled each step and released + freed only once
+    `check_xfer_state` reports a terminal state (DONE/ERR), at which point no
+    transfer can still touch the memory.
+    """
+
+    dst_indices: list[int]
+    read_handle: int
 
 
 # Msgpack (de)serialization for the list-of-(addr, size, device_id)

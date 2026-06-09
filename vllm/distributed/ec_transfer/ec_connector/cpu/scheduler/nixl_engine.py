@@ -15,7 +15,18 @@ _NIXL_DRAM = "DRAM"
 
 
 class NixlEngine:
-    """Adapts NixlWrapper to the duck-typed engine the scheduler delegates use."""
+    """Adapts NixlWrapper to the duck-typed engine the scheduler delegates use.
+
+    Thread-safety: the underlying NixlWrapper is not thread-safe, and one
+    NixlEngine instance is shared by every role on a node. In single-role pods
+    this is safe by construction — a producer touches it only from the
+    transport's router thread (``get_new_notifs``), a consumer only from the
+    scheduler thread (``add_remote_source``/``post_read``/``check_xfer_state``/
+    ``release_xfer_handle``). An ``ec_both`` pod runs both, so those two threads
+    would call into the same agent concurrently. Before enabling ``ec_both``
+    (e.g. for peer-to-peer transfer), serialize every method here behind a lock
+    (or give each role its own agent); today nothing enforces it.
+    """
 
     def __init__(self, agent_name: str, num_threads: int = 1) -> None:
         if NixlWrapper is None or nixl_agent_config is None:
@@ -59,12 +70,11 @@ class NixlEngine:
     ) -> tuple[str, int]:
         """Register a remote producer and prep a READ-source dlist over it.
 
-        `metadata` is the producer's `get_agent_metadata()` blob, delivered
-        fresh on an `XferAck` — never sourced from the routing layer — so the
-        rkeys it carries always belong to the live producer process.
-        `mem_descriptor` is the producer's msgpack-encoded block descs.
-        Returns `(agent_name, remote_read_handle)`; the handle is the prepared
-        dlist passed as the READ source to `post_read`.
+        `metadata` is the producer's `get_agent_metadata()` blob carried on the
+        live `XferAck`, so its rkeys reference the current producer process.
+        `mem_descriptor` is the producer's msgpack-encoded block descs. Returns
+        `(agent_name, remote_read_handle)`; the handle is the prepared dlist
+        passed as the READ source to `post_read`.
         """
         agent_name = self._nixl.add_remote_agent(metadata)
         remote_blocks = deserialize_mem_descriptor(mem_descriptor)
@@ -126,4 +136,4 @@ class NixlEngine:
         try:
             self._nixl.release_xfer_handle(handle)
         except Exception:
-            logger.warning("EC: release_xfer_handle failed")
+            logger.warning("EC: release_xfer_handle failed", exc_info=True)
