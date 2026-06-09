@@ -2844,7 +2844,7 @@ class NixlConnectorWorker:
                 block_stats,
             )
 
-        # Check first 2 KDA layers (conv state from tuple)
+        # Check first 2 KDA layers (conv_state bf16 + ssm_state fp32 from tuple)
         checked = 0
         for layer_name, cache_val in list(self.device_kv_caches.items()):
             if checked >= 2:
@@ -2855,7 +2855,34 @@ class NixlConnectorWorker:
                     continue
                 if ".attn" in layer_name:
                     continue  # skip MLA entries here
-                _check_layer("SSM", layer_name, t, mamba_group_bids)
+                # Check conv_state (bf16) — index 0
+                _check_layer("SSM-conv", layer_name, t, mamba_group_bids)
+                # Check ssm_state (fp32) — index 1
+                if len(cache_val) > 1:
+                    ssm_t = cache_val[1]
+                    if isinstance(ssm_t, torch.Tensor):
+                        _check_layer(
+                            "SSM-ssm(fp32)", layer_name, ssm_t, mamba_group_bids
+                        )
+                        # Verify ssm_state view alignment: data_ptr should be
+                        # offset past conv_state within the shared tensor.
+                        conv_ptr = t.data_ptr()
+                        ssm_ptr = ssm_t.data_ptr()
+                        ptr_diff = ssm_ptr - conv_ptr
+                        if self._mamba_ssm_size is not None:
+                            expected_conv_bytes = self._mamba_ssm_size[0]
+                            logger.warning(
+                                "[DESC-DEBUG]   SSM alignment: "
+                                "conv_ptr=0x%x, ssm_ptr=0x%x, "
+                                "ptr_diff=%d, expected_conv=%d, "
+                                "match=%s, ssm_stride=%s",
+                                conv_ptr,
+                                ssm_ptr,
+                                ptr_diff,
+                                expected_conv_bytes,
+                                ptr_diff == expected_conv_bytes,
+                                ssm_t.stride(),
+                            )
                 checked += 1
 
         # CRITICAL: Check ALL MLA layers (keys containing ".self_attn.attn")
