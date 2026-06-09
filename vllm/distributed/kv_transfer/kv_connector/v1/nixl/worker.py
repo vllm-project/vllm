@@ -850,7 +850,14 @@ class NixlConnectorWorker:
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
-            layer_spec = self._layer_specs[layer_name]
+            layer_spec = self._layer_specs.get(layer_name)
+            if layer_spec is None:
+                logger.debug(
+                    "Skipping layer %s as no KVCache spec is present. "
+                    "This is likely because the layer is sharing its KV cache",
+                    layer_name,
+                )
+                continue
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
