@@ -49,56 +49,6 @@ except (ImportError, ModuleNotFoundError) as e:
 DEFAULT_FA_VERSION = 2
 
 
-def compute_block_sparsity(
-    head_size: int,
-    mask_mod,
-    aux_tensors: list,
-    cu_seqlens_q,
-    seqused_k,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
-    device,
-):
-    """Compute block sparsity for mm_prefix masks using arch-matched tiles.
-
-    Tile sizes must match what FA4's kernel selects, otherwise
-    normalize_block_sparse_config raises on tile_n mismatch.
-    """
-    from vllm.platforms import current_platform
-    from vllm.vllm_flash_attn.cute.compute_block_sparsity import (
-        compute_block_sparsity as _compute_block_sparsity,
-    )
-    from vllm.vllm_flash_attn.cute.interface import _tile_size_fwd_sm90
-
-    cap = current_platform.get_device_capability()
-    assert cap is not None
-    assert cap.major in (8, 9, 10, 12), f"Unsupported SM major version: {cap.major}"
-
-    if cap.major == 8:
-        tile_m, tile_n = 128, 64
-    elif cap.major == 9:
-        cfg = _tile_size_fwd_sm90(head_size, head_size, False, False)
-        tile_m, tile_n = cfg.m_block_size, cfg.n_block_size
-    elif cap.major == 10:
-        tile_m, tile_n = 128, 128
-    else:  # major == 12
-        tile_m, tile_n = (128, 128) if head_size <= 64 else (128, 64)
-
-    return _compute_block_sparsity(
-        tile_m=tile_m,
-        tile_n=tile_n,
-        batch_size=cu_seqlens_q.shape[0] - 1,
-        num_heads=1,
-        seqlen_q=max_seqlen_q,
-        seqlen_k=max_seqlen_k,
-        mask_mod=mask_mod,
-        aux_tensors=aux_tensors,
-        device=device,
-        cu_seqlens_q=cu_seqlens_q,
-        seqused_k=seqused_k,
-    )
-
-
 def _is_fa2_supported() -> tuple[bool, str | None]:
     if not FA2_AVAILABLE:
         return False, f"FA2 is unavailable due to: {FA2_UNAVAILABLE_REASON}"
@@ -259,7 +209,6 @@ def flash_attn_varlen_func(
     # FA4 only
     mask_mod=None,
     aux_tensors=None,
-    block_sparse_tensors=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -355,8 +304,6 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support mask_mod")
         if aux_tensors is not None:
             raise NotImplementedError("FA2 does not support aux_tensors")
-        if block_sparse_tensors is not None:
-            raise NotImplementedError("FA2 does not support block_sparse_tensors")
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -389,8 +336,6 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA3 does not support mask_mod")
         if aux_tensors is not None:
             raise NotImplementedError("FA3 does not support aux_tensors")
-        if block_sparse_tensors is not None:
-            raise NotImplementedError("FA3 does not support block_sparse_tensors")
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
             k,
@@ -456,7 +401,6 @@ def flash_attn_varlen_func(
             learnable_sink=s_aux,
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
-            block_sparse_tensors=block_sparse_tensors,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

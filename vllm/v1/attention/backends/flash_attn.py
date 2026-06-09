@@ -273,10 +273,6 @@ class FlashAttentionMetadata:
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
 
-    # Cached block sparsity tensors for the mm_prefix mask_mod path.
-    # Computed lazily on the first forward() call, shared across layers.
-    mm_prefix_block_sparse: object | None = None
-
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -831,27 +827,10 @@ class FlashAttentionImpl(AttentionImpl):
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
                 mm_aux = None
-                mm_block_sparse = None
                 if mm_prefix_ranges is not None and attn_metadata.causal:
                     max_ranges = mm_prefix_ranges.shape[1]
                     mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
                     mm_aux = [mm_prefix_ranges]
-                    if attn_metadata.mm_prefix_block_sparse is None:
-                        from vllm.vllm_flash_attn.flash_attn_interface import (
-                            compute_block_sparsity,
-                        )
-
-                        attn_metadata.mm_prefix_block_sparse = compute_block_sparsity(
-                            head_size=self.head_size,
-                            mask_mod=mm_mask_mod,
-                            aux_tensors=mm_aux,
-                            cu_seqlens_q=cu_seqlens_q,
-                            seqused_k=seqused_k,
-                            max_seqlen_q=max_seqlen_q,
-                            max_seqlen_k=max_seqlen_k,
-                            device=query.device,
-                        )
-                    mm_block_sparse = attn_metadata.mm_prefix_block_sparse
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -877,7 +856,6 @@ class FlashAttentionImpl(AttentionImpl):
                     s_aux=self.sinks,
                     mask_mod=mm_mask_mod,
                     aux_tensors=mm_aux,
-                    block_sparse_tensors=mm_block_sparse,
                 )
                 return output
 
@@ -1125,21 +1103,23 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
     import cutlass
     import cutlass.cute as cute
     from cutlass import Int32  # type: ignore[attr-defined]
+    from flash_attn.cute.utils import scalar_to_ssa  # type: ignore[import-untyped]
 
     @cute.jit
     def mm_prefix_mask_mod(
-        batch_idx: Int32,
-        head_idx: Int32,
-        q_idx: Int32,
-        kv_idx: Int32,
+        batch_idx: cute.TensorSSA,
+        head_idx: cute.TensorSSA,
+        q_idx: cute.TensorSSA,
+        kv_idx: cute.TensorSSA,
         seqlen_info,
         aux_tensors,
     ):
         keep = kv_idx <= q_idx
         ranges = aux_tensors[0]
+        b = batch_idx[0]
         for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-            r_start = ranges[batch_idx, i, 0]
-            r_end = ranges[batch_idx, i, 1]
+            r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+            r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
             valid = r_start < r_end
             q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
             k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
