@@ -65,12 +65,6 @@ class RequestArgs(NamedTuple):
     limit_min_tokens: int  # Use negative value for no limit
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
-    # Whether to send the non-standard `conversation_id` field in each
-    # request payload. Required by the disaggregated multi-turn proxy
-    # (examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py)
-    # for cross-turn KV cache reuse. Default off so the benchmark is
-    # compatible with strict OpenAI-compatible endpoints that reject
-    # unknown fields with HTTP 400.
     send_conversation_id: bool
     headers: dict[str, str]
 
@@ -450,9 +444,6 @@ async def send_turn(
             max_tokens = max(1, answer_num_tokens)
 
     # Send the current conversation to LLM and get a response.
-    # Only forward `conv_id` on the wire when the user opted in via
-    # `--send-conversation-id`; otherwise the payload stays
-    # OpenAI-schema-compliant and works against strict endpoints.
     response: ServerResponse = await send_request(
         session,
         messages,
