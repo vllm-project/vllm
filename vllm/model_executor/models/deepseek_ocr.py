@@ -629,43 +629,54 @@ class DeepseekOCRForCausalLM(
             tower_model=["sam_model", "vision_model"],
         )
 
+    # -- Fixed spatial constants (computed from BASE_SIZE / IMAGE_SIZE) --
+
+    @property
+    def image_side(self) -> int:
+        """Number of output grid cells per spatial dim for a global image."""
+        return math.ceil((BASE_SIZE // 16) / 4)  # 16
+
+    @property
+    def global_image_output_token(self) -> int:
+        """Tokens per global image (grid + one newline per row)."""
+        return self.image_side * (self.image_side + 1)  # 272
+
+    @property
+    def patch_side(self) -> int:
+        """Number of output grid cells per spatial dim for a local patch."""
+        return math.ceil((IMAGE_SIZE // 16) / 4)  # 10
+
+    @property
+    def single_patch_output_token(self) -> int:
+        """Tokens per local patch (square grid, no newlines)."""
+        return self.patch_side * self.patch_side  # 100
+
     # -- SupportsEncoderCudaGraph protocol methods --
 
     def _get_num_input_output_tokens(
         self,
         image_spatial_crop: torch.Tensor | None = None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int, int]:
         """
-        Init fixed spatial constants, which will be used later.
+        Return (num_input_tokens, num_output_tokens, global_output_token,
+        local_output_token) for a single image described by
+        ``image_spatial_crop``.
         """
-        base_size = BASE_SIZE  # 1024
-        image_size = IMAGE_SIZE  # 640
-        patch_size = 16
-        downsample_ratio = 4
-
         is_tiled = False
         if image_spatial_crop is not None:
-            is_tiled = (image_spatial_crop[0] > 1) or (image_spatial_crop[1] > 1)
+            is_tiled = image_spatial_crop[0] > 1 or image_spatial_crop[1] > 1
 
         # Compute input size:
-        global_input_side = base_size // patch_size  # 1024 / 16 = 64
-        local_input_side = image_size // patch_size  # 640 / 16 = 40
+        global_input_side = BASE_SIZE // 16  # 64
+        local_input_side = IMAGE_SIZE // 16  # 40
         num_input_tokens = global_input_side**2
 
         if is_tiled:
             num_patches = image_spatial_crop.prod(dim=-1)
             num_input_tokens += num_patches * (local_input_side**2)
 
-        # Compute output size:
-        global_h = global_w = math.ceil(global_input_side / downsample_ratio)
-        self.image_side = global_h
-        global_output_token = global_h * (global_w + 1)  # 272
-        self.global_image_output_token = global_output_token
+        global_output_token = self.global_image_output_token
         num_output_tokens = global_output_token
-
-        local_h = local_w = math.ceil(local_input_side / downsample_ratio)
-        self.patch_side = local_h
-        self.single_patch_output_token = local_h * local_w  # 100
 
         local_output_token = 0
         if is_tiled:
@@ -680,7 +691,6 @@ class DeepseekOCRForCausalLM(
         )
 
     def get_encoder_cudagraph_config(self):
-        self._get_num_input_output_tokens()
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=["pixel_values"],
