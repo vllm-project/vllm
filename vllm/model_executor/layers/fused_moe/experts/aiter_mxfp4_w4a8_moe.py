@@ -67,7 +67,7 @@ def aiter_triton_kernel_w4a8_moe_forward(
             )
         except ImportError:
             from aiter.ops.triton.moe_routing.routing import (
-                routing_torch as aiter_routing,
+                routing as aiter_routing,
             )
     else:
         try:
