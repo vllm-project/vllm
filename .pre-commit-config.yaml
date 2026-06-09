@@ -21,7 +21,7 @@ repos:
   rev: v21.1.2
   hooks:
   - id: clang-format
-    exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
+    exclude: 'csrc/(moe/topk_softmax_kernels.cu|libtorch_stable/quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/DavidAnson/markdownlint-cli2
@@ -131,6 +131,16 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-docs
+      name: pip-compile-docs
+      args: [
+        requirements/docs.in,
+        -o, requirements/docs.txt,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/docs\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
@@ -138,33 +148,27 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
-  - id: mypy-local
-    name: Run mypy locally for lowest supported Python version
-    entry: python tools/pre_commit/mypy.py 0 "3.10"
-    stages: [pre-commit] # Don't run in CI
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.10
+    entry: python tools/pre_commit/mypy.py "3.10"
     <<: &mypy_common
       language: python
       types_or: [python, pyi]
       require_serial: true
-      additional_dependencies: ["mypy[faster-cache]==1.19.1", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: python tools/pre_commit/mypy.py 1 "3.10"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
+      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
-    entry: python tools/pre_commit/mypy.py 1 "3.11"
+    entry: python tools/pre_commit/mypy.py "3.11"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
-    entry: python tools/pre_commit/mypy.py 1 "3.12"
+    entry: python tools/pre_commit/mypy.py "3.12"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.13
-    entry: python tools/pre_commit/mypy.py 1 "3.13"
+    entry: python tools/pre_commit/mypy.py "3.13"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: shellcheck
@@ -212,6 +216,12 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
+  - id: test-nonroot-entrypoint
+    name: Test non-root entrypoint wrapper
+    entry: bash docker/entrypoints/test_vllm_nonroot_entrypoint.sh
+    language: system
+    pass_filenames: false
+    files: ^docker/entrypoints/(vllm-nonroot-entrypoint|test_vllm_nonroot_entrypoint)\.sh$
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/pre_commit/check_forbidden_imports.py
@@ -246,6 +256,32 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
+  # skips with a warning when cargo is not installed.
+  - id: rust-cargo-autoinherit
+    name: Rust - Normalize Cargo manifests with autoinherit
+    entry: tools/pre_commit/rust-check.sh autoinherit --prefer-simple-dotted
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+  - id: rust-cargo-sort
+    name: Rust - Sort Cargo manifest sections
+    entry: tools/pre_commit/rust-check.sh sort --workspace
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+  - id: rust-cargo-fmt
+    name: Rust - Format code
+    entry: tools/pre_commit/rust-check.sh fmt
+    language: script
+    pass_filenames: false
+    require_serial: true
+    stages: [pre-commit] # Only run locally as Buildkite will cover this
+    files: ^rust/.*(\.rs|Cargo\.toml|rustfmt\.toml)$
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

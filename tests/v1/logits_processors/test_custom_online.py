@@ -10,7 +10,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServerCustom, create_new_process_for_each_test
+from tests.utils import RemoteOpenAIServerCustom
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -18,8 +18,8 @@ from tests.v1.logits_processors.utils import (
     MODEL_NAME,
     TEMP_GREEDY,
     prompts,
+    setup_fake_entrypoint,
 )
-from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 
 
 def _server_with_logitproc_entrypoint(
@@ -27,16 +27,9 @@ def _server_with_logitproc_entrypoint(
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
-    """Start vLLM server, inject dummy logitproc entrypoint"""
-
-    # Patch `entry_points` to inject logitproc entrypoint
-    import importlib.metadata
-
-    importlib.metadata.entry_points = fake_entry_points  # type: ignore
+    """Start vLLM server with dummy logitproc entrypoint."""
     from vllm.entrypoints.cli import main
 
-    # fork is required for workers to see entrypoint patch
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
     if env_dict is not None:
         os.environ.update(env_dict)
 
@@ -50,7 +43,7 @@ def _server_with_logitproc_fqcn(
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
-    """Start vLLM server, inject module with dummy logitproc"""
+    """Start vLLM server with dummy logitproc specified by FQCN."""
     from vllm.entrypoints.cli import main
 
     if env_dict is not None:
@@ -80,8 +73,8 @@ def default_server_args():
 def server(default_server_args, request, monkeypatch):
     """Consider two server configurations:
     (1) --logits-processors cli arg specifies dummy logits processor via fully-
-    qualified class name (FQCN); patch in a dummy logits processor module
-    (2) No --logits-processors cli arg; patch in a dummy logits processor
+    qualified class name (FQCN)
+    (2) No --logits-processors cli arg; inject a dummy logits processor
     entrypoint
     """
 
@@ -94,6 +87,7 @@ def server(default_server_args, request, monkeypatch):
         _server_fxn = _server_with_logitproc_fqcn
     else:
         # Launch server, inject dummy logitproc entrypoint
+        setup_fake_entrypoint(monkeypatch)
         args = default_server_args
         _server_fxn = _server_with_logitproc_entrypoint
 
@@ -119,13 +113,11 @@ api_keyword_args = {
 }
 
 
-@create_new_process_for_each_test()
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
+def test_custom_logitsprocs(server, model_name: str):
     """Test custom logitsprocs when starting OpenAI server from CLI
 
     Launch vLLM OpenAI-compatible server, configured to load a custom logitproc
@@ -139,36 +131,45 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
     token
     """
 
-    use_dummy_logitproc = True
-    for prompt in prompts:
-        # Build request arguments
-        request_keyword_args: dict[str, Any] = {
-            **api_keyword_args,
-        }
-        if use_dummy_logitproc:
-            # 50% of requests pass target_token custom arg
-            target_token = random.choice([128, 67])
-            # For requests which activate the dummy logitproc, choose one of
-            # two `target_token` values which are known not to be EOS tokens
-            request_keyword_args["extra_body"] = {
-                "vllm_xargs": {DUMMY_LOGITPROC_ARG: target_token}
+    import asyncio
+
+    async def _async_main(srv, mn):
+        async with srv.get_async_client() as client:
+            await _run(client)
+
+    async def _run(client):
+        use_dummy_logitproc = True
+        for prompt in prompts:
+            # Build request arguments
+            request_keyword_args: dict[str, Any] = {
+                **api_keyword_args,
             }
-        batch = await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            **request_keyword_args,
-        )
+            if use_dummy_logitproc:
+                # 50% of requests pass target_token custom arg
+                target_token = random.choice([128, 67])
+                # For requests which activate the dummy logitproc, choose one of
+                # two `target_token` values which are known not to be EOS tokens
+                request_keyword_args["extra_body"] = {
+                    "vllm_xargs": {DUMMY_LOGITPROC_ARG: target_token}
+                }
+            batch = await client.completions.create(
+                model=model_name,
+                prompt=prompt,
+                **request_keyword_args,
+            )
 
-        if use_dummy_logitproc:
-            # Only for requests which activate dummy logitproc - validate that
-            # output token is repeated
-            choices: openai.types.CompletionChoice = batch.choices
-            toks = choices[0].logprobs.tokens
-            if not all([x == toks[0] for x in toks]):
-                raise AssertionError(f"Generated {toks} should all be {toks[0]}")
+            if use_dummy_logitproc:
+                # Only for requests which activate dummy logitproc - validate that
+                # output token is repeated
+                choices: openai.types.CompletionChoice = batch.choices
+                toks = choices[0].logprobs.tokens
+                if not all([x == toks[0] for x in toks]):
+                    raise AssertionError(f"Generated {toks} should all be {toks[0]}")
 
-        # Alternate whether to activate dummy logitproc for each request
-        use_dummy_logitproc = not use_dummy_logitproc
+            # Alternate whether to activate dummy logitproc for each request
+            use_dummy_logitproc = not use_dummy_logitproc
+
+    asyncio.run(_async_main(server, model_name))
 
 
 @pytest.mark.asyncio

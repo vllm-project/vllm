@@ -190,13 +190,27 @@ def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--moe-backend",
+            "flashinfer_cutlass",
+            "--quantization-config.moe.activation",
+            "mxfp8",
+        ],
+    )
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--quantization-config.moe.activation",
+            "mxfp8",
+        ],
+    )
 
 
 def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):

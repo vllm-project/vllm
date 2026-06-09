@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -36,7 +38,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    QwenGatedDeltaNetAttention,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -55,6 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
@@ -135,7 +140,12 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        if config.shared_expert_intermediate_size > 0:
+        if (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            or config.shared_expert_intermediate_size <= 0
+        ):
+            self.shared_expert = None
+        else:
             self.shared_expert = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
@@ -146,8 +156,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.shared_expert",
             )
-        else:
-            self.shared_expert = None
 
         self.experts = FusedMoE(
             shared_experts=self.shared_expert,
@@ -162,6 +170,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            n_shared_experts=1 if self.shared_expert is None else None,
+            shared_expert_gate=self.shared_expert_gate
+            if self.shared_expert is None
+            else None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -273,13 +285,50 @@ class Qwen3NextAttention(nn.Module):
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-    def forward(
+        # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
+        # TODO: support MRoPE
+        mm_config = model_config.multimodal_config if model_config else None
+        text_only = mm_config is None or mm_config.language_model_only
+        self.use_fused_qk_norm_rope_gate = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and current_platform.is_cuda()
+            and text_only
+        )
+
+    def _project_qkv_gate(
         self,
+        qkv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ):
-        qkv, _ = self.qkv_proj(hidden_states)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
+
+        Dispatches between the fused Triton kernel and the eager
+        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
+        gating is disabled.
+        """
+        if self.use_fused_qk_norm_rope_gate:
+            q_gate, k, v = qkv.split(
+                [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
+            )
+            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
+            # enabled text-only, where the three rows are identical, so taking
+            # the T row is exact. (1D positions pass through.)
+            pos = positions[0] if positions.ndim == 2 else positions
+            q, k, gate = fused_qk_rmsnorm_rope_gate(
+                q_gate,
+                k,
+                self.q_norm.weight.float() + 1.0,
+                self.k_norm.weight.float() + 1.0,
+                self.rotary_emb.cos_sin_cache,
+                pos,
+                self.q_norm.variance_epsilon,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.rotary_emb.rotary_dim,
+            )
+            return q, k, v, gate
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -292,6 +341,7 @@ class Qwen3NextAttention(nn.Module):
             gate = gate.reshape(*orig_shape, -1)
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            gate = None
 
         q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
             -1, self.num_heads * self.head_dim
@@ -299,15 +349,20 @@ class Qwen3NextAttention(nn.Module):
         k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
             -1, self.num_kv_heads * self.head_dim
         )
-
         q, k = self.rotary_emb(positions, q, k)
+        return q, k, v, gate
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ):
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
-
-        if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
-            attn_output = attn_output * gate
-
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
         output[:], _ = self.o_proj(attn_output)
 
 
@@ -329,7 +384,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
 
         if self.layer_type == "linear_attention":
-            self.linear_attn = GatedDeltaNetAttention(
+            self.linear_attn = QwenGatedDeltaNetAttention(
                 config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
@@ -536,12 +591,15 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        num_experts = getattr(self.config, "num_experts", 0)
+        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            num_experts += 1
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=getattr(self.config, "num_experts", 0),
+            num_experts=num_experts,
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -558,6 +616,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+
+        is_fse = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        num_routed = getattr(self.config, "num_experts", 0)
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -570,6 +632,13 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
+            # FSE: remap shared_expert weights to the fused expert slot
+            if is_fse and "mlp.shared_expert." in name:
+                name = name.replace(
+                    "mlp.shared_expert.",
+                    f"mlp.experts.{num_routed}.",
+                )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

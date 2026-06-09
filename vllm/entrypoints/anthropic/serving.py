@@ -24,11 +24,11 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicError,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
+    AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -39,9 +39,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    JsonSchemaResponseFormat,
+    ResponseFormat,
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -128,6 +131,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._convert_messages(anthropic_request.messages, openai_messages)
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
+        cls._handle_output_config(req, anthropic_request)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -139,23 +143,36 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
     ) -> None:
         """Convert Anthropic system message to OpenAI format"""
-        if not anthropic_request.system:
-            return
+        system_parts: list[str] = []
 
-        if isinstance(anthropic_request.system, str):
-            openai_messages.append(
-                {"role": "system", "content": anthropic_request.system}
-            )
-        else:
-            system_prompt = ""
-            for block in anthropic_request.system:
-                if block.type == "text" and block.text:
-                    # Strip Claude Code's attribution header which contains
-                    # a per-request hash that defeats prefix caching.
-                    if block.text.startswith("x-anthropic-billing-header"):
-                        continue
-                    system_prompt += block.text
-            openai_messages.append({"role": "system", "content": system_prompt})
+        # Top-level system field
+        if anthropic_request.system:
+            if isinstance(anthropic_request.system, str):
+                system_parts.append(anthropic_request.system)
+            else:
+                for block in anthropic_request.system:
+                    if block.type == "text" and block.text:
+                        # Strip Claude Code's attribution header which contains
+                        # a per-request hash that defeats prefix caching.
+                        if block.text.startswith("x-anthropic-billing-header"):
+                            continue
+                        system_parts.append(block.text)
+
+        # System messages embedded inside the messages array
+        for msg in anthropic_request.messages:
+            if msg.role != "system":
+                continue
+            if isinstance(msg.content, str):
+                system_parts.append(msg.content)
+            else:
+                for block in msg.content:
+                    if block.type == "text" and block.text:
+                        if block.text.startswith("x-anthropic-billing-header"):
+                            continue
+                        system_parts.append(block.text)
+
+        if system_parts:
+            openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
     @classmethod
     def _convert_messages(
@@ -163,6 +180,9 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
         for msg in messages:
+            if msg.role == "system":
+                continue
+
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
 
             if isinstance(msg.content, str):
@@ -237,6 +257,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             cls._convert_tool_use_block(block, tool_calls)
         elif block.type == "tool_result":
             cls._convert_tool_result_block(block, role, openai_messages, content_parts)
+        elif block.type == "tool_reference":
+            # Tool references are expanded during tool_result processing
+            # when they appear inside tool_result content.
+            pass
 
     @classmethod
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
@@ -275,6 +299,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Convert user tool_result with text and image support"""
         tool_text = ""
         tool_image_urls: list[str] = []
+        tool_reference: list[dict[str, Any]] = []
 
         if isinstance(block.content, str):
             tool_text = block.content
@@ -291,6 +316,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                     url = cls._convert_image_source_to_url(source)
                     if url:
                         tool_image_urls.append(url)
+                elif item_type == "tool_reference":
+                    ref_name = item.get("tool_name") or item.get("name")
+                    if ref_name:
+                        tool_reference.append(
+                            {"type": "tool_reference", "name": ref_name}
+                        )
             tool_text = "\n".join(text_parts)
 
         openai_messages.append(
@@ -309,6 +340,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                         {"type": "image_url", "image_url": {"url": img}}
                         for img in tool_image_urls
                     ],
+                }
+            )
+
+        if tool_reference:
+            openai_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": block.tool_use_id or "",
+                    "content": tool_reference,  # type: ignore[dict-item]
                 }
             )
 
@@ -338,6 +378,27 @@ class AnthropicServingMessages(OpenAIServingChat):
             kv_transfer_params=anthropic_request.kv_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
+
+    @classmethod
+    def _handle_output_config(
+        cls,
+        req: ChatCompletionRequest,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> None:
+        """Handle output configuration such as output format and effort"""
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            return
+        output_config: AnthropicOutputConfig | None = anthropic_request.output_config
+        if output_config and output_config.format and output_config.format.json_schema:
+            req.response_format = ResponseFormat(
+                type=output_config.format.type,
+                json_schema=JsonSchemaResponseFormat(
+                    schema=output_config.format.json_schema,
+                    name=output_config.format.type,
+                ),
+            )
+        if output_config and output_config.effort is not None:
+            req.reasoning_effort = output_config.effort
 
     @classmethod
     def _handle_streaming_options(
@@ -400,6 +461,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             "name": tool.name,
                             "description": tool.description,
                             "parameters": tool.input_schema,
+                            "defer_loading": tool.defer_loading,
                         },
                     }
                 )
