@@ -123,6 +123,70 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     assert metadata["frames_indices"] == [0, 3, 6, 9]
 
 
+def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    decoded_indices = []
+
+    class FakeMetadata:
+        width = 10
+        height = 20
+        average_fps = 5.0
+        duration = 2.0
+
+    class FakeDecoder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __len__(self):
+            return 10
+
+        def get_stream_metadata(self):
+            return FakeMetadata()
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    class RecordingPool:
+        def __init__(self):
+            self.acquired: list[int] = []
+
+        @contextmanager
+        def acquire(self, size: int):
+            self.acquired.append(size)
+            yield
+
+    def fake_decode(cls, file_path: str, frame_idx: list[int], nvc):
+        decoded_indices.append(frame_idx)
+        return np.zeros((len(frame_idx), 20, 10, 3), dtype=np.uint8)
+
+    pool = RecordingPool()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
+    monkeypatch.setattr(
+        "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
+    )
+    monkeypatch.setattr(
+        DynamicVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+    frames, metadata = loader.load_bytes(
+        b"fake video",
+        fps=2,
+        max_duration=1,
+        backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+
+    assert frames.shape == (2, 20, 10, 3)
+    assert decoded_indices == [[0, 9]]
+    assert pool.acquired == [2 * 20 * 10 * 3]
+    assert metadata["video_backend"] == f"{PYNVVIDEOCODEC_VIDEO_BACKEND}_dynamic"
+    assert metadata["frames_indices"] == [0, 9]
+
+
 def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatch):
     class FakeSlot:
         pass

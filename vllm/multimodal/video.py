@@ -183,7 +183,7 @@ class VideoLoader:
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
-PYNVVIDEOCODEC_VIDEO_BACKEND = "pynvvideocodec"
+PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
 # Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
@@ -513,142 +513,28 @@ class PyAVVideoBackendMixin:
         return np.stack(frames_list), valid_indices
 
 
-@VIDEO_LOADER_REGISTRY.register("opencv")
-class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
-    """Uniform-sampling video backend.
+class PyNvVideoCodecVideoBackendMixin:
+    """PyNvVideoCodec utilities for GPU-backed frame decode."""
 
-    Samples ``num_frames`` uniformly across the video (or one frame every
-    ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
-    is selected via the ``backend`` kwarg (``"opencv"`` or ``"pyav"``),
-    which can be passed through ``--media-io-kwargs``. Defaults to
-    ``"pyav"`` for concurrent decoding.
-    """
-
-    _sampling_suffix: ClassVar[str] = ""
+    _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
+    _active_decoder_slots: ClassVar[int] = 0
+    _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
+    _DEVICE_INDEX: ClassVar[int] = 0
 
     @classmethod
+    @abstractmethod
     def compute_frames_index_to_sample(
         cls,
         source: VideoSourceMetadata,
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
-        total_frames_num = source.total_frames_num
-        duration = source.duration
-        num_frames = target.num_frames
-        fps = target.fps
-        # resample video to target num_frames and fps
-        # - the minimum of the two will be used
-        num_frames_to_sample = total_frames_num
-        if num_frames > 0:
-            num_frames_to_sample = min(num_frames, total_frames_num)
-        if fps > 0:
-            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
-        num_frames_to_sample = max(1, num_frames_to_sample)
-
-        if num_frames_to_sample == total_frames_num:
-            return list(range(num_frames_to_sample))
-        return np.linspace(
-            0, total_frames_num - 1, num_frames_to_sample, dtype=int
-        ).tolist()
+        raise NotImplementedError
 
     @classmethod
+    @abstractmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
-        """Sampling-algorithm-specific metadata adjustment hook."""
-        return source
-
-    @classmethod
-    def load_bytes(
-        cls,
-        data: bytes,
-        num_frames: int = -1,
-        fps: int = -1,
-        max_duration: int = 300,
-        frame_recovery: bool = False,
-        *,
-        backend: Literal["opencv", "pyav"] = "opencv",
-        **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """Load sampled frames from raw video bytes.
-
-        Args:
-            data: Raw video bytes.
-            num_frames: Target number of frames to sample (``-1`` for all).
-            fps: Target FPS for sampling (``-1`` for original).
-            max_duration: Maximum duration in seconds — only used by the
-                dynamic subclass; ignored here.
-            frame_recovery: Enable forward-scan recovery for failed frames.
-                Only honored by the OpenCV codec.
-            backend: Decoding codec — ``"opencv"`` or ``"pyav"`` .
-
-        Returns:
-            Tuple of ``(frames_array, metadata_dict)``.
-        """
-        target = VideoTargetMetadata(
-            num_frames=num_frames, fps=fps, max_duration=max_duration
-        )
-
-        if backend == "opencv":
-            cap = cls.open_video_capture(data)
-            source = cls._prepare_source(cls.get_video_metadata(cap))
-            frame_idx = cls.compute_frames_index_to_sample(
-                source=source, target=target, **kwargs
-            )
-            frames, valid = cls.read_frames(
-                cap,
-                frame_idx,
-                total_frames_num=source.total_frames_num,
-                frame_recovery=frame_recovery,
-            )
-        elif backend == "pyav":
-            assert not frame_recovery, (
-                "frame_recovery is only available for `opencv` backend"
-            )
-            with av.open(BytesIO(data)) as container:
-                source = cls._prepare_source(cls.get_metadata(container))
-                frame_idx = cls.compute_frames_index_to_sample(
-                    source=source, target=target, **kwargs
-                )
-                frames, valid = cls.decode_frames(
-                    container, frame_idx, source.original_fps, source.duration
-                )
-        else:
-            raise ValueError(
-                f"Unknown video codec backend {backend!r}; "
-                "valid options: 'opencv', 'pyav'."
-            )
-
-        if len(valid) < len(frame_idx):
-            logger.warning(
-                "%s video loading: expected %d frames but got %d.",
-                backend,
-                len(frame_idx),
-                len(valid),
-            )
-
-        return frames, cls.create_hf_metadata(
-            source=source,
-            video_backend=f"{backend}{cls._sampling_suffix}",
-            valid_frame_indices=valid,
-        )
-
-
-@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND)
-class PyNvVideoCodecVideoBackend(VideoBackend):
-    """Hardware-accelerated video backend using PyNvVideoCodec.
-
-    The backend first opens the stream only to read metadata and compute the
-    sampled frame indices. It then acquires the raw decoded RGB byte count from
-    the process-local multimodal GPU memory pool before decoding the selected
-    frames into VRAM. Decoded frames are copied into pinned host memory before
-    the lease is released, so downstream preprocessing continues to receive a
-    CPU ``np.ndarray`` in NHWC RGB format.
-    """
-
-    _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
-    _active_decoder_slots: ClassVar[int] = 0
-    _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
-    _DEVICE_INDEX: ClassVar[int] = 0
+        raise NotImplementedError
 
     @classmethod
     def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
@@ -842,35 +728,23 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
                 return host_array
 
     @classmethod
-    def load_bytes(
+    def decode_frames_pynvvideocodec(
         cls,
         data: bytes,
-        num_frames: int = -1,
-        fps: int = -1,
-        max_duration: int = 300,
-        frame_recovery: bool = False,
+        target: VideoTargetMetadata,
         **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        if frame_recovery:
-            raise ValueError(
-                "frame_recovery is not supported for "
-                f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
-            )
-
+    ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
         import PyNvVideoCodec as nvc
 
         from vllm.multimodal.gpu_ipc_memory import get_mm_gpu_ipc_pool
 
-        target = VideoTargetMetadata(
-            num_frames=num_frames, fps=fps, max_duration=max_duration
-        )
         temp_fd, temp_path = tempfile.mkstemp(suffix=".mp4")
         try:
             with os.fdopen(temp_fd, "wb") as temp_file:
                 temp_file.write(data)
 
             gpu_source = cls._read_source_metadata(temp_path, nvc)
-            source = gpu_source.source
+            source = cls._prepare_source(gpu_source.source)
             frame_idx = cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
             )
@@ -886,10 +760,177 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
                 os.unlink(temp_path)
 
         valid_frame_indices = frame_idx[: int(frames.shape[0])]
+        return frames, source, frame_idx, valid_frame_indices
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv")
+class VideoBackend(
+    VideoLoader,
+    OpenCVVideoBackendMixin,
+    PyAVVideoBackendMixin,
+    PyNvVideoCodecVideoBackendMixin,
+):
+    """Uniform-sampling video backend.
+
+    Samples ``num_frames`` uniformly across the video (or one frame every
+    ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
+    is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``, or
+    ``"pynvvideocodec"``), which can be passed through
+    ``--media-io-kwargs``. Defaults to ``"opencv"``.
+    """
+
+    _sampling_suffix: ClassVar[str] = ""
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        duration = source.duration
+        num_frames = target.num_frames
+        fps = target.fps
+        # resample video to target num_frames and fps
+        # - the minimum of the two will be used
+        num_frames_to_sample = total_frames_num
+        if num_frames > 0:
+            num_frames_to_sample = min(num_frames, total_frames_num)
+        if fps > 0:
+            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
+        num_frames_to_sample = max(1, num_frames_to_sample)
+
+        if num_frames_to_sample == total_frames_num:
+            return list(range(num_frames_to_sample))
+        return np.linspace(
+            0, total_frames_num - 1, num_frames_to_sample, dtype=int
+        ).tolist()
+
+    @classmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        """Sampling-algorithm-specific metadata adjustment hook."""
+        return source
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """Load sampled frames from raw video bytes.
+
+        Args:
+            data: Raw video bytes.
+            num_frames: Target number of frames to sample (``-1`` for all).
+            fps: Target FPS for sampling (``-1`` for original).
+            max_duration: Maximum duration in seconds — only used by the
+                dynamic subclass; ignored here.
+            frame_recovery: Enable forward-scan recovery for failed frames.
+                Only honored by the OpenCV codec.
+            backend: Decoding codec — ``"opencv"``, ``"pyav"``, or
+                ``"pynvvideocodec"``.
+
+        Returns:
+            Tuple of ``(frames_array, metadata_dict)``.
+        """
+        target = VideoTargetMetadata(
+            num_frames=num_frames, fps=fps, max_duration=max_duration
+        )
+
+        if backend == "opencv":
+            cap = cls.open_video_capture(data)
+            source = cls._prepare_source(cls.get_video_metadata(cap))
+            frame_idx = cls.compute_frames_index_to_sample(
+                source=source, target=target, **kwargs
+            )
+            frames, valid = cls.read_frames(
+                cap,
+                frame_idx,
+                total_frames_num=source.total_frames_num,
+                frame_recovery=frame_recovery,
+            )
+        elif backend == "pyav":
+            assert not frame_recovery, (
+                "frame_recovery is only available for `opencv` backend"
+            )
+            with av.open(BytesIO(data)) as container:
+                source = cls._prepare_source(cls.get_metadata(container))
+                frame_idx = cls.compute_frames_index_to_sample(
+                    source=source, target=target, **kwargs
+                )
+                frames, valid = cls.decode_frames(
+                    container, frame_idx, source.original_fps, source.duration
+                )
+        elif backend == PYNVVIDEOCODEC_VIDEO_BACKEND:
+            if frame_recovery:
+                raise ValueError(
+                    "frame_recovery is not supported for "
+                    f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
+                )
+            frames, source, frame_idx, valid = cls.decode_frames_pynvvideocodec(
+                data,
+                target,
+                **kwargs,
+            )
+        else:
+            raise ValueError(
+                f"Unknown video codec backend {backend!r}; "
+                "valid options: 'opencv', 'pyav', 'pynvvideocodec'."
+            )
+
+        if len(valid) < len(frame_idx):
+            logger.warning(
+                "%s video loading: expected %d frames but got %d.",
+                backend,
+                len(frame_idx),
+                len(valid),
+            )
+
         return frames, cls.create_hf_metadata(
             source=source,
-            video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
-            valid_frame_indices=valid_frame_indices,
+            video_backend=f"{backend}{cls._sampling_suffix}",
+            valid_frame_indices=valid,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND)
+class PyNvVideoCodecVideoBackend(VideoBackend):
+    """Hardware-accelerated video backend using PyNvVideoCodec.
+
+    The backend first opens the stream only to read metadata and compute the
+    sampled frame indices. It then acquires the raw decoded RGB byte count from
+    the process-local multimodal GPU memory pool before decoding the selected
+    frames into VRAM. Decoded frames are copied into pinned host memory before
+    the lease is released, so downstream preprocessing continues to receive a
+    CPU ``np.ndarray`` in NHWC RGB format.
+    """
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        kwargs.pop("backend", None)
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            **kwargs,
         )
 
 
@@ -971,7 +1012,7 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1070,7 +1111,7 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1389,7 +1430,7 @@ class NemotronVLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
