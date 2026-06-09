@@ -297,13 +297,6 @@ class RayDistributedExecutor(Executor):
                 " each node."
             )
 
-        # Populate assigned_gpu_ids so workers address physical devices
-        # directly instead of relying on CUDA_VISIBLE_DEVICES remapping.
-        for node_id, _ in worker_node_and_gpu_ids:
-            self.vllm_config.parallel_config.assigned_gpu_ids = sorted(
-                node_gpus[node_id]
-            )
-
         all_args_to_update_environment_variables: list[dict[str, str]] = [
             {} for _ in worker_node_and_gpu_ids
         ]

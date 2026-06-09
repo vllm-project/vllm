@@ -36,8 +36,17 @@ def set_assigned_gpu_ids(ids: list[int]) -> None:
     """Set the physical GPU IDs assigned to this worker process.
     Called during worker init so that device_id_to_physical_device_id()
     can map local_rank to the correct physical device without relying
-    on CUDA_VISIBLE_DEVICES."""
+    on CUDA_VISIBLE_DEVICES.
+
+    Idempotent: a second call with the same value is a no-op.
+    Raises AssertionError if called again with a different value."""
     global _assigned_gpu_ids
+    if _assigned_gpu_ids is not None:
+        assert _assigned_gpu_ids == ids, (
+            f"set_assigned_gpu_ids called with conflicting values: "
+            f"existing={_assigned_gpu_ids}, new={ids}"
+        )
+        return
     _assigned_gpu_ids = ids
 
 
@@ -249,6 +258,12 @@ class Platform:
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         if _assigned_gpu_ids is not None:
+            if device_id >= len(_assigned_gpu_ids):
+                raise IndexError(
+                    f"device_id {device_id} is out of range for "
+                    f"assigned_gpu_ids {_assigned_gpu_ids} "
+                    f"({len(_assigned_gpu_ids)} devices assigned)"
+                )
             return _assigned_gpu_ids[device_id]
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in

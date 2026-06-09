@@ -282,6 +282,10 @@ class Worker(WorkerBase):
                     f"local_rank {self.local_rank} is out of bounds for "
                     f"assigned_gpu_ids {assigned}"
                 )
+                assert self.parallel_config.local_world_size <= len(assigned), (
+                    f"local_world_size ({self.parallel_config.local_world_size})"
+                    f" exceeds assigned_gpu_ids count ({len(assigned)})"
+                )
                 device_index = assigned[self.local_rank]
             else:
                 assert self.local_rank < torch.accelerator.device_count(), (
