@@ -10,7 +10,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-from ....utils import dummy_hf_overrides
+from ...utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
