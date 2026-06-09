@@ -265,28 +265,27 @@ ENV DEBIAN_FRONTEND=noninteractive
 # scripts) and unzip (used to extract the pinned protoc release below).
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         dnf install -y --setopt=install_weak_deps=False \
-            ca-certificates curl git gcc gcc-c++ make unzip \
+            ca-certificates curl git gcc gcc-c++ make unzip python3 python3-pip \
         && dnf clean all && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
         && apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential unzip \
+            ca-certificates curl git build-essential unzip python3 python3-pip \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
 COPY tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
-# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain none
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 WORKDIR /workspace
 
-# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs. The binary is the sole artifact we need.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
+COPY tools/build_rust.py tools/build_rust.py
 COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
@@ -299,7 +298,7 @@ ENV CARGO_BUILD_JOBS=4
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/workspace/rust/target \
-    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+    bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -508,7 +507,7 @@ COPY . .
 
 # Drop the pre-built rust frontend binary into the source tree. setup.py
 # detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
