@@ -210,7 +210,7 @@ def run_with_expert_maps(
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hidden_dim=w2.shape[1],
-            intermediate_size_per_partition=w2.shape[2],
+            intermediate_size=w2.shape[2],
             in_dtype=a.dtype,
         )
         kernel = mk.FusedMoEKernel(
@@ -283,7 +283,7 @@ def run_8_bit(
             num_experts=num_experts,
             num_local_experts=num_local_experts,
             hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
-            intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+            intermediate_size=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
             in_dtype=moe_tensors.a.dtype,
         )
         kernel = mk.FusedMoEKernel(
