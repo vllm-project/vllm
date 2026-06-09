@@ -261,6 +261,11 @@ class ECCPUProducer:
                 "peer_port": self._peer_port,
                 "size_bytes": size_bytes,
             }
+        logger.debug(
+            "EC: request_finished req_id=%s params=%s",
+            request.request_id,
+            params,
+        )
         return params or None
 
     def _fifo_alloc(self, n_blocks: int) -> list[int]:

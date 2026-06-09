@@ -486,7 +486,7 @@ class ECCPUConsumer:
                 if blocks is not None:
                     loads[mm_hash] = blocks
                     logger.debug(
-                        "EC: cache hit mm_hash=%s",
+                        "EC: Local mmap cache hit mm_hash=%s",
                         mm_hash,
                     )
         self._pending_reload = set()
