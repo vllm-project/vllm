@@ -412,8 +412,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         can feed it directly to `merge_attn_states` or copy it into the
         final `output` buffer.
         """
-        from vllm.v1.worker.workspace import current_workspace_manager
-
         # AITER ASM kernel requires V contiguous in (seq, head, v_head_dim).
         # cp_gather_cache produces V as a slice of a wider nope+rope buffer
         # (stride[1] = qk_head_dim, not v_head_dim), so force a copy here.
@@ -435,10 +433,27 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
         one_scale = torch.ones((), dtype=torch.float32, device=q.device)
 
-        logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
-            ((num_partial_tiles * tile_q, nhead, v_head_dim), torch.float32),
-            ((num_partial_tiles * tile_q, nhead), torch.float32),
-            ((total_q, nhead), torch.float32),
+        # Allocate scratch directly instead of going through the workspace
+        # manager. The manager is locked after profile_run + graph capture,
+        # but profile_run never exercises a noncausal chunked-context shape,
+        # so the lock-time size is too small and a later long-context request
+        # silently gets an undersized view, causing GPU OOB writes. Direct
+        # torch.empty hits the caching allocator, which amortizes reuse for
+        # the common shapes after warmup.
+        logits = torch.empty(
+            (num_partial_tiles * tile_q, nhead, v_head_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        attn_lse = torch.empty(
+            (num_partial_tiles * tile_q, nhead),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        final_lse = torch.empty(
+            (total_q, nhead),
+            dtype=torch.float32,
+            device=q.device,
         )
 
         self._mla_prefill_ps_asm_fwd(
