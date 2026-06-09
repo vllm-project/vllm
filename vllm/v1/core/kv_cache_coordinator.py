@@ -669,8 +669,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     hit_blocks_by_group[group_id] = blocks
 
                 # Collect information on the longest cached prefix overall
-                # (no matter the attention type) to allow for more complex
-                # caching policies
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
 
             if curr_hit_length >= hit_length:
@@ -687,11 +685,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
 
-        # Uncached shared prefix detection heuristic:
-        # If any attention group cached a longer prefix than the current common
-        # prefix, there was a request with a shared prefix of at least that
-        # length in the past. Return the length of such common prefix.
-        # Implementation: Use an attribute to avoid function return signature change.
+        # Uncached shared prefix detection: If any attn. group cached a longer prefix
+        # than the current prefix, it is an uncached common prefix across requests:
         self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group

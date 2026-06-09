@@ -1029,11 +1029,8 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 
     HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
-    uncached prefix is detected. The heuristic is useful for mamba align cache,
-    where num_uncached_common is a hint consumed by the scheduler.
-
-    Scheduler consumes the hint in _mamba_block_aligned_split to enforce
-    scheduling aligned with the common prefix.
+    uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split
+    enforces scheduling aligned with the common prefix.
     """
     block_size = 16
     manager = make_kv_cache_manager(
@@ -1043,12 +1040,9 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         hash_block_size=block_size,
     )
     hash_fn = sha256
-    prefix = [i for i in range(3) for _ in range(block_size)]
 
-    # Request: 3 blocks -> block-aligned to ensure caching of the last block:
-    # - mamba_align caches the last state only
-    # - the cache manager assigns block hashes to full blocks only
-    # - this means that we need to schedule a block-aligned request to have state cached
+    # Request: 3 blocks
+    prefix = [i for i in range(3) for _ in range(block_size)]
     req_0 = make_request("0", prefix, block_size, hash_fn)
     computed_blocks, num_computed = manager.get_computed_blocks(req_0)
     num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
@@ -1071,7 +1065,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
     assert num_uncached_common == 2 * block_size  # heuristic detects a shared prefix
 
-    # Validate scheduler logic for num_uncached_common_prefix_tokens > 0
+    # Next, validate scheduler logic for num_uncached_common_prefix_tokens > 0
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size), use_eagle=False

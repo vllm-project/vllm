@@ -338,28 +338,14 @@ class Scheduler(SchedulerInterface):
                 pass
 
             # Marconi cache admission optimization:
-            # Create cache entries at divergence points of common prefixes.
-            #
-            # Implementation:
-            # If uncached common prefix (num_uncached_common_prefix_tokens)
-            # is long enough to justify its caching ( >= block_size)
-            #   AND
-            # currently scheduled token count is longer than the common prefix
+            # cache common prefixes by scheduling num_new_tokens = common prefix length
             if (
                 num_uncached_common_prefix_tokens >= block_size
                 and num_new_tokens > num_uncached_common_prefix_tokens
             ):
-                # Then force to cache at the end of the common prefix
-                # by limiting the num_new_tokens to the length of that prefix:
                 num_new_tokens = num_uncached_common_prefix_tokens
-                # This should be still block aligned as:
-                #  - token hit counts are block aligned
-                #  - thus num_uncached_common_prefix_tokens is block aligned
-                #  - attention and mamba block sizes are equal
-                # Optionally, we can verify this:
-                assert num_new_tokens % block_size == 0
-                # Or force block re-alignment:
-                # num_new_tokens = num_new_tokens // block_size * block_size
+                # keep alignment to block_size
+                num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -638,16 +624,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                     # In case of hybrid models, obtain hint for Marconi-style APC logic
-                    # More proper check for hybrid model case would be:
-                    # if isinstance(self.kv_cache_manager.coordinator,
-                    #               HybridKVCacheCoordinator):
-                    # but the check below is similar and avoids
-                    # importing HybridKVCacheCoordinator:
                     if self.has_mamba_layers:
-                        # obtain num_uncached_common_prefix_tokens from coordinator's
-                        # attribute if exists, else 0
-                        # (alternative solution: pass as a return value, but
-                        # this would require multiple function signature changes)
                         num_uncached_common_prefix_tokens = getattr(
                             self.kv_cache_manager.coordinator,
                             "num_uncached_common_prefix_tokens",
