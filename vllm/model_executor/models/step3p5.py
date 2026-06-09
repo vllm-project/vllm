@@ -310,7 +310,13 @@ class FusedMoEBlock(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
         self.n_routed_experts = config.moe_num_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        self.n_redundant_experts = (
+            parallel_config.eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
+            else 0
+        )
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 

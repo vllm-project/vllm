@@ -179,7 +179,13 @@ class MoEMixin(MixtureOfExperts):
             ("linear", "linear_1", "linear_v"),  # Grok1 style
         ]
         num_experts = self.model_config.get_num_experts()
-        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
+        num_redundant_experts = (
+            self.parallel_config.eplb_config.get_num_redundant_experts(
+                num_experts, get_ep_group().world_size
+            )
+            if self.parallel_config.enable_eplb
+            else 0
+        )
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 fused_moe_make_expert_params_mapping(
@@ -241,10 +247,16 @@ class MoEMixin(MixtureOfExperts):
 
         # Expert parallel load balancing kwargs
         enable_eplb = self.parallel_config.enable_eplb
-        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
 
         # MixtureOfExperts mixin settings
         ep_size = get_ep_group().world_size
+        num_redundant_experts = (
+            self.parallel_config.eplb_config.get_num_redundant_experts(
+                self.model_config.get_num_experts(), ep_size
+            )
+            if enable_eplb
+            else 0
+        )
 
         self.mlp_moe_layers = []  # Used for MixtureOfExperts methods
         self.moe_layers = []

@@ -119,11 +119,15 @@ class Llama4MoE(nn.Module):
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config if parallel_config else None
         self.enable_eplb = parallel_config.enable_eplb if parallel_config else False
-        self.n_redundant_experts = (
-            eplb_config.num_redundant_experts if eplb_config else 0
-        )
 
         self.n_routed_experts: int = config.num_local_experts
+        self.n_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
+            else 0
+        )
         self.n_logical_experts = self.n_routed_experts
         self.n_shared_experts: int = 1
         self.n_local_experts: int = config.num_local_experts
@@ -395,7 +399,11 @@ class Llama4Model(LlamaModel):
     ):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
         self.n_redundant_experts = (
-            vllm_config.parallel_config.eplb_config.num_redundant_experts
+            vllm_config.parallel_config.eplb_config.get_num_redundant_experts(
+                self.num_experts, get_ep_group().world_size
+            )
+            if vllm_config.parallel_config.enable_eplb
+            else 0
         )
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 

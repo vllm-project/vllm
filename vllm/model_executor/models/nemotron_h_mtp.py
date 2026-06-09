@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -331,10 +332,21 @@ class NemotronHMTP(nn.Module, SupportsPP):
         self.mtp_start_layer_idx = config.num_hidden_layers
 
         # EPLB config for experts
+        num_routed_experts = getattr(config, "n_routed_experts", None)
+        if getattr(config, "model_type", None) == "nemotron_h_puzzle":
+            num_routed_experts = config.mtp_n_routed_experts
+
         self.num_redundant_experts = 0
-        if vllm_config.parallel_config and vllm_config.parallel_config.eplb_config:
+        if (
+            vllm_config.parallel_config
+            and vllm_config.parallel_config.eplb_config
+            and vllm_config.parallel_config.enable_eplb
+            and num_routed_experts is not None
+        ):
             self.num_redundant_experts = (
-                vllm_config.parallel_config.eplb_config.num_redundant_experts
+                vllm_config.parallel_config.eplb_config.get_num_redundant_experts(
+                    num_routed_experts, get_ep_group().world_size
+                )
             )
 
         # MTP predictor
