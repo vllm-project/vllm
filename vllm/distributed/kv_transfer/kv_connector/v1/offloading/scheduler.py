@@ -563,6 +563,7 @@ class OffloadingConnectorScheduler:
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
+        num_hit_tokens: int | None
         if request.skip_reading_prefix_cache:
             num_hit_tokens = 0
         else:
