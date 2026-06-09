@@ -82,10 +82,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Diagnostic flag for descriptor debugging. Set to True to enable verbose
-# logging of KV cache registration, descriptor building, and transfer data.
-_DESC_DEBUG = True
-
 
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
@@ -105,25 +101,6 @@ class NixlConnectorWorker:
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
         num_fa_descs = num_fa_regions * num_blocks
-
-        if _DESC_DEBUG:
-            logger.warning(
-                "[DESC-DEBUG] _compute_desc_ids: num_fa_regions=%s, "
-                "num_ssm_regions=%s, dst_num_blocks=%s, block_size_ratio=%s, "
-                "physical_blocks_per_logical=%s => num_blocks=%s, "
-                "num_fa_descs=%s (FA/Mamba boundary), "
-                "block_ids_lengths=%s, group_spec_types=%s",
-                num_fa_regions,
-                num_ssm_regions,
-                dst_num_blocks,
-                block_size_ratio,
-                physical_blocks_per_logical,
-                num_blocks,
-                num_fa_descs,
-                [len(g) for g in block_ids],
-                [t.__name__ for t in self._group_spec_types],
-            )
-
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
             # NOTE (NickLucche) With HMA, every kv group has the same number of layers
@@ -170,15 +147,6 @@ class NixlConnectorWorker:
                 )
 
         result = np.concatenate(all_descs)
-        if _DESC_DEBUG:
-            sample = result[:10].tolist() if len(result) > 10 else result.tolist()
-            logger.warning(
-                "[DESC-DEBUG] _compute_desc_ids result: total=%d, "
-                "per_group_counts=%s, sample_ids=%s",
-                len(result),
-                [len(d) for d in all_descs],
-                sample,
-            )
         return result
 
     def _build_local_splits_from_plan(
@@ -900,31 +868,6 @@ class NixlConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
-            if _DESC_DEBUG:
-                cache_type = type(cache_or_caches).__name__
-                if isinstance(cache_or_caches, torch.Tensor):
-                    cache_info = f"Tensor(shape={tuple(cache_or_caches.shape)}, dtype={cache_or_caches.dtype})"
-                elif isinstance(cache_or_caches, (tuple, list)):
-                    parts = []
-                    for c in cache_or_caches:
-                        if isinstance(c, torch.Tensor):
-                            parts.append(
-                                f"Tensor(shape={tuple(c.shape)}, ptr=0x{c.data_ptr():x})"
-                            )
-                        else:
-                            parts.append(type(c).__name__)
-                    cache_info = f"({', '.join(parts)})"
-                else:
-                    cache_info = cache_type
-                logger.warning(
-                    "[DESC-DEBUG] register layer=%s: spec=%s, is_ssm=%s, "
-                    "cache_type=%s, cache_info=%s",
-                    layer_name,
-                    type(layer_spec).__name__,
-                    isinstance(layer_spec, MambaSpec),
-                    cache_type,
-                    cache_info,
-                )
             cache_list = self.transfer_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
@@ -974,39 +917,7 @@ class NixlConnectorWorker:
                     # regions.
                     if is_attn:
                         self._attn_block_len[idx] = physical_page_size
-                        if _DESC_DEBUG:
-                            ssm_stride = self.block_len_per_layer[idx]
-                            logger.warning(
-                                "[DESC-DEBUG] DUAL-PURPOSE region %d: "
-                                "ssm_block_len=%d, attn_block_len=%d, "
-                                "stride_mismatch=%s",
-                                idx,
-                                ssm_stride,
-                                physical_page_size,
-                                ssm_stride != physical_page_size,
-                            )
-                    if _DESC_DEBUG:
-                        logger.warning(
-                            "[DESC-DEBUG] SKIP layer=%s: base=0x%x already seen "
-                            "(spec=%s, is_ssm=%s, is_attn=%s)",
-                            layer_name,
-                            base_addr,
-                            type(layer_spec).__name__,
-                            is_ssm,
-                            is_attn,
-                        )
                     continue
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] REGISTER layer=%s: base=0x%x shape=%s "
-                        "spec=%s is_ssm=%s page_size=%d",
-                        layer_name,
-                        base_addr,
-                        tuple(cache.shape),
-                        type(layer_spec).__name__,
-                        isinstance(layer_spec, MambaSpec),
-                        physical_page_size,
-                    )
                 seen_base_addresses.append(base_addr)
                 is_ssm = isinstance(layer_spec, MambaSpec)
                 is_attn = not is_ssm
@@ -1053,36 +964,6 @@ class NixlConnectorWorker:
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
-
-        if _DESC_DEBUG:
-            dual_purpose = [
-                i
-                for i in range(len(self._is_ssm_region))
-                if i < len(self._is_attn_region)
-                and self._is_ssm_region[i]
-                and self._is_attn_region[i]
-            ]
-            logger.warning(
-                "[DESC-DEBUG] register_kv_caches summary: "
-                "num_unique_regions=%d, is_ssm_region=%s, "
-                "block_len_per_layer=%s, attn_block_len=%s, "
-                "dual_purpose_regions=%s, group_spec_types=%s, "
-                "has_mamba=%s, use_mla=%s, "
-                "physical_blocks_per_logical=%s, logical_num_blocks=%s, "
-                "num_blocks=%s",
-                len(seen_base_addresses),
-                self._is_ssm_region,
-                self.block_len_per_layer,
-                self._attn_block_len,
-                dual_purpose,
-                [t.__name__ for t in self._group_spec_types],
-                self._has_mamba,
-                self.use_mla,
-                self._physical_blocks_per_logical_kv_block,
-                self._logical_num_blocks,
-                self.num_blocks,
-            )
-
         # Expand NIXL registration size for dual-purpose regions.  KDA
         # registers first with its stride (542720 bytes/block), but the
         # physical allocation uses max(KDA, MLA) = 552960 bytes/block.
@@ -1104,15 +985,6 @@ class NixlConnectorWorker:
                 if old_size != new_size:
                     base, _, device, label = caches_data[idx]
                     caches_data[idx] = (base, new_size, device, label)
-                    if _DESC_DEBUG:
-                        logger.warning(
-                            "[DESC-DEBUG] DUAL-PURPOSE registration size: "
-                            "region %d, original=%d, expanded=%d",
-                            idx,
-                            old_size,
-                            new_size,
-                        )
-
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         # FA regions count only attention layers.  SSM/Mamba regions are
         # served by Mamba descriptors, not FA descriptors, and must be
@@ -1123,18 +995,6 @@ class NixlConnectorWorker:
         # HMA dual-purpose regions (both SSM and attn) are counted here.
         num_attention_base = sum(self._is_attn_region)
         self.num_regions = num_attention_base
-
-        if _DESC_DEBUG:
-            logger.warning(
-                "[DESC-DEBUG] Region counts: total_caches_data=%d, "
-                "num_ssm_regions=%d, num_attention_base=%d, "
-                "num_regions_before_split=%d",
-                len(caches_data),
-                sum(self._is_ssm_region),
-                num_attention_base,
-                self.num_regions,
-            )
-
         if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
@@ -1228,28 +1088,7 @@ class NixlConnectorWorker:
             # outside their registered memory, causing prepXferDlist failures.
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if not self._is_ssm_region[i]:
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_mamba_local: SKIP region %d "
-                        "(not SSM), base=0x%x",
-                        i,
-                        base_addr,
-                    )
                 continue
-            if _DESC_DEBUG:
-                logger.warning(
-                    "[DESC-DEBUG] _build_mamba_local: BUILD region %d "
-                    "(SSM), base=0x%x, page_stride=%d, conv_offsets=%s, "
-                    "ssm_size=%d, num_blocks=%d",
-                    i,
-                    base_addr,
-                    self.block_len_per_layer[i]
-                    // block_size_ratio
-                    * physical_per_logical,
-                    conv_offsets,
-                    ssm_size,
-                    num_blocks,
-                )
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
             page_stride = (
@@ -1304,28 +1143,7 @@ class NixlConnectorWorker:
             # Only build Mamba descriptors for SSM/Mamba regions.
             # Attention/MLA regions do not contain conv or temporal state.
             if i < len(self._is_ssm_region) and not self._is_ssm_region[i]:
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_mamba_remote: SKIP region %d "
-                        "(not SSM), remote_base=0x%x",
-                        i,
-                        base_addr,
-                    )
                 continue
-            if _DESC_DEBUG:
-                logger.warning(
-                    "[DESC-DEBUG] _build_mamba_remote: BUILD region %d "
-                    "(SSM), remote_base=0x%x, page_stride=%d, "
-                    "conv_offsets=%s, ssm_read_size=%d, "
-                    "local_offset=%d, num_blocks=%d",
-                    i,
-                    base_addr,
-                    nixl_agent_meta.block_lens[i] * remote_physical_per_logical,
-                    conv_offsets,
-                    ssm_read_size,
-                    local_offset,
-                    num_blocks,
-                )
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
@@ -1355,12 +1173,6 @@ class NixlConnectorWorker:
             # SSM/Mamba regions are served by Mamba descriptors.
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_fa_local: SKIP region %d (not attn), base=0x%x",
-                        i,
-                        base_addr,
-                    )
                 continue
             # For dual-purpose regions (HMA), block_len_per_layer stores the
             # KDA/SSM stride.  FA descriptors must use the attention spec's
@@ -1373,14 +1185,6 @@ class NixlConnectorWorker:
                     kv_block_len = attn_stride
                 kv_block_len = kv_block_len // block_size_ratio
                 page_stride = attn_stride // block_size_ratio
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_fa_local: DUAL-PURPOSE region %d, "
-                        "using attn_stride=%d (ssm_stride=%d)",
-                        i,
-                        page_stride,
-                        self.block_len_per_layer[i] // block_size_ratio,
-                    )
             else:
                 kv_block_len = (
                     self.get_backend_aware_kv_block_len(
@@ -1389,18 +1193,6 @@ class NixlConnectorWorker:
                     // block_size_ratio
                 )
                 page_stride = self.block_len_per_layer[i] // block_size_ratio
-            if _DESC_DEBUG:
-                logger.warning(
-                    "[DESC-DEBUG] _build_fa_local: BUILD region %d "
-                    "(attn), base=0x%x, kv_block_len=%d, page_stride=%d, "
-                    "num_blocks=%d, virtual_split=%s",
-                    i,
-                    base_addr,
-                    kv_block_len,
-                    page_stride,
-                    num_blocks,
-                    self.transfer_topo.virtually_split_kv_in_blocks,
-                )
             for block_id in range(num_blocks):
                 block_offset = block_id * page_stride
                 addr = base_addr + block_offset
@@ -1442,30 +1234,7 @@ class NixlConnectorWorker:
             # SSM/Mamba regions are served by Mamba descriptors.
             # Dual-purpose regions (HMA) get both FA and Mamba descs.
             if i < len(self._is_attn_region) and not self._is_attn_region[i]:
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_fa_remote: SKIP region %d "
-                        "(not attn), remote_base=0x%x",
-                        i,
-                        base_addr,
-                    )
                 continue
-            if _DESC_DEBUG:
-                local_block_len = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=True, mamba_view=False
-                )
-                logger.warning(
-                    "[DESC-DEBUG] _build_fa_remote: BUILD region %d "
-                    "(attn), remote_base=0x%x, local_block_len=%d, "
-                    "remote_block_len=%d, num_blocks=%d, "
-                    "num_attn_reads=%d",
-                    i,
-                    base_addr,
-                    local_block_len,
-                    nixl_agent_meta.block_lens[i],
-                    num_blocks,
-                    num_attn_reads,
-                )
             # Read our whole local region size from remote..
             # For dual-purpose regions, use the attention spec's stride instead
             # of block_len_per_layer (which stores KDA's stride).
@@ -1475,14 +1244,6 @@ class NixlConnectorWorker:
                     local_block_len = attn_stride // 2
                 else:
                     local_block_len = attn_stride
-                if _DESC_DEBUG:
-                    logger.warning(
-                        "[DESC-DEBUG] _build_fa_remote: DUAL-PURPOSE region %d, "
-                        "using attn_stride=%d (remote_block_lens=%d)",
-                        i,
-                        attn_stride,
-                        nixl_agent_meta.block_lens[i],
-                    )
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=True, mamba_view=False
@@ -1553,7 +1314,6 @@ class NixlConnectorWorker:
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
         blocks_data = self._build_fa_local(local_base_addresses, block_size_ratio)
-        fa_desc_count = len(blocks_data)
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
@@ -1573,44 +1333,6 @@ class NixlConnectorWorker:
             blocks_data.extend(
                 self._build_mamba_local(local_base_addresses, block_size_ratio)
             )
-
-        if _DESC_DEBUG:
-            mamba_desc_count = len(blocks_data) - fa_desc_count
-            logger.warning(
-                "[DESC-DEBUG] register_local_xfer_handler: "
-                "fa_desc_count=%d, mamba_desc_count=%d, total=%d, "
-                "num_descs(boundary)=%d, num_regions=%d, num_blocks=%d, "
-                "is_ssm_region=%s",
-                fa_desc_count,
-                mamba_desc_count,
-                len(blocks_data),
-                self.num_descs,
-                self.num_regions,
-                self.num_blocks,
-                self._is_ssm_region,
-            )
-            # Spot-check first/last FA desc and first/last Mamba desc
-            if blocks_data:
-                logger.warning(
-                    "[DESC-DEBUG] local FA desc[0]: addr=0x%x size=%d dev=%d",
-                    *blocks_data[0],
-                )
-                if fa_desc_count > 1:
-                    logger.warning(
-                        "[DESC-DEBUG] local FA desc[%d]: addr=0x%x size=%d dev=%d",
-                        fa_desc_count - 1,
-                        *blocks_data[fa_desc_count - 1],
-                    )
-                if mamba_desc_count > 0:
-                    logger.warning(
-                        "[DESC-DEBUG] local Mamba desc[0]: addr=0x%x size=%d dev=%d",
-                        *blocks_data[fa_desc_count],
-                    )
-                    logger.warning(
-                        "[DESC-DEBUG] local Mamba desc[last]: addr=0x%x size=%d dev=%d",
-                        *blocks_data[-1],
-                    )
-
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
@@ -1793,7 +1515,6 @@ class NixlConnectorWorker:
             nixl_agent_meta,
             block_size_ratio,
         )
-        remote_fa_count = len(blocks_data)
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1814,36 +1535,6 @@ class NixlConnectorWorker:
                     transfer_info,
                 )
             )
-
-        if _DESC_DEBUG:
-            remote_mamba_count = len(blocks_data) - remote_fa_count
-            logger.warning(
-                "[DESC-DEBUG] add_remote_agent: remote_fa_descs=%d, "
-                "remote_mamba_descs=%d, total_remote=%d, "
-                "tp_ratio=%s, block_size_ratio=%s, "
-                "remote_num_blocks=%s, remote_base_addrs=%d, "
-                "remote_block_lens=%s",
-                remote_fa_count,
-                remote_mamba_count,
-                len(blocks_data),
-                tp_ratio,
-                block_size_ratio,
-                nixl_agent_meta.num_blocks,
-                len(nixl_agent_meta.kv_caches_base_addr),
-                nixl_agent_meta.block_lens,
-            )
-            # Spot-check remote descriptors
-            if blocks_data:
-                logger.warning(
-                    "[DESC-DEBUG] remote FA desc[0]: addr=0x%x size=%d dev=%d",
-                    *blocks_data[0],
-                )
-                if remote_mamba_count > 0:
-                    logger.warning(
-                        "[DESC-DEBUG] remote Mamba desc[0]: addr=0x%x size=%d dev=%d",
-                        *blocks_data[remote_fa_count],
-                    )
-
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         self.dst_xfer_side_handles[engine_id][remote_tp_rank] = (
@@ -2182,10 +1873,6 @@ class NixlConnectorWorker:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
-
-            # Spot-check KV tensor values after transfer
-            if _DESC_DEBUG and meta.remote is not None:
-                self._spot_check_kv_after_recv(req_id, meta)
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -2563,7 +2250,7 @@ class NixlConnectorWorker:
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
+        if self.use_mla and tp_ratio < 0 and read_specs and not self._has_mamba:
             # MLA attention KV is replicated across P ranks. D reads from
             # one P rank, but other P ranks also hold the same KV and need
             # to be notified so they can release blocks early (vs. timeout).
@@ -2576,12 +2263,11 @@ class NixlConnectorWorker:
             # request" errors because the P-side request tracking dicts
             # (_reqs_to_send / _reqs_to_process) are only populated on the
             # decode side.
-            if not self._has_mamba:
-                notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-                remote_agents = self._remote_agents[meta.remote.engine_id]
-                for rank_to_notify, agent in remote_agents.items():
-                    if rank_to_notify != read_specs[0].remote_rank:
-                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+            remote_agents = self._remote_agents[meta.remote.engine_id]
+            for rank_to_notify, agent in remote_agents.items():
+                if rank_to_notify != read_specs[0].remote_rank:
+                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
         self,
@@ -2696,38 +2382,6 @@ class NixlConnectorWorker:
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
-
-        if _DESC_DEBUG:
-            local_sample = local_block_descs_ids[:10].tolist()
-            remote_sample = remote_block_descs_ids[:10].tolist()
-            logger.warning(
-                "[DESC-DEBUG] _read_blocks req=%s: num_desc_pairs=%d, "
-                "local_block_ids=%s, remote_block_ids=%s, "
-                "local_desc_sample=%s, remote_desc_sample=%s",
-                request_id,
-                len(local_block_descs_ids),
-                [ids[:3] for ids in local_block_ids],
-                [ids[:3] for ids in remote_block_ids],
-                local_sample,
-                remote_sample,
-            )
-            # Spot-check descriptor content (addr/size) from src/dst blocks
-            if hasattr(self, "src_blocks_data") and self.src_blocks_data:
-                for check_idx in [0, -1]:
-                    if check_idx < len(local_block_descs_ids):
-                        did = local_block_descs_ids[check_idx]
-                        if 0 <= did < len(self.src_blocks_data):
-                            addr, sz, dev = self.src_blocks_data[did]
-                            logger.warning(
-                                "[DESC-DEBUG] local_desc[%d]=%d => "
-                                "src_blocks_data: addr=0x%x size=%d dev=%d",
-                                check_idx,
-                                did,
-                                addr,
-                                sz,
-                                dev,
-                            )
-
         # Prepare transfer with Nixl.
         handle = None
         try:
@@ -2756,159 +2410,6 @@ class NixlConnectorWorker:
                 remote_rank=remote_rank,
             )
             self._handle_failed_transfer(request_id, handle)
-
-    # Counter for spot-check rate limiting
-    _spot_check_count: int = 0
-
-    def _spot_check_kv_after_recv(self, req_id: str, meta: ReqMeta) -> None:
-        """Spot-check KV tensor values after a transfer completes."""
-        NixlConnectorWorker._spot_check_count += 1
-        if NixlConnectorWorker._spot_check_count > 5:
-            return  # Only check the first few transfers
-
-        num_kv_caches = len(self.device_kv_caches)
-        logger.warning(
-            "[DESC-DEBUG] _spot_check_kv_after_recv req=%s "
-            "num_kv_caches=%d local_block_ids=%s",
-            req_id,
-            num_kv_caches,
-            [ids[:3] for ids in meta.local_physical_block_ids],
-        )
-
-        # Dump ALL keys with types and shapes so we can find MLA entries
-        all_keys_info = []
-        for k, v in self.device_kv_caches.items():
-            if isinstance(v, torch.Tensor):
-                all_keys_info.append(f"{k}=Tensor{tuple(v.shape)}")
-            elif isinstance(v, (tuple, list)):
-                parts = []
-                for c in v:
-                    if isinstance(c, torch.Tensor):
-                        parts.append(f"T{tuple(c.shape)}")
-                    else:
-                        parts.append(type(c).__name__)
-                all_keys_info.append(f"{k}=({','.join(parts)})")
-            else:
-                all_keys_info.append(f"{k}={type(v).__name__}")
-        logger.warning("[DESC-DEBUG]   device_kv_caches keys: %s", all_keys_info)
-
-        # Memory-efficient spot check: only examine transferred blocks,
-        # not the full tensor (which can be >100 GB and cause OOM).
-        block_ids = meta.local_physical_block_ids
-
-        # Collect unique block IDs to check (across all groups)
-        bids_to_check: list[int] = []
-        for bids in block_ids[:4]:
-            for bid in bids[:2]:
-                if bid not in bids_to_check:
-                    bids_to_check.append(bid)
-
-        # Per-group block IDs: for correct spot-checking, each layer type
-        # should only check its own group's blocks.
-        # Groups: MambaSpec×N + MLAAttentionSpec×1
-        mamba_group_bids: list[int] = []
-        attn_group_bids: list[int] = []
-        for gi, bids in enumerate(block_ids):
-            if gi < len(self._group_spec_types) and _is_attention_spec(
-                self._group_spec_types[gi]
-            ):
-                attn_group_bids.extend(bids[:2])
-            else:
-                mamba_group_bids.extend(bids[:2])
-
-        # Helper to spot-check one layer's transferred blocks
-        def _check_layer(
-            label: str,
-            name: str,
-            t: torch.Tensor,
-            group_bids: list[int] | None = None,
-        ) -> None:
-            check_bids = group_bids if group_bids else bids_to_check[:4]
-            block_stats = ""
-            for bid in check_bids[:4]:
-                if bid < t.shape[0]:
-                    blk = t[bid].float()
-                    block_stats += (
-                        f" blk[{bid}]:mean={blk.mean():.6f}"
-                        f",std={blk.std():.6f}"
-                        f",nan={torch.isnan(blk).any().item()}"
-                        f",inf={torch.isinf(blk).any().item()}"
-                        f",f4={blk.flatten()[:4].tolist()}"
-                    )
-            logger.warning(
-                "[DESC-DEBUG]   %s layer=%s shape=%s dtype=%s%s",
-                label,
-                name,
-                tuple(t.shape),
-                t.dtype,
-                block_stats,
-            )
-
-        # Check first 2 KDA layers (conv_state bf16 + ssm_state fp32 from tuple)
-        checked = 0
-        for layer_name, cache_val in list(self.device_kv_caches.items()):
-            if checked >= 2:
-                break
-            if isinstance(cache_val, (tuple, list)):
-                t = cache_val[0] if len(cache_val) > 0 else None
-                if t is None or not isinstance(t, torch.Tensor):
-                    continue
-                if ".attn" in layer_name:
-                    continue  # skip MLA entries here
-                # Check conv_state (bf16) — index 0
-                _check_layer("SSM-conv", layer_name, t, mamba_group_bids)
-                # Check ssm_state (fp32) — index 1
-                if len(cache_val) > 1:
-                    ssm_t = cache_val[1]
-                    if isinstance(ssm_t, torch.Tensor):
-                        _check_layer(
-                            "SSM-ssm(fp32)", layer_name, ssm_t, mamba_group_bids
-                        )
-                        # Verify ssm_state view alignment: data_ptr should be
-                        # offset past conv_state within the shared tensor.
-                        conv_ptr = t.data_ptr()
-                        ssm_ptr = ssm_t.data_ptr()
-                        ptr_diff = ssm_ptr - conv_ptr
-                        if self._mamba_ssm_size is not None:
-                            expected_conv_bytes = self._mamba_ssm_size[0]
-                            logger.warning(
-                                "[DESC-DEBUG]   SSM alignment: "
-                                "conv_ptr=0x%x, ssm_ptr=0x%x, "
-                                "ptr_diff=%d, expected_conv=%d, "
-                                "match=%s, ssm_stride=%s",
-                                conv_ptr,
-                                ssm_ptr,
-                                ptr_diff,
-                                expected_conv_bytes,
-                                ptr_diff == expected_conv_bytes,
-                                ssm_t.stride(),
-                            )
-                checked += 1
-
-        # CRITICAL: Check ALL MLA layers (keys containing ".self_attn.attn")
-        # Use attn_group_bids so we check the MLA group's actual blocks,
-        # not the KDA group's blocks.
-        mla_count = 0
-        for layer_name, cache_val in self.device_kv_caches.items():
-            if ".attn" not in layer_name:
-                continue
-            if isinstance(cache_val, torch.Tensor):
-                _check_layer("MLA", layer_name, cache_val, attn_group_bids)
-                mla_count += 1
-            elif isinstance(cache_val, (tuple, list)):
-                for i, c in enumerate(cache_val):
-                    if isinstance(c, torch.Tensor):
-                        _check_layer(f"MLA[{i}]", layer_name, c, attn_group_bids)
-                        mla_count += 1
-
-        if checked == 0 and mla_count == 0:
-            logger.warning(
-                "[DESC-DEBUG]   No torch.Tensor found in device_kv_caches. Types: %s",
-                {
-                    k: type(v).__name__
-                    for k, v in list(self.device_kv_caches.items())[:4]
-                },
-            )
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
