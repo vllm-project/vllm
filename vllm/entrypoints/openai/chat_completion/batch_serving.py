@@ -8,7 +8,7 @@ from http import HTTPStatus
 
 from fastapi import Request
 
-from vllm.entrypoints.chat_utils import ConversationMessage
+from vllm.entrypoints.chat_utils import ConversationMessage, flatten_content_to_text
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionResponse,
@@ -283,12 +283,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
                 if request.echo:
                     conversation = all_conversations[prompt_idx]
-                    last_msg_content: str | list[dict[str, str]] = ""
+                    last_msg_content = ""
                     if conversation and "content" in conversation[-1]:
-                        last_msg_content = conversation[-1]["content"] or ""
-                    if isinstance(last_msg_content, list):
-                        last_msg_content = "\n".join(
-                            msg["text"] for msg in last_msg_content
+                        last_msg_content = flatten_content_to_text(
+                            conversation[-1]["content"]
                         )
                     message.content = last_msg_content + (message.content or "")
 

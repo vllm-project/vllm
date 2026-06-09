@@ -17,6 +17,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    flatten_content_to_text,
     get_history_tool_calls_cnt,
     get_tool_call_id_type,
     make_tool_call_id,
@@ -555,13 +556,15 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: str | list[dict[str, str]] = ""
+                        last_msg_content = ""
                         if (
                             conversation
                             and "content" in conversation[-1]
                             and conversation[-1].get("role") == role
                         ):
-                            last_msg_content = conversation[-1]["content"] or ""
+                            last_msg_content = flatten_content_to_text(
+                                conversation[-1]["content"]
+                            )
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -1279,15 +1282,13 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: str | list[dict[str, str]] = ""
+            last_msg_content = ""
             if (
                 conversation
                 and "content" in conversation[-1]
                 and conversation[-1].get("role") == role
             ):
-                last_msg_content = conversation[-1]["content"] or ""
-            if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
+                last_msg_content = flatten_content_to_text(conversation[-1]["content"])
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content or "")

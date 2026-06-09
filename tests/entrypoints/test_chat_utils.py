@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -2088,65 +2089,286 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
         )
 
 
-def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
-    messages = [
-        {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": "You are a helpful assistant."},
-                {
-                    "type": "thinking",
-                    "closed": True,
-                    "thinking": "Only return the answer when you are confident.",
-                },
-            ],
-        },
-        {"role": "user", "content": "What is 2+2?"},
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "Let me think about it."},
-                {"type": "thinking", "closed": True, "thinking": "2+2 = 4"},
-                {
-                    "type": "text",
-                    "text": "The answer is 4.",
-                },
-            ],
-        },
-    ]
-
-    conversation_with_thinking, _, _ = parse_chat_messages(
-        messages,
-        mistral_model_config,
-        content_format="openai",
+class TestParseChatMessagesThinking:
+    @pytest.mark.parametrize(
+        ("config_fixture", "messages", "content_format", "expected"),
+        [
+            pytest.param(
+                "mistral_model_config",
+                [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are a helpful assistant.",
+                            },
+                            {
+                                "type": "thinking",
+                                "closed": True,
+                                "thinking": "Only return the answer when you are confident.",  # noqa: E501
+                            },
+                        ],
+                    },
+                    {"role": "user", "content": "What is 2+2?"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Let me think about it."},
+                            {
+                                "type": "thinking",
+                                "thinking": "2+2 = 4",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                "openai",
+                [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are a helpful assistant.",
+                            },
+                            {
+                                "type": "thinking",
+                                "thinking": "Only return the answer when you are confident.",  # noqa: E501
+                            },
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "What is 2+2?"}],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Let me think about it."},
+                            {
+                                "type": "thinking",
+                                "thinking": "2+2 = 4",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                id="mistral_thinking_preserved",
+            ),
+            pytest.param(
+                "phi3v_model_config",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Let me think about it."},
+                            {
+                                "type": "thinking",
+                                "closed": True,
+                                "thinking": "2+2 = 4",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                "openai",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "Let me think about it."},
+                            {
+                                "type": "thinking",
+                                "thinking": "2+2 = 4",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                id="openai_thinking_preserved",
+            ),
+            pytest.param(
+                "phi3v_model_config",
+                [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are a helpful assistant.",
+                            },
+                            {
+                                "type": "thinking",
+                                "thinking": "system reasoning",
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "assistant reasoning",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                "openai",
+                [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "You are a helpful assistant.",
+                            },
+                            {
+                                "type": "thinking",
+                                "thinking": "system reasoning",
+                            },
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "assistant reasoning",
+                            },
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                    },
+                ],
+                id="openai_system_and_assistant",
+            ),
+            pytest.param(
+                "phi3v_model_config",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": "first thought"},
+                            {"type": "text", "text": "middle text"},
+                            {"type": "thinking", "thinking": "second thought"},
+                        ],
+                    },
+                ],
+                "openai",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "first thought",
+                            },
+                            {"type": "text", "text": "middle text"},
+                            {
+                                "type": "thinking",
+                                "thinking": "second thought",
+                            },
+                        ],
+                    },
+                ],
+                id="openai_multiple_thinking_blocks",
+            ),
+            pytest.param(
+                "phi3v_model_config",
+                [
+                    {
+                        "role": "assistant",
+                        "content": "The answer is 4.",
+                        "reasoning": "I computed 2+2",
+                    },
+                ],
+                "openai",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "The answer is 4."},
+                        ],
+                        "reasoning": "I computed 2+2",
+                        "reasoning_content": "I computed 2+2",
+                    },
+                ],
+                id="top_level_reasoning_no_thinking",
+            ),
+            pytest.param(
+                "mistral_model_config",
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "text content"},
+                            {
+                                "type": "thinking",
+                                "thinking": "thinking content",
+                            },
+                        ],
+                    },
+                ],
+                "string",
+                [
+                    {
+                        "role": "assistant",
+                        "content": "text content",
+                        "reasoning": "thinking content",
+                        "reasoning_content": "thinking content",
+                    },
+                ],
+                id="string_thinking_extracted",
+            ),
+        ],
     )
+    def test_thinking_handling(
+        self,
+        request: pytest.FixtureRequest,
+        config_fixture: str,
+        messages: list[dict[str, object]],
+        content_format: Literal["openai", "string"],
+        expected: list[dict[str, object]],
+    ) -> None:
+        model_config = request.getfixturevalue(config_fixture)
+        conversation, _, _ = parse_chat_messages(
+            messages,
+            model_config,
+            content_format=content_format,
+        )
+        assert conversation == expected
 
-    expected_conversation = [
-        {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": "You are a helpful assistant."},
-                {
-                    "type": "text",
-                    "text": "Only return the answer when you are confident.",
-                },
-            ],
-        },
-        {
-            "role": "user",
-            "content": [{"type": "text", "text": "What is 2+2?"}],
-        },
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "Let me think about it."},
-                {"type": "text", "text": "2+2 = 4"},
-                {"type": "text", "text": "The answer is 4."},
-            ],
-        },
-    ]
+    @pytest.mark.parametrize(
+        "model_config_fixture", ["phi3v_model_config", "mistral_model_config"]
+    )
+    def test_reasoning_and_thinking_conflict_raises(
+        self,
+        model_config_fixture: str,
+        request: pytest.FixtureRequest,
+    ) -> None:
+        model_config = request.getfixturevalue(model_config_fixture)
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "some thinking"},
+                    {"type": "text", "text": "answer"},
+                ],
+                "reasoning": "top-level reasoning",
+            },
+        ]
 
-    assert conversation_with_thinking == expected_conversation
+        with pytest.raises(
+            VLLMValidationError,
+            match="Cannot specify both a top-level 'reasoning' field and "
+            "'thinking' content blocks",
+        ):
+            parse_chat_messages(
+                messages,
+                model_config,
+                content_format="openai",
+            )
 
 
 def test_parse_chat_messages_single_empty_audio_with_uuid(

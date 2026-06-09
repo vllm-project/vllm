@@ -389,6 +389,26 @@ class ConversationMessage(TypedDict, total=False):
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
 
+def flatten_content_to_text(
+    content: str | None | list[dict[str, str]],
+) -> str:
+    r"""Flatten a ConversationMessage content value to a plain string.
+
+    Content may be a list of typed dicts
+    (e.g. thinking chunks for Mistral chat templates).  Only
+    type="text" parts are kept for features like *echo* that expects plain text.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
+
+
 # Passed in by user
 ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
@@ -1561,6 +1581,7 @@ def _parse_chat_message_content_mm_part(
 PART_TYPES_TO_SKIP_NONE_CONTENT = (
     "text",
     "refusal",
+    "thinking",
 )
 
 
@@ -1656,13 +1677,26 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
+    if part_type in ("text", "input_text", "output_text", "refusal"):
         str_content = cast(str, content)
         _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
         if wrap_dicts:
             return {"type": "text", "text": str_content}
         else:
             return str_content
+
+    # This is kept for HF renderer with chat templates supporting thinking chunks.
+    if part_type == "thinking":
+        str_content = cast(str, content)
+        _reject_reserved_placeholder_in_text(str_content, mm_parser.model_config)
+        assert wrap_dicts, (
+            "thinking parts should have been extracted by "
+            "_extract_thinking for content_format='string'"
+        )
+        return {
+            "type": "thinking",
+            "thinking": str_content,
+        }
 
     # For media items, if a user has provided one, use it. Otherwise, insert
     # a placeholder empty uuid.
@@ -1740,6 +1774,50 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
+def _extract_thinking(
+    content: list[ChatCompletionContentPartParam],
+    reasoning: str | None,
+    content_format: ChatTemplateContentFormat,
+) -> tuple[list[ChatCompletionContentPartParam], str | None]:
+    r"""Extract thinking content blocks from `content`.
+
+    When `content_format` is `"openai"`, thinking blocks are kept in
+    the content list so that Jinja chat templates (including older Mistral
+    model templates) can handle them natively as
+    `{"type": "thinking", ...}` dicts.  When `content_format` is
+    `"string"`, thinking blocks are pulled out and concatenated into a
+    single string.
+    """
+
+    thinking_parts: list[str] = []
+    non_thinking_parts: list[ChatCompletionContentPartParam] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "thinking":
+            thinking_str = _ThinkParser(part).get("thinking", None)
+            if thinking_str is not None:
+                thinking_parts.append(thinking_str)
+        else:
+            non_thinking_parts.append(part)
+
+    if not thinking_parts:
+        return content, reasoning
+
+    if reasoning is not None:
+        raise VLLMValidationError(
+            "Cannot specify both a top-level 'reasoning' field and "
+            "'thinking' content blocks on the same message."
+        )
+
+    if content_format == "openai":
+        # Thinking blocks stay inline for Jinja template rendering;
+        # no separate reasoning field is needed.
+        return content, reasoning
+
+    thinking_text = "\n".join(thinking_parts)
+
+    return non_thinking_parts, thinking_text
+
+
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
@@ -1755,6 +1833,14 @@ def _parse_chat_message_content(
         content = []
     elif isinstance(content, str):
         content = [ChatCompletionContentPartTextParam(type="text", text=content)]
+
+    if isinstance(content, list):
+        content, reasoning = _extract_thinking(
+            content,
+            reasoning,
+            content_format=content_format,
+        )
+
     result = _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
