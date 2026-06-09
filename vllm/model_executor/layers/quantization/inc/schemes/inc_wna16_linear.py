@@ -19,6 +19,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -31,28 +32,36 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=1)
 def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
-    """Return ARK availability, error details, cached instance, and QuantLinear."""
+    """Return ARK availability, error details, cached module, and QuantLinear."""
     try:
-        import auto_round_kernel
+        import auto_round_kernel as ark
         from auto_round_kernel.qlinear import QuantLinear
 
         logger.info("Successfully imported auto_round_kernel.")
     except ImportError as error:
         return False, str(error), None, None
 
-    ark_loader = getattr(auto_round_kernel, "_ark_instance", None)
-    if not callable(ark_loader):
-        return False, "auto_round_kernel does not expose _ark_instance().", None, None
+    if current_platform.is_xpu():
+        if getattr(ark, "xpu_lib", None) is None:
+            return (
+                False,
+                "The XPU backend library is unavailable.",
+                None,
+                None,
+            )
+        logger.info("Successfully loaded auto_round_kernel XPU backend library.")
 
-    try:
-        ark_instance = ark_loader()
-    except Exception as error:
-        return False, str(error), None, None
+    elif current_platform.is_cpu():
+        if getattr(ark, "cpu_lib", None) is None:
+            return (
+                False,
+                "The CPU backend library is unavailable.",
+                None,
+                None,
+            )
+        logger.info("Successfully loaded auto_round_kernel CPU backend library.")
 
-    if ark_instance is None:
-        return False, "auto_round_kernel._ark_instance() returned None.", None, None
-
-    return True, None, ark_instance, QuantLinear
+    return True, None, ark, QuantLinear
 
 
 class INCWNA16LinearScheme(INCLinearScheme):
