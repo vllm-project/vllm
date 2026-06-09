@@ -12,7 +12,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -687,6 +687,29 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Track registered pattern instances for inspection (e.g., ordering tests)
         self._pattern_replacements: list = []
 
+        # Discover (num_heads, head_dim) pairs for gated RMSNorm patterns
+        # from GatedDeltaNetAttention layers in static_forward_context.
+        from vllm.model_executor.layers.mamba.gdn.base import (
+            GatedDeltaNetAttention,
+        )
+
+        gdn_layers = get_layers_from_vllm_config(
+            config,
+            GatedDeltaNetAttention,  # type: ignore[type-abstract]
+        )
+        gated_norm_shapes: set[tuple[int, int]] = set()
+        for layer in gdn_layers.values():
+            num_v_heads = getattr(layer, "num_v_heads", None) or getattr(
+                layer, "num_heads", None
+            )
+            head_v_dim = getattr(layer, "head_v_dim", None) or getattr(
+                layer, "head_dim", None
+            )
+
+            assert num_v_heads is not None and head_v_dim is not None
+
+            gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
+
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.
         # The DoubleQuant patterns handle 1 rms_norm -> 2 group_fp8_quant
@@ -754,6 +777,21 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 AiterFusedAddRMSNormDynamicQuantPattern(
                     epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
                 ).register(self.patterns)
+
+            # Fuse decomposed RMSNormGated + group fp8 quant.
+            # The replacement op (fused_rms_gated_fp8_group_quant) requires
+            # an aiter version that includes the GDN triton kernel renames.
+            if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
+                for num_heads, head_dim in gated_norm_shapes:
+                    if head_dim != 128:
+                        continue
+                    AiterRMSNormGatedFp8GroupQuantPattern(
+                        epsilon,
+                        FP8_DTYPE,
+                        GroupShape(1, 128),
+                        num_heads=num_heads,
+                        head_dim=head_dim,
+                    ).register(self.patterns)
 
         if mxfp4_pattern_count:
             logger.info(
