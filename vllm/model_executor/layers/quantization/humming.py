@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 import math
 from collections.abc import Callable
@@ -67,7 +68,7 @@ try:
         get_humming_moe_gemm_type,
     )
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
-        humming_choose_hadamard_block_size,
+        humming_update_schema_hadamard_block_size,
     )
 except ModuleNotFoundError:
     HummingMethod = None
@@ -418,28 +419,26 @@ class HummingLinearMethod(LinearMethodBase):
 
             shape_n = layer.output_partition_sizes_sum
             shape_k = layer.input_size_per_partition
-            if is_unquantized and self.is_online_quant and shape_k % 64 == 0 and shape_n % 64 == 0:
+            is_shape_ok = shape_k % 64 == 0 and shape_n % 64 == 0
+            if is_unquantized and self.is_online_quant and is_shape_ok:
                 # online quant (fp16/bf16 -> quant_type)
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
 
-                hadamard_block_size: int | None = None
-                if not envs.VLLM_HUMMING_ONLINE_QUANT_DISABLE_HADAMARD:
-                    weight_scale_group_size = self.weight_schema.weight_scale_group_size
-                    input_scale_group_size = self.input_schema.input_scale_group_size
-
-                    hadamard_block_size = humming_choose_hadamard_block_size(
-                        weight_scale_group_size=weight_scale_group_size,
-                        input_scale_group_size=input_scale_group_size,
+                if self.weight_schema.hadamard_block_size == 0:
+                    self.weight_schema = humming_update_schema_hadamard_block_size(
+                        weight_schema=self.weight_schema,
+                        input_schema=self.input_schema,
                         shape_k=shape_k,
                     )
-                    if hadamard_block_size >= 4:
-                        loaded_weight = humming.ops.hadamard_transform(
-                            inputs=loaded_weight.cuda(),
-                            block_size=hadamard_block_size,
-                        )
-                        layer.hadamard_block_size = hadamard_block_size
+
+                if self.weight_schema.hadamard_block_size > 1:
+                    loaded_weight = humming.ops.hadamard_transform(
+                        inputs=loaded_weight.cuda(),
+                        block_size=self.weight_schema.hadamard_block_size,
+                    )
+                    layer.hadamard_block_size = self.weight_schema.hadamard_block_size
 
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
@@ -602,13 +601,24 @@ class HummingLinearMethod(LinearMethodBase):
         assert isinstance(self.weight_schema, HummingWeightSchema)
         force_requant = self.force_weight_schema is not None
         if force_requant and self.weight_schema != self.force_weight_schema:
+            force_weight_schema = self.force_weight_schema
+            force_input_schema = self.force_input_schema or self.input_schema
+            if force_weight_schema.hadamard_block_size == 0:
+                force_weight_schema = humming_update_schema_hadamard_block_size(
+                    weight_schema=force_weight_schema,
+                    input_schema=force_input_schema,
+                    shape_k=layer.input_size_per_partition,
+                )
+
+            layer.hadamard_block_size = force_weight_schema.hadamard_block_size
+
             tensors = self.weight_schema.requant_tensors(
                 tensors=layer.state_dict(),
-                target_weight_schema=self.force_weight_schema,
+                target_weight_schema=force_weight_schema,
                 param_dtype=layer.param_dtype,
             )
 
-            self.weight_schema = self.force_weight_schema
+            self.weight_schema = force_weight_schema
 
             for name, _ in list(layer.named_parameters()):
                 if name != "bias":
@@ -670,8 +680,14 @@ class HummingMoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
         self.moe = moe
-        self.weight_schema = quant_config.weight_schema
-        self.input_schema = quant_config.input_schema
+        self.weight_schemas: dict[str, HummingWeightSchema] = {
+            "w13": dataclasses.replace(quant_config.weight_schema),
+            "w2": dataclasses.replace(quant_config.weight_schema),
+        }
+        self.input_schemas: dict[str, HummingInputSchema] = {
+            "w13": dataclasses.replace(quant_config.input_schema),
+            "w2": dataclasses.replace(quant_config.input_schema),
+        }
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
 
@@ -685,42 +701,43 @@ class HummingMoEMethod(FusedMoEMethodBase):
             return_success: bool = False,
         ):
             name = param.param_name
+            sublayer_name = "w2" if shard_id == "w2" else "w13"
+            weight_schema = self.weight_schemas[sublayer_name]
+            input_schema = self.input_schemas[sublayer_name]
             float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
             is_unquantized = name == "weight" and loaded_weight.dtype in float_dtypes
             # online quant (fp16/bf16 -> quant_type)
             if is_unquantized:
-                assert isinstance(self.weight_schema, HummingWeightSchema)
+                shape_k = layer.sublayer_configs[sublayer_name]["shape_k"]
+
+                assert isinstance(weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
-                has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
+                has_global_scale = "TENSOR" in str(weight_schema.weight_scale_type)
 
-                hadamard_block_size: int | None = None
-                if not envs.VLLM_HUMMING_ONLINE_QUANT_DISABLE_HADAMARD:
-                    sublayer_name = "w2" if shard_id == "w2" else "w13"
-                    weight_scale_group_size = self.weight_schema.weight_scale_group_size
-                    input_scale_group_size = self.input_schema.input_scale_group_size
-                    shape_k = layer.sublayer_configs[sublayer_name]["shape_k"]
-
-                    hadamard_block_size = humming_choose_hadamard_block_size(
-                        weight_scale_group_size=weight_scale_group_size,
-                        input_scale_group_size=input_scale_group_size,
+                if weight_schema.hadamard_block_size == 0:
+                    weight_schema = humming_update_schema_hadamard_block_size(
+                        weight_schema=weight_schema,
+                        input_schema=input_schema,
                         shape_k=shape_k,
                     )
-                    if hadamard_block_size >= 4:
-                        loaded_weight = humming.ops.hadamard_transform(
-                            inputs=loaded_weight.cuda(),
-                            block_size=hadamard_block_size,
-                        )
-                        attr_name = f"{sublayer_name}_hadamard_block_size"
-                        setattr(layer, attr_name, hadamard_block_size)
+                    self.weight_schemas[sublayer_name] = weight_schema
+
+                if weight_schema.hadamard_block_size > 1:
+                    loaded_weight = humming.ops.hadamard_transform(
+                        inputs=loaded_weight.cuda(),
+                        block_size=weight_schema.hadamard_block_size,
+                    )
+                    attr_name = f"{sublayer_name}_hadamard_block_size"
+                    setattr(layer, attr_name, weight_schema.hadamard_block_size)
 
                 tensor_list = quantize_weight(
                     weight=loaded_weight,
-                    dtype=self.weight_schema.b_dtype,
-                    scale_dtype=self.weight_schema.bs_dtype or f16_dtype,
-                    group_size=self.weight_schema.weight_scale_group_size,
-                    has_zero_point=self.weight_schema.has_zero_point,
+                    dtype=weight_schema.b_dtype,
+                    scale_dtype=weight_schema.bs_dtype or f16_dtype,
+                    group_size=weight_schema.weight_scale_group_size,
+                    has_zero_point=weight_schema.has_zero_point,
                     has_global_scale=has_global_scale,
-                    is_fp_zero_point=self.weight_schema.is_fp_zero_point,
+                    is_fp_zero_point=weight_schema.is_fp_zero_point,
                     pack=True,
                 )
 
@@ -747,7 +764,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 return success if return_success else None
 
             # weight processing logic for specific quantization schema
-            loaded_weight = self.weight_schema.process_loaded_weight(
+            loaded_weight = weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
                 name=name,
             )
@@ -785,7 +802,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             "w13": {
                 "shape_n": intermediate_size_per_partition * 2,
                 "shape_k": hidden_size,
-                "tensors_attrs": self.weight_schema.get_padded_tensors_attrs(
+                "tensors_attrs": self.weight_schemas["w13"].get_padded_tensors_attrs(
                     shape_n=intermediate_size_per_partition * 2,
                     shape_k=hidden_size,
                     num_experts=num_experts,
@@ -796,7 +813,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             "w2": {
                 "shape_n": hidden_size,
                 "shape_k": intermediate_size_per_partition,
-                "tensors_attrs": self.weight_schema.get_padded_tensors_attrs(
+                "tensors_attrs": self.weight_schemas["w2"].get_padded_tensors_attrs(
                     shape_n=hidden_size,
                     shape_k=intermediate_size_per_partition,
                     num_experts=num_experts,
@@ -837,14 +854,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
         if getattr(self, "processed", False):
             return
         self.processed = True
-        layer.weight_schemas = {}
-        layer.input_schemas = {}
+        layer.weight_schemas = self.weight_schemas
+        layer.input_schemas = self.input_schemas
         for sublayer_name, configs in layer.sublayer_configs.items():
-            input_schema = self.input_schema
-            weight_schema = self.weight_schema
-            layer.weight_schemas[sublayer_name] = weight_schema
-            layer.input_schemas[sublayer_name] = input_schema
-
+            input_schema = self.input_schemas[sublayer_name]
+            weight_schema = self.weight_schemas[sublayer_name]
             # convert from checkpoint format to humming format
             if not isinstance(weight_schema, HummingWeightSchema):
                 tensors: dict[str, torch.Tensor] = dict(
@@ -891,6 +905,18 @@ class HummingMoEMethod(FusedMoEMethodBase):
             assert isinstance(weight_schema, HummingWeightSchema)
             force_requant = self.force_weight_schema is not None
             if force_requant and weight_schema != self.force_weight_schema:
+                force_weight_schema = self.force_weight_schema
+                force_input_schema = self.force_input_schema or input_schema
+                if force_weight_schema.hadamard_block_size == 0:
+                    force_weight_schema = humming_update_schema_hadamard_block_size(
+                        weight_schema=force_weight_schema,
+                        input_schema=force_input_schema,
+                        shape_k=configs["shape_k"],
+                    )
+
+                attr_name = f"{sublayer_name}_hadamard_block_size"
+                setattr(layer, attr_name, force_weight_schema.hadamard_block_size)
+
                 tensors = dict(
                     (key.removeprefix(sublayer_name + "_"), value)
                     for key, value in layer.state_dict().items()
@@ -899,11 +925,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
                 tensors = weight_schema.requant_tensors(
                     tensors=tensors,
-                    target_weight_schema=self.force_weight_schema,
+                    target_weight_schema=force_weight_schema,
                     param_dtype=layer.param_dtype,
                 )
 
                 weight_schema = self.force_weight_schema
+                self.weight_schemas[sublayer_name] = weight_schema
 
                 for name, _ in list(layer.named_parameters()):
                     if not name.startswith(sublayer_name + "_"):

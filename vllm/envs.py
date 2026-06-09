@@ -156,7 +156,6 @@ if TYPE_CHECKING:
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
-    VLLM_HUMMING_ONLINE_QUANT_DISABLE_HADAMARD: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
@@ -1234,10 +1233,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype config for humming kernel
     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
-    ),
-    # Whether to disable hadamard transform for humming online quantization
-    "VLLM_HUMMING_ONLINE_QUANT_DISABLE_HADAMARD": lambda: (
-        os.environ.get("VLLM_HUMMING_ONLINE_QUANT_DISABLE_HADAMARD", "0") == "1"
     ),
     # Whether to use fp16 accumulator mma
     "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
