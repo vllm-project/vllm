@@ -4,14 +4,14 @@
 // sweep TUs compile in parallel.
 #include "skinny_gemms_int4_kernels.cuh"
 
-torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
+torch::Tensor wvSplitK_int4_g(const at::Tensor& in_w, const at::Tensor& in_x,
                               const at::Tensor& in_scale,
                               const std::optional<at::Tensor>& in_zero_points,
                               const std::optional<at::Tensor>& in_bias,
                               const int64_t CuCount, const int64_t group_size) {
-  auto M_in = in_a.size(0);
-  auto K_in = in_b.size(1);
-  auto N_in = in_b.size(0);
+  auto M_in = in_w.size(0);
+  auto K_in = in_x.size(1);
+  auto N_in = in_x.size(0);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -21,14 +21,17 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_w.stride(0) * in_w.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "B row stride (",
+              b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "B row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
   TORCH_CHECK(
-      in_b.dtype() == torch::kFloat16 || in_b.dtype() == torch::kBFloat16,
+      in_x.dtype() == torch::kFloat16 || in_x.dtype() == torch::kBFloat16,
       "Activation must be float16 or bfloat16");
-  TORCH_CHECK(in_scale.dtype() == in_b.dtype(),
+  TORCH_CHECK(in_scale.dtype() == in_x.dtype(),
               "Scale dtype must match activation dtype");
   TORCH_CHECK(group_size == 32 || group_size == 64 || group_size == 128,
               "group_size must be 32, 64, or 128, got ", group_size);
@@ -42,7 +45,7 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
               "Scale must be [M, K/group_size] = [", M_in, ", ", num_groups,
               "] but got [", in_scale.size(0), ", ", in_scale.size(1), "]");
   if (in_zero_points.has_value()) {
-    TORCH_CHECK(in_zero_points->dtype() == in_b.dtype(),
+    TORCH_CHECK(in_zero_points->dtype() == in_x.dtype(),
                 "Zero points dtype must match activation dtype");
     TORCH_CHECK(in_zero_points->dim() == 2,
                 "Zero points must be 2D [M, K/group_size], got shape ",
@@ -61,18 +64,18 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
 
   auto out_c = torch::empty(
       {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+      torch::TensorOptions().dtype(in_x.dtype()).device(in_x.device()));
 
   dim3 grid(CuCount);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_w));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      in_b.scalar_type(), "wvSplitK_int4_g", [&] {
+      in_x.scalar_type(), "wvSplitK_int4_g", [&] {
         using fptype = typename scalar<scalar_t>::type;
-        const uint8_t* wptr = reinterpret_cast<const uint8_t*>(in_a.data_ptr());
-        const fptype* aptr = reinterpret_cast<const fptype*>(in_b.data_ptr());
+        const uint8_t* wptr = reinterpret_cast<const uint8_t*>(in_w.data_ptr());
+        const fptype* aptr = reinterpret_cast<const fptype*>(in_x.data_ptr());
         const fptype* sptr =
             reinterpret_cast<const fptype*>(in_scale.data_ptr());
         const fptype* zpptr =

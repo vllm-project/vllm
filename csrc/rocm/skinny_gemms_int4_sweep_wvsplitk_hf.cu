@@ -4,18 +4,21 @@
   #include "skinny_gemms_int4_kernels.cuh"
 
 torch::Tensor wvSplitK_int4g_hf_sweep(
-    const at::Tensor& in_a, const at::Tensor& in_b, const at::Tensor& in_scale,
+    const at::Tensor& in_w, const at::Tensor& in_x, const at::Tensor& in_scale,
     const int64_t CuCount, const int64_t group_size, const int64_t ytile,
     const int64_t unrl, const int64_t achunk, const int64_t wvprgrp) {
-  auto M_in = in_a.size(0);
-  auto K_in = in_b.size(1);
-  auto N_in = in_b.size(0);
+  auto M_in = in_w.size(0);
+  auto K_in = in_x.size(1);
+  auto N_in = in_x.size(0);
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
-  TORCH_CHECK(in_b.dtype() == torch::kFloat16,
+  const int64_t b_row_stride_bytes = in_w.stride(0) * in_w.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "B row stride (",
+              b_row_stride_bytes, " B) must hold K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "B row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
+  TORCH_CHECK(in_x.dtype() == torch::kFloat16,
               "Sweep only supports float16 activations");
   TORCH_CHECK(in_scale.dtype() == torch::kFloat16,
               "Sweep only supports float16 scale");
@@ -35,16 +38,16 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
 
   auto out_c = torch::empty(
       {N_in, M_in},
-      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+      torch::TensorOptions().dtype(in_x.dtype()).device(in_x.device()));
 
   dim3 grid(CuCount);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_w));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   using fptype = half;
-  const uint8_t* wptr = reinterpret_cast<const uint8_t*>(in_a.data_ptr());
-  const fptype* aptr = reinterpret_cast<const fptype*>(in_b.data_ptr());
+  const uint8_t* wptr = reinterpret_cast<const uint8_t*>(in_w.data_ptr());
+  const fptype* aptr = reinterpret_cast<const fptype*>(in_x.data_ptr());
   const fptype* sptr = reinterpret_cast<const fptype*>(in_scale.data_ptr());
   const fptype* biasptr = nullptr;
   fptype* cptr = reinterpret_cast<fptype*>(out_c.data_ptr());
@@ -58,7 +61,7 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _ACHUNK, _UNRL, _N, \
                         _GS><<<grid, block, 0, stream>>>(                     \
           K_in, M_in, 1, 1, wptr, aptr, sptr, nullptr, biasptr, cptr,         \
-          __wvPrGrp, CuCount);                                                \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                        \
     }
 
   #define SWEEP_GHF_N(_THRDS, _YTILE, _WVPRGRP, _ACHUNK, _UNRL, _GS)       \
