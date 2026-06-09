@@ -33,6 +33,8 @@ logger = init_logger(__name__)
 
 
 class OpenAIToolParser(ToolParser):
+    structural_tag_model = "harmony"
+
     def __init__(self, tokenizer: "TokenizerLike", tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 

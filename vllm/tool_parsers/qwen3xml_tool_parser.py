@@ -1148,6 +1148,8 @@ class StreamingXMLToolCallParser:
 
 
 class Qwen3XMLToolParser(ToolParser):
+    structural_tag_model = "qwen_3_coder"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
         self.parser = StreamingXMLToolCallParser()

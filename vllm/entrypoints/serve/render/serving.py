@@ -598,8 +598,15 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = tool_parser(tokenizer, request.tools).adjust_request(
-                    request=request
+                tool_parser_instance = tool_parser(tokenizer, request.tools)
+                # Inject request-local reasoning/template state before
+                # `adjust_request()` builds any structural tag.
+                tool_parser_instance.chat_template_kwargs = (
+                    chat_params.chat_template_kwargs
                 )
+                tool_parser_instance.reasoning_parser_enabled = (
+                    reasoning_parser is not None
+                )
+                request = tool_parser_instance.adjust_request(request=request)
 
         return conversation, [engine_input]

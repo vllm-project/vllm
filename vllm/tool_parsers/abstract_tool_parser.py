@@ -6,6 +6,7 @@ import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
@@ -57,6 +58,15 @@ class ToolParser:
     # extract_tool_calls / extract_tool_calls_streaming methods for
     # required/named tool_choice, treating them the same as "auto".
     supports_required_and_named: bool = True
+    # xgrammar builtin structural tag model key. Subclasses set this when
+    # their parsed tool-call syntax matches a builtin xgrammar format.
+    structural_tag_model: str | None = None
+    # These are injected by the serving layer right before `adjust_request()`.
+    # `chat_template_kwargs` carries per-request template state such as
+    # `enable_thinking`, and `reasoning_parser_enabled` marks whether
+    # `--reasoning-parser` is active for the request.
+    chat_template_kwargs: dict[str, Any] = {}
+    reasoning_parser_enabled: bool = False
 
     def __init__(
         self,
@@ -70,6 +80,10 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
+        # Safe defaults for standalone construction; serving overwrites these
+        # immediately before calling `adjust_request()`.
+        self.chat_template_kwargs: dict[str, Any] = {}
+        self.reasoning_parser_enabled: bool = False
         if tools:
             self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
                 tool
@@ -170,7 +184,24 @@ class ToolParser:
         return request
 
     def get_structural_tag(self, request: ChatCompletionRequest):
-        return None
+        if self.structural_tag_model is None:
+            return None
+
+        from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+
+        return get_model_structural_tag(
+            model=self.structural_tag_model,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=self._structural_tag_reasoning_enabled(),
+        )
+
+    def _structural_tag_reasoning_enabled(self) -> bool:
+        """Whether this request should constrain the reasoning section."""
+
+        if not self.reasoning_parser_enabled:
+            return False
+        return self.chat_template_kwargs.get("enable_thinking", True) is not False
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
