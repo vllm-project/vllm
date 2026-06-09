@@ -53,7 +53,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -190,6 +195,7 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        self.finished_error_outputs: list[tuple[int, EngineCoreOutput]] = []
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -417,6 +423,9 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        # Normally drained by update_from_output(); clear stale error outputs
+        # if a previous step failed before reaching it.
+        self.finished_error_outputs.clear()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -673,17 +682,18 @@ class Scheduler(SchedulerInterface):
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(
-                    request.status
-                ) and not self._try_promote_blocked_waiting_request(request):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
+                if self._is_blocked_waiting_status(request.status):
+                    if self._finish_request_on_error(request):
+                        continue
+                    if not self._try_promote_blocked_waiting_request(request):
+                        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request_id,
+                            )
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -1151,7 +1161,6 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
-
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -1583,6 +1592,10 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        if self.finished_error_outputs:
+            for client_index, output in self.finished_error_outputs:
+                outputs[client_index].append(output)
+            self.finished_error_outputs.clear()
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids = None
@@ -2535,6 +2548,43 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens = request.num_tokens - 1
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
+
+    def _finish_request_on_error(self, request: Request) -> bool:
+        # Handles blocked async request errors; currently only grammar failures.
+        if request.status != RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            return False
+
+        structured_output_req = request.structured_output_request
+        if structured_output_req is None:
+            return False
+
+        # Accessing grammar polls the async compilation future and records any
+        # failure on the request.
+        _ = structured_output_req.grammar
+        grammar_error = structured_output_req.grammar_error
+        if not isinstance(grammar_error, BaseException):
+            return False
+
+        logger.error(
+            "Structured output grammar compilation failed for request %s. "
+            "Terminating request.",
+            request.request_id,
+            exc_info=grammar_error,
+        )
+        self.finished_error_outputs.append(
+            (
+                request.client_index,
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    finish_reason=FinishReason.ERROR,
+                    events=request.take_events(),
+                    trace_headers=request.trace_headers,
+                ),
+            )
+        )
+        self.finish_requests(request.request_id, RequestStatus.FINISHED_ERROR)
+        return True
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
         """
