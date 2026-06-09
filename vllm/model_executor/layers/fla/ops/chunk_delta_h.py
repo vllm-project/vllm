@@ -14,9 +14,13 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, use_cuda_graph
+from .utils import FLA_CHUNK_SIZE, is_amd, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
+
+# num_stages=4 causes "LLVM ERROR: operation destroyed but still has uses" on
+# ROCm (e.g. MI210/gfx90a) with Triton's AMD backend. Cap at 3 on HIP.
+_num_stages = [2, 3] if is_amd else [2, 3, 4]
 
 
 @triton.heuristics(
@@ -33,7 +37,7 @@ NUM_WARPS = [2, 4, 8, 16]
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in _num_stages
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],

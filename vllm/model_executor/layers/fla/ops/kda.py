@@ -27,6 +27,8 @@ from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
+# num_stages=4 causes "LLVM ERROR: operation destroyed but still has uses" on ROCm.
+_num_stages = [2, 3] if is_amd else [2, 3, 4]
 
 
 def fused_recurrent_kda_fwd(
@@ -513,7 +515,7 @@ class FusedRMSNormGated(CustomOp):
         triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
         for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _num_stages
     ],
     key=["BC"],
 )
@@ -809,7 +811,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _num_stages
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
 )
@@ -1011,7 +1013,7 @@ def recompute_w_u_fwd(
         for BK in [32, 64]
         for BV in [64, 128]
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _num_stages
     ],
     key=["BT"],
 )
