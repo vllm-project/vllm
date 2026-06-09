@@ -27,6 +27,7 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -93,6 +94,23 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
         if key.startswith("node:"):
             return key.split(":", 1)[1]
     raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
+def _node_ip_from_resources(node_resources: dict) -> str | None:
+    """Return the node IP encoded in a Ray per-node resource dict, or None.
+
+    Ray advertises each node's IP as a ``node:<ip>`` resource key. The head node
+    also carries ``node:__internal_head__``, and placement groups add
+    ``..._group_...`` keys; both are ignored.
+    """
+    for key in node_resources:
+        if (
+            key.startswith("node:")
+            and key != "node:__internal_head__"
+            and "_group_" not in key
+        ):
+            return key.split(":", 1)[1]
+    return None
 
 
 class CoreEngineProcManager:
@@ -356,7 +374,10 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination=actor_class.__name__)
+        env_vars_list = get_env_vars_to_copy(
+            destination=actor_class.__name__,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
@@ -496,6 +517,32 @@ class CoreEngineActorManager:
         assert dp_master_ip_key in nodes[0], (
             f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
+
+        # optionally restrict DP placement to a caller-provided node set.
+        requested_node_ips = {
+            ip.strip()
+            for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
+            if ip.strip()
+        }
+        if requested_node_ips:
+            allowed_node_ips = set(requested_node_ips)
+            # The master node must host the local ranks, so it has to be allowed.
+            if dp_master_ip not in allowed_node_ips:
+                allowed_node_ips.add(dp_master_ip)
+            filtered_nodes = [
+                node_resources
+                for node_resources in nodes
+                if _node_ip_from_resources(node_resources) in allowed_node_ips
+            ]
+            logger.info(
+                "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
+                "from %d to %d node(s): %s",
+                len(nodes),
+                len(filtered_nodes),
+                sorted(allowed_node_ips),
+            )
+            nodes = filtered_nodes
+
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
             int(node_resources[device_str])
@@ -562,18 +609,10 @@ class CoreEngineActorManager:
         # for "span" pack strategy
         collected_bundles = []
         for node_resources in nodes:
-            node_ip_keys = [
-                key
-                for key in node_resources
-                if key != "node:__internal_head__"
-                and key.startswith("node:")
-                and "_group_" not in key
-            ]
-            assert len(node_ip_keys) == 1, (
-                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
+            node_ip = _node_ip_from_resources(node_resources)
+            assert node_ip is not None, (
+                f"No node IP key found in node resources: {node_resources}"
             )
-            node_ip_key = node_ip_keys[0]
-            node_ip = node_ip_key.split(":")[1]
 
             n_device_on_node = int(node_resources.get(device_str, 0))
             if pack_strategy == "span" and n_device_on_node != 0:
