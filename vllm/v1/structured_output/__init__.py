@@ -423,6 +423,21 @@ class StructuredOutputManager:
                 )
                 return True
 
+            # Deferred backends still need the post-marker tail of this step's
+            # new_token_ids to be drained into the FSM, otherwise the next
+            # step's bitmask preparation sees grammar at its initial state and
+            # the model can emit a duplicate opening token (e.g. "{{") when
+            # reasoning ended inside a spec-decode window.
+            if new_token_ids:
+                for idx, token in enumerate(new_token_ids):
+                    if reasoner.is_reasoning_end_streaming([], [token]):
+                        post_marker = list(new_token_ids[idx + 1 :])
+                        if post_marker:
+                            structured_req.grammar.accept_tokens(
+                                request.request_id, post_marker
+                            )
+                        break
+
         return False
 
     @staticmethod
