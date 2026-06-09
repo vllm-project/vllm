@@ -64,6 +64,7 @@ if has_humming() and current_platform.is_cuda():
         get_humming_moe_gemm_type,
     )
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        get_humming_moe_quant_config,
         humming_update_schema_hadamard_block_size,
     )
 
@@ -456,7 +457,7 @@ class HummingLinearMethod(LinearMethodBase):
                     param.weight_loader(param, tensor, shard_id)
 
                 del tensor_list, loaded_weight, tensor
-                torch.cuda.empty_cache()
+                torch.accelerator.empty_cache()
                 return None
             elif is_unquantized:
                 # fallback to unquantized linear
@@ -842,10 +843,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
         layer.register_buffer("locks", locks)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            get_humming_moe_quant_config,
-        )
-
         return get_humming_moe_quant_config(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
