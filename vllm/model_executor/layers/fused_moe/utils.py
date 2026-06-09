@@ -443,8 +443,8 @@ def swiglu_limit_func(
 
 
 def resolve_moe_use_td() -> bool:
-    """Tri-state resolver for ``VLLM_TRITON_MOE_USE_TD`` (auto-on for XPU)."""
-    override = envs.VLLM_TRITON_MOE_USE_TD
+    """Tri-state resolver for ``VLLM_TRITON_USE_TD`` (auto-on for XPU)."""
+    override = envs.VLLM_TRITON_USE_TD
     if override is None:
         return current_platform.is_xpu()
     return override
@@ -456,7 +456,7 @@ _warned_moe_use_td_ineffective = False
 def warn_if_moe_use_td_ineffective(
     active_backend: str, is_quantized: bool = False
 ) -> None:
-    """One-shot warning when ``VLLM_TRITON_MOE_USE_TD`` is set but ignored.
+    """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
     MoE backend is not Triton-family, or (b) the model is quantized (the
@@ -465,7 +465,7 @@ def warn_if_moe_use_td_ineffective(
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
         return
-    if envs.VLLM_TRITON_MOE_USE_TD is None:
+    if envs.VLLM_TRITON_USE_TD is None:
         return
     is_triton = "TRITON" in active_backend.upper()
     if is_triton and not is_quantized:
@@ -486,8 +486,8 @@ def warn_if_moe_use_td_ineffective(
             "back to the pointer path"
         )
     logger.warning(
-        "VLLM_TRITON_MOE_USE_TD is set to %s but %s.",
-        envs.VLLM_TRITON_MOE_USE_TD,
+        "VLLM_TRITON_USE_TD is set to %s but %s.",
+        envs.VLLM_TRITON_USE_TD,
         reason,
     )
     _warned_moe_use_td_ineffective = True

@@ -121,7 +121,7 @@ def test_batched_mm(
     and those tests will be skipped on unsupported hardware."""
     if use_td and not hasattr(tl, "make_tensor_descriptor"):
         pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
-    monkeypatch.setenv("VLLM_TRITON_MOE_USE_TD", "1" if use_td else "0")
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -264,7 +264,7 @@ def test_fused_moe_batched_experts(
     and those tests will be skipped on unsupported hardware."""
     if use_td and not hasattr(tl, "make_tensor_descriptor"):
         pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
-    monkeypatch.setenv("VLLM_TRITON_MOE_USE_TD", "1" if use_td else "0")
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
