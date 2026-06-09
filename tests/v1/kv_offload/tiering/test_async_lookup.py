@@ -105,10 +105,10 @@ class TestAsyncLookupManager:
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
-    def test_flush_noop_when_empty(self):
+    def test_flush_no_queue_post_when_empty(self):
         mgr = InMemoryLookupManager()
         mgr.flush()
-        assert not mgr._need_to_drain
+        assert mgr._lookup_queue.empty()
         mgr.shutdown()
 
     def test_repeated_lookup_same_key_no_duplicate_batch(self):
@@ -117,6 +117,39 @@ class TestAsyncLookupManager:
         mgr.lookup(_key(1), ctx)
         mgr.lookup(_key(1), ctx)
         assert len(mgr._lookup_batch) == 1
+        mgr.shutdown()
+
+    def test_cleanup_unknown_req_id_is_noop(self):
+        mgr = InMemoryLookupManager(existing_keys={_key(1)})
+        ctx = _ctx("req_a")
+        mgr.lookup(_key(1), ctx)
+        mgr.flush()
+        self._wait_for_drain(mgr)
+        mgr.lookup(_key(1), ctx)
+        mgr.cleanup("nonexistent")
+        assert _key(1) in mgr._lookup_state
+        mgr.shutdown()
+
+    def test_multiple_flushes_across_steps(self):
+        existing = {_key(1), _key(2), _key(3)}
+        mgr = InMemoryLookupManager(existing_keys=existing)
+        ctx = _ctx()
+
+        # Step 1: lookup key 1, flush
+        mgr.lookup(_key(1), ctx)
+        mgr.flush()
+        self._wait_for_drain(mgr)
+
+        # Step 2: lookup keys 2 and 3, flush
+        mgr.lookup(_key(2), ctx)
+        mgr.lookup(_key(3), ctx)
+        mgr.flush()
+        self._wait_for_drain(mgr)
+
+        # All results should be available
+        assert mgr.lookup(_key(1), ctx) is True
+        assert mgr.lookup(_key(2), ctx) is True
+        assert mgr.lookup(_key(3), ctx) is True
         mgr.shutdown()
 
     def test_shutdown_unblocks_worker(self):
