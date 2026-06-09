@@ -218,38 +218,12 @@ class ColBERTModel(ColBERTMixin, BertEmbeddingModel):
         return self._build_colbert_pooler(pooler_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        def _strip(name: str) -> str:
-            for p in ("model.", "bert."):
-                if name.startswith(p):
-                    name = name[len(p) :]
-            return name
-
-        weights_list = list(weights)
-        model_side: list[tuple[str, torch.Tensor]] = []
-        colbert_side: list[tuple[str, torch.Tensor]] = []
-
-        for name, weight in weights_list:
-            stripped = _strip(name)
-            # Handle different checkpoint naming conventions
-            if stripped in ("linear.weight", "colbert_linear.weight"):
-                colbert_side.append(("colbert_linear.weight", weight))
-            elif stripped.startswith("linear.") or stripped.startswith(
-                "colbert_linear."
-            ):
-                new_name = stripped.replace("linear.", "colbert_linear.")
-                colbert_side.append((new_name, weight))
-            else:
-                model_side.append((stripped, weight))
-
-        loaded: set[str] = set()
-        loaded_model = self.model.load_weights(model_side)
-        loaded.update({"model." + n for n in loaded_model})
-
-        if colbert_side:
-            _, colbert_loaded = self._load_colbert_weights(colbert_side)
-            loaded.update(colbert_loaded)
-
-        return loaded
+        other_weights, colbert_loaded = self._load_colbert_weights(weights)
+        # Force "bert." to become "model."
+        mapper = WeightsMapper(orig_to_new_prefix={"bert.": "model."})
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(other_weights, mapper=mapper)
+        return loaded | colbert_loaded
 
 
 # -----------------------------------------------------------------------
