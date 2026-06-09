@@ -57,7 +57,8 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      'pip install lm_eval[api]>=0.4.12 &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
