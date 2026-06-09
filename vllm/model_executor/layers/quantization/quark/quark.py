@@ -87,8 +87,9 @@ class QuarkConfig(QuantizationConfig):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
@@ -646,26 +647,16 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """
-        Check whether the param name matches the format for k/v cache scales
-        in quark. If this is the case, return its equivalent param name
-        expected by vLLM
-
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
-        """
-        if name.endswith(".output_scale") and ".k_proj" in name:
-            return name.replace(".k_proj.output_scale", ".attn.k_scale")
-        if name.endswith(".output_scale") and ".v_proj" in name:
-            return name.replace(".v_proj.output_scale", ".attn.v_scale")
-        if name.endswith(".output_scale") and ".q_proj" in name:
-            return name.replace(".q_proj.output_scale", ".attn.q_scale")
-        if name.endswith("self_attn.prob_output_scale"):
-            return name.replace(".prob_output_scale", ".attn.prob_scale")
-
-        # If no matches, return None
-        return None
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
+        """Map Quark KV-cache scale names to vLLM names."""
+        return WeightsMapper(
+            orig_to_new_suffix={
+                ".k_proj.output_scale": ".attn.k_scale",
+                ".v_proj.output_scale": ".attn.v_scale",
+                ".q_proj.output_scale": ".attn.q_scale",
+                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+            }
+        )
 
 
 class QuarkLinearMethod(LinearMethodBase):
@@ -734,7 +725,9 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_config: the quark kv cache scheme
+
+        Args:
+            kv_cache_config: the quark kv cache scheme
         """
         if kv_cache_config is None:
             return
