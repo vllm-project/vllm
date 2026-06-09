@@ -118,10 +118,14 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
-        audio_config_names = ("audio_config", "encoder_config")
-        names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
+        audio_config_names = (
+            "audio_config",
+            "encoder_config",
+            "acoustic_tokenizer_encoder_config",
+        )
         audio_config = getattr_iter(config, audio_config_names)
         if audio_config is not None:
+            names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
             val = getattr_iter(audio_config, names)
             if val is not None:
                 return int(val)
@@ -129,14 +133,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
                 f"Unable to get max input length from {type(audio_config).__name__}. "
                 f"The following attribute names were checked: {names}."
             )
-        val = getattr_iter(config, names)
-        if val is not None:
-            return int(val)
         raise ValueError(
             f"Unable to get audio config from {type(config).__name__}. "
-            f"The following audio config names were checked: {audio_config_names}; "
-            f"and {type(config).__name__} does not expose any of {names} at the "
-            f"top level either."
+            f"The following audio config names were checked: {audio_config_names}."
         )
 
     def get_max_image_tokens(self) -> int:
