@@ -668,7 +668,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
 
-                # Collect information on the longest cached prefix overall
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
 
             if curr_hit_length >= hit_length:
