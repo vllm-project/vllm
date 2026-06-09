@@ -203,7 +203,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r /workspace/vllm/requirements/xpu.txt && \
     uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.7.0 && \
+    uv pip install triton-xpu==3.7.1 && \
     uv pip uninstall oneccl oneccl-devel && \
     source /opt/intel/oneapi/setvars.sh --force && \
     source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
