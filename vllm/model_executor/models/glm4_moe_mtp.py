@@ -241,12 +241,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # AITER fused shared-expert (FSE) weight-loader branch. When FSE is
-        # on, the MTP block's FusedMoE was widened by n_shared_experts slots
-        # and the checkpoint's `...mlp.shared_experts.{gate,up,down}_proj.*`
-        # tensors must be split into n_shared_experts chunks and routed to
-        # those appended slots `...mlp.experts.{n_routed_experts + j}.*`.
-        # Mirrors the pattern in glm4_moe.py and deepseek_mtp.py.
+        # FSE weight loading mirrors glm4_moe.py / deepseek_mtp.py.
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
@@ -306,8 +301,6 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
-                # Under FSE we treat mlp.shared_experts.* as expert-style
-                # tensors (handled below) rather than stacked gate/up linears.
                 if is_fusion_moe_shared_experts_layer:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -320,12 +313,8 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # FSE split: if this is a widened mlp.shared_experts tensor,
-                # slice it into n_shared_experts chunks along the
-                # intermediate-size axis and synthesize per-slot expert
-                # names. For ColumnParallel (gate_proj / up_proj) the
-                # intermediate dim is dim 0; for RowParallel (down_proj)
-                # it's dim 1.
+                # FSE: split a widened mlp.shared_experts tensor into
+                # n_shared_experts chunks; see deepseek_v2.py for details.
                 num_chunks = 1
                 split_dim = 0
                 chunk_size = 0
