@@ -114,8 +114,7 @@ class AsyncLookupManager(ABC):
         Called from the worker thread — must be synchronous and must not
         touch the primary tier or scheduler state.
 
-        Returns a list parallel to keys: True if present, False if not
-        found, None if the tier is busy (retry later).
+        Returns a list parallel to keys: True if present, False if not.
         """
         ...
 
@@ -134,7 +133,7 @@ class AsyncLookupManager(ABC):
         """
         if self._need_to_drain:
             self.drain_results()
-            self._need_to_drain = True  # TODO: results might not be ready yet
+            self._need_to_drain = False
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
@@ -153,10 +152,10 @@ class AsyncLookupManager(ABC):
         the model-execution window, maximising time available before the next
         step's drain_results().  Safe to call with an empty batch (no-op).
         """
+        self._need_to_drain = True
         if self._lookup_batch:
             self._lookup_queue.put(self._lookup_batch)
             self._lookup_batch = []
-            self._need_to_drain = True
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
@@ -225,11 +224,7 @@ class AsyncLookupManager(ABC):
                     hits = (False for _ in keys)
 
                 for key, hit in zip(keys, hits):
-                    if hit is True:
-                        results.append((key, True))
-                    elif hit is False:
-                        results.append((key, False))
-                    # hit is None → stays in-flight (not added to results)
+                    results.append((key, hit))
 
             # Post the entire batch as one item — no lock needed.
             if results:
