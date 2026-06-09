@@ -272,6 +272,20 @@ GET_WEATHER_TOOL = {
         },
     },
 }
+VALID_STRUCTURAL_TAG = {
+    "type": "structural_tag",
+    "format": {
+        "type": "triggered_tags",
+        "tags": [
+            {
+                "begin": "<tool>",
+                "content": {"type": "any_text"},
+                "end": "</tool>",
+            }
+        ],
+        "triggers": ["<tool>"],
+    },
+}
 
 
 class _StubTokenizer:
@@ -353,7 +367,7 @@ def parser_unsupported_arch(
 
 class TestAdjustRequestPassthrough:
     def test_structured_outputs_structural_tag_not_modified(self, parser) -> None:
-        tag = '{"type":"structural_tag","format":{"type":"triggered_tags","tags":[]}}'
+        tag = json.dumps(VALID_STRUCTURAL_TAG)
         r = _make_chat_request(structured_outputs={"structural_tag": tag})
         o = parser.adjust_request(r)
         assert o.structured_outputs.structural_tag == tag
@@ -363,7 +377,7 @@ class TestAdjustRequestPassthrough:
         # bare ``{"type": "structural_tag"}`` is invalid (use pydantic model).
         rf = StructuralTagResponseFormat(
             type="structural_tag",
-            format={"type": "triggered_tags", "triggers": [], "tags": []},
+            format=VALID_STRUCTURAL_TAG["format"],
         )
         r = _make_chat_request(response_format=rf)
         o = parser.adjust_request(r)
