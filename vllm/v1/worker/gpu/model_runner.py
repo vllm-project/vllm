@@ -243,7 +243,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA
         self.lora_capture_cases = [0]
         if self.lora_config:
-            self.lora_capture_cases = get_lora_capture_cases(...)
+            self.lora_capture_cases = get_lora_capture_cases(
+                self.lora_config, self.compilation_config
+            )
         self.cudagraph_manager: ModelCudaGraphManager | None = None
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -503,14 +505,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
+        max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
             num_sampled_tokens=None,
             remove_lora=True,
-            num_active_loras=self.lora_config.max_loras
-            if self.lora_config is not None
-            else 0,
+            num_active_loras=max_loras,
         ):
             # Execute the model.
             self.execute_model(
@@ -1052,6 +1053,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         num_active_loras = 0
         if self.lora_config:
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
             num_active_loras = get_num_active_loras_for_dispatch(
                 self.lora_config, self.lora_state, req_ids, dummy_run
             )

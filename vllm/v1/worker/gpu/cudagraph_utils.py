@@ -32,7 +32,6 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.lora_utils import resolve_effective_num_active_loras
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -61,7 +60,7 @@ def _is_compatible(
     num_reqs: int,
     num_tokens: int,
     uniform_token_count: int | None,
-    num_active_loras: int = 0,
+    num_active_loras: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
@@ -114,6 +113,9 @@ class CudaGraphManager:
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
         self.lora_capture_cases = lora_capture_cases or [0]
+        # Precompute actual num_active_loras -> captured case mapping so that
+        # dispatch() is a plain dict lookup instead of a per-call bisect.
+        self._lora_dispatch_map, self._max_lora_case = self._build_lora_dispatch_map()
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
@@ -134,6 +136,32 @@ class CudaGraphManager:
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
+
+    def _build_lora_dispatch_map(self) -> tuple[dict[int, int], int]:
+        """Precompute actual num_active_loras -> effective captured case.
+
+        Mirrors the num_tokens candidate expansion in ``_init_candidates``:
+        every possible active-LoRA count is mapped ahead of time to the
+        smallest captured case that can serve it, so ``dispatch`` is a plain
+        dict lookup instead of a per-call bisect.
+        """
+        captured_with_lora = sorted(c for c in self.lora_capture_cases if c > 0)
+        if not captured_with_lora:
+            return {}, 0
+        dispatch_map: dict[int, int] = {}
+        case_idx = 0
+        for n in range(1, captured_with_lora[-1] + 1):
+            while captured_with_lora[case_idx] < n:
+                case_idx += 1
+            dispatch_map[n] = captured_with_lora[case_idx]
+        return dispatch_map, captured_with_lora[-1]
+
+    def _resolve_effective_loras(self, num_active_loras: int) -> int:
+        """Map an actual active-LoRA count to its captured graph case."""
+        if num_active_loras <= 0 or not self._lora_dispatch_map:
+            return num_active_loras
+        # Counts above the largest captured case clamp to it.
+        return self._lora_dispatch_map.get(num_active_loras, self._max_lora_case)
 
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
@@ -286,13 +314,11 @@ class CudaGraphManager:
         num_reqs: int,
         num_tokens: int,
         uniform_token_count: int | None,
-        num_active_loras: int = 0,
+        num_active_loras: int,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
-        effective_loras = resolve_effective_num_active_loras(
-            num_active_loras, self.lora_capture_cases
-        )
+        effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """LoRA utilities for the Model Runner V2 and cudagraph."""
 
-import bisect
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -16,11 +15,6 @@ if TYPE_CHECKING:
     from vllm.config.lora import LoRAConfig
 
 NO_LORA_ID = 0
-
-
-def make_graph_key(num_tokens: int, num_active_loras: int = 0) -> tuple[int, int]:
-    """Create a unique key for CUDA graph storage (num_tokens, num_active_loras)."""
-    return (num_tokens, num_active_loras)
 
 
 def get_lora_capture_cases(
@@ -40,24 +34,6 @@ def get_lora_capture_cases(
         captured = get_captured_lora_counts(lora_config.max_loras, specialize)
         return [0] + [c for c in captured if c > 0]
     return [0, lora_config.max_loras + 1]
-
-
-def resolve_effective_num_active_loras(
-    num_active_loras: int, lora_capture_cases: list[int]
-) -> int:
-    """
-    Resolve effective num_active_loras for graph lookup.
-    Maps actual count to the nearest captured case.
-    """
-    if num_active_loras <= 0 or not lora_capture_cases:
-        return num_active_loras
-    captured_with_lora = [c for c in lora_capture_cases if c > 0]
-    if not captured_with_lora:
-        return num_active_loras
-    idx = bisect.bisect_left(captured_with_lora, num_active_loras)
-    if idx < len(captured_with_lora):
-        return captured_with_lora[idx]
-    return captured_with_lora[-1]
 
 
 def get_num_active_loras_for_dispatch(
@@ -91,25 +67,6 @@ def create_lora_capture_hook(
             pass
 
     return hook
-
-
-def activate_loras_for_batch(
-    lora_config: "LoRAConfig | None",
-    lora_state: "LoraState",
-    req_ids: list[str],
-    idx_mapping_np: np.ndarray,
-    num_scheduled_tokens: np.ndarray,
-    set_active_loras_fn: Callable[
-        [tuple[int, ...], tuple[int, ...], set[LoRARequest]], None
-    ],
-) -> None:
-    """Activate LoRA adapters for the current batch if LoRA is enabled."""
-    if lora_config is None:
-        return
-    prompt_mapping, token_mapping, lora_requests = lora_state.make_lora_inputs(
-        req_ids, idx_mapping_np, num_scheduled_tokens
-    )
-    set_active_loras_fn(prompt_mapping, token_mapping, lora_requests)
 
 
 class LoraState:
