@@ -10,7 +10,8 @@ from compressed_tensors.quantization import (
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -277,7 +278,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize = maybe_make_prepare_finalize(
             moe=self.moe,
             quant_config=self.moe_quant_config,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
             allow_new_interface=True,
             use_monolithic=False,
         )
@@ -287,8 +288,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             HybridW4A16MoEExperts(
                 moe_config=self.moe, quant_config=self.moe_quant_config
             ),
-            shared_experts=None,
-            inplace=not self.moe.disable_inplace,
         )
 
     def get_fused_moe_quant_config(
@@ -336,10 +335,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.moe_kernel is not None:
@@ -364,7 +364,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,

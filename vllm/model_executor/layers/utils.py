@@ -11,11 +11,60 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _tiny_dot_kernel(
+    x_ptr, w_ptr, out_ptr, K, BLOCK: tl.constexpr, APPLY_SIGMOID: tl.constexpr
+):
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < K
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    acc = tl.sum(x * w, axis=0)
+    if APPLY_SIGMOID:
+        acc = 1.0 / (1.0 + tl.exp(-acc))
+    # tl.store auto-casts acc (fp32) to the dtype of out_ptr;
+    # passing a bf16/fp16 ptr eliminates the post-kernel aten::copy_
+    # that otherwise fires once per layer per decode token.
+    tl.store(out_ptr, acc)
+
+
+def _tiny_dot_triton(
+    x_flat: torch.Tensor, w_flat: torch.Tensor, apply_sigmoid: bool = False
+) -> torch.Tensor:
+    K = x_flat.numel()
+    BLOCK = triton.next_power_of_2(K)
+    # Allocate the scalar output directly in the input's dtype so the
+    # in-kernel store does the fp32 -> bf16/fp16 cast (matches the eager
+    # (x*w).sum(dtype=x.dtype) semantics, no extra aten::copy_).
+    out = torch.empty((), dtype=x_flat.dtype, device=x_flat.device)
+    _tiny_dot_kernel[(1,)](
+        x_flat, w_flat, out, K=K, BLOCK=BLOCK, APPLY_SIGMOID=apply_sigmoid
+    )
+    return out
+
+
+def tiny_sigmoid_dot(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """sigmoid((x.flatten() * weight.flatten()).sum()) in one Triton kernel.
+
+    Replaces the eager 3-launch chain (aten::mul + aten::sum + aten::sigmoid)
+    used for Qwen MoE shared_expert_gate where the gate is
+    `Linear(hidden, 1)` and the post-call is sigmoid.  Falls back to the
+    eager chain when Triton or the input shape isn't supported.
+    """
+    if weight.numel() > 4096:
+        return torch.sigmoid((x.reshape(-1) * weight.reshape(-1)).sum(dtype=x.dtype))
+    return _tiny_dot_triton(
+        x.reshape(-1).contiguous(), weight.reshape(-1).contiguous(), apply_sigmoid=True
+    )
+
 
 MOE_LAYER_ROUTER_GATE_SUFFIXES = {
     "gate",
@@ -151,6 +200,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0
@@ -160,6 +210,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         x_view = x.reshape(-1, x.size(-1))
         with record_function_or_nullcontext(f"wvSplitKrc {n}x{m}x{k}"):
@@ -171,6 +222,35 @@ def rocm_unquantized_gemm_impl(
 
         return gemm_a16w16(x, weight, bias)
 
+    # Tiny scalar projection (e.g. Qwen MoE shared_expert_gate): hipBLASLt
+    # runs a 64x96x32 macro tile with a SplitK + post-pass even though the
+    # output is a single scalar. Replace with a fused elementwise-mul + reduce
+    # that emits one (Inductor-friendly) reduction kernel. Triggered for the
+    # 1x1xK shape only (40 MoE layers x 1 token = 40 calls/decode step on
+    # Qwen3-Next/Qwen3.5-MoE).  When bias is None and K <= 4096 we take the
+    # single-block Triton fast path; otherwise fall back to the eager fused
+    # (x*w).sum chain.  Correctness covered by
+    # tests/kernels/test_tiny_dot_triton.py.
+    if (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and m == 1
+        and n == 1
+        and x.dtype in [torch.float16, torch.bfloat16]
+    ):
+        if bias is None and k <= 4096:
+            with record_function_or_nullcontext(f"DOT {n}x{m}x{k} [tk]"):
+                x_flat = x.reshape(-1).contiguous()
+                w_flat = weight.reshape(-1).contiguous()
+                out = _tiny_dot_triton(x_flat, w_flat, apply_sigmoid=False)
+                return out.reshape(*x.shape[:-1], 1)
+        with record_function_or_nullcontext(f"DOT {n}x{m}x{k}"):
+            x_flat = x.reshape(-1)
+            w_flat = weight.reshape(-1)
+            out = (x_flat * w_flat).sum(dtype=x.dtype)
+            if bias is not None:
+                out = out + bias.reshape(-1)[0]
+            return out.reshape(*x.shape[:-1], 1)
+
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
@@ -178,20 +258,22 @@ def rocm_unquantized_gemm_impl(
         and k % 8 == 0
     )
 
-    if not use_skinny:
-        with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
-            return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 5:
+            cu_count = num_compute_units()
+            with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
+                out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
+                out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
-            out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
-            out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
 
     with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
         return torch.nn.functional.linear(x, weight, bias)
@@ -235,6 +317,19 @@ def dispatch_cpu_unquantized_gemm(
     # skip for missing layers
     if layer.weight.is_meta:
         layer.cpu_linear = torch.nn.functional.linear
+        return
+
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op
+        if torch.cpu._is_amx_tile_supported():
+            # prepack conv weight
+            layer.weight.data = ops.causal_conv1d_weight_pack(
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+            )
         return
 
     N, K = layer.weight.size()

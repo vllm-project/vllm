@@ -26,18 +26,43 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
-#ifdef VLLM_SKINNY_GEMM_SWEEP
-  // FP16/BF16 skinny GEMM sweep: ytile/unrl as runtime args (benchmark only)
+  // META3-2: bf16/fp16 skinny GEMM with fused silu_and_mul preamble.
+  // in_b is [N=1, 2*K] = [gate(K) | up(K)]; output is [N=1, M].
+  rocm_ops.def(
+      "wvSplitK_fused_silu_mul(Tensor in_a, Tensor in_b, Tensor? in_bias, "
+      "int CuCount) -> Tensor");
+  rocm_ops.impl("wvSplitK_fused_silu_mul", torch::kCUDA,
+                &wvSplitK_fused_silu_mul);
+
+  // META3-2 Phase 2: bf16/fp16 skinny GEMM with fused silu_and_mul preamble
+  // AND a fused per-token scalar (gate) mul epilogue.
+  // in_b is [N=1, 2*K] = [gate(K) | up(K)]; in_gate is [N=1, 1].  Output
+  // is [N=1, M] = (silu(g)*u) @ in_a.T * in_gate.
+  rocm_ops.def(
+      "wvSplitK_fused_silu_gate_mul(Tensor in_a, Tensor in_b, "
+      "Tensor in_gate, Tensor? in_bias, int CuCount) -> Tensor");
+  rocm_ops.impl("wvSplitK_fused_silu_gate_mul", torch::kCUDA,
+                &wvSplitK_fused_silu_gate_mul);
+
+#ifdef VLLM_SKINNY_GEMM_SWEEP_BF16
+  // FP16/BF16 skinny GEMM sweep: all four tunable axes (ytile, unrl,
+  // achunk, wvprgrp) as runtime args (benchmark only).  Allowed values:
+  //   ytile   in {1, 2}
+  //   unrl    in {1, 2, 4}
+  //   achunk  in {8, 16}
+  //   wvprgrp in {16, 32}
   rocm_ops.def(
       "wvSplitK_sweep(Tensor in_a, Tensor in_b, Tensor? in_bias, "
-      "int CuCount, int ytile, int unrl) -> Tensor");
+      "int CuCount, int ytile, int unrl, int achunk, int wvprgrp) -> Tensor");
   rocm_ops.impl("wvSplitK_sweep", torch::kCUDA, &wvSplitK_sweep);
 #endif
 
-  // W8A16 skinny GEMM: int8 weights, fp16/bf16 activations, per-channel scale
+  // W8A16 skinny GEMM: int8 weights, fp16/bf16 activations.
+  // group_size = -1 -> per-channel (1-D scale [M]); 32/64/128 -> per-group
+  // (2-D scale [M, K/group_size]).
   rocm_ops.def(
       "wvSplitK_int8(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_bias, int CuCount) -> Tensor");
+      "Tensor? in_bias, int CuCount, int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int8", torch::kCUDA, &wvSplitK_int8);
 
   // W8A8 skinny GEMM: int8 weights, int8 or bf16/fp16 activations,
@@ -51,7 +76,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
   // optional zero points for asymmetric quantization
   rocm_ops.def(
-      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
+      "wvSplitK_int4_g(Tensor in_w, Tensor in_x, Tensor in_scale, "
       "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
@@ -73,17 +98,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK_int8_sweep", torch::kCUDA, &wvSplitK_int8_sweep);
 
   rocm_ops.def(
-      "wvSplitK_int4g_sweep(Tensor in_a, Tensor in_b, Tensor in_scale, "
+      "wvSplitK_int4g_sweep(Tensor in_w, Tensor in_x, Tensor in_scale, "
       "int CuCount, int group_size, int ytile, int unrl, int achunk, "
       "int wvprgrp) -> Tensor");
   rocm_ops.impl("wvSplitK_int4g_sweep", torch::kCUDA, &wvSplitK_int4g_sweep);
 
   rocm_ops.def(
-      "wvSplitK_int4g_hf_sweep(Tensor in_a, Tensor in_b, Tensor in_scale, "
+      "wvSplitK_int4g_hf_sweep(Tensor in_w, Tensor in_x, Tensor in_scale, "
       "int CuCount, int group_size, int ytile, int unrl, int achunk, "
       "int wvprgrp) -> Tensor");
   rocm_ops.impl("wvSplitK_int4g_hf_sweep", torch::kCUDA,
                 &wvSplitK_int4g_hf_sweep);
+
+  // MoE int4 sweep: same args as fused_moe_wvSplitK_int4_gemm plus
+  // (ytile, unrl, achunk, wvprgrp) as runtime knobs.
+  rocm_ops.def(
+      "fused_moe_wvSplitK_int4_gemm_sweep(Tensor a, Tensor w, Tensor scales, "
+      "Tensor c, Tensor expert_ids, int block_size_m, int CuCount, "
+      "int group_size, Tensor zero_points, Tensor sorted_token_ids, "
+      "int top_k, bool fuse_silu_mul, int ytile, int unrl, int achunk, "
+      "int wvprgrp) -> ()");
+  rocm_ops.impl("fused_moe_wvSplitK_int4_gemm_sweep", torch::kCUDA,
+                &fused_moe_wvSplitK_int4_gemm_sweep);
 
   // W8A8 skinny GEMM sweep: all tunable params as runtime args (benchmark only)
   rocm_ops.def(
@@ -105,6 +141,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+
+#ifdef VLLM_ROCM_GFX1100
+  // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
+  rocm_ops.def(
+      "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
+
+  rocm_ops.def(
+      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, Tensor b_g_idx, bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
+#endif
 
   // Custom attention op
   // Compute the attention between an input query and the cached

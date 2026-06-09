@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x
+from vllm.platforms.rocm import on_gfx1x, on_gfx1151
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -57,6 +57,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     N,
     K,
     K8,  # K // 8
+    stride_bn,  # per-row stride of b_ptr (in int32 elements)
     num_groups,  # K // group_size
     # Quantization parameters
     group_size,
@@ -110,7 +111,7 @@ def _triton_w4a16_skinny_fmt_kernel(
 
         # ---- Load packed weights B: [BLOCK_N, BLOCK_K//8] int32 ----
         offs_k8 = k_start * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
-        b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]
+        b_ptrs = b_ptr + offs_n[:, None] * stride_bn + offs_k8[None, :]
         mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
         b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
 
@@ -128,10 +129,26 @@ def _triton_w4a16_skinny_fmt_kernel(
 
         # ---- Dequantize ----
         if HAS_ZP:
-            # Asymmetric: (nibble - zp_raw) * scale (single subtraction)
             zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
             zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
-            b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+            if scales.dtype == tl.bfloat16:
+                # bf16: subtract zp in INT (zp values are 0..15, exact
+                # roundtrip), then cast once. This mirrors the symmetric
+                # path and avoids the per-tile int->bf16 cast of the full
+                # [BLOCK_N, BLOCK_K] nibble block, which is the bottleneck
+                # for asymmetric w4a16 bf16 prefill on RDNA3.5 (Strix Halo,
+                # gfx1151). Casting zp_raw (only BLOCK_N elements) to int
+                # is cheap. Recovers ~14% TFLOPS across Qwen3-8B w4a16
+                # prefill projections without changing fp16 behavior.
+                zp_int = zp_raw.to(b.dtype)
+                b_fp = (b - zp_int[:, None]).to(scales.dtype) * scales[:, None]
+            else:
+                # fp16: original asymmetric path. The int->fp16 cast on
+                # RDNA3.5 has a direct ISA path and fuses well with the
+                # subsequent subtraction, so keeping the cast-first order
+                # avoids a small fp16 regression observed when switching
+                # both dtypes to the int-subtract-first form.
+                b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
         else:
             # Symmetric: (w - 8) * scale
             b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
@@ -174,7 +191,9 @@ def triton_w4a16_skinny_fmt_gemm(
         Output matrix [M, N], same dtype as a.
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
-    assert b_q.is_contiguous(), "Weight matrix must be contiguous"
+    # b_q may be a row-padded view (stride(0) > K//8) when the K_packed%2048
+    # cliff workaround is active; only require the last dim to be unit-stride.
+    assert b_q.stride(1) == 1, "Weight matrix must be unit-stride on K axis"
     assert scales.is_contiguous(), "Scales must be contiguous"
 
     M, K = a.shape
@@ -183,6 +202,7 @@ def triton_w4a16_skinny_fmt_gemm(
     num_groups = K // group_size
 
     assert b_q.shape == (N, K8), f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"
+    stride_bn = b_q.stride(0)
     assert scales.shape == (N, num_groups), (
         f"scales shape mismatch: {scales.shape} vs ({N}, {num_groups})"
     )
@@ -309,6 +329,7 @@ def triton_w4a16_skinny_fmt_gemm(
         N,
         K,
         K8,
+        stride_bn,
         num_groups,
         group_size=group_size,
         ZP_BIAS=zp_bias,
@@ -513,9 +534,38 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         # ---- Pack into skinny format: [N, K//8] ExLlama shuffle ----
         shuffled = pack_int4_exllama_shuffle(unpacked)
 
-        # Store as int8 for skinny kernel, keep int32 view for triton kernel
-        w_q_skinny_i32 = shuffled.contiguous()
-        w_q_skinny = w_q_skinny_i32.view(torch.int8)
+        # ---- Pad K axis by +128 B per row on the gfx1151 cliff ----
+        # On gfx1151 (Strix Halo) the int4 wvSplitK skinny kernel hits a sharp
+        # BW cliff when K_packed = K/2 is a multiple of 2048 B -- multi-row
+        # weight loads collide on memory-subsystem hash bits (DRAM channel
+        # and/or MALL slice) downstream of L2.  Adding 128 B (one cache line /
+        # 32 int32 cols) to the row stride breaks the collision.  Other gfx11x
+        # parts (Strix Point gfx1150, Krackan gfx115{2,3}) lack the
+        # multi-channel / MALL combination that produces the cliff and see no
+        # benefit from the pad, so the 3% weight-memory overhead is gated to
+        # gfx1151 only.
+        N_rows, K8 = shuffled.shape
+        K_packed_bytes = K8 * 4  # int32 -> bytes
+        # +128 B per row = one cache line, keeping each row cache-line aligned.
+        pad_int32 = 32
+        if (
+            on_gfx1151()
+            and K_packed_bytes % 2048 == 0
+            and shuffled.device.type == "cuda"
+        ):
+            padded = torch.empty(
+                (N_rows, K8 + pad_int32),
+                dtype=torch.int32,
+                device=shuffled.device,
+            )
+            padded[:, :K8].copy_(shuffled)
+            # Both views inherit stride(0) = K8 + pad_int32.
+            w_q_skinny_i32 = padded[:, :K8]
+            w_q_skinny = padded.view(torch.int8)[:, :K_packed_bytes]
+        else:
+            # Store as int8 for skinny kernel, keep int32 view for triton kernel
+            w_q_skinny_i32 = shuffled.contiguous()
+            w_q_skinny = w_q_skinny_i32.view(torch.int8)
 
         # ---- Prepare skinny scales: normalize to [N, K//G] ----
         permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)

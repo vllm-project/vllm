@@ -7,8 +7,12 @@ model:
   block_size: 16
 
 batch_specs:
-  - "q8000s8k"
-  - "q8k"
+  # Chunked-prefill chunks for input-len 8000, max-num-batched-tokens 2048
+  - "q2k"
+  - "q2ks4k"
+  - "q2ks6k"
+  - "q1856s8000"
+  # Decode at 8K
   - "q1s8k"
 
 backends:

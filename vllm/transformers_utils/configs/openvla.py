@@ -1,55 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""OpenVLA configuration support.
+
+OpenVLA checkpoints use a custom ``model_type`` and nest the language model
+configuration under ``text_config``. This shim lets vLLM load the checkpoint
+configuration without executing Hugging Face remote code.
+"""
+
 from typing import Any
 
-from transformers import LlamaConfig
-from transformers.configuration_utils import PretrainedConfig
+from transformers import LlamaConfig, PretrainedConfig
 
 
 class OpenVLAConfig(PretrainedConfig):
-    """Configuration class for OpenVLA model."""
+    """Configuration class for OpenVLA models."""
 
     model_type = "openvla"
 
     def __init__(
         self,
         timm_model_ids: list[str] | None = None,
+        timm_override_act_layers: list[str | None] | None = None,
         image_sizes: list[int] | None = None,
         use_fused_vision_backbone: bool = True,
         image_token_index: int = 32000,
         n_action_bins: int = 256,
         text_config: dict[str, Any] | LlamaConfig | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("architectures", ["OpenVLAForActionPrediction"])
         super().__init__(**kwargs)
+
         self.timm_model_ids = timm_model_ids or [
             "vit_large_patch14_reg4_dinov2.lvd142m",
             "vit_so400m_patch14_siglip_224",
         ]
+        self.timm_override_act_layers = timm_override_act_layers or [None, None]
         self.image_sizes = image_sizes or [224, 224]
         self.use_fused_vision_backbone = use_fused_vision_backbone
         self.image_token_index = image_token_index
         self.n_action_bins = n_action_bins
 
-        # Handle text_config for the Llama backbone
         if text_config is None:
-            # Default Llama-2-7b config matching OpenVLA
-            text_config = LlamaConfig(
-                vocab_size=32064,
-                hidden_size=4096,
-                intermediate_size=11008,
-                num_hidden_layers=32,
-                num_attention_heads=32,
-                num_key_value_heads=32,
-                hidden_act="silu",
-                max_position_embeddings=2048,
-                rms_norm_eps=1e-6,
-                architectures=["LlamaForCausalLM"],
-            )
+            text_config = LlamaConfig(architectures=["LlamaForCausalLM"])
         elif isinstance(text_config, dict):
-            if "architectures" not in text_config:
-                text_config["architectures"] = ["LlamaForCausalLM"]
+            text_config = text_config.copy()
+            text_config.setdefault("architectures", ["LlamaForCausalLM"])
             text_config = LlamaConfig(**text_config)
         self.text_config = text_config
-
-        self.pad_token_id = self.image_token_index

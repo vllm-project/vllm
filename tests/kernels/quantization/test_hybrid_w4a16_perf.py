@@ -146,6 +146,39 @@ SHAPES: list[dict[str, Any]] = [
         "group_size": 128,
         "comment": "Qwen3-4B down_proj",
     },
+    # RedHatAI/Qwen3-8B-quantized.w4a16 (asymmetric bf16; see PR #953)
+    {
+        "in_features": 4096,
+        "out_features": 6144,
+        "group_size": 128,
+        "comment": "Qwen3-8B qkv_proj",
+    },
+    {
+        "in_features": 4096,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Qwen3-8B o_proj",
+    },
+    {
+        "in_features": 4096,
+        "out_features": 24576,
+        "group_size": 128,
+        "comment": "Qwen3-8B gate_up_proj",
+    },
+    {
+        "in_features": 12288,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Qwen3-8B down_proj",
+    },
+    # Intel/Qwen3.5-35B-A3B-int4-AutoRound -- exercises the gfx11 K=4096 N=1
+    # wvSplitK_int4 dispatch branch added by PR #951 (W=16, AC=32, YT=1, UN=4).
+    {
+        "in_features": 4096,
+        "out_features": 2048,
+        "group_size": 128,
+        "comment": "Qwen3.5-35B-A3B GDN out_proj",
+    },
     # Qwen/Qwen2.5-7B-Instruct
     {
         "in_features": 3584,
@@ -186,7 +219,26 @@ SHAPES: list[dict[str, Any]] = [
     },
 ]
 
-PROVIDERS = ["hybrid-w4a16", "hybrid-w4a16-zp"]
+# Provider naming convention: "<base>[-zp][-bf16]". Suffix -zp selects the
+# asymmetric (per-group zero-point) dequant path; suffix -bf16 runs the kernel
+# with bfloat16 activations/scales/zp instead of float16. The bf16 variants
+# guard the asymmetric-bf16 fast path (see PR #953).
+PROVIDERS = [
+    "hybrid-w4a16",
+    "hybrid-w4a16-zp",
+    "hybrid-w4a16-bf16",
+    "hybrid-w4a16-zp-bf16",
+]
+
+
+def _provider_dtype(provider: str) -> torch.dtype:
+    return torch.bfloat16 if provider.endswith("-bf16") else torch.float16
+
+
+def _provider_use_zp(provider: str) -> bool:
+    return provider.startswith("hybrid-w4a16-zp")
+
+
 BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
 TFLOPS_TOLERANCE_PCT = {  # [low, high] allowed deviation from golden
     "default": [-8, 8],
@@ -274,18 +326,26 @@ def _validate_golden(data: dict[str, Any]) -> None:
 
 
 def prepare_hybrid_weights(
-    K: int, N: int, group_size: int, device: str = "cuda"
+    K: int,
+    N: int,
+    group_size: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float16,
 ) -> dict[str, torch.Tensor]:
-    """Create random packed weights for benchmarking."""
+    """Create random packed weights for benchmarking.
+
+    Scales/zp follow the activation *dtype* so the kernel exercises the
+    same fp16 vs bf16 code path it takes in production.
+    """
     num_groups = K // group_size
 
     w_q_skinny_i32 = torch.randint(
         0, 2**31, (N, K // 8), dtype=torch.int32, device=device
     )
     w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
-    w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
+    w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
     w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
-        torch.float16
+        dtype
     )
 
     return {
@@ -335,11 +395,11 @@ def measure_tflops(
     from vllm.utils.platform_utils import num_compute_units
 
     device = "cuda"
-    dtype = torch.float16
+    dtype = _provider_dtype(provider)
     a = torch.randn((M, K), device=device, dtype=dtype)
 
     cu_count = num_compute_units()
-    use_zp = provider == "hybrid-w4a16-zp"
+    use_zp = _provider_use_zp(provider)
 
     def run():
         return _hybrid_w4a16_apply_impl(
@@ -533,7 +593,9 @@ def _warm_up_gpu():
             print("Warming up GPU...")
             shape = sorted(SHAPES, key=_shape_key)[0]
             K, N, gs = shape["in_features"], shape["out_features"], shape["group_size"]
-            weights = prepare_hybrid_weights(K, N, gs)
+            weights = prepare_hybrid_weights(
+                K, N, gs, dtype=_provider_dtype(PROVIDERS[0])
+            )
             for bs in BATCH_SIZES:
                 measure_tflops(
                     bs, weights, K, N, gs, PROVIDERS[0]
@@ -606,8 +668,8 @@ def test_hybrid_w4a16_perf(
     test_id = f"i{K}-o{N}-g{group_size}-{provider}"
     _cool_down(request.config, test_id)
 
-    # ---- allocate weights once ----
-    weights = prepare_hybrid_weights(K, N, group_size)
+    # ---- allocate weights once (per provider, dtype-specific) ----
+    weights = prepare_hybrid_weights(K, N, group_size, dtype=_provider_dtype(provider))
 
     # ---- iterate batch sizes ----
     failures: list[str] = []

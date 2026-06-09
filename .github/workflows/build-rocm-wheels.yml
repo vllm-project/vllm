@@ -52,30 +52,45 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # 1) Install torch from the nightly ROCm index *only* (no
-          #    PyPI fallback) so we always get the ROCm wheel.
+          # Resolve torch on the ROCm nightly index, then derive matching
+          # torchvision/torchaudio pins. The nightly publishes multiple
+          # base versions side-by-side (2.9, 2.10, 2.11, 2.12); pin to
+          # 2.11 to match requirements/build/rocm.txt. The three packages
+          # must share the same +rocm build-date suffix or they
+          # ABI-mismatch at import ("operator torchvision::nms does not
+          # exist").
+          echo 'torch==2.11.*' > constraints.in
+          # --no-deps: torch pins exact rocm[libraries]/triton versions
+          # in its metadata (e.g. rocm[libraries]==7.14.0a..., triton==
+          # 3.7.0+rocm...); we don't want those locked in constraints.
+          uv pip compile constraints.in \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --prerelease allow \
+            --no-header --no-annotate --no-deps \
+            -o constraints.txt
+          # Synthesize torchvision/torchaudio entries with the same
+          # +rocm local version uv just picked for torch.
+          TORCH_LOCAL=$(grep '^torch==' constraints.txt | sed 's/.*+//')
+          TORCH_PATCH_SUFFIX=$(grep '^torch==' constraints.txt | sed 's/^torch==[0-9]\+\.[0-9]\+\.\([0-9]\+[^+]*\)+.*/\1/')
+          echo "torchvision==0.26.${TORCH_PATCH_SUFFIX}+${TORCH_LOCAL}" >> constraints.txt
+          echo "torchaudio==2.11.${TORCH_PATCH_SUFFIX}+${TORCH_LOCAL}" >> constraints.txt
+          cat constraints.txt
+          # unsafe-best-match: uv defaults to stopping at the first
+          # index that has a given package name, so PyPI (extra-index)
+          # would otherwise win for torch. We need it to consider both
+          # indexes and let the +rocm constraint pick the nightly wheel.
+          # --prerelease=allow: rocm-sdk transitive deps are alpha-tagged
+          # nightlies (e.g. rocm==7.14.0a20260518).
           uv pip install --system \
-            --upgrade-package "rocm[devel,libraries]" \
-            --upgrade-package torch \
-            --upgrade-package torchaudio \
-            --upgrade-package torchvision \
+            -c constraints.txt \
             "rocm[devel,libraries]" \
-            torch \
-            torchaudio \
-            torchvision \
-            --index-url ${{ env.PYTORCH_INDEX_URL }}
-          # rocm-sdk-devel ships a tarball that must be unpacked after every upgrade
-          rocm-sdk init
-          # 2) Install the remaining build deps from the requirements
-          #    file with torch/torchvision/torchaudio lines and the
-          #    stable ROCm index stripped out.
-          grep -v -E '^(torch|torchvision|torchaudio)==' requirements/build/rocm.txt \
-            | grep -v 'download.pytorch.org' \
-            > requirements/build/rocm-ci.txt
-          uv pip install --system -r requirements/build/rocm-ci.txt \
+            -r requirements/build/rocm.txt \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
-            --index-strategy unsafe-first-match
+            --index-strategy unsafe-best-match \
+            --prerelease allow
+          # rocm-sdk-devel ships a tarball that must be unpacked after install
+          rocm-sdk init
 
       - name: Expose GitHub Actions cache env vars
         uses: actions/github-script@v7
@@ -96,7 +111,7 @@ jobs:
         env:
           PYTORCH_ROCM_ARCH: ${{ env.PYTORCH_ROCM_ARCH }}
           VLLM_TARGET_DEVICE: rocm
-          MAX_JOBS: 2
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_IDLE_TIMEOUT: 0
         run: |
@@ -151,6 +166,8 @@ jobs:
         tests/kernels/quantization/test_rocm_skinny_gemms.py
         tests/kernels/quantization/test_dynamic_int8_lm_head.py
         tests/quantization/test_hip_w4a16_kernel.py
+        tests/rocm/aiter/test_fused_qk_norm_mrope_kvcache.py
+        tests/kernels/test_wvsplitk_fused_silu.py
 
   test-kernels-performance:
     name: test-kernels (performance)

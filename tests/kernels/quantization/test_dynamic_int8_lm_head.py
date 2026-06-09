@@ -69,7 +69,7 @@ def _make_layer(M: int, K: int, dtype: torch.dtype) -> torch.nn.Module:
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not _has_int8_kernel(), reason="no int8 per-channel kernel")
 @torch.inference_mode()
-def test_dynamic_int8_lm_head_apply(n, m, k, dtype, seed):
+def test_dynamic_int8_lm_head_apply(n, m, k, dtype, seed, default_vllm_config):
     torch.manual_seed(seed)
     method, layer = _make_layer(m, k, dtype)
 
@@ -114,7 +114,7 @@ def test_dynamic_int8_lm_head_apply(n, m, k, dtype, seed):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not _has_int8_kernel(), reason="no int8 per-channel kernel")
 @torch.inference_mode()
-def test_dynamic_int8_lm_head_embedding(m, k, dtype, seed):
+def test_dynamic_int8_lm_head_embedding(m, k, dtype, seed, default_vllm_config):
     torch.manual_seed(seed)
     method, layer = _make_layer(m, k, dtype)
 

@@ -353,15 +353,66 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 }
 
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+// META3-2: Variant of the wvSplitK_hf_sml LDS-load loop that fuses the
+// silu_and_mul preamble. The source activation tensor A has 2*K columns
+// per row, packed as [gate(K) | up(K)]; the LDS staging buffer ends up
+// with silu(gate) * up.  N=1 only (decode batch=1 path).  Mirrors the
+// int4 EXPERIMENT-g helper `load_act_into_lds_silu_mul` for the bf16 /
+// fp16 wvSplitK template.
+//
+// Match the unfused silu_and_mul semantics exactly: silu in fp32, cast
+// back to scalar_t, then the scalar_t multiply by `up`.  Doing the
+// multiply in fp32 changed downstream GEMM rounding subtly enough to
+// regress generated text on the int4 path; same caution applies here.
+template <typename scalar_t, int THRDS, int WvPrGrp, int A_CHUNK>
+__device__ __forceinline__ void load_act_into_lds_silu_mul_bf16(
+    scalar_t* s, const scalar_t* __restrict__ A, const int K,
+    const int max_lds_len) {
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    scalar8 h8;
+  };
+  const int limit = min__(K, max_lds_len);
+  for (uint32_t k = 0; k < (uint32_t)limit; k += THRDS * WvPrGrp * A_CHUNK) {
+    uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
+    if (k_in >= (uint32_t)limit) break;
+    bigType gate = *((const bigType*)(&A[k_in]));
+    bigType up = *((const bigType*)(&A[k_in + K]));
+    bigType out;
+  #pragma unroll
+    for (int i = 0; i < A_CHUNK; ++i) {
+      float g;
+      if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+        g = __bfloat162float(gate.h[i]);
+      } else {
+        g = __half2float(gate.h[i]);
+      }
+      scalar_t silu_g = __float2s<scalar_t>(g / (1.0f + expf(-g)));
+      out.h[i] = silu_g * up.h[i];
+    }
+    *((bigType*)(&s[k_in])) = out;
+  }
+  __syncthreads();
+}
+
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, bool FUSED_SILU_MUL = false,
+          bool FUSED_GATE_MUL = false>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap, const int M,
                      const int Bx, const int By, const scalar_t* B,
                      const scalar_t* __restrict__ A,
                      const scalar_t* __restrict__ BIAS, scalar_t* C,
-                     const int _WvPrGrp, const int CuCount) {
+                     const int _WvPrGrp, const int CuCount,
+                     const scalar_t* __restrict__ GATE = nullptr) {
+  static_assert(!FUSED_SILU_MUL || N == 1,
+                "FUSED_SILU_MUL is only supported with N=1");
+  static_assert(!FUSED_GATE_MUL || N == 1,
+                "FUSED_GATE_MUL is only supported with N=1");
   constexpr int max_lds_len = LDS_SIZE / 2;
   #if defined(__HIP__MI3XX__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
@@ -370,8 +421,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -399,15 +449,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  if constexpr (FUSED_SILU_MUL) {
+    // META3-2: A is laid out [gate(K) | up(K)] per row; this writes
+    // silu(gate)*up into LDS so the kernel sees the post-activation K
+    // elements directly. N=1 (asserted above).
+    load_act_into_lds_silu_mul_bf16<scalar_t, THRDS, WvPrGrp, A_CHUNK>(
+        s, A, K, max_lds_len);
+  } else {
+    for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+         k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
   #if defined(__gfx950__)
-    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+      __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
   #else
-    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+      *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
   #endif
+    }
+    __syncthreads();
   }
-  __syncthreads();
 
   if (threadIdx.y >= _WvPrGrp) return;
 
@@ -520,7 +578,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
               sum[n][y] += __bfloat162float(biases[n][y]);
             }
-            C[m + y + n * M] = __float2s<scalar_t>(sum[n][y]);
+            scalar_t out_val = __float2s<scalar_t>(sum[n][y]);
+            if constexpr (FUSED_GATE_MUL) {
+              // META3-2 Phase 2: per-token scalar mul (mirrors the
+              // unfused `F.sigmoid(expert_gate(x)) * out` in scalar_t).
+              out_val = out_val * GATE[n];
+            }
+            C[m + y + n * M] = out_val;
           }
         }
       }
@@ -566,7 +630,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
             sum4[n][y][0] += __bfloat162float(biases[n][y]);
-            C[m + y + n * M] = __float2bfloat16(sum4[n][y][0]);
+            scalar_t out_val = __float2bfloat16(sum4[n][y][0]);
+            if constexpr (FUSED_GATE_MUL) {
+              // META3-2 Phase 2: per-token scalar mul.
+              out_val = out_val * GATE[n];
+            }
+            C[m + y + n * M] = out_val;
           }
         }
       }
@@ -577,13 +646,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, bool FUSED_SILU_MUL = false,
+          bool FUSED_GATE_MUL = false>
 __global__ void wvSplitK_hf_sml_(const int K, const int Kbp, const int Kap,
                                  const int M, const int Bx, const int By,
                                  const scalar_t* B,
                                  const scalar_t* __restrict__ A,
                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
-                                 const int _WvPrGrp, const int CuCount) {
+                                 const int _WvPrGrp, const int CuCount,
+                                 const scalar_t* __restrict__ GATE = nullptr) {
   UNREACHABLE_CODE
 }
 #endif
@@ -607,8 +678,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -841,8 +911,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -1218,42 +1287,122 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                     \
+// Like WVSPLITK_CFG but lets the caller pick A_CHUNK. The original macro
+// hard-coded A_CHUNK=8; this is a compatibility-preserving expansion that
+// lets a single dispatch branch select wider/narrower per-thread global
+// loads. Used today by the gfx11 K=2048 N=1 fast path (Qwen3.5 decode):
+// AC=16 with WvPrGrp=32 and UNRL=8 beats the (AC=8, W=16, UN=4) default
+// by ~30% on M ∈ {256, 1024} and ~4% on M=248320.  Reproduce the YT/UN
+// half of the sweep via benchmarks/kernels/sweep_bf16_kernel.py; the
+// A_CHUNK and WvPrGrp axes are not yet exposed by wvSplitK_sweep (TODO:
+// extend the op to 4 axes like wvSplitK_int4g_sweep already does).
+#define WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, _AC)             \
   {                                                                           \
     dim3 block(_THRDS, _WVPRGRP);                                             \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);                 \
     if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))               \
-      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else if (Kbp_in * N_in <= max_lds_len * 1.2)                              \
-      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>            \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>          \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
     else                                                                      \
-      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>        \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, af4, bf4, biasf4, c, __wvPrGrp, \
                                        CuCount);                              \
   }
 
-#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
-  {                                                       \
-    bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
-    if (_sYT <= 1)                                        \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if (is_gfx11() && (K_in <= 2048))                \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
-    else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
-    else if (_sYT <= 4 * 3)                               \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
-    else if (__N == 4)                                    \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
-    else                                                  \
-      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
+// Backwards-compatible wrapper: existing call sites get A_CHUNK=8.
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N) \
+  WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N, 8)
+
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)                        \
+  {                                                                          \
+    bool fit_lds = (Kbp_in * N_in <= max_lds_len);                           \
+    if (is_gfx11()) {                                                        \
+      if (_sYT <= 1)                                                         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if (K_in < 1024)                                                  \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                            \
+      else if ((K_in % 1024 == 512) && (_sYT >= 40 || K_in >= 4096))         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                            \
+      else if ((K_in == 2048) && (__N == 1))                                 \
+        /* Tuned for gfx1151 (Qwen3.5 decode shapes M ∈ {256, 1024,        \
+           248320}, K=2048, N=1): beats the (AC=8, W=16, UN=4) baseline of   \
+           the K_in<=2048 branch below by 1.31-1.37x on small/mid M and 3.9% \
+           on the lm_head-sized M.  Compiles to 145 VGPRs / occupancy 9 (vs  \
+           46 / 8 for the default); zero spills.  VGPR-bound but DRAM-       \
+           saturated past 92% of LPDDR5X peak after subtracting the per-     \
+           launch dispatch floor.  Verify per shape with                     \
+           benchmarks/kernels/sweep_bf16_kernel.py. */                       \
+        WVSPLITK_CFG_AC(32, 32, 1, 8, __N, 16)                               \
+      /* gfx1151 AC=32 fast paths.  Each cell beats AC=16 by >=2% with       \
+         z>1.96 in a 10-rep do_bench A/B (stderr 0.1-1.0us per cell, mean    \
+         delta 1.5-3 us per cell).  Other K%2048==0 cells stay on the AC=16  \
+         fallbacks below where AC=32 was a tie or lost (notably 4096x4096    \
+         N=4 was -2.7%, do not extrapolate to untested cells).  Re-verify    \
+         per shape with benchmarks/kernels/sweep_bf16_kernel.py (extend the  \
+         ACHUNKS list to include 32 and rebuild with                         \
+         VLLM_SKINNY_GEMM_SWEEP_BF16=1). */                                  \
+      else if ((K_in == 2048) && (__N == 2 || __N == 3))                     \
+        /* M=2560 K=2048 N=2: 1.057x (z=21.5); N=3: 1.049x (z=12.8) */       \
+        WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 32)                     \
+      else if ((K_in == 4096) && (__N == 1))                                 \
+        /* M=2560 K=4096 N=1: 1.041x (z=3.7); UR=4 not 2 for N=1 */          \
+        WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 4, __N, 32)                     \
+      else if ((K_in == 4096) && (__N == 2) && (M_in < 4096))                \
+        /* M<4096 K=4096 N=2: 1.057x (z=13.1), W=16 wins at this M */        \
+        WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 32)                     \
+      else if ((K_in == 4096) && (__N == 2) && (M_in >= 4096))               \
+        /* M>=4096 K=4096 N=2: 1.028x (z=6.2), W=32 wins at larger M */      \
+        WVSPLITK_CFG_AC(_THRDS, 32, 1, 2, __N, 32)                           \
+      else if ((K_in == 4096) && (__N == 3))                                 \
+        /* M=2560 K=4096 N=3: 1.031x (z=4.9) */                              \
+        WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 2, __N, 32)                     \
+      else if ((K_in == 8192) && (__N == 2))                                 \
+        /* M=2560 K=8192 N=2: 1.040x (z=9.3), W=32 wins at this K */         \
+        WVSPLITK_CFG_AC(_THRDS, 32, 1, 2, __N, 32)                           \
+      else if ((K_in % 2048 == 0) && (__N == 2))                             \
+        /* gfx1151 K%2048==0, N=2 only: YT=2 + W=32 + AC=16 + UR=4.          \
+           sweep_bf16_kernel.py 4-axis sweep showed this is the best         \
+           N=2 config across K in {2048, 4096, 8192} and 4096x4096,          \
+           1.06x (K=8192) to 1.60x (K=2048) over the prior AC=8 default. */  \
+        WVSPLITK_CFG_AC(_THRDS, 32, 2, 4, __N, 16)                           \
+      else if ((K_in % 2048 == 0) && (__N != 2))                             \
+        /* gfx1151 K%2048==0, N in {1, 3, 4} (K=2048 N=1 handled above):     \
+           YT=1 + W=16 + AC=16 + UR=4.  N=3/4 want YT=1 not YT=2 (LDS/VGPR   \
+           pressure from W=32 hurts them); same config also wins for N=1.    \
+           sweep showed 1.11x-1.19x (N=1), 1.23x-1.98x (N=3),                \
+           1.59x-2.73x (N=4) over the prior AC=8 defaults. */                \
+        WVSPLITK_CFG_AC(_THRDS, _WVPRGRP, 1, 4, __N, 16)                     \
+      else if (K_in <= 2048)                                                 \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if (__N >= 2 && !fit_lds) {                                       \
+        if (K_in % 1024 == 0 && Kbp_in < max_lds_len / 2)                    \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 4, __N)                          \
+        else                                                                 \
+          WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                          \
+      } else if (__N == 1)                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 2, __N)                            \
+      else                                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 1, __N)                            \
+    } else {                                                                 \
+      if (_sYT <= 1)                                                         \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)                            \
+      else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2))                  \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)                            \
+      else if (_sYT <= 4 * 3)                                                \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)                            \
+      else if (__N == 4)                                                     \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)                            \
+      else                                                                   \
+        WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)                            \
+    }                                                                        \
   }
 
 #define WVSPLIT_TILE(_sYT, __N)                                      \
@@ -1329,7 +1478,10 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
           WVSPLIT_TILE_CFG(64, 16, sYT, 4)
         break;
       case 5:
-        WVSPLIT_TILE(sYT, 5)
+        if (use_wave32)
+          WVSPLIT_TILE_CFG(32, 16, sYT, 5)
+        else
+          WVSPLIT_TILE_CFG(64, 16, sYT, 5)
         break;
       default:
         throw std::runtime_error(
@@ -1340,13 +1492,244 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
+// META3-2: bf16/fp16 wvSplitK with a FUSED_SILU_MUL preamble.
+//
+// in_a: weight   [M, K]   (bf16/fp16)         (wvSplitK convention: in_a)
+// in_b: activation [N=1, 2*K]  packed [gate(K) | up(K)] per row
+// in_bias: optional bias
+// out:  [N=1, M]
+//
+// Mirrors the int4 EXPERIMENT-g `fuse_silu_mul` flag but specialized to a
+// single-call entry point so we don't have to retrofit the existing
+// wvSplitK dispatch macros (which cover N=1..5 and 3 LDS-residency
+// regimes).  Only the N=1 sml path is implemented; the caller (Python)
+// is responsible for falling back to the unfused wvSplitK + silu_and_mul
+// when preconditions don't hold.
+//
+// Note on parameter naming: the wvSplitK kernel's C-side argument names
+// are confusingly cross-mapped vs. the wrapper's local variable names.
+// Inside the kernel, `B` is the weight (= in_a here) and `A` is the
+// activation (= in_b).  We mirror the original wvSplitK wrapper's call
+// pattern so the kernel sees (B=af4=weight, A=bf4=activation) exactly as
+// it does in the unfused path.
+torch::Tensor wvSplitK_fused_silu_mul(const at::Tensor& in_a,
+                                      const at::Tensor& in_b,
+                                      const std::optional<at::Tensor>& in_bias,
+                                      const int64_t CuCount) {
+  auto M_in = in_a.size(0);      // weight output dim
+  auto K_in = in_a.size(1);      // weight K (compute K)
+  auto N_in = in_b.size(0);      // batch (must be 1)
+  auto two_K = in_b.size(1);     // activation's last dim (must be 2*K)
+  auto Kap_in = in_a.stride(0);  // weight row stride (passed as kernel's
+                                 // Kbp); = K_in normally
+  auto Kbp_in = in_b.stride(0);  // activation row stride (passed as
+                                 // kernel's Kap); = 2*K_in normally
+
+  TORCH_CHECK(in_a.dtype() == in_b.dtype(),
+              "wvSplitK_fused_silu_mul: dtype mismatch");
+  TORCH_CHECK(
+      in_a.dtype() == torch::kFloat16 || in_a.dtype() == torch::kBFloat16,
+      "wvSplitK_fused_silu_mul: only fp16/bf16 supported");
+  TORCH_CHECK(K_in % 8 == 0,
+              "wvSplitK_fused_silu_mul: K must be multiple of 8");
+  TORCH_CHECK(N_in == 1, "wvSplitK_fused_silu_mul: only N=1 supported, got ",
+              N_in);
+  TORCH_CHECK(two_K == 2 * K_in,
+              "wvSplitK_fused_silu_mul: in_b.size(-1) must equal 2*K=",
+              2 * K_in, ", got ", two_K);
+
+  auto Bx_in =
+      (in_bias.has_value() && in_bias->numel() > 0)
+          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
+          : 1;
+  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
+                in_bias->sizes().size() == 2)
+                   ? in_bias->size(0)
+                   : 1;
+
+  auto out_c = torch::empty(
+      {N_in, M_in},
+      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int max_lds_len = get_lds_size() / 2;
+
+  // sml-path precondition: post-silu_mul K elements per row must fit LDS.
+  // (The fused load reads 2*K from global but only K go into LDS.)
+  TORCH_CHECK(K_in * N_in <= max_lds_len,
+              "wvSplitK_fused_silu_mul: K*N must fit LDS (K=", K_in,
+              ", N=", N_in, ", max_lds_len=", max_lds_len, ")");
+
+  dim3 grid(CuCount);
+
+  // Pick a small fixed config that matches what the unfused wvSplitK
+  // dispatcher chooses for the canonical Qwen3.5-MoE shared_expert
+  // down-projection (N=1, K=512, M=2048 on gfx1151): per the
+  // WVSPLIT_TILE_CFG macro for K_in <= 2048 case, this lands at
+  // THRDS=32, WvPrGrp=16, YTILE=1, UNRL=4 on wave32 (gfx1x) and
+  // THRDS=64, WvPrGrp=16, YTILE=2, UNRL=2 on wave64 (gfx9).
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+      in_b.scalar_type(), "wvSplitK_fused_silu_mul", [&] {
+        using fptype = typename scalar<scalar_t>::type;
+        fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
+        const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+        const fptype* biasf4 =
+            (in_bias.has_value() && in_bias->numel() > 0)
+                ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+                : nullptr;
+        fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
+
+        const bool use_wave32 = on_gfx1x();
+
+        // Mirror the unfused wvSplitK launch site exactly, then flip the
+        // FUSED_SILU_MUL template parameter to true.  Argument order is the
+        // documented (K, Kap_in, Kbp_in, M, ..., af4=weight, bf4=activation)
+        // -- same swap that wvSplitK does under the hood.  Inlined (not
+        // macroized) because hipify mishandles the line-continuation '\'
+        // in macro bodies that contain literal template args like 'true'.
+        if (use_wave32) {
+          // gfx11/12 (wave32): YTILE=1, UNRL=4 matches the K_in <= 2048,
+          // N=1 branch of WVSPLIT_TILE_CFG -- same per-CU tile shape as
+          // the unfused down_proj kernel for this model.
+          constexpr int _THRDS = 32, _WVPRGRP = 16, _YTILE = 1, _UNRL = 4;
+          dim3 block(_THRDS, _WVPRGRP);
+          int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);
+          wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, 1, true>
+              <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,
+                                           By_in, af4, bf4, biasf4, c,
+                                           __wvPrGrp, CuCount);
+        } else {
+          // wave64 (gfx9): YTILE=2, UNRL=2 mirrors the (__N==1) clause of
+          // WVSPLIT_TILE_CFG.
+          constexpr int _THRDS = 64, _WVPRGRP = 16, _YTILE = 2, _UNRL = 2;
+          dim3 block(_THRDS, _WVPRGRP);
+          int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);
+          wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, 1, true>
+              <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,
+                                           By_in, af4, bf4, biasf4, c,
+                                           __wvPrGrp, CuCount);
+        }
+      });
+  return out_c;
+}
+
+// META3-2 Phase 2: bf16/fp16 wvSplitK with both FUSED_SILU_MUL preamble
+// AND a per-token FUSED_GATE_MUL epilogue.
+//
+// Same shape conventions as `wvSplitK_fused_silu_mul`, plus:
+//   in_gate: [N, 1] (or [N]) per-token scalar weight that pre-multiplies
+//            the GEMM output before write-back to C. Same dtype as in_b.
+//
+// Used by Qwen2MoeMLP.forward when expert_gate is set: collapses
+// silu_and_mul + down_proj + (sigmoid(expert_gate(x)) * out) into one
+// kernel.  Output is [N=1, M].
+torch::Tensor wvSplitK_fused_silu_gate_mul(
+    const at::Tensor& in_a, const at::Tensor& in_b, const at::Tensor& in_gate,
+    const std::optional<at::Tensor>& in_bias, const int64_t CuCount) {
+  auto M_in = in_a.size(0);      // weight output dim
+  auto K_in = in_a.size(1);      // weight K (compute K)
+  auto N_in = in_b.size(0);      // batch (must be 1)
+  auto two_K = in_b.size(1);     // activation's last dim (must be 2*K)
+  auto Kap_in = in_a.stride(0);  // weight row stride (kernel's Kbp)
+  auto Kbp_in = in_b.stride(0);  // activation row stride (kernel's Kap)
+
+  TORCH_CHECK(in_a.dtype() == in_b.dtype(),
+              "wvSplitK_fused_silu_gate_mul: dtype mismatch a vs b");
+  TORCH_CHECK(in_gate.dtype() == in_b.dtype(),
+              "wvSplitK_fused_silu_gate_mul: dtype mismatch gate vs b");
+  TORCH_CHECK(
+      in_a.dtype() == torch::kFloat16 || in_a.dtype() == torch::kBFloat16,
+      "wvSplitK_fused_silu_gate_mul: only fp16/bf16 supported");
+  TORCH_CHECK(K_in % 8 == 0,
+              "wvSplitK_fused_silu_gate_mul: K must be multiple of 8");
+  TORCH_CHECK(N_in == 1,
+              "wvSplitK_fused_silu_gate_mul: only N=1 supported, got ", N_in);
+  TORCH_CHECK(two_K == 2 * K_in,
+              "wvSplitK_fused_silu_gate_mul: in_b.size(-1) must equal 2*K=",
+              2 * K_in, ", got ", two_K);
+  TORCH_CHECK(in_gate.numel() == N_in,
+              "wvSplitK_fused_silu_gate_mul: in_gate.numel() must equal N=",
+              N_in, ", got ", in_gate.numel());
+
+  auto Bx_in =
+      (in_bias.has_value() && in_bias->numel() > 0)
+          ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
+          : 1;
+  auto By_in = (in_bias.has_value() && in_bias->numel() > 0 &&
+                in_bias->sizes().size() == 2)
+                   ? in_bias->size(0)
+                   : 1;
+
+  auto out_c = torch::empty(
+      {N_in, M_in},
+      torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const int max_lds_len = get_lds_size() / 2;
+
+  TORCH_CHECK(K_in * N_in <= max_lds_len,
+              "wvSplitK_fused_silu_gate_mul: K*N must fit LDS (K=", K_in,
+              ", N=", N_in, ", max_lds_len=", max_lds_len, ")");
+
+  dim3 grid(CuCount);
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+      in_b.scalar_type(), "wvSplitK_fused_silu_gate_mul", [&] {
+        using fptype = typename scalar<scalar_t>::type;
+        fptype* af4 = reinterpret_cast<fptype*>(in_a.data_ptr());
+        const fptype* bf4 = reinterpret_cast<const fptype*>(in_b.data_ptr());
+        const fptype* gatef4 =
+            reinterpret_cast<const fptype*>(in_gate.data_ptr());
+        const fptype* biasf4 =
+            (in_bias.has_value() && in_bias->numel() > 0)
+                ? reinterpret_cast<const fptype*>(in_bias->data_ptr())
+                : nullptr;
+        fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
+
+        const bool use_wave32 = on_gfx1x();
+
+        // Same tile config as wvSplitK_fused_silu_mul; only the trailing
+        // FUSED_GATE_MUL=true template flag and the GATE pointer differ.
+        if (use_wave32) {
+          constexpr int _THRDS = 32, _WVPRGRP = 16, _YTILE = 1, _UNRL = 4;
+          dim3 block(_THRDS, _WVPRGRP);
+          int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);
+          wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, 1, true,
+                           true><<<grid, block, 0, stream>>>(
+              K_in, Kap_in, Kbp_in, M_in, Bx_in, By_in, af4, bf4, biasf4, c,
+              __wvPrGrp, CuCount, gatef4);
+        } else {
+          constexpr int _THRDS = 64, _WVPRGRP = 16, _YTILE = 2, _UNRL = 2;
+          dim3 block(_THRDS, _WVPRGRP);
+          int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);
+          wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, 1, true,
+                           true><<<grid, block, 0, stream>>>(
+              K_in, Kap_in, Kbp_in, M_in, Bx_in, By_in, af4, bf4, biasf4, c,
+              __wvPrGrp, CuCount, gatef4);
+        }
+      });
+  return out_c;
+}
+
 // Sweep function disabled by default to reduce compile time.
-// Build with -DVLLM_SKINNY_GEMM_SWEEP to enable.
-#ifdef VLLM_SKINNY_GEMM_SWEEP
+// Build with -DVLLM_SKINNY_GEMM_SWEEP_BF16 (or the umbrella
+// -DVLLM_SKINNY_GEMM_SWEEP) to enable.  Compared to the dispatcher's
+// (YTILE, UNRL) heuristic this lets the caller also pick A_CHUNK and
+// WvPrGrp at runtime, which is necessary to verify whether the (W=32,
+// AC=16) trick used by the K=2048 N=1 fast path also recovers other
+// K%2048 == 0 shapes that currently route through (W=16, AC=8).
+// The YTILE grid is restricted to {1, 2} -- the production dispatcher
+// never picks YTILE > 2 for the slow K%2048 shapes (YT=1 for N=1,
+// YT=2 for N>=2 + !fit_lds) -- which keeps the template-instantiation
+// count to 24 combos x 4 N x 3 kernel variants = 288.
+#ifdef VLLM_SKINNY_GEMM_SWEEP_BF16
 torch::Tensor wvSplitK_sweep(const at::Tensor& in_a, const at::Tensor& in_b,
                              const std::optional<at::Tensor>& in_bias,
                              const int64_t CuCount, const int64_t ytile,
-                             const int64_t unrl) {
+                             const int64_t unrl, const int64_t achunk,
+                             const int64_t wvprgrp) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
@@ -1377,63 +1760,78 @@ torch::Tensor wvSplitK_sweep(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-  #define WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, _N)                  \
+  #define WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _AC, _WVPRGRP)   \
     {                                                                       \
-      dim3 block(_THRDS, 16);                                               \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, 16);                   \
+      dim3 block(_THRDS, _WVPRGRP);                                         \
+      int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);             \
       if ((Kbp_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))           \
-        wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>          \
+        wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>  \
             <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in, \
                                          By_in, af4, bf4, biasf4, c,        \
                                          __wvPrGrp, CuCount);               \
       else if (Kbp_in * N_in <= max_lds_len * 1.2)                          \
-        wvSplitK_hf_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>              \
+        wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>      \
             <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in, \
                                          By_in, af4, bf4, biasf4, c,        \
                                          __wvPrGrp, CuCount);               \
       else                                                                  \
-        wvSplitK_hf_big_<fptype, _THRDS, _YTILE, 16, 8, _UNRL, _N>          \
+        wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, _AC, _UNRL, _N>  \
             <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in, \
                                          By_in, af4, bf4, biasf4, c,        \
                                          __wvPrGrp, CuCount);               \
     }
 
-  #define WVSPLITK_SWEEP_N(_THRDS, _YTILE, _UNRL)              \
-    switch (N_in) {                                            \
-      case 1:                                                  \
-        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 1) break; \
-      case 2:                                                  \
-        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 2) break; \
-      case 3:                                                  \
-        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 3) break; \
-      case 4:                                                  \
-        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 4) break; \
-      default:                                                 \
-        TORCH_CHECK(false, "Unsupported N=", N_in);            \
+  #define WVSPLITK_SWEEP_N(_THRDS, _YTILE, _UNRL, _AC, _WVPRGRP)              \
+    switch (N_in) {                                                           \
+      case 1:                                                                 \
+        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 1, _AC, _WVPRGRP) break; \
+      case 2:                                                                 \
+        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 2, _AC, _WVPRGRP) break; \
+      case 3:                                                                 \
+        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 3, _AC, _WVPRGRP) break; \
+      case 4:                                                                 \
+        WVSPLITK_SWEEP_LAUNCH(_THRDS, _YTILE, _UNRL, 4, _AC, _WVPRGRP) break; \
+      default:                                                                \
+        TORCH_CHECK(false, "Unsupported N=", N_in);                           \
+    }
+
+  #define WVSPLITK_SWEEP_WVPRGRP(_THRDS, _YTILE, _UNRL, _AC) \
+    if (wvprgrp == 16) {                                     \
+      WVSPLITK_SWEEP_N(_THRDS, _YTILE, _UNRL, _AC, 16)       \
+    } else if (wvprgrp == 32) {                              \
+      WVSPLITK_SWEEP_N(_THRDS, _YTILE, _UNRL, _AC, 32)       \
+    } else {                                                 \
+      TORCH_CHECK(false, "Unsupported wvprgrp=", wvprgrp,    \
+                  "; allowed: 16, 32");                      \
+    }
+
+  #define WVSPLITK_SWEEP_AC(_THRDS, _YTILE, _UNRL)                           \
+    if (achunk == 8) {                                                       \
+      WVSPLITK_SWEEP_WVPRGRP(_THRDS, _YTILE, _UNRL, 8)                       \
+    } else if (achunk == 16) {                                               \
+      WVSPLITK_SWEEP_WVPRGRP(_THRDS, _YTILE, _UNRL, 16)                      \
+    } else {                                                                 \
+      TORCH_CHECK(false, "Unsupported achunk=", achunk, "; allowed: 8, 16"); \
     }
 
   #define WVSPLITK_SWEEP_UNRL(_THRDS, _YTILE)        \
     if (unrl == 1) {                                 \
-      WVSPLITK_SWEEP_N(_THRDS, _YTILE, 1)            \
+      WVSPLITK_SWEEP_AC(_THRDS, _YTILE, 1)           \
     } else if (unrl == 2) {                          \
-      WVSPLITK_SWEEP_N(_THRDS, _YTILE, 2)            \
+      WVSPLITK_SWEEP_AC(_THRDS, _YTILE, 2)           \
     } else if (unrl == 4) {                          \
-      WVSPLITK_SWEEP_N(_THRDS, _YTILE, 4)            \
+      WVSPLITK_SWEEP_AC(_THRDS, _YTILE, 4)           \
     } else {                                         \
       TORCH_CHECK(false, "Unsupported unrl=", unrl); \
     }
 
-  #define WVSPLITK_SWEEP_YTILE(_THRDS)                 \
-    if (ytile == 1) {                                  \
-      WVSPLITK_SWEEP_UNRL(_THRDS, 1)                   \
-    } else if (ytile == 2) {                           \
-      WVSPLITK_SWEEP_UNRL(_THRDS, 2)                   \
-    } else if (ytile == 3) {                           \
-      WVSPLITK_SWEEP_UNRL(_THRDS, 3)                   \
-    } else if (ytile == 4) {                           \
-      WVSPLITK_SWEEP_UNRL(_THRDS, 4)                   \
-    } else {                                           \
-      TORCH_CHECK(false, "Unsupported ytile=", ytile); \
+  #define WVSPLITK_SWEEP_YTILE(_THRDS)                                    \
+    if (ytile == 1) {                                                     \
+      WVSPLITK_SWEEP_UNRL(_THRDS, 1)                                      \
+    } else if (ytile == 2) {                                              \
+      WVSPLITK_SWEEP_UNRL(_THRDS, 2)                                      \
+    } else {                                                              \
+      TORCH_CHECK(false, "Unsupported ytile=", ytile, "; allowed: 1, 2"); \
     }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK_sweep", [&] {
@@ -1455,12 +1853,14 @@ torch::Tensor wvSplitK_sweep(const at::Tensor& in_a, const at::Tensor& in_b,
 
   #undef WVSPLITK_SWEEP_LAUNCH
   #undef WVSPLITK_SWEEP_N
+  #undef WVSPLITK_SWEEP_WVPRGRP
+  #undef WVSPLITK_SWEEP_AC
   #undef WVSPLITK_SWEEP_UNRL
   #undef WVSPLITK_SWEEP_YTILE
 
   return out_c;
 }
-#endif  // VLLM_SKINNY_GEMM_SWEEP
+#endif  // VLLM_SKINNY_GEMM_SWEEP_BF16
 
 // This version targets cases skinny where CUs are not filled
 // Wave-SplitK is used with reduction done via atomics.
@@ -1488,8 +1888,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];

@@ -112,20 +112,34 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: |
-          # Pin torch from the nightly ROCm index *only* (no PyPI
-          # fallback) so we always get the ROCm wheel.
+          # Resolve torch on the ROCm nightly index, then derive matching
+          # torchvision/torchaudio pins sharing the same +rocm build-date
+          # suffix. Without this, the vllm wheel's `torch==2.11.0` dep is
+          # satisfied by the vanilla PyPI wheel (PyTorch 2.11.0+cu130,
+          # HIP: None), and tests fail to find any GPU. See the build
+          # workflow for the same trick.
+          echo 'torch==2.11.*' > constraints.in
+          uv pip compile constraints.in \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --prerelease allow \
+            --no-header --no-annotate --no-deps \
+            -o constraints.txt
+          TORCH_LOCAL=$(grep '^torch==' constraints.txt | sed 's/.*+//')
+          TORCH_PATCH_SUFFIX=$(grep '^torch==' constraints.txt | sed 's/^torch==[0-9]\+\.[0-9]\+\.\([0-9]\+[^+]*\)+.*/\1/')
+          echo "torchvision==0.26.${TORCH_PATCH_SUFFIX}+${TORCH_LOCAL}" >> constraints.txt
+          echo "torchaudio==2.11.${TORCH_PATCH_SUFFIX}+${TORCH_LOCAL}" >> constraints.txt
+          cat constraints.txt
           uv pip install --system \
-            --upgrade-package torch \
-            torch \
-            --index-url ${{ env.PYTORCH_INDEX_URL }}
-          uv pip install --system dist/*.whl \
+            -c constraints.txt \
+            dist/*.whl \
             pytest pytest-timeout numpy \
             tblib transformers huggingface_hub sentencepiece pillow \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
-            --index-strategy unsafe-first-match
-          # Nightly torchvision has operator ABI mismatch with nightly torch.
-          # Our kernel tests don't need it; remove to prevent conftest crash.
+            --index-strategy unsafe-best-match \
+            --prerelease allow
+          # Kernel tests don't need torchvision; remove to keep the env
+          # minimal and avoid any future ABI surprises.
           uv pip uninstall --system torchvision 2>/dev/null || true
 
       - name: Prepare test environment

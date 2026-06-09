@@ -32,6 +32,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm._aiter_ops import check_aiter_fused_qk_norm_mrope_kvcache
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -57,6 +58,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -66,6 +68,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
@@ -339,6 +342,19 @@ class Qwen3MoeAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.rms_norm_eps = rms_norm_eps
+
+        # Decide once whether to use the aiter fused
+        # qk-norm + mrope + reshape_and_cache kernel.  The kernel handles
+        # all three stages of the QKV path in a single HIP launch and is
+        # only valid for the 3D mrope decode path with full-rotary heads.
+        self._aiter_qknorm_mrope_enabled = (
+            current_platform.is_rocm()
+            and isinstance(self.rotary_emb, MRotaryEmbedding)
+            and getattr(self.rotary_emb, "mrope_section", None) is not None
+            and self.rotary_emb.rotary_dim == self.head_dim
+            and check_aiter_fused_qk_norm_mrope_kvcache()
+        )
 
     def forward(
         self,
@@ -346,6 +362,13 @@ class Qwen3MoeAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+
+        if self._aiter_qknorm_mrope_enabled:
+            fused_out = self._fused_qknorm_mrope_kvcache_forward(positions, qkv)
+            if fused_out is not None:
+                output, _ = self.o_proj(fused_out)
+                return output
+
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
@@ -359,6 +382,87 @@ class Qwen3MoeAttention(nn.Module):
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
+
+    def _fused_qknorm_mrope_kvcache_forward(
+        self,
+        positions: torch.Tensor,
+        qkv: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Fused Q-RMSNorm + K-RMSNorm + MRotary via aiter.
+
+        Replaces three small triton kernels (qk_norm reduction, mrope cos/sin
+        prep, mrope rotation math) with one HIP launch.  The KV cache write
+        is left to vLLM's existing reshape_and_cache path because vLLM's paged
+        kv_cache has K and V interleaved at the block level and aiter needs
+        a contiguous k_cache.
+
+        Returns the attention output (shape [num_tokens, num_heads*head_dim])
+        on success, or None to fall back to the unfused path.
+        """
+        # Need 2D mrope positions [3, num_tokens] — the kernel only supports
+        # the multimodal mrope variant.
+        if positions.ndim != 2:
+            return None
+
+        num_tokens = qkv.size(0)
+        # Aiter expects flat per-token QKV [num_tokens, (Hq+Hk+Hv)*D].
+        qkv_flat = qkv.view(num_tokens, -1)
+
+        # cos_sin_cache must match qkv dtype + device.  Reuse the rotary
+        # embedding's cached buffer and let it lazily promote.
+        cos_sin_cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)
+
+        mrope_section = self.rotary_emb.mrope_section
+
+        q_out = torch.empty(
+            num_tokens,
+            self.num_heads,
+            self.head_dim,
+            dtype=qkv.dtype,
+            device=qkv.device,
+        )
+        k_out = torch.empty(
+            num_tokens,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=qkv.dtype,
+            device=qkv.device,
+        )
+        v_out = torch.empty(
+            num_tokens,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=qkv.dtype,
+            device=qkv.device,
+        )
+
+        torch.ops.vllm.aiter_fused_qk_norm_mrope_kvcache(
+            qkv_flat,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            cos_sin_cache,
+            positions,
+            q_out,
+            k_out,
+            v_out,
+            self.num_heads,
+            self.num_kv_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.is_neox_style,
+            mrope_section[0],
+            mrope_section[1],
+            mrope_section[2],
+            self.rotary_emb.mrope_interleaved,
+            self.rms_norm_eps,
+        )
+
+        attn_output = self.attn(
+            q_out.view(num_tokens, self.num_heads * self.head_dim),
+            k_out.view(num_tokens, self.num_kv_heads * self.head_dim),
+            v_out.view(num_tokens, self.num_kv_heads * self.head_dim),
+        )
+        return attn_output
 
 
 class Qwen3MoeDecoderLayer(nn.Module):

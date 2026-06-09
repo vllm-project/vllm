@@ -136,7 +136,7 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat(request)
+        result = await self.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -164,6 +164,7 @@ class OpenAIServingRender:
             input_length,
             self.default_sampling_params,
             self.override_max_tokens,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
@@ -184,6 +185,8 @@ class OpenAIServingRender:
     async def render_chat(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -252,7 +255,7 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
-                skip_mm_cache=True,
+                skip_mm_cache=skip_mm_cache,
                 reasoning_parser=self.reasoning_parser,
             )
         else:
@@ -276,7 +279,7 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        result = await self.render_completion(request)
+        result = await self.render_completion(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
@@ -296,6 +299,7 @@ class OpenAIServingRender:
                 input_length,
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
             params = request.to_sampling_params(
                 max_tokens, self.default_sampling_params
@@ -322,6 +326,8 @@ class OpenAIServingRender:
     async def render_completion(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
@@ -344,7 +350,7 @@ class OpenAIServingRender:
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
-            skip_mm_cache=True,
+            skip_mm_cache=skip_mm_cache,
         )
 
         return engine_inputs
@@ -537,7 +543,10 @@ class OpenAIServingRender:
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                tokenize=(
+                    is_mistral_tokenizer(renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
             ),
         )
 

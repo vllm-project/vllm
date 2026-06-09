@@ -111,15 +111,25 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 // W8A16 skinny GEMM kernel: int8 weights, fp16/bf16 activations
 // Targets the "sml" case where activations fit in LDS.
 // A_CHUNK=16: each thread processes 16 int8 weight elements per step.
+// GROUP_SIZE: 0 = per-channel scale [M] (one scale per output row, applied
+//             once at the end of the K reduction).
+//             >0 = per-group scale [M, K/GROUP_SIZE] (one scale per K-group;
+//             requires GROUP_SIZE % A_CHUNK == 0 so each thread's A_CHUNK
+//             K-elements lie within a single group).
 #if defined(__HIP__GFX9__) || defined(__GFX11__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GROUP_SIZE = 0>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitK_int8_hf_sml_(const int K, const int M, const int Bx, const int By,
                           const int8_t* B, const scalar_t* __restrict__ A,
                           const scalar_t* scale,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
                           const int _WvPrGrp, const int CuCount) {
+  static_assert(GROUP_SIZE == 0 || GROUP_SIZE >= A_CHUNK,
+                "GROUP_SIZE must be >= A_CHUNK so each thread's A_CHUNK "
+                "K-elements lie in one group");
+  static_assert(GROUP_SIZE == 0 || (GROUP_SIZE % A_CHUNK) == 0,
+                "GROUP_SIZE must be a multiple of A_CHUNK");
   constexpr int max_lds_len = LDS_SIZE / 2;
 
   // Activation union: 16 fp16/bf16 values = 32 bytes
@@ -151,6 +161,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   if (threadIdx.y >= _WvPrGrp) return;
 
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+
+  // For per-group scales, num_groups stride along K.
+  [[maybe_unused]] const int num_groups =
+      (GROUP_SIZE > 0) ? (K / GROUP_SIZE) : 0;
 
   float sum[N][YTILE];
 
@@ -209,9 +223,25 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             for (uint32_t b = 0; b < A_CHUNK; b++) {
               cvtB.h[b] = bigB[y][k2].b[b];
             }
+            if constexpr (GROUP_SIZE > 0) {
+              // Per-group scale: this thread's A_CHUNK K-elements lie in
+              // a single group (statically asserted GROUP_SIZE >= A_CHUNK
+              // and GROUP_SIZE % A_CHUNK == 0).  Accumulate the partial
+              // dot product locally, multiply by the group's scale, then
+              // add into sum[n][y].
+              float partial = 0.0f;
   #pragma unroll
-            for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
-              DOT2C(sum[n][y], bigA[n][k2].f[b], cvtB.f[b])
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
+                DOT2C(partial, bigA[n][k2].f[b], cvtB.f[b])
+              }
+              uint32_t group_idx = k_ / GROUP_SIZE;
+              sum[n][y] +=
+                  partial * __s2float(scale[(m + y) * num_groups + group_idx]);
+            } else {
+  #pragma unroll
+              for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
+                DOT2C(sum[n][y], bigA[n][k2].f[b], cvtB.f[b])
+              }
             }
           }
         }
@@ -237,7 +267,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == (THRDS - 1)) {
       for (int n = 0; n < N; n++) {
         for (int i = 0; i < YTILE; i++) {
-          sum[n][i] *= __s2float(scale[m + i]);
+          if constexpr (GROUP_SIZE == 0) {
+            sum[n][i] *= __s2float(scale[m + i]);
+          }
           if (BIAS) sum[n][i] += __s2float(BIAS[(m + i) % Bx + (n % By) * M]);
           C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
         }
@@ -270,7 +302,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == 63) {
       for (int n = 0; n < N; n++) {
         for (int i = 0; i < YTILE; i++) {
-          sum[n][i] *= __s2float(scale[m + i]);
+          if constexpr (GROUP_SIZE == 0) {
+            sum[n][i] *= __s2float(scale[m + i]);
+          }
           if (BIAS) sum[n][i] += __s2float(BIAS[(m + i) % Bx + (n % By) * M]);
           C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
         }
@@ -282,7 +316,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__GFX11__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GROUP_SIZE = 0>
 __global__ void wvSplitK_int8_hf_sml_(const int K, const int M, const int Bx,
                                       const int By, const int8_t* B,
                                       const scalar_t* __restrict__ A,
@@ -310,7 +344,7 @@ int mindiv_int8(int N, int div1, int div2) {
 torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
                             const at::Tensor& in_scale,
                             const std::optional<at::Tensor>& in_bias,
-                            const int64_t CuCount) {
+                            const int64_t CuCount, const int64_t group_size) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
@@ -329,8 +363,30 @@ torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
       "Activation must be float16 or bfloat16");
   TORCH_CHECK(in_scale.dtype() == in_b.dtype(),
               "Scale dtype must match activation dtype");
-  TORCH_CHECK(in_scale.size(0) == M_in, "Scale size must match M");
   TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16 for int8 kernel");
+
+  // Per-channel: group_size == -1, scale shape [M].
+  // Per-group: group_size in {32, 64, 128} (or any multiple of 16 dividing K),
+  //            scale shape [M, K/group_size].
+  if (group_size == -1) {
+    TORCH_CHECK(in_scale.dim() == 1, "Per-channel scale must be 1-D [M]");
+    TORCH_CHECK(in_scale.size(0) == M_in,
+                "Per-channel scale size must match M");
+  } else {
+    TORCH_CHECK(group_size >= 16, "group_size must be >= 16 (A_CHUNK)");
+    TORCH_CHECK((group_size % 16) == 0,
+                "group_size must be a multiple of 16 (A_CHUNK)");
+    TORCH_CHECK(K_in % group_size == 0,
+                "K must be divisible by group_size=", group_size);
+    int64_t num_groups = K_in / group_size;
+    TORCH_CHECK(in_scale.dim() == 2,
+                "Per-group scale must be 2-D [M, K/group_size]");
+    TORCH_CHECK(in_scale.size(0) == M_in && in_scale.size(1) == num_groups,
+                "Per-group scale must be [M, K/group_size] = [", M_in, ", ",
+                num_groups, "], got [", in_scale.size(0), ", ",
+                in_scale.size(1), "]");
+    TORCH_CHECK(in_scale.is_contiguous(), "Per-group scale must be contiguous");
+  }
 
   const int max_lds_len = get_lds_size_int8() / 2;
   TORCH_CHECK(K_in * N_in <= max_lds_len,
@@ -347,14 +403,29 @@ torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-#define WVSPLITK_INT8_LAUNCH(_THRDS, _YTILE, _UNRL, _N)                        \
+#define WVSPLITK_INT8_LAUNCH_G(_THRDS, _YTILE, _UNRL, _N, _GROUP)              \
   {                                                                            \
     dim3 block(_THRDS, 16);                                                    \
     int __wvPrGrp = mindiv_int8(M_in, CuCount * _YTILE, 16);                   \
     TORCH_CHECK(M_in % _YTILE == 0, "M must be divisible by YTILE=", _YTILE);  \
-    wvSplitK_int8_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N>           \
+    wvSplitK_int8_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GROUP>   \
         <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, wptr, aptr,     \
                                      sptr, biasptr, cptr, __wvPrGrp, CuCount); \
+  }
+
+#define WVSPLITK_INT8_LAUNCH(_THRDS, _YTILE, _UNRL, _N)          \
+  {                                                              \
+    if (group_size == -1) {                                      \
+      WVSPLITK_INT8_LAUNCH_G(_THRDS, _YTILE, _UNRL, _N, 0)       \
+    } else if (group_size == 32) {                               \
+      WVSPLITK_INT8_LAUNCH_G(_THRDS, _YTILE, _UNRL, _N, 32)      \
+    } else if (group_size == 64) {                               \
+      WVSPLITK_INT8_LAUNCH_G(_THRDS, _YTILE, _UNRL, _N, 64)      \
+    } else if (group_size == 128) {                              \
+      WVSPLITK_INT8_LAUNCH_G(_THRDS, _YTILE, _UNRL, _N, 128)     \
+    } else {                                                     \
+      TORCH_CHECK(false, "Unsupported group_size=", group_size); \
+    }                                                            \
   }
 
 #define WVSPLITK_INT8(_YTILE, _UNRL, _N)        \
@@ -407,6 +478,7 @@ torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
     }
   });
 
+#undef WVSPLITK_INT8_LAUNCH_G
 #undef WVSPLITK_INT8_LAUNCH
 #undef WVSPLITK_INT8
 #undef WVSPLIT_INT8_TILE
