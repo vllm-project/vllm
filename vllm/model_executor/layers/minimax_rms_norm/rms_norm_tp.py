@@ -12,15 +12,32 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 # Max number of tokens supported by the Lamport fused allreduce+RMSNorm kernel.
 # Larger batches fall back to the eager allreduce + RMSNorm path.
 MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
+
+
+def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
+    """All-reduce a per-token variance tensor across the TP group.
+
+    Variance is accumulated in fp32 for numerical stability. The FlashInfer
+    fused all-reduce caches a single global workspace keyed to the model's
+    16-bit activation dtype (``use_fp32_lamport=False``); routing an fp32
+    reduction through it would read against a mismatched workspace and corrupt
+    the result. FlashInfer's fast-path only triggers for 2D inputs, so reducing
+    a flattened (1D) view keeps these fp32 reductions on custom all-reduce /
+    pynccl, both of which handle fp32 correctly.
+    """
+    return tensor_model_parallel_all_reduce(var.flatten()).view_as(var)
 
 
 @torch.compile(backend=current_platform.simple_compile_backend, dynamic=True)
@@ -42,7 +59,7 @@ def _minimax_qk_norm_fallback(
     k_var = k.pow(2).mean(dim=-1, keepdim=True)
     if tp_world > 1:
         qk_var = torch.cat([q_var, k_var], dim=-1)
-        qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+        qk_var = _all_reduce_variance(qk_var) / tp_world
         q_var, k_var = qk_var.chunk(2, dim=-1)
     q = q * torch.rsqrt(q_var + eps) * q_weight
     k = k * torch.rsqrt(k_var + eps) * k_weight
@@ -143,12 +160,27 @@ class MiniMaxText01RMSNormTP(CustomOp):
                 get_allreduce_workspace,
             )
 
-            self.workspace = get_allreduce_workspace(
-                rank=self.tp_rank,
-                world_size=self.tp_world,
-                max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
-                process_group=get_tp_group().cpu_group,
-            )
+            # The Lamport workspace exchanges CUDA IPC handles and enables peer
+            # access between GPUs. This requires P2P (IPC peer access) to be
+            # available; on topologies where it is not (e.g. consumer PCIe cards
+            # with P2P disabled in the driver), allocation raises. Fall back to
+            # the eager allreduce + RMSNorm path instead of failing model load.
+            try:
+                self.workspace = get_allreduce_workspace(
+                    rank=self.tp_rank,
+                    world_size=self.tp_world,
+                    max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
+                    process_group=get_tp_group().cpu_group,
+                )
+            except Exception as e:
+                logger.warning_once(
+                    "Failed to initialize MiniMax fused allreduce+RMSNorm "
+                    "Lamport workspace: %s. This is expected on GPUs without "
+                    "P2P (IPC peer access) support. Falling back to the eager "
+                    "allreduce + RMSNorm path.",
+                    e,
+                )
+                self.workspace = None
 
     @staticmethod
     def weight_loader(
@@ -174,7 +206,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         x = x.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
         if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
+            variance = _all_reduce_variance(variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = (x * self.weight).to(orig_dtype)
         return x
@@ -201,7 +233,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         k_var = k.pow(2).mean(dim=-1, keepdim=True)
         if q_norm.tp_world > 1:
             qk_var = torch.cat([q_var, k_var], dim=-1)
-            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
+            qk_var = _all_reduce_variance(qk_var) / q_norm.tp_world
             q_var, k_var = qk_var.chunk(2, dim=-1)
         q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
         k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight

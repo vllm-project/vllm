@@ -128,8 +128,6 @@ trait_set! {
 
 /// Generate the northbound tool-call ID using the OpenAI-style `call_<id>`
 /// format.
-// TODO: support other ID scheme like Kimi-K2's
-// `functions.{name}:{global_index}`.
 pub(crate) fn generate_tool_call_id() -> String {
     format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }
