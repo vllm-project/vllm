@@ -35,8 +35,8 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
-PRECOMPILED_RUST_EXTENSION_GLOB = "_rust_*.so"
-PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
+PRECOMPILED_RUST_EXTENSION_SUFFIXES = (".so", ".dylib")
+PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.(?:so|dylib)$")
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -58,24 +58,24 @@ def should_require_rust_frontend() -> bool:
     return value.lower() not in ("", "0", "false", "no")
 
 
-rust_extensions = rust_build.rust_extensions(
-    optional=not should_require_rust_frontend()
-)
-
-
 def get_precompiled_rust_extension_paths() -> list[Path]:
-    return sorted((ROOT_DIR / "vllm").glob(PRECOMPILED_RUST_EXTENSION_GLOB))
+    paths = []
+    for suffix in PRECOMPILED_RUST_EXTENSION_SUFFIXES:
+        paths.extend((ROOT_DIR / "vllm").glob(f"_rust_*{suffix}"))
+    return sorted(paths)
 
 
-def get_expected_rust_extension_module_names() -> list[str]:
-    """Return configured PyO3 Rust extension module names under ``vllm``."""
-    return rust_build.rust_py_extension_module_names(rust_extensions)
+def has_precompiled_rust_extension_module(module_name: str) -> bool:
+    return any(
+        (ROOT_DIR / "vllm").glob(f"{module_name}*{suffix}")
+        for suffix in PRECOMPILED_RUST_EXTENSION_SUFFIXES
+    )
 
 
 def get_missing_precompiled_rust_extension_modules() -> list[str]:
     missing = []
-    for module_name in get_expected_rust_extension_module_names():
-        if not list((ROOT_DIR / "vllm").glob(f"{module_name}*.so")):
+    for module_name in rust_build.rust_py_extension_module_names():
+        if not has_precompiled_rust_extension_module(module_name):
             missing.append(module_name)
     return missing
 
@@ -454,10 +454,17 @@ class precompiled_build_rust(build_rust):
     """Skips local Rust builds when all precompiled Rust artifacts are present."""
 
     def run(self) -> None:
-        if (
-            PRECOMPILED_RUST_FRONTEND_PATH.exists()
-            and has_precompiled_rust_extensions()
-        ):
+        missing = []
+        if not PRECOMPILED_RUST_FRONTEND_PATH.exists():
+            missing.append(str(PRECOMPILED_RUST_FRONTEND_PATH))
+        missing_rust_extensions = get_missing_precompiled_rust_extension_modules()
+        if missing_rust_extensions:
+            missing.extend(
+                str(ROOT_DIR / "vllm" / f"{module_name}*(.so|.dylib)")
+                for module_name in missing_rust_extensions
+            )
+
+        if not missing:
             logger.info(
                 "Skipping local Rust build: using precompiled %s and %s",
                 PRECOMPILED_RUST_FRONTEND_PATH,
@@ -465,15 +472,6 @@ class precompiled_build_rust(build_rust):
             )
             return
 
-        missing = []
-        if not PRECOMPILED_RUST_FRONTEND_PATH.exists():
-            missing.append(str(PRECOMPILED_RUST_FRONTEND_PATH))
-        missing_rust_extensions = get_missing_precompiled_rust_extension_modules()
-        if missing_rust_extensions:
-            missing.extend(
-                str(ROOT_DIR / "vllm" / f"{module_name}*.so")
-                for module_name in missing_rust_extensions
-            )
         logger.warning(
             "Precompiled wheel did not provide all Rust artifacts (%s); "
             "falling back to local Rust build.",
@@ -1161,6 +1159,12 @@ package_data = {
 }
 
 
+def add_vllm_package_data(filename: str) -> None:
+    vllm_files = package_data.setdefault("vllm", [])
+    if filename not in vllm_files:
+        vllm_files.append(filename)
+
+
 # If using precompiled artifacts, extract and patch package_data in advance.
 if USE_PRECOMPILED_RUST_FRONTEND:
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
@@ -1176,13 +1180,9 @@ if USE_PRECOMPILED_RUST_FRONTEND:
 # If the rust frontend binary is already present in the source tree (e.g.,
 # pre-built in a separate Docker build stage), ship it as-is.
 if PRECOMPILED_RUST_FRONTEND_PATH.exists():
-    vllm_files = package_data.setdefault("vllm", [])
-    if "vllm-rs" not in vllm_files:
-        vllm_files.append("vllm-rs")
-vllm_files = package_data.setdefault("vllm", [])
+    add_vllm_package_data("vllm-rs")
 for rust_extension_path in get_precompiled_rust_extension_paths():
-    if rust_extension_path.name not in vllm_files:
-        vllm_files.append(rust_extension_path.name)
+    add_vllm_package_data(rust_extension_path.name)
 
 if _no_device():
     ext_modules = []
@@ -1201,6 +1201,12 @@ if (
     or has_precompiled_rust_extensions()
 ):
     cmdclass["build_rust"] = precompiled_build_rust
+
+# Rust artifacts, built via setuptools-rust and installed into the package
+# directory alongside the Python modules.
+rust_extensions = rust_build.rust_extensions(
+    optional=not should_require_rust_frontend()
+)
 
 setup(
     # static metadata should rather go in pyproject.toml

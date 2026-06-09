@@ -156,8 +156,7 @@ RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
     && bash build_rust.sh \
-    && test -x vllm/vllm-rs \
-    && test -f vllm/_rust_tool_parser*.so
+    && test -x vllm/vllm-rs
 
 # -----------------------
 # vLLM native build stages
