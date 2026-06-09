@@ -250,7 +250,7 @@ async def send_request(
         "model": model,
         "messages": messages,
     }
-    
+
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
 
