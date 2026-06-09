@@ -176,6 +176,52 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow():
     assert not grammar.is_terminated()
 
 
+def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance():
+    """Post-marker drafts predate the bitmask and may be grammar-invalid;
+    grammar_bitmask must skip the grammar advance instead of asserting.
+    """
+    tokenizer, manager, request, prompt = _make_manager_and_request(prompt_str="{")
+    grammar = request.structured_output_request.grammar
+
+    assert grammar.accept_tokens(request.request_id, prompt)
+    assert not grammar.is_terminated()
+
+    marker = tokenizer.encode("\n")[0]
+
+    class StubReasoner:
+        def __init__(self, *_, **__):
+            self.end_token_id = marker
+
+        def is_reasoning_end(self, input_ids):
+            return marker in list(input_ids)
+
+        def is_reasoning_end_streaming(self, input_ids, delta_ids):
+            return marker in list(delta_ids)
+
+    manager.reasoner_cls = StubReasoner
+    request.structured_output_request.reasoner = StubReasoner()
+    request.structured_output_request.reasoning_ended = False
+
+    pre = tokenizer.encode(" ")[0]
+    # A token that the JSON grammar would reject as the first post-marker
+    # token; without the fix grammar.accept_tokens fires the assertion.
+    invalid_post = tokenizer.encode("z")[0]
+    drafts = [pre, marker, invalid_post]
+
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+
+    assert bitmask is not None
+    assert bitmask.shape[0] == len(drafts) + 1
+    # Post-marker position is still bitmask-constrained.
+    assert not (bitmask[2] == -1).all()
+    # Grammar must not have advanced through the unvalidated draft.
+    assert not grammar.is_terminated()
+
+
 def test_validate_tokens_then_bitmask_round_trip():
     """validate_tokens -> pad with -1 -> grammar_bitmask must not assert."""
     tokenizer, manager, request, prompt = _make_manager_and_request()

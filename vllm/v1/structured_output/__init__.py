@@ -281,6 +281,7 @@ class StructuredOutputManager:
                 history_prefix: list[int] | None = None
 
                 state_advancements = 0
+                post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
@@ -294,15 +295,23 @@ class StructuredOutputManager:
                         simulated = history_prefix + list(req_tokens[: i + 1])
                         if reasoner.is_reasoning_end_streaming(simulated, [token]):
                             # Reasoning ended mid-window. Constrain the rest
-                            # of the window but skip advancing the grammar
-                            # through the marker token (it is reasoning
-                            # content, not grammar content).
+                            # of the window via bitmask. Skip grammar advance
+                            # through the marker (it is reasoning content);
+                            # try to advance through subsequent drafts so the
+                            # next bitmask row reflects the post-advance state,
+                            # but tolerate rejection since those drafts predate
+                            # the bitmask and are not guaranteed valid.
                             apply_bitmask = True
                             advance_grammar = False
+                            post_reasoning_end_in_window = True
                     if advance_grammar and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if accepted:
+                            state_advancements += 1
+                        elif not post_reasoning_end_in_window:
+                            raise AssertionError(
+                                (token, req_id, scheduled_spec_decode_tokens)
+                            )
                     cumulative_index += 1
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
                     # Diffusion LLMs don't sample a bonus token after the
