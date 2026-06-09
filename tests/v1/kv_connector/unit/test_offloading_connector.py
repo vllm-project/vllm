@@ -564,7 +564,8 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     "model,block_size,tp_size",
     [
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
-        ("tiiuae/falcon-mamba-7b", 16, 1)
+        # ("tiiuae/falcon-mamba-7b", 16, 1),
+        ("state-spaces/mamba-1.4b-hf", 16, 1)
     ],
 )
 def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
