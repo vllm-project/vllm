@@ -98,20 +98,30 @@ __device__ __forceinline__ typename WmmaNative<T>::v4 from_b16x4(_B16x4 v) {
 // ---------------------------------------------------------------------------
 // MFMA wrappers (16x16x16, fp16/bf16 inputs, fp32 accumulator)
 //
-// Declarations are unconditional; the underlying `__builtin_amdgcn_mfma_*`
-// calls only get lowered during the device-side compile pass, where the
-// gfx9 arch macros are defined. The host pass compiles a stub.
+// The `__builtin_amdgcn_mfma_*` intrinsics need the `mai-insts` target
+// feature, which only exists on CDNA (gfx90a/942/950). A multi-arch HIP
+// build runs the device compile pass once *per* `--offload-arch`, including
+// RDNA targets (gfx11xx/12xx), so the intrinsics must be guarded behind
+// __HIP__CDNA__. On any other target — RDNA device passes or the host pass —
+// the wrapper compiles to a stub. That stub is never executed: the runtime
+// dispatch is gated to MI3xx, so non-CDNA builds simply carry an inert copy.
 // ---------------------------------------------------------------------------
 
 template <typename T>
 __device__ __forceinline__ floatx4 mfma_16x16x16(typename WmmaNative<T>::v4 a,
                                                  typename WmmaNative<T>::v4 b,
                                                  floatx4 c) {
+#if defined(__HIP__CDNA__)
   if constexpr (std::is_same<T, _Float16>::value) {
     return __builtin_amdgcn_mfma_f32_16x16x16f16(a, b, c, 0, 0, 0);
   } else {
     return __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(a, b, c, 0, 0, 0);
   }
+#else
+  (void)a;
+  (void)b;
+  return c;
+#endif
 }
 
 // NOTE: i8 MFMA wrappers intentionally omitted. The INT4 path dequantizes
