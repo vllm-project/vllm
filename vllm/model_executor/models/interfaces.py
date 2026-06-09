@@ -1524,8 +1524,8 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
     ) -> str:
-        """Return the modality of the inputs."""
-        ...
+        """Return the modality of the inputs (default: image-only)."""
+        return "image"
 
     def get_max_frames_per_video(
         self,
