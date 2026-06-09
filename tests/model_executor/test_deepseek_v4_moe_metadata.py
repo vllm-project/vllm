@@ -142,7 +142,11 @@ def test_deepseek_v4_fused_moe_init_exports_moe_metadata(monkeypatch):
         model_config=SimpleNamespace(hf_config=config),
         quant_config=None,
         kernel_config=SimpleNamespace(moe_backend="auto"),
-        parallel_config=SimpleNamespace(enable_expert_parallel=True),
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=True,
+            enable_eplb=False,
+            eplb_config=SimpleNamespace(num_redundant_experts=0),
+        ),
     )
 
     moe = DeepseekV4MoE(vllm_config, prefix="model.layers.3.mlp")
