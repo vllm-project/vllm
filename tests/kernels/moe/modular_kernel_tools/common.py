@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -43,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
+    has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
 )
@@ -150,6 +152,10 @@ class Config:
         make env data for vllm launch.
         """
         vllm_config = VllmConfig()
+        vllm_config.model_config = SimpleNamespace(
+            enforce_eager=True,
+            is_moe=True,
+        )
         vllm_config.parallel_config.data_parallel_size = self.world_size
         vllm_config.parallel_config.enable_expert_parallel = True
 
@@ -239,6 +245,10 @@ class Config:
             or info.backend == "deepep_low_latency"
         )
 
+    def needs_deep_ep_v2(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "deepep_v2"
+
     def needs_aiter(self):
         info = expert_info(self.fused_experts_type)
         return info.needs_aiter
@@ -315,6 +325,8 @@ class Config:
         # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
             return False, "Needs DeepEP, but DeepEP not available."
+        if self.needs_deep_ep_v2() and not has_deep_ep_v2():
+            return False, "Needs DeepEP v2, but DeepEP v2 not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
             return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_aiter() and not has_aiter():  # noqa: SIM103
@@ -657,6 +669,58 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def _maybe_convert_weights_for_experts(
+    config: Config,
+    rank_weights: WeightTensors,
+) -> WeightTensors:
+    """Convert weights to expert-specific format (e.g., TrtLLM BlockMajorK)."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        convert_to_fp8_moe_kernel_format,
+    )
+
+    fe_type = config.fused_experts_type
+    fe_name = getattr(fe_type, "__name__", "")
+
+    backend: Fp8MoeBackend | None = None
+    if fe_name == "TrtLlmFp8ExpertsModular":
+        backend = Fp8MoeBackend.FLASHINFER_TRTLLM
+    elif fe_name == "FlashInferExperts":
+        backend = Fp8MoeBackend.FLASHINFER_CUTLASS
+
+    if backend is None or not rank_weights.is_quantized():
+        return rank_weights
+
+    mock_layer = SimpleNamespace(
+        weight_block_size=config.quant_block_shape,
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=config.N,
+        ),
+        activation=SimpleNamespace(is_gated=True),
+    )
+
+    w1, w2, w1_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+        fp8_backend=backend,
+        layer=mock_layer,
+        w13=rank_weights.w1,
+        w2=rank_weights.w2,
+        w13_scale=rank_weights.w1_scale,
+        w2_scale=rank_weights.w2_scale,
+        w13_input_scale=None,
+        w2_input_scale=None,
+    )
+
+    return WeightTensors(
+        w1=w1,
+        w2=w2,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_gs=rank_weights.w1_gs,
+        w2_gs=rank_weights.w2_gs,
+    )
+
+
 def run_modular_kernel(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -669,6 +733,7 @@ def run_modular_kernel(
 
     # weights for rank
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
+    rank_weights = _maybe_convert_weights_for_experts(config, rank_weights)
 
     if config.quant_dtype == "nvfp4":
         gscale = _make_gscale(config.num_local_experts)
@@ -713,6 +778,8 @@ def run_modular_kernel(
     num_tokens_across_dp = torch.tensor(
         [num_tokens] * config.world_size, device="cuda", dtype=torch.int
     )
+
+    torch.distributed.barrier()
 
     with set_forward_context(
         None,

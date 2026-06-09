@@ -17,8 +17,6 @@ Two main reasons:
 
 ## Usage example
 
-Please refer to [examples/disaggregated/disaggregated_prefill.sh](../../examples/disaggregated/disaggregated_prefill.sh) for the example usage of disaggregated prefilling.
-
 Now supports 9 types of connectors:
 
 - **ExampleConnector**: refer to [examples/disaggregated/example_connector/run.sh](../../examples/disaggregated/example_connector/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
