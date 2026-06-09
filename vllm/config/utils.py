@@ -279,9 +279,20 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
+    # PretrainedConfig
+    if hasattr(x, "to_json_string") and callable(x.to_json_string):
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
+
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
-    # Skip objects that also expose to_json_string() (e.g., HF PretrainedConfig)
-    if is_dataclass(x) and not hasattr(x, "to_json_string"):
+    if is_dataclass(x):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
         items = tuple(
             (f.name, normalize_value(getattr(x, f.name)))
@@ -296,18 +307,6 @@ def normalize_value(x):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(normalize_value(v) for v in x)
-
-    # PretrainedConfig
-    if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        try:
-            return x.to_json_string()
-        except (TypeError, ValueError):
-            # to_json_string() may fail for trust-remote-code configs
-            # with non-JSON-serializable nested objects. Fall back to
-            # normalizing the dict representation recursively.
-            if hasattr(x, "to_dict") and callable(x.to_dict):
-                return normalize_value(x.to_dict())
-            raise
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid
