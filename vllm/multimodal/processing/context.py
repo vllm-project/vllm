@@ -170,10 +170,7 @@ class InputProcessingContext:
 
     @overload
     def get_hf_processor(
-        self,
-        typ: type[_P] | tuple[type[_P], ...],
-        /,
-        **kwargs: object,
+        self, typ: type[_P] | tuple[type[_P], ...], /, **kwargs: object
     ) -> _P: ...
 
     def get_hf_processor(
@@ -187,9 +184,15 @@ class InputProcessingContext:
         (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
+        Pass ``disable_type_check=True`` to skip validating the loaded processor
+        against ``typ`` (needed for ``trust_remote_code`` processors that are
+        bare classes not subclassing ``ProcessorMixin``).
+
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+        disable_type_check = bool(kwargs.pop("disable_type_check", False))
+
         if typ is None:
             from transformers.processing_utils import ProcessorMixin
 
@@ -206,6 +209,7 @@ class InputProcessingContext:
             self.model_config,
             processor_cls=typ,
             tokenizer=tokenizer,
+            disable_type_check=disable_type_check,
             **merged_kwargs,
         )
 
