@@ -91,7 +91,7 @@ def load_audio_pyav(
                         chunks.append(out_frame.to_ndarray())
                 else:
                     chunks.append(frame.to_ndarray())
-    except ValueError:
+    except (ValueError, ImportError):
         raise
     except Exception as e:
         raise ValueError(

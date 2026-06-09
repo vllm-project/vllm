@@ -75,7 +75,11 @@ run_tests() {
 # Set backend
 label="default backend"
 cmdline_args=""
-if [[ -n "${ROCM_ATTN:-}" ]]; then
+if [[ -n "${ATTENTION_BACKEND:-}" ]]; then
+  echo "ATTENTION_BACKEND is set, running with --attention-backend ${ATTENTION_BACKEND}"
+  label="${ATTENTION_BACKEND} backend"
+  cmdline_args=" --attention-backend ${ATTENTION_BACKEND} "
+elif [[ -n "${ROCM_ATTN:-}" ]]; then
   echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
   label="ROCM_ATTN backend"
   cmdline_args=" --attention-backend ROCM_ATTN "
