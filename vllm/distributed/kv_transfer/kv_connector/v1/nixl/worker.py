@@ -1248,15 +1248,17 @@ class NixlConnectorWorker:
                 else:
                     # Standard attention stride is TP-dependent
                     # (num_kv_heads scales with TP).  Use remote's
-                    # block_len for stepping through remote memory and
-                    # apply block_size_ratio for correct sizes.
+                    # block_len for stepping through remote memory.
+                    # Do NOT apply block_size_ratio to descriptor SIZE —
+                    # the split handle mechanism (fa_num_splits) already
+                    # reduces sizes for heterogeneous TP.  Applying
+                    # block_size_ratio here would double-reduce and cause
+                    # local/remote size mismatches at makeXferReq.
                     if self.transfer_topo.virtually_split_kv_in_blocks:
                         local_block_len = attn_stride // 2
                     else:
                         local_block_len = attn_stride
-                    remote_kv_block_len = local_block_len // block_size_ratio
-                    if block_size_ratio > 1:
-                        local_block_len = remote_kv_block_len
+                    remote_kv_block_len = local_block_len
                     page_size = nixl_agent_meta.block_lens[i]
             else:
                 local_block_len = self.get_backend_aware_kv_block_len(
