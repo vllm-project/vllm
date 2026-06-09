@@ -284,8 +284,8 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(other_weights) | colbert_loaded
+        loaded_model = self.model.load_weights(other_weights)
+        loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
         # When the ST projector is loaded via `_build_colbert_pooler`, the weights
         # might come from `colbert_loaded` or the pooler automatically falls back to
@@ -441,17 +441,15 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         other_weights, colbert_loaded = self._load_colbert_weights(weights)
 
-        # Strip "model." prefix added by the embedding adapter
-        model_weights = [
-            (n[len("model.") :] if n.startswith("model.") else n, w)
-            for n, w in other_weights
-        ]
-        loaded_model = self.model.load_weights(model_weights)
+        loaded_model = self.model.load_weights(other_weights)
+
         loaded = {f"model.{name}" for name in loaded_model} | colbert_loaded
 
-        # When the ST projector was auto-loaded during init
-        # (not from the main checkpoint), mark its params as loaded
-        # so the weight validator doesn't complain.
+        # When the ST projector is loaded via `_build_colbert_pooler`, the weights
+        # might come from `colbert_loaded` or the pooler automatically falls back to
+        # load from `/1_Dense` etc.
+        # We need to mark its params as loaded so the weight validator doesn't complain
+        # when they are loaded via fallback.
         if hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)
