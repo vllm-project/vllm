@@ -4,8 +4,8 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.model_executor.models.qwen3_next import fused_qk_rmsnorm_rope_gate
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
