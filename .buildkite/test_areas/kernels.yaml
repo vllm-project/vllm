@@ -86,7 +86,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
@@ -299,3 +299,4 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
+    - pytest -v -s kernels/moe/test_deepep_v2_moe.py

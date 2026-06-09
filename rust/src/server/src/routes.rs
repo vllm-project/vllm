@@ -6,6 +6,7 @@ mod load;
 mod lora;
 mod metrics;
 pub(crate) mod openai;
+mod pause;
 mod server_info;
 mod sleep;
 mod version;
@@ -90,6 +91,9 @@ fn build_router_with_options(
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
+            .route("/pause", post(pause::pause))
+            .route("/resume", post(pause::resume))
+            .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
     }
 

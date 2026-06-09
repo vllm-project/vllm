@@ -1562,7 +1562,9 @@ def generate_legend() -> str:
 
 
 def generate_mla_section(
-    prefill_backends: list[dict[str, Any]], decode_backends: list[dict[str, Any]]
+    prefill_backends: list[dict[str, Any]],
+    decode_backends: list[dict[str, Any]],
+    v4_decode_backends: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generate the complete MLA section with prefill and decode tables."""
     lines = [
@@ -1611,6 +1613,22 @@ def generate_mla_section(
     columns = _build_columns(is_mla=True, has_versions=False)
     lines.extend(_render_table(columns, decode_backends))
 
+    if v4_decode_backends:
+        lines.extend(
+            [
+                "",
+                "### DeepSeek V4 Decode Backends",
+                "",
+                "DeepSeek V4 sparse MLA uses its own decode backends, selected via",
+                "`--attention-backend=<BACKEND>` (e.g., `FLASHMLA_SPARSE_DSV4`,",
+                "`FLASHINFER_MLA_SPARSE_DSV4`). They share the V4 sparse-index",
+                "pipeline (compressor + SWA + indexer, 256-token blocks, head 512);",
+                "default on NVIDIA is `FLASHMLA_SPARSE_DSV4`.",
+                "",
+            ]
+        )
+        lines.extend(_render_table(columns, v4_decode_backends))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -1651,9 +1669,15 @@ def generate_docs() -> str:
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # Split into MLA and non-MLA
-    mla_backends = [b for b in all_backends if b["is_mla"]]
-    non_mla_backends = [b for b in all_backends if not b["is_mla"]]
+    # DeepSeek V4 (*_DSV4) decode backends get their own subsection rather than
+    # mixing into the main MLA / standard tables (the ROCm V4 backend isn't
+    # flagged is_mla by the AST heuristic, so filter purely on the name).
+    def _is_v4(b: dict[str, Any]) -> bool:
+        return b["name"].endswith("_DSV4")
+
+    v4_decode_backends = [b for b in all_backends if _is_v4(b)]
+    mla_backends = [b for b in all_backends if b["is_mla"] and not _is_v4(b)]
+    non_mla_backends = [b for b in all_backends if not b["is_mla"] and not _is_v4(b)]
 
     # Generate documentation
     script_path = "tools/pre_commit/generate_attention_backend_docs.py"
@@ -1703,7 +1727,9 @@ def generate_docs() -> str:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
 
     # Add MLA section with prefill and decode backends
-    doc_lines.append(generate_mla_section(mla_prefill_backends, mla_backends))
+    doc_lines.append(
+        generate_mla_section(mla_prefill_backends, mla_backends, v4_decode_backends)
+    )
 
     return "\n".join(doc_lines)
 

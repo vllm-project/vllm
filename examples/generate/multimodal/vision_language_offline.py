@@ -2562,6 +2562,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "qwen3_5",
     "qwen3_5_moe",
     "stepvl",
+    "glm4_1v",
 ]
 
 

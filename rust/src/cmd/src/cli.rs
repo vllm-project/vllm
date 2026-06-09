@@ -118,6 +118,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
     pub renderer: RendererSelection,
+    /// Disable multimodal inputs and treat the model as language-only.
+    #[arg(long)]
+    #[serde(default)]
+    pub language_model_only: bool,
     /// Override the maximum model context length. When set, the frontend uses
     /// this value instead of the model's `max_position_embeddings` from
     /// `config.json`.
@@ -263,6 +267,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
+            language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
@@ -306,6 +311,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
+            language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
@@ -449,6 +455,7 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
+            self.runtime.language_model_only,
             handshake_port,
         )
     }
