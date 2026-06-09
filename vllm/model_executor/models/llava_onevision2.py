@@ -184,6 +184,66 @@ def _pack_timestamps(per_video: list[list[float]]) -> torch.Tensor:
     return padded
 
 
+def _validate_video_source(path: str, model_config) -> None:
+    """Re-apply vLLM's media access controls to a raw video path/URL.
+
+    The frame and codec backends keep the raw path string alive past vLLM's
+    ``MultiModalDataParser`` (which for standard models decodes *and* validates
+    media upstream through ``MediaConnector``). Because this model dispatches on
+    the path at the processor stage, the string would otherwise reach
+    ``qwen_vl_utils.fetch_video`` / the codec module without any SSRF or
+    local-file-read protection. This mirrors the gates in
+    ``vllm/multimodal/media/connector.py`` (``load_from_url`` scheme check,
+    ``_assert_url_in_allowed_media_domains``, and ``_load_file_url`` subpath
+    confinement) so the two video backends honour ``--allowed-media-domains``
+    and ``--allowed-local-media-path`` exactly like the standard pipeline.
+    """
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    allowed_local = getattr(model_config, "allowed_local_media_path", "") or ""
+    allowed_domains = getattr(model_config, "allowed_media_domains", None) or []
+
+    parsed = urlsplit(str(path))
+    scheme = parsed.scheme.lower()
+
+    if scheme in ("http", "https"):
+        if allowed_domains and parsed.hostname not in allowed_domains:
+            raise ValueError(
+                f"Video URL host {parsed.hostname!r} is not in the allowed "
+                f"media domains; set --allowed-media-domains to permit it."
+            )
+        return
+    if scheme == "data":
+        return
+    if scheme in ("", "file"):
+        # Local file access is opt-in: require --allowed-local-media-path and
+        # confine the resolved path to that directory (connector.py:253-271).
+        if not allowed_local:
+            raise ValueError(
+                "Local video file access is disabled. Set "
+                "--allowed-local-media-path to enable reading local videos."
+            )
+        local = Path(parsed.path if scheme == "file" else str(path))
+        allowed_root = Path(allowed_local).resolve()
+        resolved = local.resolve()
+        if resolved != allowed_root and allowed_root not in resolved.parents:
+            raise ValueError(
+                f"Video path {str(path)!r} is outside the allowed local media "
+                f"directory {allowed_local!r}."
+            )
+        return
+    raise ValueError(
+        f"Unsupported video URL scheme {scheme!r}; must be http(s), data, or "
+        f"file (mirrors MediaConnector.load_from_url)."
+    )
+
+
+def _validate_video_sources(paths, model_config) -> None:
+    for path in paths:
+        _validate_video_source(path, model_config)
+
+
 # Design note: codec and frame backends both need the *raw video path string*
 # to survive untouched into ``_call_hf_processor``, where the HF processor runs
 # OV2's codec canvas+patchify (producing pixel_values/image_grid_thw/
@@ -1452,6 +1512,9 @@ class LlavaOnevision2MultiModalProcessor(
         is_codec = is_codec_marker or is_codec_kwarg
 
         if is_codec:
+            # Enforce vLLM's media access controls before the codec module
+            # decodes the path (SSRF / local-file-read protection).
+            _validate_video_sources(codec_video_paths, self.info.ctx.model_config)
             # Codec backend: HF processor consumes the path string directly and
             # performs decode + canvas-packing internally. The dummy ndarray
             # we attached during prepare_codec_video_input is discarded here.
@@ -1480,6 +1543,9 @@ class LlavaOnevision2MultiModalProcessor(
             _extract_video_paths(mm_data["videos"]) if videos_present else None
         )
         if videos_present and backend != "native" and video_paths is not None:
+            # Enforce vLLM's media access controls before qwen_vl_utils fetches
+            # the path (SSRF / local-file-read protection).
+            _validate_video_sources(video_paths, self.info.ctx.model_config)
             fps = float(mm_kwargs.get("target_fps", _DEFAULT_FPS))
             max_frames = int(mm_kwargs.get("max_frames", _DEFAULT_MAX_FRAMES))
             timestamp_decimals = int(
