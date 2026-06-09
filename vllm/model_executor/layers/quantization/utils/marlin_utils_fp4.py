@@ -8,6 +8,7 @@ import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MIN_THREAD_N,
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
@@ -22,6 +23,31 @@ from vllm.scalar_type import scalar_types
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
 logger = init_logger(__name__)
+
+
+def _round_up(value: int, multiple: int) -> int:
+    return (value + multiple - 1) // multiple * multiple
+
+
+def _get_fp4_marlin_padded_sizes(size_n: int, size_k: int) -> tuple[int, int]:
+    min_thread_k = 64
+    candidates = (
+        (
+            _round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N * 2),
+            _round_up(size_k, min_thread_k),
+        ),
+        (
+            _round_up(size_n, GPTQ_MARLIN_MIN_THREAD_N),
+            _round_up(size_k, min_thread_k * 2),
+        ),
+    )
+    return min(
+        candidates,
+        key=lambda sizes: (
+            sizes[0] * sizes[1],
+            sizes[0] - size_n + sizes[1] - size_k,
+        ),
+    )
 
 
 def is_fp4_marlin_supported():
@@ -165,8 +191,14 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
+    padded_size_n, padded_size_k = _get_fp4_marlin_padded_sizes(size_n, size_k)
+
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0),
+        n=padded_size_n,
+        k=padded_size_k,
+        device=input.device,
+        dtype=input.dtype,
     )
 
     inputs = reshaped_x
@@ -179,6 +211,9 @@ def apply_fp4_marlin_linear(
             raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
 
         inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
+
+    if input_dtype is None and padded_size_k != size_k:
+        inputs = torch.nn.functional.pad(inputs, (0, padded_size_k - size_k))
 
     output = ops.marlin_gemm(
         a=inputs,
@@ -194,12 +229,14 @@ def apply_fp4_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float4_e2m1f,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
-        size_k=size_k,
+        size_n=padded_size_n,
+        size_k=padded_size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
+    if padded_size_n != size_n:
+        output = output[..., :size_n].contiguous()
     return output.reshape(out_shape)
 
 
@@ -232,11 +269,20 @@ def prepare_fp4_layer_for_marlin(
     qweight = layer.weight.view(torch.int32).T.contiguous()
 
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
+    padded_part_size_n, padded_part_size_k = _get_fp4_marlin_padded_sizes(
+        part_size_n, part_size_k
+    )
+    n_pad = padded_part_size_n - part_size_n
+    k_pad_qweight = (padded_part_size_k - part_size_k) // 8
+    k_pad_scales = padded_part_size_k // group_size - part_size_k // group_size
+    if k_pad_qweight or n_pad:
+        qweight = torch.nn.functional.pad(qweight, (0, n_pad, 0, k_pad_qweight))
+
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
     )
@@ -250,10 +296,14 @@ def prepare_fp4_layer_for_marlin(
         weight_scale = weight_scale.view(torch.float8_e8m0fnu)
 
     weight_scale = weight_scale.to(param_dtype)
+    if k_pad_scales or n_pad:
+        weight_scale = torch.nn.functional.pad(
+            weight_scale, (0, n_pad, 0, k_pad_scales)
+        )
     weight_scale = marlin_permute_scales(
         s=weight_scale,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_part_size_k,
+        size_n=padded_part_size_n,
         group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
@@ -280,7 +330,10 @@ def prepare_fp4_layer_for_marlin(
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
-        bias = marlin_permute_bias(layer.bias)
+        bias = layer.bias
+        if n_pad:
+            bias = torch.nn.functional.pad(bias, (0, n_pad))
+        bias = marlin_permute_bias(bias)
         layer.bias = torch.nn.Parameter(bias, requires_grad=False)
 
     return
