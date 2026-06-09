@@ -516,6 +516,45 @@ class TestStreamingExtraction:
         for index, expected_args in expected_args_by_index.items():
             assert json.loads(args_by_index[index]) == expected_args
 
+    def test_streaming_mtp_chunk_merges_same_index_argument_segments(
+        self, parser, mock_request
+    ):
+        """Segment replay should not emit duplicate index entries per chunk."""
+        chunks = [
+            "<|tool_call>",
+            "call:write_file{",
+            'path:<|"|>src/main.rs<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                indexes = [tc.index for tc in delta.tool_calls]
+                assert len(indexes) == len(set(indexes))
+
+        args_by_index = self._collect_arguments_by_index(results)
+        assert set(args_by_index) == {0}
+        assert json.loads(args_by_index[0]) == {"path": "src/main.rs"}
+
+    def test_streaming_mtp_chunk_crossing_buffered_tool_call_boundary(
+        self, parser, mock_request
+    ):
+        """Segment replay must still run when buffering completes a delimiter."""
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<',
+            'tool_call|><|tool_call>call:getStationInfo{location:<|"|>Piacenza<|"|>}<',
+            "tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
     def test_streaming_multi_arg(self, parser, mock_request):
         """Streaming with multiple arguments."""
         chunks = [

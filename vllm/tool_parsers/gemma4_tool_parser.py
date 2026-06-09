@@ -526,7 +526,7 @@ class Gemma4ToolParser(ToolParser):
         current_text: str,
         delta_text: str,
     ) -> DeltaMessage | None:
-        """Replay a multi-boundary delta through the existing parser."""
+        """Replay delimiter-aligned delta segments through the existing parser."""
 
         def extract_once() -> DeltaMessage | None:
             return self._extract_streaming(
@@ -535,9 +535,12 @@ class Gemma4ToolParser(ToolParser):
                 delta_text=delta_text,
             )
 
-        boundary_count = delta_text.count(self.tool_call_start_token)
-        boundary_count += delta_text.count(self.tool_call_end_token)
-        if boundary_count <= 1:
+        pattern = (
+            f"({re.escape(self.tool_call_start_token)}|"
+            f"{re.escape(self.tool_call_end_token)})"
+        )
+        segments = [segment for segment in re.split(pattern, delta_text) if segment]
+        if len(segments) <= 1:
             return extract_once()
 
         processed_current_text = current_text
@@ -550,11 +553,6 @@ class Gemma4ToolParser(ToolParser):
         if not processed_current_text.endswith(delta_text):
             return extract_once()
 
-        pattern = (
-            f"({re.escape(self.tool_call_start_token)}|"
-            f"{re.escape(self.tool_call_end_token)})"
-        )
-        segments = [segment for segment in re.split(pattern, delta_text) if segment]
         segment_previous_text = processed_current_text[: -len(delta_text)]
         combined = DeltaMessage()
         tool_calls_by_index: dict[int, DeltaToolCall] = {}
