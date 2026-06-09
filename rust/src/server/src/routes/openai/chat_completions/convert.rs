@@ -18,19 +18,19 @@ use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreparedRequest {
+pub(super) struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external chat request ID.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
     /// Public response rendering options for route-layer helpers.
-    pub options: ChatCompletionOptions,
+    pub options: ResponseOptions,
     /// Lowered chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ChatCompletionOptions {
+pub(super) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
@@ -52,7 +52,7 @@ pub(crate) struct ChatCompletionOptions {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
-pub(crate) fn prepare_chat_request(
+pub(super) fn prepare_chat_request(
     request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
@@ -152,7 +152,7 @@ pub(crate) fn prepare_chat_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        options: ChatCompletionOptions {
+        options: ResponseOptions {
             include_usage,
             requested_logprobs,
             include_prompt_logprobs,

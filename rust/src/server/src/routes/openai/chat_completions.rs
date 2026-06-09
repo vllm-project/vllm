@@ -1,4 +1,4 @@
-pub mod convert;
+mod convert;
 mod types;
 mod validate;
 
@@ -23,10 +23,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::StopReason;
 
+use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::chat_completions::convert::{
-    ChatCompletionOptions, prepare_chat_request,
-};
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
@@ -116,7 +114,7 @@ async fn collect_chat_completion(
     response_model: String,
     created: u64,
     log_request: bool,
-    ChatCompletionOptions {
+    ResponseOptions {
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
         requested_logprobs,
@@ -125,7 +123,7 @@ async fn collect_chat_completion(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
-    }: ChatCompletionOptions,
+    }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -234,7 +232,7 @@ async fn chat_completion_chunk_stream(
     response_model: String,
     created: u64,
     log_request: bool,
-    ChatCompletionOptions {
+    ResponseOptions {
         include_usage,
         requested_logprobs,
         // Ignored: chat streaming prompt logprobs are rejected for Python parity.
@@ -243,7 +241,7 @@ async fn chat_completion_chunk_stream(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
-    }: ChatCompletionOptions,
+    }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
@@ -806,9 +804,7 @@ mod tests {
     use vllm_engine_core_client::protocol::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{
-        ChatCompletionOptions, block_delta_chunk, chat_completion_chunk_stream, final_chunk,
-    };
+    use super::{ResponseOptions, block_delta_chunk, chat_completion_chunk_stream, final_chunk};
 
     #[test]
     fn text_chunk_uses_content_only_delta() {
@@ -934,7 +930,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions {
+            ResponseOptions {
                 requested_logprobs: true,
                 include_reasoning: true,
                 ..Default::default()
@@ -997,7 +993,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions {
+            ResponseOptions {
                 requested_logprobs: true,
                 include_reasoning: true,
                 ..Default::default()
@@ -1049,7 +1045,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions::default(),
+            ResponseOptions::default(),
         )
         .collect::<Vec<_>>()
         .await
@@ -1127,7 +1123,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions {
+            ResponseOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
                 ..Default::default()
@@ -1257,7 +1253,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions {
+            ResponseOptions {
                 requested_logprobs: true,
                 return_token_ids: true,
                 ..Default::default()
@@ -1335,7 +1331,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            ChatCompletionOptions {
+            ResponseOptions {
                 include_reasoning: true,
                 ..Default::default()
             },

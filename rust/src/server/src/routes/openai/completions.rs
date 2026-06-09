@@ -18,13 +18,13 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStreamExt as _};
 
+use self::convert::{ResponseOptions, prepare_completion_request};
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
     text_len,
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::completions::convert::{CompletionOptions, prepare_completion_request};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -112,7 +112,7 @@ async fn collect_completion(
     response_model: String,
     created: u64,
     log_request: bool,
-    CompletionOptions {
+    ResponseOptions {
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
         echo,
@@ -120,7 +120,7 @@ async fn collect_completion(
         include_prompt_logprobs,
         return_token_ids,
         return_tokens_as_token_ids,
-    }: CompletionOptions,
+    }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let collected = stream
         .collect_output()
@@ -203,7 +203,7 @@ async fn completion_chunk_stream(
     response_model: String,
     created: u64,
     log_request: bool,
-    CompletionOptions {
+    ResponseOptions {
         include_usage,
         echo,
         requested_logprobs,
@@ -211,7 +211,7 @@ async fn completion_chunk_stream(
         include_prompt_logprobs: _,
         return_token_ids,
         return_tokens_as_token_ids,
-    }: CompletionOptions,
+    }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
@@ -431,7 +431,7 @@ mod tests {
         FinishReason, Finished,
     };
 
-    use super::{CompletionOptions, CompletionSseChunk, completion_chunk_stream, final_chunk};
+    use super::{CompletionSseChunk, ResponseOptions, completion_chunk_stream, final_chunk};
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
@@ -526,7 +526,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            CompletionOptions {
+            ResponseOptions {
                 requested_logprobs: Some(1),
                 ..Default::default()
             },

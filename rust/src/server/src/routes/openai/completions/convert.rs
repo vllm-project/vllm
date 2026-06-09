@@ -10,19 +10,19 @@ use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreparedRequest {
+pub(super) struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external text request ID.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
     /// Public response rendering options for route-layer helpers.
-    pub options: CompletionOptions,
+    pub options: ResponseOptions,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct CompletionOptions {
+pub(super) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
     /// Original text prompt that should be echoed back northbound when
@@ -43,7 +43,7 @@ pub(crate) struct CompletionOptions {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
-pub(crate) fn prepare_completion_request(
+pub(super) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
@@ -127,7 +127,7 @@ pub(crate) fn prepare_completion_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        options: CompletionOptions {
+        options: ResponseOptions {
             include_usage,
             echo,
             requested_logprobs: request.logprobs,
