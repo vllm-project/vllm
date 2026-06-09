@@ -248,11 +248,15 @@ class Attention(nn.Module, AttentionLayerBase):
                     cache_config.cache_dtype = "fp8"
                     cache_config.calculate_kv_scales = False
             else:
+                cap = current_platform.get_device_capability()
+                cap_str = cap.as_version_str() if cap else "unknown"
                 logger.warning(
                     "Model specifies kv_cache_scheme (FP8 KV cache) but "
-                    "the current GPU does not support FP8 attention "
-                    "kernels. Falling back to auto KV cache dtype. "
-                    "Use --kv-cache-dtype fp8 to override."
+                    "the current GPU (compute capability %s) does not "
+                    "support FP8 attention kernels (SM90+ required). "
+                    "Falling back to auto KV cache dtype. "
+                    "Use --kv-cache-dtype fp8 to override.",
+                    cap_str,
                 )
 
         # Check if per-head quant scales are required based on kv_cache_scheme
