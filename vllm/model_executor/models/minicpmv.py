@@ -217,7 +217,9 @@ class Resampler2_5(BaseResampler):
         for i in range(bs):
             tgt_h, tgt_w = tgt_sizes[i].tolist()
             pos_embed.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+                self.pos_embed[:tgt_h, :tgt_w, :]
+                .reshape((tgt_h * tgt_w, -1))
+                .to(device=device, dtype=dtype)
             )  # patches * D
             key_padding_mask[i, patch_len[i] :] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
@@ -544,6 +546,14 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
+
+        vendored_processor = MiniCPMVProcessor(
+            image_processor=hf_processor.image_processor,
+            tokenizer=hf_processor.tokenizer,
+        )
+        hf_processor = vendored_processor
 
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
