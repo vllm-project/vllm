@@ -25,7 +25,6 @@ import os
 import pybase64 as base64
 import requests
 from openai import OpenAI
-from utils import get_first_model
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -204,7 +203,7 @@ def run_multi_image(model: str, max_completion_tokens: int) -> None:
 
 # Video input inference
 def run_video(model: str, max_completion_tokens: int) -> None:
-    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    video_url = "https://huggingface.co/datasets/raushan-testing-hf/videos-test/resolve/main/sample_demo_1.mp4"
     video_base64 = encode_base64_content_from_url(video_url)
 
     ## Use video url in the payload
@@ -407,7 +406,7 @@ def parse_args():
 
 def main(args) -> None:
     chat_type = args.chat_type
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
     example_function_map[chat_type](model, args.max_completion_tokens)
 
 

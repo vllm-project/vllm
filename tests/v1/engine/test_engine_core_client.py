@@ -27,12 +27,13 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreReadyResponse, EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
     DPLBAsyncMPClient,
     EngineCoreClient,
+    MPClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -234,6 +235,30 @@ def test_dplb_non_late_interaction_still_uses_lb():
 
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
+
+
+def test_apply_ready_response_syncs_block_size():
+    import msgspec
+
+    client = object.__new__(MPClient)
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+    client.stats_update_address = None
+
+    payload = msgspec.msgpack.encode(
+        EngineCoreReadyResponse(
+            max_model_len=8192,
+            num_gpu_blocks=100,
+            block_size=1056,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+        )
+    )
+    client._apply_ready_response(payload)
+    assert client.vllm_config.cache_config.block_size == 1056
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -1187,7 +1212,6 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
-        mock_executor.max_concurrent_batches = 1
 
         return mock_executor
 

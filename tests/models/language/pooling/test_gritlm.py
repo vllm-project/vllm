@@ -7,7 +7,7 @@ from scipy.spatial.distance import cosine
 from vllm import LLM, SamplingParams
 from vllm.config import ModelConfig
 
-from ....utils import RemoteOpenAIServer
+from ....utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from .embed_utils import run_client_embeddings
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
@@ -126,9 +126,15 @@ def test_gritlm_offline_embedding(vllm_runner):
 async def test_gritlm_api_server_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    args = ["--runner", "pooling", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = [
+        "--runner",
+        "pooling",
+        "--max_model_len",
+        str(MAX_MODEL_LEN),
+        *ROCM_EXTRA_ARGS,
+    ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=ROCM_ENV_OVERRIDES) as server:
         client_embedding = server.get_async_client()
 
         d_rep = await run_client_embeddings(

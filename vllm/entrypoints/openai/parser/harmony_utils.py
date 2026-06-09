@@ -3,7 +3,7 @@
 
 import datetime
 from collections.abc import Iterable, Sequence
-from typing import Literal
+from typing import Any
 
 from openai.types.responses.tool import Tool
 from openai_harmony import (
@@ -26,6 +26,42 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionTools
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def is_function_recipient(
+    recipient: str,
+    allowed_function_tool_names: frozenset[str] | None = None,
+) -> bool:
+    """Check whether *recipient* refers to a function tool call.
+
+    The optional *allowed_function_tool_names* parameter is used by the
+    Responses API to distinguish bare function-call recipients (missing the
+    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    recipient is only treated as a function call if it appears in the set.
+    The Chat Completions path omits this parameter so that all bare
+    recipients are accepted as function calls (the heuristic fallback).
+    """
+    if not recipient:
+        return False
+    if recipient.startswith("<|"):
+        return False
+    if recipient.startswith("functions."):
+        return len(recipient) > len("functions.")
+    if recipient == "assistant":
+        return False
+    if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    first_segment = recipient.split(".", 1)[0]
+    if first_segment in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    if allowed_function_tool_names is not None:
+        return recipient in allowed_function_tool_names
+    return True
+
+
+def extract_function_from_recipient(recipient: str) -> str:
+    return recipient.removeprefix("functions.")
+
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -66,7 +102,7 @@ def get_encoding():
 
 def get_system_message(
     model_identity: str | None = None,
-    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    reasoning_effort: str | None = None,
     start_date: str | None = None,
     browser_description: str | None = None,
     python_description: str | None = None,
@@ -84,6 +120,12 @@ def get_system_message(
         )
         sys_msg_content = sys_msg_content.with_model_identity(new_identity)
     if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_EFFORT:
+            supported_values = ", ".join(REASONING_EFFORT)
+            raise ValueError(
+                f"reasoning_effort={reasoning_effort!r} is not supported by "
+                f"Harmony. Supported values are: {supported_values}."
+            )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
         )
@@ -154,6 +196,12 @@ def get_user_message(content: str) -> Message:
     return Message.from_role_and_content(Role.USER, content)
 
 
+def get_system_or_developer_message(role: str, instructions: str) -> Message:
+    if role == "system" and envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+        return get_system_message(instructions=instructions)
+    return get_developer_message(instructions=instructions)
+
+
 def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     """
     Parse a list of messages from request.messages in the Chat Completion API to
@@ -208,18 +256,96 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
     return cleaned_msgs
 
 
-def flatten_chat_text_content(content: str | list | None) -> str | None:
+def flatten_input_text_content(content: Any) -> str | None:
     """
-    Extract the text parts from a chat message content field and flatten them
-    into a single string.
+    Extract text parts from a Chat Completion or Responses API content field and
+    flatten them into a single string. Returns None if no text content is found.
     """
-    if isinstance(content, list):
-        return "".join(
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
+    if content is None or isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+
+    texts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            texts.append(item)
+            continue
+        if isinstance(item, dict):
+            text = item.get("text")
+            if text is not None:
+                texts.append(text)
+    return "".join(texts) if texts else None
+
+
+def extract_instructions_from_messages(
+    messages: Sequence[Any],
+) -> tuple[str | None, list[Any]]:
+    """
+    Peel a leading system/developer Chat Completion or Responses message and
+    flatten its instruction text.
+    """
+    remaining_messages = list(messages)
+    if not remaining_messages:
+        return None, remaining_messages
+
+    first_message = remaining_messages[0]
+    if not isinstance(first_message, dict):
+        if hasattr(first_message, "to_dict"):
+            # Handle OpenAI Harmony Message
+            first_message = first_message.to_dict()
+        elif hasattr(first_message, "model_dump"):
+            first_message = first_message.model_dump(exclude_none=True)
+        else:
+            raise ValueError(f"Unknown message type: {type(first_message)}")
+
+    if first_message.get("role") not in (
+        "system",
+        "developer",
+    ):
+        return None, remaining_messages
+
+    instructions = flatten_input_text_content(first_message.get("content"))
+    return instructions, remaining_messages[1:]
+
+
+def build_harmony_preamble(
+    *,
+    instructions: str | None = None,
+    tools: list[Tool | ChatCompletionToolsParam] | None = None,
+    reasoning_effort: str | None = None,
+    browser_description: str | None = None,
+    python_description: str | None = None,
+    container_description: str | None = None,
+    with_custom_tools: bool = False,
+) -> list[Message]:
+    """
+    Build the standard Harmony system/developer prefix for a request.
+    """
+    developer_instructions = system_instructions = None
+    if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+        system_instructions = instructions
+    else:
+        developer_instructions = instructions
+
+    messages = [
+        get_system_message(
+            reasoning_effort=reasoning_effort,
+            browser_description=browser_description,
+            python_description=python_description,
+            container_description=container_description,
+            instructions=system_instructions,
+            with_custom_tools=with_custom_tools,
         )
-    return content
+    ]
+    if developer_instructions or tools:
+        messages.append(
+            get_developer_message(
+                instructions=developer_instructions,
+                tools=tools,
+            )
+        )
+    return messages
 
 
 def parse_chat_input_to_harmony_message(
@@ -242,7 +368,7 @@ def parse_chat_input_to_harmony_message(
     tool_calls = chat_msg.get("tool_calls", [])
 
     if role == "assistant" and tool_calls:
-        content = flatten_chat_text_content(chat_msg.get("content"))
+        content = flatten_input_text_content(chat_msg.get("content"))
         if content:
             commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
             commentary_msg = commentary_msg.with_channel("commentary")
@@ -272,8 +398,7 @@ def parse_chat_input_to_harmony_message(
     if role == "tool":
         tool_call_id = chat_msg.get("tool_call_id", "")
         name = tool_id_names.get(tool_call_id, "")
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
+        content = flatten_input_text_content(chat_msg.get("content")) or ""
 
         msg = (
             Message.from_author_and_content(
@@ -308,7 +433,12 @@ def parse_chat_input_to_harmony_message(
         # Send non-tool assistant messages to the final channel
         msg = msg.with_channel("final")
         msgs.append(msg)
-    # For user/system/developer messages, add them directly even if no content.
+    elif role in ("system", "developer"):
+        instructions = flatten_input_text_content(chat_msg.get("content"))
+        if instructions is not None:
+            msg = get_system_or_developer_message(role, instructions)
+            msgs.append(msg)
+    # For user messages, add them directly even if no content.
     elif role != "assistant":
         msg = Message.from_role_and_contents(role, contents)
         msgs.append(msg)
@@ -322,10 +452,6 @@ def render_for_completion(messages: list[Message]) -> list[int]:
         conversation, Role.ASSISTANT
     )
     return token_ids
-
-
-def get_stop_tokens_for_assistant_actions() -> list[int]:
-    return get_encoding().stop_tokens_for_assistant_actions()
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:
