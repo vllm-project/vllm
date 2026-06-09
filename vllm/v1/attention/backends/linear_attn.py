@@ -94,9 +94,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         self.compilation_config: CompilationConfig = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode: bool = self.num_spec_tokens > 0
-        self.decode_cudagraph_max_bs: int = (
-            vllm_config.scheduler_config.max_num_seqs
-        )
+        self.decode_cudagraph_max_bs: int = vllm_config.scheduler_config.max_num_seqs
         if self.compilation_config.max_cudagraph_capture_size is not None:
             self.decode_cudagraph_max_bs = min(
                 self.decode_cudagraph_max_bs,
