@@ -17,4 +17,3 @@ jinja2>=3.1.6
 # amdsmi is provided by rocm-sdk-core; do NOT install the PyPI package
 amdsmi==7.0.2
 timm>=1.0.17
-tilelang==0.1.10
