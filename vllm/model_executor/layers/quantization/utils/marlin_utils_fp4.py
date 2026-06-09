@@ -6,6 +6,7 @@ import torch
 
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
@@ -286,7 +287,7 @@ def prepare_fp4_layer_for_marlin(
 
 
 def prepare_nvfp4_moe_layer_for_marlin(
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -353,7 +354,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     # WEIGHT SCALES
     # Permute scales
-    def premute_scales(
+    def permute_scales(
         scales: torch.Tensor, g_scales: torch.Tensor, name: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         scales = scales.to(param_dtype)
@@ -388,8 +389,8 @@ def prepare_nvfp4_moe_layer_for_marlin(
         g_scales = g_scales / combined_scale_factor
         return scales, g_scales
 
-    w13_scale, w13_scale_2 = premute_scales(w13_scale, w13_scale_2, "w13")
-    w2_scale, w2_scale_2 = premute_scales(w2_scale, w2_scale_2, "w2")
+    w13_scale, w13_scale_2 = permute_scales(w13_scale, w13_scale_2, "w13")
+    w2_scale, w2_scale_2 = permute_scales(w2_scale, w2_scale_2, "w2")
 
     return w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2
 

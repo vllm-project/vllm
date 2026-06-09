@@ -40,6 +40,7 @@ QuantizationMethods = Literal[
     # _ONLINE_SHORTHANDS by the assertion in get_quantization_config().
     "fp8_per_tensor",
     "fp8_per_block",
+    "fp8_per_channel",
     "int8_per_channel_weight_only",
     "mxfp8",
 ]
