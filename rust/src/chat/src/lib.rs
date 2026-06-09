@@ -52,7 +52,7 @@ mod stream;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::ModelDtype;
 use vllm_llm::Llm;
-use vllm_text::{TextLlm, TextRequest};
+use vllm_text::{Prompt, TextLlm, TextRequest};
 
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
@@ -196,6 +196,33 @@ impl ChatLlm {
         let structured_stream = output_processor.process(decoded_stream)?;
 
         Ok(ChatEventStream::new(request.request_id, structured_stream))
+    }
+
+    /// Render through the chat template and tokenize, without submitting to the engine.
+    ///
+    /// Same render → [`multimodal::finalize_rendered_prompt`] → encode pipeline as
+    /// [`Self::chat`], but stops after token IDs so `/tokenize` counts match what
+    /// generation would see. Used by `POST /tokenize` (chat form).
+    pub async fn tokenize_chat(&self, request: ChatRequest) -> Result<Vec<u32>> {
+        request.validate()?;
+
+        let rendered = self.backend.chat_renderer().render(&request)?;
+        let (prompt, _mm_features) = multimodal::finalize_rendered_prompt(
+            &request,
+            rendered,
+            self.backend.multimodal_model_info(),
+            self.model_dtype,
+        )
+        .await?;
+
+        let tokenizer = self.text.tokenizer();
+        let token_ids = match prompt {
+            // Rendered string from the template (usual chat path).
+            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
+            // Already tokenized (e.g. multimodal path); pass through unchanged.
+            Prompt::TokenIds(ids) => ids,
+        };
+        Ok(token_ids)
     }
 
     /// Shut down the underlying LLM client and its background tasks.

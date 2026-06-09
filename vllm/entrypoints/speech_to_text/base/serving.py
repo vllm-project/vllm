@@ -115,6 +115,7 @@ class OpenAISpeechToText(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         if self.model_cls.supports_segment_timestamp:
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
@@ -216,7 +217,11 @@ class OpenAISpeechToText(OpenAIServing):
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
             with io.BytesIO(audio_data) as buf:
-                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
+                y, sr = load_audio(
+                    buf,
+                    sr=self.asr_config.sample_rate,
+                    max_duration_s=self.max_audio_decode_duration_s,
+                )
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 
