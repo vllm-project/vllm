@@ -375,7 +375,6 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 slot_mappings=prefill_slot_mappings,
                 kv_cache_config=kv_cache_config,
             )
-            # prefill是自己走了一遍前向，采样得到d1,但是没更新序列长度和query_start_loc
             batch_descriptor = BatchDescriptor(num_tokens=total_expanded)
             with set_forward_context(
                 attn_md_0,
