@@ -428,6 +428,27 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
         )
 
 
+@pytest.mark.parametrize("token_ids", [[0], [0, 9]])
+def test_stop_token_ids_validate_vocab_bounds_valid(token_ids: list[int]):
+    SamplingParams(stop_token_ids=token_ids).verify(
+        _model_config(),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+
+
+@pytest.mark.parametrize("token_ids", [[-1], [10], [999999999], [5, 999999999]])
+def test_stop_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
+    with pytest.raises(VLLMValidationError, match="stop_token_ids"):
+        SamplingParams(stop_token_ids=token_ids).verify(
+            _model_config(),
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+
+
 def test_none_logprobs(vllm_model, example_prompts):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
 
