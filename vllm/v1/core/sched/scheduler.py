@@ -615,6 +615,7 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
