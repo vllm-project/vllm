@@ -3,8 +3,9 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from vllm.inputs import MultiModalHashes
+
 from ..hasher import MultiModalHasher
-from ..inputs import MultiModalHashes
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 
 
@@ -26,7 +27,7 @@ class ProcessorInputs:
         mm_uuid_items = self.mm_uuid_items or {}
         hf_processor_mm_kwargs = self.hf_processor_mm_kwargs
 
-        mm_hashes: MultiModalHashes = {}
+        mm_hashes = dict[str, list[str]]()
         hasher = MultiModalHasher
 
         for modality, data_items in mm_data_items.items():

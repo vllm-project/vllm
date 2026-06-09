@@ -15,7 +15,7 @@ from torch import nn
 from transformers import MiniMaxConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -24,7 +24,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -33,7 +35,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01LinearAttention
+from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
+    MiniMaxText01LinearAttention,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -52,7 +56,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_layers,
+)
 
 
 def replace_weight_name(
@@ -157,7 +166,6 @@ class MiniMaxText01MoE(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size * self.tp_size,
             params_dtype=self.params_dtype,
-            reduce_results=True,
             renormalize=True,
             quant_config=self.quant_config,
             tp_size=self.tp_size,
@@ -271,9 +279,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MiniMaxConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig,
         expert_num: int = 1,
         layer_id: int = None,
         linear_layer_id: int | None = None,
@@ -297,25 +303,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 config.max_position_embeddings, config.max_model_len
             )
         if config.attention_type == 0:
-            use_headxdim = True
-            hidden_inner = (
-                head_dim * config.num_attention_heads
-                if use_headxdim
-                else config.hidden_size
-            )
             self.self_attn = MiniMaxText01LinearAttention(
-                hidden_size=self.hidden_size,
-                hidden_inner_size=hidden_inner,
-                num_heads=config.num_attention_heads,
-                head_dim=head_dim,
-                max_position=max_position_embeddings,
-                block_size=config.block if hasattr(config, "block") else 256,
-                num_hidden_layer=config.num_hidden_layers,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                layer_idx=self._ilayer,
-                linear_layer_idx=linear_layer_id,
+                config,
+                vllm_config,
                 prefix=prefix,
             )
         elif config.attention_type == 1:
@@ -327,9 +317,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
                 sliding_window=config.sliding_window,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 layer_idx=self._ilayer,
-                cache_config=cache_config,
+                cache_config=vllm_config.cache_config,
                 prefix=prefix,
             )
         else:
@@ -342,7 +332,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self.mlp = MiniMaxText01MLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 layer_idx=self._ilayer,
                 prefix=prefix,
             )
@@ -353,7 +343,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 layer_idx=self._ilayer,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=prefix,
             )
 
@@ -404,7 +394,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self.shared_mlp = MiniMaxText01MLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=shared_intermediate,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 layer_idx=self._ilayer,
                 prefix=prefix,
             )
@@ -412,7 +402,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 self.hidden_size,
                 1,
                 bias=False,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 params_dtype=torch.float32,
             )
             self.coefficient.weight.weight_loader = self.shared_moe_coefficient_loader
@@ -490,10 +480,9 @@ class MiniMaxText01Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: MiniMaxConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
+        self.config = config
+        self.CONCAT_FFN = True
 
         self.vocab_size = config.vocab_size
 
@@ -533,10 +522,8 @@ class MiniMaxText01Model(nn.Module):
             layer_config.layer_idx = layer_idx
 
             decoder_kwargs = {
-                "quant_config": quant_config,
                 "layer_id": layer_idx,
-                "model_config": model_config,
-                "cache_config": cache_config,
+                "vllm_config": vllm_config,
             }
 
             if layer_config.attention_type == 0:
@@ -620,128 +607,6 @@ class MiniMaxText01Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is None:
-                hidden_states = self.embed_scale * self.embed_tokens(input_ids)
-            else:
-                hidden_states = inputs_embeds
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
-                hidden_states=hidden_states,
-                positions=positions,
-                attn_metadata=attn_metadata,
-                residual=residual,
-            )
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
-        if residual is not None:
-            hidden_states, _ = self.norm(hidden_states, residual)
-        else:
-            hidden_states = self.norm(hidden_states)
-
-        return hidden_states
-
-
-class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-
-        self.config = config
-
-        if not hasattr(config, "sliding_window"):
-            config.sliding_window = None
-
-        self.CONCAT_FFN = True
-
-        if hasattr(vllm_config.model_config, "max_model_len"):
-            self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxText01Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-
-            self.logits_processor = LogitsProcessor(
-                config.vocab_size, self.config.vocab_size
-            )
-
-        else:
-            self.lm_head = PPMissingLayer()
-        self.lm_head.float()
-        flash_layer_count = sum(
-            1 for attn_type in self.model.decoder_attention_types if attn_type == 1
-        )
-        self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
-        return
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs
-        )
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
-        )
-
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states.float())
-
-        return logits
-
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-            }
-        )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -753,17 +618,15 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             return None
 
         def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or layer_idx >= len(
-                self.model.decoder_attention_types
-            ):
+            if layer_idx is None or layer_idx >= len(self.decoder_attention_types):
                 return False
-            return self.model.decoder_attention_types[layer_idx] == 0
+            return self.decoder_attention_types[layer_idx] == 0
 
         def is_moe_weight(name: str) -> bool:
             return "block_sparse_moe" in name and not name.endswith(".bias")
 
         def get_expert_id(param_name):
-            pattern = r"model\.layers\.\d+\.block_sparse_moe\.experts\.(\d+)\."
+            pattern = r"layers\.\d+\.block_sparse_moe\.experts\.(\d+)\."
             match = re.search(pattern, param_name)
             if match:
                 return match.group(1)
@@ -948,9 +811,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
-            if weight_at_layer and weight_at_layer >= len(
-                self.model.decoder_attention_types
-            ):
+            if weight_at_layer and weight_at_layer >= len(self.decoder_attention_types):
                 continue
 
             if is_layer_norm_weight(name):
@@ -974,6 +835,128 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
             load_basic_weight(name, loaded_weight, self)
         return loaded_params
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is None:
+                hidden_states = self.embed_scale * self.embed_tokens(input_ids)
+            else:
+                hidden_states = inputs_embeds
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            hidden_states, residual = layer(
+                hidden_states=hidden_states,
+                positions=positions,
+                attn_metadata=attn_metadata,
+                residual=residual,
+            )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        if residual is not None:
+            hidden_states, _ = self.norm(hidden_states, residual)
+        else:
+            hidden_states = self.norm(hidden_states)
+
+        return hidden_states
+
+
+class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+
+        self.config = config
+
+        if not hasattr(config, "sliding_window"):
+            config.sliding_window = None
+
+        self.CONCAT_FFN = True
+
+        if hasattr(vllm_config.model_config, "max_model_len"):
+            self.config.max_model_len = vllm_config.model_config.max_model_len
+        self.model = MiniMaxText01Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, self.config.vocab_size
+            )
+
+        else:
+            self.lm_head = PPMissingLayer()
+        self.lm_head.float()
+        flash_layer_count = sum(
+            1 for attn_type in self.model.decoder_attention_types if attn_type == 1
+        )
+        self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
+        return
+
+    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
+        return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
+            input_buffers, **kwargs
+        )
+
+    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
+        return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(batch_size)
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+
+        return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states.float())
+
+        return logits
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+            }
+        )
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -1011,3 +994,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

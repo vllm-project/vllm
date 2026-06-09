@@ -10,6 +10,7 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -19,7 +20,9 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -32,10 +35,10 @@ from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -183,7 +186,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
@@ -374,7 +376,13 @@ def _deep_ep_moe(
         w1_scale = w1_scale.to(device=device_idx)
         w2_scale = w2_scale.to(device=device_idx)
 
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        pg = torch.distributed.split_group(
+            split_ranks=[list(range(pgi.world_size))],
+            group_desc="deepep_test",
+        )
+    else:
+        pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, low_latency_mode)
 
     with set_current_vllm_config(VllmConfig()):

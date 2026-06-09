@@ -356,6 +356,23 @@
         "is_multimodal_model": false,
         "dtype": "torch.float32"
     },
+    "stepfun-ai/Step-3.5-Flash": {
+        "architectures": [
+            "Step3p5ForCausalLM"
+        ],
+        "model_type": "step3p5",
+        "text_model_type": "step3p5",
+        "hidden_size": 4096,
+        "total_num_hidden_layers": 45,
+        "total_num_attention_heads": 64,
+        "head_size": 128,
+        "vocab_size": 128896,
+        "total_num_kv_heads": 8,
+        "num_experts": 288,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
+    },
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
         "architectures": [
             "NemotronHForCausalLM"
