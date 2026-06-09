@@ -20,6 +20,8 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor | None = None,
+        use_dora: bool = False,
         scaling: float | None = None,
     ) -> None:
         self.module_name = module_name
@@ -27,6 +29,8 @@ class LoRALayerWeights:
         self.lora_alpha = lora_alpha
         self.lora_a = lora_a
         self.lora_b = lora_b
+        self.lora_magnitude_vector = lora_magnitude_vector
+        self.use_dora = use_dora
 
         if scaling is None:
             self.scaling = self.lora_alpha / self.rank
@@ -61,12 +65,13 @@ class LoRALayerWeights:
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
         return cls(
-            module_name,
-            peft_helper.r,
-            peft_helper.lora_alpha,
-            None,
-            None,
-            peft_helper.vllm_lora_scaling_factor,
+            module_name=module_name,
+            rank=peft_helper.r,
+            lora_alpha=peft_helper.lora_alpha,
+            lora_a=None,
+            lora_b=None,
+            use_dora=peft_helper.use_dora,
+            scaling=peft_helper.vllm_lora_scaling_factor,
         )
 
     @classmethod
@@ -135,6 +140,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         for lora in loras:
             if lora is None:
                 continue
+            if lora.use_dora:
+                raise NotImplementedError("DoRA is not supported for packed LoRA.")
             lora.optimize()
         rank = first_lora.rank
         module_name = first_lora.module_name
@@ -165,6 +172,9 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
+        for lora in loras:
+            if lora is not None and lora.use_dora:
+                raise NotImplementedError("DoRA is not supported for MoE LoRA.")
         rank = first_lora.rank
         lora_alpha = first_lora.lora_alpha
         assert len(loras) % 3 == 0

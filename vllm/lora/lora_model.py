@@ -126,13 +126,6 @@ class LoRAModel:
         skip_prefixes: list[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        if peft_helper.use_dora:
-            raise NotImplementedError(
-                "DoRA adapter loading is not implemented yet. "
-                "DoRA config validation and magnitude vector name parsing are "
-                "supported, but DoRA weight storage is still pending."
-            )
-
         pin_memory = str(device) == "cpu" and PIN_MEMORY
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
@@ -148,12 +141,22 @@ class LoRAModel:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper
                 )
+            module_lora = loras[module_name]
 
             if weight_type == "dora_magnitude":
-                raise NotImplementedError(
-                    "DoRA magnitude vector parsing is recognized, but DoRA "
-                    "weight storage is not implemented yet."
+                if not peft_helper.use_dora:
+                    raise ValueError(
+                        f"Received DoRA lora_magnitude_vector for module "
+                        f"{module_name}, but adapter_config.json has use_dora=False."
+                    )
+                module_lora.lora_magnitude_vector = tensor.to(
+                    device=device, dtype=dtype
                 )
+                if pin_memory:
+                    module_lora.lora_magnitude_vector = (
+                        module_lora.lora_magnitude_vector.pin_memory()
+                    )
+                continue
 
             if weight_type == "lora_a":
                 if (
@@ -165,14 +168,14 @@ class LoRAModel:
                         f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
                         f" with the base model's vocabulary size({model_vocab_size})."
                     )
-                loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
+                module_lora.lora_a = tensor.to(device=device, dtype=dtype)
                 if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
+                    module_lora.lora_a = module_lora.lora_a.pin_memory()
             else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
+                module_lora.lora_b = tensor.to(device=device, dtype=dtype)
 
                 if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                    module_lora.lora_b = module_lora.lora_b.pin_memory()
 
         return cls(lora_model_id, peft_helper.r, loras)
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
@@ -24,6 +25,17 @@ MOCK_PACKED_MAPPING = {
         "up_proj",
     ],
 }
+
+
+def _make_peft_helper(use_dora: bool) -> PEFTHelper:
+    return PEFTHelper.from_dict(
+        {
+            "r": 2,
+            "lora_alpha": 4,
+            "target_modules": ["linear"],
+            "use_dora": use_dora,
+        }
+    )
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
@@ -154,3 +166,46 @@ def test_gemma4_moe_lora_weights_mapping():
         "model.layers.9.moe.gate_up_proj",
         "lora_b",
     )
+
+
+def test_load_dora_tensors():
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+        "base_model.model.linear.lora_magnitude_vector": torch.randn(4),
+    }
+
+    lora_model = LoRAModel.from_lora_tensors(
+        1,
+        tensors,
+        _make_peft_helper(use_dora=True),
+        device="cpu",
+    )
+
+    lora = lora_model.loras["linear"]
+    assert lora.use_dora
+    assert isinstance(lora.lora_a, torch.Tensor)
+    assert isinstance(lora.lora_b, torch.Tensor)
+    assert isinstance(lora.lora_magnitude_vector, torch.Tensor)
+    assert torch.equal(lora.lora_a, tensors["base_model.model.linear.lora_A.weight"])
+    assert torch.equal(lora.lora_b, tensors["base_model.model.linear.lora_B.weight"])
+    assert torch.equal(
+        lora.lora_magnitude_vector,
+        tensors["base_model.model.linear.lora_magnitude_vector"],
+    )
+
+
+def test_load_lora_tensors_rejects_unconfigured_dora_magnitude():
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+        "base_model.model.linear.lora_magnitude_vector": torch.randn(4),
+    }
+
+    with pytest.raises(ValueError, match="use_dora=False"):
+        LoRAModel.from_lora_tensors(
+            1,
+            tensors,
+            _make_peft_helper(use_dora=False),
+            device="cpu",
+        )
