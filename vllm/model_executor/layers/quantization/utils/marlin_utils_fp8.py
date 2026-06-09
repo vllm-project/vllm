@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from math import gcd
+from math import lcm
 
 import torch
 
@@ -19,16 +19,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
-
-
-def _round_up(value: int, multiple: int) -> int:
-    return (value + multiple - 1) // multiple * multiple
-
-
-def _lcm(a: int, b: int) -> int:
-    return a * b // gcd(a, b)
 
 
 def _get_fp8_marlin_padded_sizes(
@@ -36,8 +29,8 @@ def _get_fp8_marlin_padded_sizes(
 ) -> tuple[int, int]:
     group_k = group_size if group_size > 0 else 1
     candidates = (
-        (_round_up(size_n, 128), _round_up(size_k, _lcm(64, group_k))),
-        (_round_up(size_n, 64), _round_up(size_k, _lcm(128, group_k))),
+        (round_up(size_n, 128), round_up(size_k, lcm(64, group_k))),
+        (round_up(size_n, 64), round_up(size_k, lcm(128, group_k))),
     )
     return min(
         candidates,
