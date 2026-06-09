@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from collections import UserDict
 from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
 from types import MappingProxyType
@@ -118,10 +119,8 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return info
 
     def touch(self, key: _K) -> None:
-        try:
+        with contextlib.suppress(KeyError):
             self._LRUCache__order.move_to_end(key)  # type: ignore
-        except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...
