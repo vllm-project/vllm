@@ -15,7 +15,7 @@ reason about temporal order.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
@@ -95,9 +95,9 @@ _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
 
 
-def _gemma4_patch_embed_weight_loader(
+def _flatten_gemma4_patch_embed_weight(
     param: torch.Tensor, loaded_weight: torch.Tensor
-) -> None:
+) -> torch.Tensor:
     if (
         param.dim() == 2
         and loaded_weight.dim() == 4
@@ -105,9 +105,40 @@ def _gemma4_patch_embed_weight_loader(
         and param.shape[1]
         == loaded_weight.shape[1] * loaded_weight.shape[2] * loaded_weight.shape[3]
     ):
-        loaded_weight = loaded_weight.flatten(1)
+        return loaded_weight.flatten(1)
 
-    default_weight_loader(param, loaded_weight)
+    return loaded_weight
+
+
+def _gemma4_patch_embed_weight_loader(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -> None:
+    default_weight_loader(
+        param, _flatten_gemma4_patch_embed_weight(param, loaded_weight)
+    )
+
+
+def _set_gemma4_patch_embed_weight_loader(weight: torch.Tensor) -> None:
+    existing_weight_loader: Callable[[torch.Tensor, torch.Tensor], None] | None = (
+        getattr(weight, "weight_loader", None)
+    )
+    if existing_weight_loader is None:
+        set_weight_attrs(weight, {"weight_loader": _gemma4_patch_embed_weight_loader})
+        return
+
+    def weight_loader(
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+    ) -> None:
+        existing_weight_loader(
+            param,
+            _flatten_gemma4_patch_embed_weight(param, loaded_weight),
+        )
+
+    # Compose with the quantization loader installed by recursive_replace_linear().
+    # set_weight_attrs() intentionally rejects overwrites, so direct assignment is
+    # used here to preserve the existing loader while adding the GGUF shape fix.
+    weight.weight_loader = weight_loader
 
 
 def _get_max_soft_tokens(
@@ -1067,9 +1098,8 @@ class Gemma4ForConditionalGeneration(
                 tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            set_weight_attrs(
-                self.vision_tower.patch_embedder.input_proj.weight,
-                {"weight_loader": _gemma4_patch_embed_weight_loader},
+            _set_gemma4_patch_embed_weight_loader(
+                self.vision_tower.patch_embedder.input_proj.weight
             )
 
         # ---- Audio tower (variants with audio_config) ----

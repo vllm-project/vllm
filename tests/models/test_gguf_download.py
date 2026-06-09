@@ -18,7 +18,10 @@ from vllm.model_executor.model_loader.weight_utils import download_gguf
 from vllm.model_executor.models.gemma4 import (
     _load_gemma4_gguf_fused_moe_qweight_type,
 )
-from vllm.model_executor.models.gemma4_mm import _gemma4_patch_embed_weight_loader
+from vllm.model_executor.models.gemma4_mm import (
+    _gemma4_patch_embed_weight_loader,
+    _set_gemma4_patch_embed_weight_loader,
+)
 from vllm.model_executor.models.qwen3_next import _maybe_reshape_gguf_weight
 
 
@@ -337,6 +340,25 @@ class TestGGUFModelLoader:
         _gemma4_patch_embed_weight_loader(param, loaded_weight)
 
         assert torch.equal(param, loaded_weight)
+
+    def test_gemma4_patch_embedder_wraps_existing_weight_loader(self):
+        param = torch.nn.Parameter(torch.empty(2, 60), requires_grad=False)
+        loaded_weight = torch.arange(2 * 3 * 4 * 5).reshape(2, 3, 4, 5)
+        seen_weights = []
+
+        def existing_weight_loader(
+            param: torch.Tensor, loaded_weight: torch.Tensor
+        ) -> None:
+            seen_weights.append(loaded_weight)
+            param.data.copy_(loaded_weight)
+
+        param.weight_loader = existing_weight_loader
+
+        _set_gemma4_patch_embed_weight_loader(param)
+        param.weight_loader(param, loaded_weight)
+
+        assert torch.equal(seen_weights[0], loaded_weight.flatten(1))
+        assert torch.equal(param, loaded_weight.flatten(1))
 
     def test_gemma4_fused_moe_gguf_qweight_type_remap(self):
         w13_type = torch.nn.Parameter(
