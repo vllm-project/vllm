@@ -317,6 +317,7 @@ class Cohere2VisionMultiModalProcessor(
 class Cohere2VisionForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
+    merge_by_field_config = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.": "vision_tower.",
@@ -357,6 +358,10 @@ class Cohere2VisionForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=config.text_config.architectures,
             )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     @property
     def dtype(self):
