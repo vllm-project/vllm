@@ -87,8 +87,8 @@ class EplbCommunicator(ABC):
         communication buffers."""
         return True
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        self._cuda_stream = cuda_stream
+    def set_stream(self, stream: torch.cuda.Stream | torch.xpu.Stream | None) -> None:
+        self._stream = stream
 
     def _log_initialized(self) -> None:
         if is_local_first_rank():
@@ -101,10 +101,10 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         ep_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.cuda.Stream | torch.xpu.Stream | None = None,
     ) -> None:
         self._ep_group = ep_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._p2p_ops: list[P2POp] = []
         self._log_initialized()
 
@@ -144,7 +144,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         if not self._p2p_ops:
             return
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with torch.cuda.stream(self._stream):
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
@@ -158,10 +158,10 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         self._cpu_group = cpu_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._ops: list[tuple[str, torch.Tensor, int]] = []
         self._log_initialized()
 
@@ -215,17 +215,24 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                 recv_staging.append((tensor, cpu_tensor))
 
         try:
-            with torch.cuda.stream(self._cuda_stream):
-                build_ops()
+            if current_platform.is_cuda_alike():
+                with torch.cuda.stream(self._stream):
+                    build_ops()
+            elif current_platform.is_xpu():
+                with torch.xpu.stream(self._stream):
+                    build_ops()
         finally:
             self._ops.clear()
 
         # Wait for all D2H copies to finish
         # before issuing gloo batch_isend_irecv operations.
-        if self._cuda_stream is not None:
-            self._cuda_stream.synchronize()
+        if self._stream is not None:
+            self._stream.synchronize()
         else:
-            torch.cuda.current_stream().synchronize()
+            if current_platform.is_cuda_alike():
+                torch.cuda.current_stream().synchronize()
+            elif current_platform.is_xpu():
+                torch.xpu.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
@@ -233,9 +240,14 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         if not recv_staging:
             return
-        with torch.cuda.stream(self._cuda_stream):
-            for dst_tensor, cpu_tensor in recv_staging:
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+        if current_platform.is_cuda_alike():
+            with torch.cuda.stream(self._stream):
+                for dst_tensor, cpu_tensor in recv_staging:
+                    dst_tensor.copy_(cpu_tensor, non_blocking=True)
+        elif current_platform.is_xpu():
+            with torch.xpu.stream(self._stream):
+                for dst_tensor, cpu_tensor in recv_staging:
+                    dst_tensor.copy_(cpu_tensor, non_blocking=True)
 
 
 class NixlEplbCommunicator(EplbCommunicator):
@@ -325,7 +337,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+    def set_stream(self, stream: torch.cuda.Stream | None) -> None:
         pass
 
     def add_send(
@@ -577,10 +589,10 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         self._pynccl_comm = pynccl_comm
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._group_started = False
         self._log_initialized()
 
@@ -597,7 +609,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
+            self._pynccl_comm.send(tensor, dst_rank, stream=self._stream)
 
     def add_recv(
         self,
@@ -607,7 +619,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
+            self._pynccl_comm.recv(tensor, src_rank, stream=self._stream)
 
     def execute(self) -> None:
         if self._group_started:

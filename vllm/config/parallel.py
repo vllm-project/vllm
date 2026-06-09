@@ -458,10 +458,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "CUDA devices or ROCm devices or XPU devices now."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")

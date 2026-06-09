@@ -188,9 +188,9 @@ class EplbModelState:
     """
     EPLB stats for the model.
     """
-    cuda_device_index: int | None
+    device_index: int | None
     """
-    CUDA device index for the async EPLB worker thread.
+    Device index for the async EPLB worker thread.
     """
     communicator: EplbCommunicator
     """
@@ -279,9 +279,13 @@ class EplbState:
         mapped yet.
         """
         if self.device.type == "cuda":
-            self.cuda_device_index = self.device.index
-            if self.cuda_device_index is None and torch.cuda.is_available():
-                self.cuda_device_index = torch.accelerator.current_device_index()
+            self.device_index = self.device.index
+            if self.device_index is None and torch.cuda.is_available():
+                self.device_index = torch.accelerator.current_device_index()
+        elif self.device.type == "xpu":
+            self.device_index = self.device.index
+            if self.device_index is None and torch.xpu.is_available():
+                self.device_index = torch.xpu.current_device()
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -465,7 +469,7 @@ class EplbState:
             expert_buffer=expert_buffer,
             rebalanced=False,
             eplb_stats=None,
-            cuda_device_index=self.cuda_device_index,
+            device_index=self.device_index,
             communicator=communicator,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -680,9 +684,14 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
+                if self.device.type == "cuda":
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                elif self.device.type == "xpu":
+                    start_event = torch.xpu.Event(enable_timing=True)
+                    end_event = torch.xpu.Event(enable_timing=True)
+                    start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",
                 "(async mode)" if self.is_async else "sync mode",

@@ -170,6 +170,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
+                expert_map=expert_map,
                 is_fp8=self.is_fp8,
                 is_int4=self.is_int4,
                 is_mxfp4=self.is_mxfp4,
