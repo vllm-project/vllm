@@ -23,7 +23,12 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_port,
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -94,6 +99,23 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
         if key.startswith("node:"):
             return key.split(":", 1)[1]
     raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
+def _node_ip_from_resources(node_resources: dict) -> str | None:
+    """Return the node IP encoded in a Ray per-node resource dict, or None.
+
+    Ray advertises each node's IP as a ``node:<ip>`` resource key. The head node
+    also carries ``node:__internal_head__``, and placement groups add
+    ``..._group_...`` keys; both are ignored.
+    """
+    for key in node_resources:
+        if (
+            key.startswith("node:")
+            and key != "node:__internal_head__"
+            and "_group_" not in key
+        ):
+            return key.split(":", 1)[1]
+    return None
 
 
 class CoreEngineProcManager:
@@ -501,6 +523,32 @@ class CoreEngineActorManager:
         assert dp_master_ip_key in nodes[0], (
             f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
+
+        # optionally restrict DP placement to a caller-provided node set.
+        requested_node_ips = {
+            ip.strip()
+            for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
+            if ip.strip()
+        }
+        if requested_node_ips:
+            allowed_node_ips = set(requested_node_ips)
+            # The master node must host the local ranks, so it has to be allowed.
+            if dp_master_ip not in allowed_node_ips:
+                allowed_node_ips.add(dp_master_ip)
+            filtered_nodes = [
+                node_resources
+                for node_resources in nodes
+                if _node_ip_from_resources(node_resources) in allowed_node_ips
+            ]
+            logger.info(
+                "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
+                "from %d to %d node(s): %s",
+                len(nodes),
+                len(filtered_nodes),
+                sorted(allowed_node_ips),
+            )
+            nodes = filtered_nodes
+
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
             int(node_resources[device_str])
@@ -567,16 +615,10 @@ class CoreEngineActorManager:
         # for "span" pack strategy
         collected_bundles = []
         for node_resources in nodes:
-            node_ip_keys = [
-                key
-                for key in node_resources
-                if key != "node:__internal_head__" and key.startswith("node:")
-            ]
-            assert len(node_ip_keys) == 1, (
-                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
+            node_ip = _node_ip_from_resources(node_resources)
+            assert node_ip is not None, (
+                f"No node IP key found in node resources: {node_resources}"
             )
-            node_ip_key = node_ip_keys[0]
-            node_ip = node_ip_key.split(":")[1]
 
             n_device_on_node = int(node_resources.get(device_str, 0))
             if pack_strategy == "span" and n_device_on_node != 0:
@@ -648,6 +690,9 @@ class CoreEngineActorManager:
                 local_dp_ranks.append(i)
                 if len(placement_groups) == dp_size:
                     break
+
+            if len(placement_groups) == dp_size:
+                break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
@@ -955,8 +1000,19 @@ class CoreEngineActorManager:
 def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
+    *,
+    defer_api_server_ports: bool = True,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication."""
+    """Allocate ZMQ addresses for engine-client communication.
+
+    By default each TCP address is a ``tcp://host:0`` placeholder; the
+    consumer (API-server child or single-process ``MPClient``) binds, then
+    recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
+    and writes it back into ``addresses`` before the engine handshake.
+
+    Set ``defer_api_server_ports=False`` only when the consumer cannot
+    report a bound port back (e.g. the Rust front-end). IPC paths are
+    unaffected."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -978,15 +1034,14 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
+    def _addr() -> str:
+        if client_local_only:
+            return get_open_zmq_ipc_path()
+        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+
     return EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
+        inputs=[_addr() for _ in range(num_api_servers)],
+        outputs=[_addr() for _ in range(num_api_servers)],
     )
 
 
@@ -1095,9 +1150,11 @@ def launch_core_engines(
     if parallel_config.enable_elastic_ep:
         handshake_local_only = False
 
-    handshake_address = get_engine_client_zmq_addr(
-        handshake_local_only, host, parallel_config.data_parallel_rpc_port
-    )
+    # Preserve "port=0 means auto-pick" for the handshake address, which
+    # is consumed by engines spawned in this process and so cannot defer
+    # port resolution to bind time.
+    rpc_port = parallel_config.data_parallel_rpc_port or get_open_port()
+    handshake_address = get_engine_client_zmq_addr(handshake_local_only, host, rpc_port)
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only

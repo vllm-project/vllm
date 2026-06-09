@@ -372,6 +372,8 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \
