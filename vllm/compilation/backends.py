@@ -29,7 +29,8 @@ from vllm.compilation.codegen import (
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import Range, hash_factors
+from vllm.config.utils import Range as VllmRange
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -137,7 +138,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig) -> None:
-        self.cache: dict[tuple[Range, int, str], Any] = dict()
+        self.cache: dict[tuple[VllmRange, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -147,7 +148,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
+    def compile_context(self, compile_range: VllmRange) -> Generator[None, None, None]:
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -194,7 +195,7 @@ class CompilerManager:
                 if not isinstance(value, ty):
                     raise TypeError(f"Expected {ty} but got {type(value)} for {value}")
 
-            def parse_key(key: Any) -> tuple[Range, int, str]:
+            def parse_key(key: Any) -> tuple[VllmRange, int, str]:
                 range_tuple, graph_index, compiler_name = key
                 check_type(graph_index, int)
                 check_type(compiler_name, str)
@@ -202,8 +203,10 @@ class CompilerManager:
                     start, end = range_tuple
                     check_type(start, int)
                     check_type(end, int)
-                    range_tuple = Range(start=start, end=end)
-                check_type(range_tuple, Range)
+                    range_tuple = VllmRange(  # type: ignore[call-arg]
+                        start=start, end=end
+                    )
+                check_type(range_tuple, VllmRange)
                 return range_tuple, graph_index, compiler_name
 
             self.cache = {parse_key(key): value for key, value in cache.items()}
@@ -225,7 +228,7 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: Range,
+        compile_range: VllmRange,
     ) -> Callable[..., Any] | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
@@ -267,7 +270,7 @@ class CompilerManager:
         example_inputs: list[Any],
         additional_inductor_config: dict[str, Any],
         compilation_config: CompilationConfig,
-        compile_range: Range,
+        compile_range: VllmRange,
         graph_index: int = 0,
         num_graphs: int = 1,
         is_encoder: bool = False,

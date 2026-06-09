@@ -13,7 +13,9 @@ from pydantic import Field, TypeAdapter, field_validator
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
-    Range,
+    Range as VllmRange,
+)
+from vllm.config.utils import (
     config,
     get_hash_factors,
     hash_factors,
@@ -1491,9 +1493,12 @@ class CompilationConfig:
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
 
-    def get_compile_ranges(self) -> list[Range]:
+    def get_compile_ranges(self) -> list[VllmRange]:
         """Get the compile ranges for the compilation config."""
         if self.compile_ranges_endpoints is None:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
-        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
+        return [
+            VllmRange(start=s + 1, end=e)  # type: ignore[call-arg]
+            for s, e in zip([0] + endpoints[:-1], endpoints)
+        ]

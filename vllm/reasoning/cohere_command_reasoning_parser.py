@@ -548,7 +548,9 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
                 "command structural tags, or the schema cannot be expressed in "
                 "that format."
             )
-        request.structured_outputs = StructuredOutputsParams(structural_tag=result)
+        request.structured_outputs = StructuredOutputsParams(  # type: ignore[call-arg]
+            structural_tag=result
+        )
         # Folded JSON constraints into ``structural_tag``; drop ``response_format``
         # when it was the source so ``to_sampling_params`` does not also set ``json`` /
         # ``json_object`` (mutually exclusive in ``StructuredOutputsParams``).

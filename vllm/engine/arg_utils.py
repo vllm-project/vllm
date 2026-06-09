@@ -6,7 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
-import os # cohere
+import os  # cohere
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass

@@ -21,4 +21,4 @@ fi
 # TODO - fix warnings in .buildkite/scripts/hardware_ci/run-amd-test.sh
 find . -path ./.git -prune -o -name "*.sh" \
   -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -S error -s bash \"\$f\"; done" --

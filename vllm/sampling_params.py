@@ -158,11 +158,15 @@ class RequestOutputKind(Enum):
 
 
 def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
-    return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
+    return is_mistral_tokenizer(tokenizer) and not getattr(
+        tokenizer, "is_tekken", False
+    )
 
 
 def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
-    return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
+    if not is_mistral_tokenizer(tokenizer):
+        return None
+    return getattr(tokenizer, "llg_tokenizer", None)
 
 
 class SamplingParams(

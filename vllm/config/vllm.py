@@ -877,7 +877,7 @@ class VllmConfig:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
-                    executor_backend,
+                    str(executor_backend),
                 )
                 self.scheduler_config.async_scheduling = False
             else:

@@ -592,7 +592,7 @@ class OpenAIServingRender:
             is_mistral_grammar_eligible = (
                 is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
-                and tokenizer.supports_grammar
+                and getattr(tokenizer, "supports_grammar", False)
             )
             if tool_choice != "none" or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):

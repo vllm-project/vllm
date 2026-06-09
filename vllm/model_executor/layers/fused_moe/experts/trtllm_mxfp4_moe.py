@@ -177,6 +177,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,
     ) -> torch.Tensor:
         from flashinfer import trtllm_fp4_block_scale_moe
 

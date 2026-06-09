@@ -515,8 +515,12 @@ class MultiModalDataParser:
     ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
-        if is_list_of(data, torch.Tensor) and len(data) > 0:
-            return data[0].ndim == 2  # type: ignore[index]
+        if (
+            isinstance(data, list)
+            and len(data) > 0
+            and isinstance(data[0], torch.Tensor)
+        ):
+            return data[0].ndim == 2
 
         return False
 

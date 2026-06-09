@@ -124,6 +124,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
             select_experts,

@@ -159,6 +159,7 @@ class ParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
+                assert name is not None
                 names = name
             else:
                 names = [class_name]

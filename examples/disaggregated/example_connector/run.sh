@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 rm -rf local_storage/
 
 if [ -f "output.txt" ]; then

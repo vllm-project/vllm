@@ -17,7 +17,7 @@ def __getattr__(name: str):
         )
 
         return get_tokenizer
-    
+
     # cohere start
     if name == "init_tokenizer_from_configs":
         from vllm.tokenizers import cached_tokenizer_from_config

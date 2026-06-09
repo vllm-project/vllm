@@ -152,8 +152,8 @@ run_fast_check() {
         --ignore=entrypoints/openai/test_collective_rpc.py \
         --ignore=entrypoints/openai/tool_parsers/ \
         --ignore=*lora* --ignore=*rerank* \
-        --ignore=entrypoints/openai/test_embedding.py \ 
-        --ignore=entrypoints/openai/test_embedding_dimensions.py \ 
+        --ignore=entrypoints/openai/test_embedding.py \
+        --ignore=entrypoints/openai/test_embedding_dimensions.py \
         --ignore=entrypoints/openai/test_embedding_long_text.py
 
 

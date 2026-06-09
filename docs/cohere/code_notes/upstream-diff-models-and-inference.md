@@ -10,7 +10,7 @@ Upstream v0.21 refactored several areas the v0.19 doc referenced as single
 files. Cohere customizations live in the **successor paths** below:
 
 | Doc (v0.19) path | Current branch path | Notes |
-|------------------|---------------------|-------|
+| --- | --- | --- |
 | `layers/pooler.py` | `layers/pooler/` package | `DispatchPooler` in `pooler/special.py` |
 | `quantization/mxfp8.py` | `quantization/online/mxfp8.py` | Online-quant frontend package |
 | MoE routing in `commandr.py` only | `commandr.py` + `cohere2_moe.py` | c5/BLS MoE stack in `cohere2_moe.py` |

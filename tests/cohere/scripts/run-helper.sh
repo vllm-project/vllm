@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Helper functions for run-performance-benchmarks.sh and run-bee-eval.sh
 
 check_gpus() {

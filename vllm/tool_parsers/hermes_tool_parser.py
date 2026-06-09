@@ -57,7 +57,7 @@ class Hermes2ProToolParser(ToolParser):
 
         if is_mistral_tokenizer(tokenizer):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
-            self.model_tokenizer = tokenizer.tokenizer
+            self.model_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
 
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"

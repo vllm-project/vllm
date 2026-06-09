@@ -108,7 +108,7 @@ class ToolParser:
                 structure_tag = self.get_structural_tag(request)
                 if structure_tag is not None:
                     if request.structured_outputs is None:
-                        request.structured_outputs = StructuredOutputsParams(
+                        request.structured_outputs = StructuredOutputsParams(  # type: ignore[call-arg]
                             structural_tag=json.dumps(structure_tag.model_dump()),
                         )
                     else:

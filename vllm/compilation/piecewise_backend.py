@@ -17,7 +17,7 @@ from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import VllmConfig
-from vllm.config.utils import Range
+from vllm.config.utils import Range as VllmRange
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -78,7 +78,7 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
 
 @dataclasses.dataclass
 class RangeEntry:
-    compile_range: Range
+    compile_range: VllmRange
     compiled: bool = False
     runnable: Callable[..., Any] = None  # type: ignore
 
@@ -144,7 +144,7 @@ class PiecewiseBackend:
                 last_compile_range.end
                 == vllm_config.scheduler_config.max_num_batched_tokens
             )
-            self.compile_ranges[-1] = Range(
+            self.compile_ranges[-1] = VllmRange(  # type: ignore[call-arg]
                 start=last_compile_range.start, end=max_int32
             )
 
@@ -159,7 +159,7 @@ class PiecewiseBackend:
         self.returns_tuple = returns_tuple
 
         # the entries for ranges that we need to either
-        self.range_entries: dict[Range, RangeEntry] = {}
+        self.range_entries: dict[VllmRange, RangeEntry] = {}
 
         # We only keep compilation management inside this class directly.
         if self.compile_sizes is not None:
@@ -172,15 +172,17 @@ class PiecewiseBackend:
                     )
                 else:
                     assert isinstance(size, int)
-                    range = Range(start=size, end=size)
-                    if range not in self.compile_ranges:
-                        self.range_entries[range] = RangeEntry(
-                            compile_range=range,
+                    size_range = VllmRange(  # type: ignore[call-arg]
+                        start=size, end=size
+                    )
+                    if size_range not in self.compile_ranges:
+                        self.range_entries[size_range] = RangeEntry(
+                            compile_range=size_range,
                         )
 
-        for range in self.compile_ranges:
-            self.range_entries[range] = RangeEntry(
-                compile_range=range,
+        for compile_range in self.compile_ranges:
+            self.range_entries[compile_range] = RangeEntry(
+                compile_range=compile_range,
             )
 
         # Track whether we've logged the graph for this subgraph (only log once)
@@ -277,7 +279,7 @@ class PiecewiseBackend:
             range_entry.compiled = True
 
     @dynamo_timed("vllm_log_compile_start_torch_trace_only")
-    def _log_compile_start(self, compile_range: Range):
+    def _log_compile_start(self, compile_range: VllmRange):
         """Log compilation event for TORCH_TRACE/tlparse."""
         is_cudagraph_size = (
             self.compile_sizes is not None and compile_range.start in self.compile_sizes
@@ -348,11 +350,15 @@ class PiecewiseBackend:
             return None
 
         if runtime_shape in self.compile_sizes:
-            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
+            return self.range_entries[
+                VllmRange(  # type: ignore[call-arg]
+                    start=runtime_shape, end=runtime_shape
+                )
+            ]
         else:
-            for range in self.compile_ranges:
-                if runtime_shape in range:
-                    return self.range_entries[range]
+            for compile_range in self.compile_ranges:
+                if runtime_shape in compile_range:
+                    return self.range_entries[compile_range]
         return None
 
     def __call__(self, *args: Any) -> Any:

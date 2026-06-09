@@ -28,6 +28,11 @@ def mock_model_runner_with_input_batch():
     runner.requests = {}
     runner.max_num_reqs = 10
     runner.max_model_len = 1024
+    # cohere start
+    # _update_streaming_request calls late_interaction_runner.register_request;
+    # upstream fixture omits this mock (test not in upstream CPU CI).
+    runner.late_interaction_runner = Mock()
+    # cohere end
 
     # Create a real InputBatch for e2e testing
     runner.input_batch = InputBatch(

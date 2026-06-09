@@ -114,16 +114,16 @@ class RoutingMethodType(IntEnum):
     # TopK: TopK (no softmax)
     TopK = (5,)
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
-    SigmoidRenorm = (6,) # cohere
+    SigmoidRenorm = (6,)  # cohere
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
     MiniMax2 = (7,)
     # Unspecified
-    Unspecified = (9.0,) # cohere
+    Unspecified = (9.0,)  # cohere
     # other routing types (not passed to FlashInfer kernels)
     # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
     DeepseekV4 = (100,)
-    Custom = (7,) # cohere
-    Simulated = (8,) # cohere
+    Custom = (7,)  # cohere
+    Simulated = (8,)  # cohere
 
 
 def get_routing_method_type(
@@ -1264,7 +1264,7 @@ class FusedMoEConfig:
     # Whether to normalize top-k probabilities (renormalize).
     norm_topk_prob: bool = True
     # cohere end
-    
+
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
@@ -1370,4 +1370,3 @@ class FusedMoEConfig:
     @property
     def needs_round_robin_routing_tables(self):
         return self.moe_parallel_config.needs_round_robin_routing_tables
-

@@ -3116,7 +3116,7 @@ class GPUModelRunner(
         model = self.get_model()
         if not is_pooling_model(model):
             return []
-        
+
         # cohere start
         supported_tasks = list(model.pooler.get_supported_tasks())
 

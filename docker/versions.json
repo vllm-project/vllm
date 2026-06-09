@@ -43,15 +43,6 @@
     "NVCC_THREADS": {
       "default": "8"
     },
-    "SCCACHE_BUCKET_NAME": {
-      "default": "vllm-build-sccache"
-    },
-    "SCCACHE_REGION_NAME": {
-      "default": "us-west-2"
-    },
-    "SCCACHE_S3_NO_CREDENTIALS": {
-      "default": "0"
-    },
     "vllm_target_device": {
       "default": "cuda"
     },

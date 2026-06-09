@@ -92,7 +92,7 @@ class MistralToolCall(ToolCall):
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     if is_mistral_tokenizer(model_tokenizer):
-        return model_tokenizer.version < 11
+        return getattr(model_tokenizer, "version", 0) < 11
     # For HF tokenizers, check if [ARGS] token exists in vocab
     # which indicates a v11+ equivalent tokenizer
     vocab: dict[str, int] = getattr(model_tokenizer, "get_vocab", lambda: {})()
@@ -185,7 +185,7 @@ class MistralToolParser(ToolParser):
         if (
             not is_mistral_tokenizer(self.model_tokenizer)
             or isinstance(request, ResponsesRequest)
-            or not self.model_tokenizer.supports_grammar
+            or not getattr(self.model_tokenizer, "supports_grammar", False)
             or any_so_non_supported_active
             or response_format_non_supported_active
         ):
@@ -232,7 +232,8 @@ class MistralToolParser(ToolParser):
             # Structured Outputs will be defined.
             request.response_format = None
 
-        grammar_factory = self.model_tokenizer.grammar_factory
+        grammar_factory = getattr(self.model_tokenizer, "grammar_factory", None)
+        assert grammar_factory is not None
 
         # TODO: Once unified parser, improve this.
         # The issue is figuring out when a model is a reasoning one or not.
@@ -277,7 +278,9 @@ class MistralToolParser(ToolParser):
                     json_only=False,
                 )
 
-        request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
+        request.structured_outputs = StructuredOutputsParams(  # type: ignore[call-arg]
+            grammar=lark_grammar
+        )
         request._grammar_from_tool_parser = True
         return request
 

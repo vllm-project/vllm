@@ -284,14 +284,19 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
-# cohere start
-# upstream also uses SCCACHE but we configure it slightly differently
-# to work with depot instead of s3 bucket
+ARG SCCACHE_DOWNLOAD_URL
+# cohere start: upstream S3 sccache ARGs (disabled — sccache prefers S3 over WebDAV;
+# Depot CI gets 403 on vllm-build-sccache without vLLM AWS creds; v0.19 was WebDAV-only)
+# ARG SCCACHE_ENDPOINT
+# ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+# ARG SCCACHE_REGION_NAME=us-west-2
+# ARG SCCACHE_S3_NO_CREDENTIALS=0
+# cohere end
+# cohere start: Depot WebDAV backend for Cohere CI
 ARG SCCACHE_WEBDAV_ENDPOINT
 ARG SCCACHE_WEBDAV_TOKEN
 ARG SCCACHE_WEBDAV_KEY_PREFIX
 # cohere end
-ARG SCCACHE_DOWNLOAD_URL
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -317,8 +322,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
 
 # Build the vLLM wheel
+# cohere start: upstream sccache wiring (disabled — use Depot WebDAV below instead)
+# if USE_SCCACHE is set, use sccache to speed up compilation
+# AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
+# cohere end
 # if USE_SCCACHE is set, use sccache to speed up compilation (Depot WebDAV for Cohere CI)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    # cohere start: upstream AWS creds secret mount (disabled with S3 backend above)
+    # --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
+    # cohere end
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && case "${TARGETPLATFORM}" in \
@@ -331,7 +343,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
-        # cohere start
+        # cohere start: upstream S3 exports (disabled — sccache prefers S3 over WebDAV)
+        # && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
+        # && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
+        # && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        # && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
+        # cohere end
+        # cohere start: Depot WebDAV backend for Cohere CI
         && export SCCACHE_WEBDAV_ENDPOINT="${SCCACHE_WEBDAV_ENDPOINT}" \
         && export SCCACHE_WEBDAV_TOKEN="${SCCACHE_WEBDAV_TOKEN}" \
         && export SCCACHE_WEBDAV_KEY_PREFIX="${SCCACHE_WEBDAV_KEY_PREFIX}$([ "${SCCACHE_ARCH}" = "aarch64" ] && echo "-arm64")" \
