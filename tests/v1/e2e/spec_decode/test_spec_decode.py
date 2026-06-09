@@ -1294,7 +1294,7 @@ def dflash_config():
         },
         max_model_len=32768,
         max_num_seqs=128,
-        gpu_memory_utilization=0.75,
+        gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
     )
