@@ -196,13 +196,20 @@ class Cohere2MoeAttention(nn.Module):
             is_neox_style=False,
         )
 
+        # cohere start: NeMo (FaxServer) uses inclusive window semantics —
+        # a SWA layer sees [pos - sliding_window, pos], i.e. sliding_window + 1
+        # tokens.  vLLM's FlashAttention backend does (value - 1, 0) internally,
+        # so we pass sliding_window + 1 here to cancel that offset and match the
+        # training convention.  The same +1 propagates into the KV-cache eviction
+        # formula (single_type_kv_cache_manager.py), keeping both paths consistent.
         self.sliding_window = None
         layer_types = getattr(config, "layer_types", None)
         if (
             layer_types is not None
             and layer_types[self.layer_idx] == "sliding_attention"
         ):
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
+        # cohere end
 
         # Prefix-dense layers (layer_idx < first_k_dense_replace) have full
         # attention (no sliding window). When prefix_dense_sliding_window_pattern
