@@ -68,6 +68,10 @@ def launch_lm_eval(eval_config, tp_size):
     if current_platform.is_rocm() and "Nemotron-3" in eval_config["model_name"]:
         model_args += "attention_backend=TRITON_ATTN"
 
+    moe_backend = eval_config.get("moe_backend", None)
+    if moe_backend is not None:
+        model_args += f"moe_backend={moe_backend},"
+
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
         results = lm_eval.simple_evaluate(
