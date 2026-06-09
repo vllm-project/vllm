@@ -411,7 +411,7 @@ class NixlConnectorWorker:
         # TTL-based eviction of stale remote engine state.
         self._engine_last_active: dict[EngineId, float] = {}
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
-            "engine_ttl", 600.0
+            "engine_ttl", 3600.0
         )
 
         self.block_size = vllm_config.cache_config.block_size
