@@ -128,8 +128,8 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         num_accepted_tokens = None
         if self.use_spec_decode:
             assert common_attn_metadata.max_query_len <= 1 + self.num_spec_tokens, (
-                "Linear attention only supports decode-only full CUDAGraph "
-                "capture for speculative decoding."
+                "Linear attention only supports speculative decoding with "
+                "query length <= 1 + number of speculative tokens."
             )
             num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
         return self.build(
