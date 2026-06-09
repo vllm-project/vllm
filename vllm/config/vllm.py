@@ -1015,6 +1015,28 @@ class VllmConfig:
                     f"got cache_dtype={self.cache_config.cache_dtype!r}."
                 )
 
+            # Re-anchoring fires when the position clock reaches
+            # max_model_len - realtime_reanchor_margin_tokens. If the margin is
+            # not smaller than (max_model_len - sliding_window) that threshold
+            # collapses: re-anchoring either thrashes (firing every step, which
+            # drops audio) or never engages, silently disabling the feature.
+            # Reject at startup rather than degrade mysteriously at run time.
+            hf_config = self.model_config.hf_config
+            text_config = getattr(hf_config, "text_config", hf_config)
+            sliding_window = getattr(text_config, "sliding_window", None)
+            margin = self.scheduler_config.realtime_reanchor_margin_tokens
+            max_model_len = self.model_config.max_model_len
+            if sliding_window is not None and (
+                margin >= max_model_len - sliding_window
+            ):
+                raise ValueError(
+                    "enable_realtime_unbounded needs head-room for re-anchoring: "
+                    f"realtime_reanchor_margin_tokens ({margin}) must be smaller "
+                    f"than max_model_len - sliding_window ({max_model_len} - "
+                    f"{sliding_window} = {max_model_len - sliding_window}). Lower "
+                    "the margin or raise --max-model-len (>= 8192 recommended)."
+                )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (

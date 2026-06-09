@@ -202,15 +202,6 @@ class LlamaAttention(nn.Module):
             is_sliding = layer_types[effective_layer_idx] == "sliding_attention"
             if is_sliding:
                 sliding_window = config.sliding_window
-        elif (cfg_sw := getattr(config, "sliding_window", None)) is not None:
-            # Defensive: honor a uniform sliding window for a config that reaches
-            # here without an explicit `layer_types` list. Redundant on shipped
-            # paths -- the mistral loader injects `layer_types`, and
-            # `Attention.__init__` already falls back to
-            # `cache_config.sliding_window` for non-interleaved configs -- so
-            # this only guards non-standard loaders. Relates to
-            # vllm-project/vllm#38233.
-            sliding_window = cfg_sw
 
         attn_cls = (
             EncoderOnlyAttention

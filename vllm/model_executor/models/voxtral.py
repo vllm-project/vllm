@@ -349,17 +349,9 @@ class VoxtralForConditionalGeneration(
         self.downsample_factor = self.config.audio_config.downsample_factor
 
         with self._mark_language_model(vllm_config):
-            # Pin the Mistral dispatch for the text backbone. Defensive: on the
-            # standard mistral load path `architectures` is already set and this
-            # is a no-op. It only matters for a config that reaches here with
-            # `architectures` unset and an unrecognized `model_type`, where
-            # init_vllm_registered_model would otherwise select the Transformers
-            # backend (which would not produce a SlidingWindowSpec, sizing the KV
-            # pool for max_model_len). Relates to vllm-project/vllm#38233.
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
-                architectures=["MistralForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
