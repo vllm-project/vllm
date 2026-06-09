@@ -76,12 +76,6 @@ ResponseType: TypeAlias = (
 logger = init_logger(__name__)
 
 
-def _get_stt_preprocess_max_workers() -> int:
-    num_workers = envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS
-    logger.info("Using %d worker(s) for STT preprocess.", num_workers)
-    return num_workers
-
-
 def asr_inter_chunk_separator(
     language: str | None, no_space_languages: Set[str]
 ) -> str:
