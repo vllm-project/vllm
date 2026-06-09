@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any, cast
@@ -10,12 +11,27 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    get_history_tool_calls_cnt,
+    get_tool_call_id_type,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProbs,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionLogProbs,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionResponseChoice,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    UsageInfo,
 )
+from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
     build_harmony_preamble,
@@ -26,13 +42,20 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
+    DerenderChatRequest,
+    DerenderCompletionRequest,
     GenerateRequest,
+    GenerateResponseChoice,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.chat_message_builder import build_chat_message
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
@@ -52,12 +75,97 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+
+def _resolve_logprobs(
+    logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
+) -> ChatCompletionLogProbs:
+    """Resolve all token_id:N placeholders in a ChatCompletionLogProbs object."""
+    if logprobs.content is None:
+        return logprobs
+    resolved_content = []
+    for entry in logprobs.content:
+        token_str, token_bytes = resolve_token_id_placeholder(entry.token, tokenizer)
+        resolved_top = []
+        for top in entry.top_logprobs:
+            top_str, top_bytes = resolve_token_id_placeholder(top.token, tokenizer)
+            resolved_top.append(
+                top.model_copy(update={"token": top_str, "bytes": top_bytes})
+            )
+        resolved_content.append(
+            entry.model_copy(
+                update={
+                    "token": token_str,
+                    "bytes": token_bytes,
+                    "top_logprobs": resolved_top,
+                }
+            )
+        )
+    return ChatCompletionLogProbs(content=resolved_content)
+
+
+def _convert_chat_logprobs_to_completion_logprobs(
+    logprobs: ChatCompletionLogProbs,
+) -> CompletionLogProbs:
+    """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
+    (parallel flat lists) as required by the /v1/completions response schema."""
+    if logprobs.content is None:
+        return CompletionLogProbs()
+
+    tokens: list[str] = []
+    token_logprobs: list[float | None] = []
+    top_logprobs_list: list[dict[str, float] | None] = []
+    text_offset: list[int] = []
+
+    offset = 0
+    for entry in logprobs.content:
+        text_offset.append(offset)
+        tokens.append(entry.token)
+        token_logprobs.append(entry.logprob)
+        top_logprobs_list.append(
+            {t.token: t.logprob for t in entry.top_logprobs}
+            if entry.top_logprobs
+            else None
+        )
+        offset += len(entry.token)
+
+    return CompletionLogProbs(
+        text_offset=text_offset,
+        token_logprobs=token_logprobs,
+        tokens=tokens,
+        top_logprobs=top_logprobs_list,
+    )
+
+
+def _build_chat_choice(
+    choice: GenerateResponseChoice, tokenizer: TokenizerLike
+) -> ChatCompletionResponseChoice:
+    """Detokenize and resolve logprobs for a single GenerateResponseChoice.
+
+    Raises:
+        ValueError: if choice.token_ids is empty or None.
+    """
+    if not choice.token_ids:
+        raise ValueError(f"choice {choice.index} has empty or null token_ids")
+    decoded_text = tokenizer.decode(choice.token_ids, skip_special_tokens=True)
+    resolved_logprobs = (
+        _resolve_logprobs(choice.logprobs, tokenizer)
+        if choice.logprobs is not None
+        else None
+    )
+    return ChatCompletionResponseChoice(
+        index=choice.index,
+        message=ChatMessage(role="assistant", content=decoded_text),
+        logprobs=resolved_logprobs,
+        finish_reason=choice.finish_reason,
+    )
 
 
 class OpenAIServingRender:
@@ -99,6 +207,20 @@ class OpenAIServingRender:
                 reasoning_parser_name=reasoning_parser,
             )
         )
+        self.parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=model_config.model,
+        )
+        if (
+            is_mistral_tool_parser(self.tool_parser)
+            and self.reasoning_parser is not None
+        ):
+            from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+
+            MistralToolParser.model_can_reason = True
+        self.tool_call_id_type = get_tool_call_id_type(model_config)
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
@@ -433,6 +555,237 @@ class OpenAIServingRender:
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
         return messages, [engine_input]
+
+    async def derender_chat_response(
+        self,
+        request: DerenderChatRequest,
+    ) -> ChatCompletionResponse | ErrorResponse:
+        """Postprocess a GenerateResponse into a ChatCompletionResponse.
+
+        This is the symmetric inverse of render_chat_request: it detokenizes
+        output token IDs, resolves token_id:N logprob placeholders, and
+        formats the result as an OpenAI-compatible chat completion response.
+
+        When request.chat_request is provided (the post adjust_request object
+        from the paired /render call), reasoning and tool-call parsing is
+        applied using the same parser path as the coupled chat endpoint,
+        ensuring a single source of truth. When chat_request is absent
+        plain detokenisation is preserved.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        tokenizer = self.renderer.get_tokenizer()
+        gen = request.generate_response
+        choices: list[ChatCompletionResponseChoice] = []
+        chat_request = request.chat_request
+
+        try:
+            if chat_request is not None:
+                # Parser aware path: run the same reasoning/tool call logic as
+                # the coupled chat endpoint so both paths share one implementation.
+                parser = None
+                chat_template_kwargs: dict[str, Any] = {}
+                if self.parser_cls is not None:
+                    chat_template_kwargs = (
+                        chat_request.build_chat_params(
+                            self.chat_template,
+                            self.chat_template_content_format,
+                        )
+                        .with_defaults(self.default_chat_template_kwargs)
+                        .chat_template_kwargs
+                    )
+                    parser = self.parser_cls(
+                        tokenizer,
+                        chat_request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+
+                if self.tool_call_id_type == "kimi_k2":
+                    # The chat path seeds this from the rendered conversation.
+                    # Here we use chat_request.messages directly.
+                    # get_history_tool_calls_cnt only reads role/tool_calls so
+                    # both work but they aren't guaranteed identical after
+                    # template normalization> Its a latent parity gap for kimi_k2 IDs.
+                    history_tool_call_cnt = get_history_tool_calls_cnt(
+                        chat_request.messages  # type: ignore[arg-type]
+                    )
+                else:
+                    history_tool_call_cnt = 0
+
+                for choice in gen.choices:
+                    if not choice.token_ids:
+                        raise ValueError(
+                            f"choice {choice.index} has empty or null token_ids"
+                        )
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=True
+                    )
+                    resolved_logprobs = (
+                        _resolve_logprobs(choice.logprobs, tokenizer)
+                        if choice.logprobs is not None
+                        else None
+                    )
+                    message, auto_tools_called, history_tool_call_cnt = (
+                        build_chat_message(
+                            output_text=decoded_text,
+                            output_token_ids=choice.token_ids,
+                            request=chat_request,
+                            parser=parser,
+                            tool_parser=self.tool_parser,
+                            use_harmony=self.use_harmony,
+                            enable_auto_tools=self.enable_auto_tools,
+                            tokenizer=tokenizer,
+                            role="assistant",
+                            tool_call_id_type=self.tool_call_id_type,
+                            history_tool_call_cnt=history_tool_call_cnt,
+                        )
+                    )
+                    if self.use_harmony:
+                        is_finish_reason_tool_calls = auto_tools_called
+                    else:
+                        is_finish_reason_tool_calls = auto_tools_called or bool(
+                            chat_request.tool_choice == "required"
+                            and choice.finish_reason == "stop"
+                        )
+                    choice_data = ChatCompletionResponseChoice(
+                        index=choice.index,
+                        message=message,
+                        logprobs=resolved_logprobs,
+                        finish_reason="tool_calls"
+                        if is_finish_reason_tool_calls
+                        else choice.finish_reason
+                        if choice.finish_reason
+                        else "stop",
+                    )
+                    if not self.use_harmony:
+                        choice_data = maybe_filter_parallel_tool_calls(
+                            choice_data, chat_request
+                        )
+                    choices.append(choice_data)
+            else:
+                # Plain detokenisation only.
+                for choice in gen.choices:
+                    choices.append(_build_chat_choice(choice, tokenizer))
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+
+        prompt_tokens = (
+            request.prompt_tokens if request.prompt_tokens is not None else 0
+        )
+        completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
+        logger.debug(
+            "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
+            gen.request_id,
+            request.model,
+            len(choices),
+            completion_tokens,
+        )
+        return ChatCompletionResponse(
+            id=gen.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            prompt_logprobs=gen.prompt_logprobs,
+            kv_transfer_params=gen.kv_transfer_params,
+        )
+
+    async def derender_completion_response(
+        self,
+        request: DerenderCompletionRequest,
+    ) -> CompletionResponse | ErrorResponse:
+        """Postprocess a list of GenerateResponses into a CompletionResponse.
+
+        Mirrors the multi-prompt completions case: one GenerateResponse per
+        prompt, parallel to the list[GenerateRequest] from /v1/completions/render.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        n = len(request.generate_responses)
+        prompt_tokens_list: list[int] = (
+            request.prompt_tokens if request.prompt_tokens is not None else [0] * n
+        )
+
+        tokenizer = self.renderer.get_tokenizer()
+        choices: list[CompletionResponseChoice] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        index = 0
+
+        for gen, pt in zip(request.generate_responses, prompt_tokens_list):
+            for choice in gen.choices:
+                if not choice.token_ids:
+                    return self.create_error_response(
+                        f"choice {choice.index} in response {gen.request_id} "
+                        "has empty or null token_ids"
+                    )
+                decoded_text = tokenizer.decode(
+                    choice.token_ids, skip_special_tokens=True
+                )
+                completion_logprobs = None
+                if choice.logprobs is not None:
+                    resolved = _resolve_logprobs(choice.logprobs, tokenizer)
+                    completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
+                        resolved
+                    )
+                choices.append(
+                    CompletionResponseChoice(
+                        index=index,
+                        text=decoded_text,
+                        finish_reason=choice.finish_reason,
+                        logprobs=completion_logprobs,
+                    )
+                )
+                total_completion_tokens += len(choice.token_ids)
+                index += 1
+            total_prompt_tokens += pt
+
+        if not request.generate_responses:
+            return self.create_error_response("generate_responses must not be empty")
+
+        first = request.generate_responses[0]
+        kv_params = first.kv_transfer_params
+        if any(
+            r.kv_transfer_params != kv_params for r in request.generate_responses[1:]
+        ):
+            logger.warning(
+                "derender_completion: kv_transfer_params differ across responses; "
+                "setting to None on the aggregated response"
+            )
+            kv_params = None
+
+        usage = UsageInfo(
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_prompt_tokens + total_completion_tokens,
+        )
+
+        logger.debug(
+            "derender_completion request_id=%s model=%s choices=%d"
+            " completion_tokens=%d",
+            first.request_id,
+            request.model,
+            len(choices),
+            total_completion_tokens,
+        )
+        return CompletionResponse(
+            id=first.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            kv_transfer_params=kv_params,
+        )
 
     def create_error_response(
         self,
