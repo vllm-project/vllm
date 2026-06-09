@@ -48,10 +48,8 @@ static bool pathEndsWithRai(const fs::path& path) {
   if (ext.size() != 4) {
     return false;
   }
-  return (ext[0] == '.' &&
-          (ext[1] == 'r' || ext[1] == 'R') &&
-          (ext[2] == 'a' || ext[2] == 'A') &&
-          (ext[3] == 'i' || ext[3] == 'I'));
+  return (ext[0] == '.' && (ext[1] == 'r' || ext[1] == 'R') &&
+          (ext[2] == 'a' || ext[2] == 'A') && (ext[3] == 'i' || ext[3] == 'I'));
 }
 
 static flexmlrt::client::ErtIoTypeNew makeIO(

@@ -6,17 +6,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import vllm.envs as envs
-from vllm.logger import init_logger
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.models.vision import get_npu_vision_backend
 
 logger = init_logger(__name__)
@@ -128,7 +128,5 @@ class Qwen2_5_VisionTransformerNPU(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         del weights
-        logger.info(
-            "[Qwen2.5VL Vision] Skipping weight loading (using NPU backend)"
-        )
+        logger.info("[Qwen2.5VL Vision] Skipping weight loading (using NPU backend)")
         return set()

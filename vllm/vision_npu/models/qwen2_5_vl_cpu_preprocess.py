@@ -48,7 +48,9 @@ class Qwen2_5_VLCpuPreprocessor:
 
     def __init__(self, model_path: str):
         onnx_model_path = _resolve_onnx_model_path(model_path)
-        logger.info("[Qwen2.5-VL CPU Preprocess] Loading ONNX model from %s", onnx_model_path)
+        logger.info(
+            "[Qwen2.5-VL CPU Preprocess] Loading ONNX model from %s", onnx_model_path
+        )
 
         model = onnx.load(onnx_model_path)
         graph = model.graph

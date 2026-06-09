@@ -101,8 +101,8 @@ from .interfaces import (
     SupportsPP,
     SupportsQuant,
 )
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_5_vl_npu import Qwen2_5_VisionTransformerNPU
+from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,

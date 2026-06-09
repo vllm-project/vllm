@@ -12,12 +12,12 @@
 #include <string>
 
 #ifdef _WIN32
-#  include <windows.h>
+  #include <windows.h>
 #else
-#  include <fcntl.h>
-#  include <sys/mman.h>
-#  include <sys/stat.h>
-#  include <unistd.h>
+  #include <fcntl.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -136,9 +136,9 @@ class RaiLoader {
 
 #ifdef _WIN32
 inline bool RaiLoader::loadWindows(const fs::path& rai_path) {
-  file_handle_ = CreateFileW(rai_path.wstring().c_str(), GENERIC_READ,
-                               FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL, nullptr);
+  file_handle_ =
+      CreateFileW(rai_path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file_handle_ == INVALID_HANDLE_VALUE) {
     std::cerr << "ERROR: Cannot open RAI file: " << rai_path << std::endl;
     return false;

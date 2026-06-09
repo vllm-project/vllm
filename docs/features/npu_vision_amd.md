@@ -7,7 +7,7 @@ vision encoder is offloaded to the NPU via FlexMLRT.
 ## Overview
 
 | Component | Runtime |
-|-----------|---------|
+| --------- | ------- |
 | Qwen2.5-VL language model | GPU (ROCm) |
 | Vision tower (when enabled) | AMD NPU (FlexMLRT) |
 | CPU preprocessing | Host CPU (PyTorch, from stitched ONNX) |
@@ -38,7 +38,7 @@ export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 source /opt/xilinx/xrt/setup.sh
 ```
 
-3. Verify the NPU is visible:
+1. Verify the NPU is visible:
 
 ```bash
 xrt-smi examine
@@ -77,7 +77,7 @@ Download the precompiled vision cache:
 The repo contains (same directory):
 
 | File | Purpose |
-|------|---------|
+| ---- | ------- |
 | `qwen2_5_vl_vision_stitched_7b.rai` | Compiled NPU cache (FlexMLRT input) |
 | `qwen2_5_vl_vision_stitched_7b.onnx` | ONNX model |
 | `qwen2_5_vl_vision_stitched_7b.onnx.data` | ONNX weights |
@@ -146,7 +146,7 @@ used in our STX validation runs.
 ## Environment variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| -------- | -------- | ----------- |
 | `VLLM_VISION_NPU_CACHE` | Yes (to enable NPU vision) | Absolute path to `*.rai` file |
 | `VLLM_VISION_NPU_DEVICE` | No | NPU device name (default: `stx`) |
 | `XRT_INI_PATH` | Yes | Path to `xrt.ini` (see above) |
@@ -231,7 +231,7 @@ expected between NPU and GPU paths).
 ## Troubleshooting
 
 | Symptom | Likely fix |
-|---------|------------|
+| ------- | ---------- |
 | `libflexmlrt.so: cannot open shared object file` | Add FlexMLRT `lib` dir to `LD_LIBRARY_PATH` |
 | `DRM_IOCTL_AMDXDNA_CREATE_BO ... Invalid argument` | Set `XRT_INI_PATH` to an `xrt.ini` with `[Debug] num_heap_pages=8`; verify NPU drivers with `xrt-smi` |
 | `VLLM_VISION_NPU_CACHE must point to a .rai file` | Point env var at the `.rai` file, not `vaiml_par_0/` |
