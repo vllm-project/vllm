@@ -20,11 +20,25 @@ namespace vllm {
 // sequence (fp32 SiLU, fmaxf abs-max) is unchanged, and fmaxf is
 // order-invariant, so the per-group scale stays bit-identical.
 constexpr int kWarpsPerBlock = 4;  // 4 groups per 128-thread block
+constexpr int kLogicalWarpSize = 32;
+constexpr int kThreadsPerBlock = kWarpsPerBlock * kLogicalWarpSize;
+
+#ifdef USE_ROCM
+__device__ __forceinline__ unsigned long long logical_warp_mask_32(int tid) {
+  return warpSize == kLogicalWarpSize
+             ? 0xffffffffULL
+             : (0xffffffffULL << (tid & kLogicalWarpSize));
+}
+#else
+__device__ __forceinline__ unsigned logical_warp_mask_32(int) {
+  return 0xffffffffu;
+}
+#endif
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
           int32_t group_size>
 __global__ void
-__launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
+__launch_bounds__(kThreadsPerBlock) silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
     float* __restrict__ scales,      // Output: [num_tokens, hidden_size /
@@ -36,15 +50,15 @@ __launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
 ) {
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
-  static_assert(group_size % 32 == 0,
+  static_assert(group_size % kLogicalWarpSize == 0,
                 "group_size must be a multiple of the warp size");
   // Elements per thread: 2 for group_size=64, 4 for group_size=128. Each maps
   // to a single vector load/store per lane (4B/8B in, 2B/4B out).
-  constexpr int EPT = group_size / 32;
+  constexpr int EPT = group_size / kLogicalWarpSize;
 
   int const tid = threadIdx.x;
-  int const warp_id = tid >> 5;
-  int const lane_id = tid & 31;
+  int const warp_id = tid / kLogicalWarpSize;
+  int const lane_id = tid & (kLogicalWarpSize - 1);
   int const token_idx = blockIdx.x;
   int const num_tokens = gridDim.x;
   // num_groups is no longer gridDim.y (we pack kWarpsPerBlock groups per
@@ -94,16 +108,11 @@ __launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
   // Step 2: per-group abs-max via warp-shuffle. fmaxf is order-invariant, so
   // the group max (and therefore the scale) is bit-identical to the tree
   // reduction.
-#ifdef USE_ROCM
-  uint64_t const shfl_mask = uint64_t(0xffffffffu)
-                             << ((threadIdx.x % warpSize / 32) * 32);
-#else
-  uint32_t const shfl_mask = 0xffffffffu;
-#endif
+  auto const warp_mask = logical_warp_mask_32(tid);
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
-    thread_max =
-        fmaxf(thread_max, __shfl_xor_sync(shfl_mask, thread_max, offset, 32));
+    thread_max = fmaxf(thread_max, __shfl_xor_sync(warp_mask, thread_max,
+                                                   offset, kLogicalWarpSize));
   }
 
   // Step 3: compute the group scale in registers; lane 0 writes it to global.
@@ -180,7 +189,7 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
   // block.
   dim3 grid(num_tokens,
             (num_groups + vllm::kWarpsPerBlock - 1) / vllm::kWarpsPerBlock);
-  dim3 block(vllm::kWarpsPerBlock * 32);
+  dim3 block(vllm::kThreadsPerBlock);
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "silu_and_mul_per_block_quant", [&] {
