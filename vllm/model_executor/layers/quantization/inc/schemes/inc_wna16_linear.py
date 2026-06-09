@@ -19,7 +19,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
@@ -41,25 +40,14 @@ def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
     except ImportError as error:
         return False, str(error), None, None
 
-    if current_platform.is_xpu():
-        if getattr(ark, "xpu_lib", None) is None:
-            return (
-                False,
-                "The XPU backend library is unavailable.",
-                None,
-                None,
-            )
-        logger.info("Successfully loaded auto_round_kernel XPU backend library.")
-
-    elif current_platform.is_cpu():
-        if getattr(ark, "cpu_lib", None) is None:
-            return (
-                False,
-                "The CPU backend library is unavailable.",
-                None,
-                None,
-            )
-        logger.info("Successfully loaded auto_round_kernel CPU backend library.")
+    if getattr(ark, "cpu_lib", None) is None and getattr(ark, "xpu_lib", None) is None:
+        return (
+            False,
+            "No ARK backend library is available.",
+            None,
+            None,
+        )
+    logger.info("Successfully loaded auto_round_kernel backend library.")
 
     return True, None, ark, QuantLinear
 
