@@ -9,11 +9,10 @@ import pytest_asyncio
 from huggingface_hub import snapshot_download
 from typing_extensions import TypedDict
 
+from tests.utils import RemoteOpenAIServer
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.granite4_tool_parser import Granite4ToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-
-from tests.utils import RemoteOpenAIServer
 
 LORA_MODEL = "minpeter/LoRA-Llama-3.2-1B-tool-vllm-ci"
 
