@@ -187,9 +187,21 @@ class Step3p5MTP(nn.Module):
         )
 
         expert_params_mapping = [
-            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
-            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
-            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.gate_proj.weight",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.up_proj.weight",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.down_proj.weight",
+                "w2",
+            ),
         ]
 
         loaded_params: set[str] = set()
