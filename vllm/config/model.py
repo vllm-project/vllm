@@ -214,11 +214,6 @@ class ModelConfig:
     one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
-    nvfp4_moe_marlin_empty_cache_after_parameter_replacement: bool = False
-    """Whether to call empty_cache after each NVFP4 MoE Marlin parameter
-    replacement. This is intended as a memory-pressure mitigation for large MoE
-    models on systems with unified CPU/GPU memory, where CUDA allocator cache
-    retained during weight repacking can put pressure on host memory."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -387,7 +382,6 @@ class ModelConfig:
             "allowed_media_domains",
             "tokenizer_revision",
             "spec_target_max_model_len",
-            "nvfp4_moe_marlin_empty_cache_after_parameter_replacement",
             "enforce_eager",
             "logprobs_mode",
             "use_fp64_gumbel",

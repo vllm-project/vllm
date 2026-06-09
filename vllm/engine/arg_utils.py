@@ -540,9 +540,6 @@ class EngineArgs:
     shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
-    nvfp4_moe_marlin_empty_cache_after_parameter_replacement: bool = (
-        ModelConfig.nvfp4_moe_marlin_empty_cache_after_parameter_replacement
-    )
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     language_model_only: bool = MultiModalConfig.language_model_only
@@ -815,10 +812,6 @@ class EngineArgs:
         model_group.add_argument(
             "--allow-deprecated-quantization",
             **model_kwargs["allow_deprecated_quantization"],
-        )
-        model_group.add_argument(
-            "--nvfp4-moe-marlin-empty-cache-after-parameter-replacement",
-            **model_kwargs["nvfp4_moe_marlin_empty_cache_after_parameter_replacement"],
         )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument(
@@ -1591,9 +1584,6 @@ class EngineArgs:
             quantization=self.quantization,
             quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
-            nvfp4_moe_marlin_empty_cache_after_parameter_replacement=(
-                self.nvfp4_moe_marlin_empty_cache_after_parameter_replacement
-            ),
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
             max_logprobs=self.max_logprobs,

@@ -21,8 +21,16 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
+NVFP4_MOE_MARLIN_EMPTY_CACHE_MEMORY_UTILIZATION_THRESHOLD = 0.8
 
 logger = init_logger(__name__)
+
+
+def _get_memory_utilization(device: torch.device) -> float:
+    free_memory, total_memory = current_platform.mem_get_info(device)
+    if total_memory <= 0:
+        return 0.0
+    return 1.0 - free_memory / total_memory
 
 
 def maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(
@@ -31,11 +39,21 @@ def maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(
     if not current_platform.is_cuda_alike() or device.type != "cuda":
         return
 
+    if device.index is None:
+        return
+
+    if not current_platform.is_integrated_gpu(device.index):
+        return
+
+    memory_utilization = _get_memory_utilization(device)
+    if memory_utilization <= NVFP4_MOE_MARLIN_EMPTY_CACHE_MEMORY_UTILIZATION_THRESHOLD:
+        return
+
     logger.info_once(
         "Calling torch.accelerator.empty_cache() after NVFP4 MoE Marlin "
-        "parameter replacement because "
-        "--nvfp4-moe-marlin-empty-cache-after-parameter-replacement is "
-        "enabled."
+        "parameter replacement because integrated GPU memory utilization "
+        "exceeded "
+        f"{NVFP4_MOE_MARLIN_EMPTY_CACHE_MEMORY_UTILIZATION_THRESHOLD:.2f}."
     )
     gc.collect()
     torch.accelerator.synchronize()
