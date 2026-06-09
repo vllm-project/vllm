@@ -1768,6 +1768,22 @@ class NixlConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
+        # See https://github.com/vllm-project/vllm/issues/37285.
+        # The NIXL READ that lands remote KV -- including the mamba/SSM recurrent
+        # and conv state -- into device memory completes on the NIC, and the
+        # receive-side post-processing above is not ordered against the
+        # consumer's *next* forward. With async scheduling the decoder schedules
+        # this request's first decode on the very next step, whose forward reads
+        # ssm_state/conv_state, so the read can race the not-yet-visible received
+        # state and consume corrupted bytes (accuracy collapses under load, worse
+        # at higher TP). Synchronous scheduling masks this via its per-step
+        # drain. Drain the device before reporting the request as done-recving --
+        # which is what gates decode scheduling -- so the received state is
+        # visible to that decode. Gated on real receives so steady-state decode
+        # is untouched.
+        if (done_recving - failed_recv_reqs) and self.device_type == "cuda":
+            torch.accelerator.synchronize()
+
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
         while self._reqs_to_send:
