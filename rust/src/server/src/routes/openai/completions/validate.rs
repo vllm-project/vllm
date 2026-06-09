@@ -26,8 +26,11 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    if request.max_tokens == Some(0) {
-        bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
+    if request.max_tokens == Some(0) && !request.echo {
+        bail_invalid_request!(
+            param = "max_tokens",
+            "max_tokens=0 is only supported when echo=true."
+        );
     }
 
     if request.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
@@ -173,6 +176,32 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_prompt_only_echo() {
+        let request = CompletionRequest {
+            stream: false,
+            echo: true,
+            max_tokens: Some(0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_prompt_only_without_echo() {
+        let request = CompletionRequest {
+            stream: false,
+            echo: false,
+            max_tokens: Some(0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 }
