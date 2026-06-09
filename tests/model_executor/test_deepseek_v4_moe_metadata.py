@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
 from vllm.models.deepseek_v4.nvidia import model as deepseek_v4_model
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MixtureOfExperts,
@@ -52,6 +54,44 @@ def test_deepseek_v4_fused_moe_metadata_handles_moe_runner_shape():
     assert moe.n_local_physical_experts == 128
     assert moe.n_local_experts == 128
     assert moe.n_redundant_experts == 0
+
+
+def test_deepseek_v4_fp4_quant_config_handles_routed_experts_after_moe_refactor(
+    monkeypatch,
+):
+    class FakeMxfp4MoEMethod:
+        def __init__(self, moe_config):
+            self.moe_config = moe_config
+
+    quant_config = deepseek_v4_quant_config.DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = object()
+
+    monkeypatch.setattr(
+        deepseek_v4_quant_config,
+        "Mxfp4MoEMethod",
+        FakeMxfp4MoEMethod,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_quant_config,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(
+                    expert_dtype="fp4",
+                    quantization_config={},
+                )
+            )
+        ),
+    )
+
+    method = quant_config.get_quant_method(layer, "model.layers.3.mlp.experts")
+
+    assert isinstance(method, FakeMxfp4MoEMethod)
+    assert method.moe_config is layer.moe_config
 
 
 def test_deepseek_v4_fused_moe_init_exports_moe_metadata(monkeypatch):
