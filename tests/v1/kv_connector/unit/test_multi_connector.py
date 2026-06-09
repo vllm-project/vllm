@@ -261,11 +261,12 @@ def test_multi_example_connector_consistency():
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
     # First event is bind_gpu_block_pool from initialization, then
-    # set_xfer_handshake_metadata, then on_new_request when the request is enqueued,
-    # then get_num_new_matched_tokens and update_state_after_alloc from generate().
+    # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
+    # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
+    # generate().
     assert storage1_scheduler_events[:6] == [
         "bind_gpu_block_pool",
-        "set_xfer_handshake_metadata",
+        "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
@@ -285,7 +286,7 @@ def test_multi_example_connector_consistency():
     ]
     assert storage2_scheduler_events[:6] == [
         "bind_gpu_block_pool",
-        "set_xfer_handshake_metadata",
+        "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
@@ -1000,11 +1001,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     )
 
 
-def test_multi_connector_hma_opt_in():
+def test_multi_connector_hma_support_detection():
     """
-    MultiConnector currently assumes HMA is opt-in: it needs
-    --no-disable-hybrid-kv-cache-manager to be enabled.
-
     At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
@@ -1060,7 +1058,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             "connectors": [
                 {
                     "kv_connector": "NixlConnector",
-                    "kv_role": "kv_both",
+                    "kv_role": "kv_consumer",
                 },
                 {
                     "kv_connector": "MockConnector",
