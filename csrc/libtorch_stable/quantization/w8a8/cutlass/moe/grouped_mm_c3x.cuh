@@ -8,7 +8,7 @@
 
 #include <torch/csrc/stable/ops.h>
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 #include "get_group_starts.cuh"
 
 using namespace cute;
