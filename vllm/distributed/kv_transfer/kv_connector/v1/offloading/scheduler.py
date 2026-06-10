@@ -3,7 +3,7 @@
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
@@ -995,10 +995,8 @@ class OffloadingConnectorScheduler:
             if self._connector_stats is None:
                 self._connector_stats = transfer_stats
             else:
-                self._connector_stats = cast(
-                    OffloadingConnectorStats,
-                    self._connector_stats.aggregate(transfer_stats),
-                )
+                self._connector_stats.aggregate(transfer_stats)
+
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -1050,7 +1048,7 @@ class OffloadingConnectorScheduler:
             if stats is None:
                 stats = manager_stats
             else:
-                stats = cast(OffloadingConnectorStats, stats.aggregate(manager_stats))
+                stats.aggregate(manager_stats)
 
         return stats
 
