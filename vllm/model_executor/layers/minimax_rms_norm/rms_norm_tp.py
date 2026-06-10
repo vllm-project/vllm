@@ -41,7 +41,7 @@ def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
 
 
 @torch.compile(backend=current_platform.simple_compile_backend, dynamic=True)
-def _minimax_qk_norm_fallback(
+def _minimax_qk_norm_tp_fallback(
     qkv: torch.Tensor,
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
@@ -57,10 +57,10 @@ def _minimax_qk_norm_fallback(
     k = k.to(torch.float32)
     q_var = q.pow(2).mean(dim=-1, keepdim=True)
     k_var = k.pow(2).mean(dim=-1, keepdim=True)
-    if tp_world > 1:
-        qk_var = torch.cat([q_var, k_var], dim=-1)
-        qk_var = _all_reduce_variance(qk_var) / tp_world
-        q_var, k_var = qk_var.chunk(2, dim=-1)
+
+    qk_var = torch.cat([q_var, k_var], dim=-1)
+    qk_var = _all_reduce_variance(qk_var) / tp_world
+    q_var, k_var = qk_var.chunk(2, dim=-1)
     q = q * torch.rsqrt(q_var + eps) * q_weight
     k = k * torch.rsqrt(k_var + eps) * k_weight
     return q.to(orig_dtype), k.to(orig_dtype)
@@ -96,7 +96,7 @@ def _minimax_qk_norm_fusion(
             tp_world,
             eps,
         )
-    return _minimax_qk_norm_fallback(
+    return _minimax_qk_norm_tp_fallback(
         qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
     )
 
@@ -231,10 +231,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         k = k.to(torch.float32)
         q_var = q.pow(2).mean(dim=-1, keepdim=True)
         k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        if q_norm.tp_world > 1:
-            qk_var = torch.cat([q_var, k_var], dim=-1)
-            qk_var = _all_reduce_variance(qk_var) / q_norm.tp_world
-            q_var, k_var = qk_var.chunk(2, dim=-1)
+
         q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
         k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
         q = q.to(orig_dtype)
@@ -250,7 +247,14 @@ class MiniMaxText01RMSNormTP(CustomOp):
         kv_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert qkv.ndim == 2
+
         assert q_norm.variance_epsilon == k_norm.variance_epsilon
+        # Case 0： tp_size=1
+        if get_tensor_model_parallel_world_size() == 1:
+            q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            q, k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q, k)
+            return q, k, v
+        # Case : tp_size>1
         q, k = torch.ops.vllm.minimax_qk_norm_fusion(
             qkv,
             q_norm.weight,
