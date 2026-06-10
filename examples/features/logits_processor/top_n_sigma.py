@@ -73,9 +73,11 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
+        self.device = device
+        self.is_pin_memory = is_pin_memory
         self.req_info: dict[int, float] = {}
-        self._rows_cpu: torch.Tensor | None = None
-        self._n_sigmas_cpu: torch.Tensor | None = None
+        self._cached_rows_cpu: torch.Tensor | None = None
+        self._cached_n_sigmas_cpu: torch.Tensor | None = None
 
     def is_argmax_invariant(self) -> bool:
         return True
@@ -85,34 +87,36 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
             self.validate_params(params)
             return params.extra_args and params.extra_args.get("top_n_sigma")
 
-        process_dict_updates(
+        needs_update = process_dict_updates(
             self.req_info,
             batch_update,
             lambda params, _, __: extract_n_sigma(params),
         )
 
-        # Rebuild CPU caches after dict update (cheap: small tensors)
-        if self.req_info:
-            self._rows_cpu = torch.tensor(
-                list(self.req_info.keys()), dtype=torch.long
-            )
-            self._n_sigmas_cpu = torch.tensor(
-                list(self.req_info.values()), dtype=torch.float32
-            )
-        else:
-            self._rows_cpu = None
-            self._n_sigmas_cpu = None
+        # Only rebuild CPU caches when dict actually changed.
+        if needs_update:
+            if self.req_info:
+                self._cached_rows_cpu = torch.tensor(
+                    list(self.req_info.keys()), dtype=torch.long,
+                    pin_memory=self.is_pin_memory,
+                )
+                self._cached_n_sigmas_cpu = torch.tensor(
+                    list(self.req_info.values()), dtype=torch.float32,
+                    pin_memory=self.is_pin_memory,
+                )
+            else:
+                self._cached_rows_cpu = None
+                self._cached_n_sigmas_cpu = None
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if self._rows_cpu is None:
+        if self._cached_rows_cpu is None:
             return logits
 
-        # Move cached CPU tensors to GPU (non-blocking for pinned memory)
-        rows = self._rows_cpu.to(
-            device=logits.device, non_blocking=True
+        rows = self._cached_rows_cpu.to(
+            device=logits.device, non_blocking=True,
         )
-        n_sigmas = self._n_sigmas_cpu.to(
-            device=logits.device, dtype=logits.dtype, non_blocking=True
+        n_sigmas = self._cached_n_sigmas_cpu.to(
+            device=logits.device, dtype=logits.dtype, non_blocking=True,
         )
 
         selected_logits = logits[rows]
@@ -167,31 +171,17 @@ sampling_params_list = [
 
 def main():
     llm = LLM(
-        model="/jiangdingfeng/zy/vllm0/Qwen2.5-0.5B-Instruct",
+        model="facebook/opt-125m",
         logits_processors=[TopNSigmaLogitsProcessor],
     )
-    # Ordered by config: [s0_p0, s0_p1, ..., s1_p0, s1_p1, ...]
-    all_params = [s for s in sampling_params_list for _ in prompts]
-    all_prompts = prompts * len(sampling_params_list)
-
-    outputs = llm.generate(all_prompts, all_params)
-    config_labels = [
-        "top_n_sigma=2.0",
-        "baseline (no filter)",
-        "top_n_sigma=1.0",
-        "baseline (no filter)",
-    ]
-    n_prompts = len(prompts)
-
+    outputs = llm.generate(prompts, sampling_params_list)
     print("\nTop-n-sigma Logits Processor Demo\n" + "=" * 60)
-    for cfg_idx, label in enumerate(config_labels):
-        print(f"\n[{label}]")
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt:    {prompt!r}")
+        print(f"Output:    {generated_text!r}")
         print("-" * 60)
-        for p_idx in range(n_prompts):
-            out = outputs[cfg_idx * n_prompts + p_idx]
-            print(f"Prompt:  {out.prompt!r}")
-            print(f"Output:  {out.outputs[0].text!r}")
-            print()
 
 
 if __name__ == "__main__":
