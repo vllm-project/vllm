@@ -465,10 +465,6 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-DEFAULT_STABILITY_THRESHOLD = 2
-DEFAULT_CONFIDENCE_THRESHOLD = 0.005
-
-
 @torch.compile(dynamic=True)
 def _compute_num_rejected(
     num_logits: torch.Tensor,
