@@ -87,18 +87,8 @@ trtllm_gen_workspace_buffer = None
 
 _NVFP4_KV_QUANT_STORE_DTYPES = {
     "default": "nvfp4",
-    "fast": "nvfp4",
-    "max6": "nvfp4",
-    "static_6": "nvfp4",
     "four_over_six": "nvfp4_4over6",
-    "4over6": "nvfp4_4over6",
-    "4_over_6": "nvfp4_4over6",
-    "4/6": "nvfp4_4over6",
     "four_over_six_k_only": "nvfp4_4over6_k_only",
-    "4over6_k_only": "nvfp4_4over6_k_only",
-    "4_over_6_k_only": "nvfp4_4over6_k_only",
-    "4/6_k_only": "nvfp4_4over6_k_only",
-    "k_only": "nvfp4_4over6_k_only",
 }
 
 
