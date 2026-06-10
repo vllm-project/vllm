@@ -564,11 +564,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub allowed_headers: Option<Unsupported>,
 
-    /// If provided, the server will require one of these keys to be presented
-    /// in the header.
-    #[arg(long)]
-    pub api_key: Option<Unsupported>,
-
     /// The file path to the SSL key file.
     #[arg(long)]
     pub ssl_keyfile: Option<Unsupported>,

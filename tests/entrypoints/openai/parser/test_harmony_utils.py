@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from openai.types.responses import FunctionTool
 from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    create_tool_definition,
     extract_function_from_recipient,
     get_encoding,
     get_system_message,
@@ -19,6 +22,58 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+
+_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {"status": {"type": "string"}},
+    "required": ["status"],
+    "additionalProperties": False,
+}
+
+
+class TestCreateToolDefinition:
+    def test_chat_completion_omitted_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_chat_completion_none_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "description": None,
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_response_tool_none_description_defaults_to_empty_string(self):
+        tool = FunctionTool(
+            name="report_status",
+            description=None,
+            parameters=_TOOL_PARAMETERS,
+            type="function",
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
 
 
 class TestIsFunctionRecipient:
