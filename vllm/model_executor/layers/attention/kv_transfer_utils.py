@@ -54,7 +54,11 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
         result = func(*args, **kwargs)
 
         # Save KV cache layer on exit
-        connector.save_kv_layer(layer_name, kv_cache, attn_metadata)
+        kwargs = {}
+        if connector.transfer_intermediate_tensors:
+            bound_args = sig.bind_partial(*args, **kwargs)
+            kwargs = {"intermediate_tensors": bound_args.arguments}
+        connector.save_kv_layer(layer_name, kv_cache, attn_metadata, **kwargs)
 
         return result
 
