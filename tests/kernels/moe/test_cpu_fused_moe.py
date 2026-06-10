@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm.model_executor.layers.fused_moe import cpu_fused_moe as cpu_fused_moe_mod
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+    _CPU_MOE_ACT_FN,
+    CPUFusedMOE,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -168,3 +174,164 @@ def test_cpu_fused_moe(
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+ZENTORCH_ACT = [
+    MoEActivation.SILU,
+    MoEActivation.GELU,
+    MoEActivation.GELU_TANH,
+    MoEActivation.SWIGLUOAI,
+]
+
+
+@pytest.fixture
+def _mock_zentorch_fused_moe():
+    """Register a mock ``zentorch_fused_moe`` op when zentorch is unavailable.
+
+    Lets the dispatch test exercise ``forward_zentorch`` in CI without a real
+    zentorch build. Skips registration when the op is already present. The mock
+    delegates to ``ref_fused_moe`` so the written output is meaningful and
+    records the activation string it was invoked with.
+    """
+    calls: list[dict] = []
+
+    def _impl(
+        output,
+        input,
+        w13_weight,
+        w2_weight,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        skip_weighted,
+        activation,
+    ):
+        calls.append({"activation": activation, "skip_weighted": skip_weighted})
+        result = ref_fused_moe(
+            input,
+            w13_weight,
+            w2_weight,
+            w13_bias,
+            w2_bias,
+            topk_weights,
+            topk_ids,
+            MoEActivation.from_str(activation),
+        )
+        output.copy_(result)
+
+    if hasattr(torch.ops.zentorch, "zentorch_fused_moe"):
+        yield calls
+        return
+
+    lib_def = torch.library.Library("zentorch", "DEF")
+    lib_def.define(
+        "zentorch_fused_moe("
+        "Tensor(a!) output, "
+        "Tensor input, "
+        "Tensor w13_weight, "
+        "Tensor w2_weight, "
+        "Tensor? w13_bias, "
+        "Tensor? w2_bias, "
+        "Tensor topk_weights, "
+        "Tensor topk_ids, "
+        "bool skip_weighted, "
+        "str activation"
+        ") -> ()"
+    )
+    lib_impl = torch.library.Library("zentorch", "IMPL", "CPU")
+    lib_impl.impl("zentorch_fused_moe", _impl)
+
+    yield calls
+
+    lib_impl._destroy()
+    lib_def._destroy()
+
+
+@pytest.mark.parametrize("act", ZENTORCH_ACT)
+def test_cpu_fused_moe_dispatches_to_zentorch(monkeypatch, act: MoEActivation):
+    """When zentorch MoE is supported, ``CPUFusedMOE`` selects the zentorch
+    forward and records the lowercased activation string."""
+    monkeypatch.setattr(
+        cpu_fused_moe_mod, "is_zentorch_moe_supported", lambda layer: True
+    )
+
+    layer = SimpleNamespace(activation=act)
+    moe = CPUFusedMOE(layer)
+
+    assert moe.isa == "none"
+    assert moe.act == act.value.lower()
+    assert moe.forward_method.__func__ is CPUFusedMOE.forward_zentorch
+
+
+@pytest.mark.parametrize("use_bias", USE_BIAS)
+def test_cpu_fused_moe_zentorch_forward(
+    default_vllm_config,
+    monkeypatch,
+    _mock_zentorch_fused_moe,
+    use_bias: bool,
+):
+    """The zentorch forward passes weights/activation through to the zentorch
+    op and returns its (mutated) output."""
+    monkeypatch.setattr(
+        cpu_fused_moe_mod, "is_zentorch_moe_supported", lambda layer: True
+    )
+    set_random_seed(0)
+
+    act = MoEActivation.SILU
+    expert_num = 8
+    hidden_size = 128
+    intermediate_size = 128
+    batch_size = 64
+    dtype = torch.bfloat16
+    topk_num = expert_num // 2
+    up_dim = 2 * intermediate_size
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13 = torch.randn((expert_num, up_dim, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w2 = torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype) / (
+        0.5 * intermediate_size**0.5
+    )
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+
+    layer = SimpleNamespace(activation=act, w13_weight=w13, w2_weight=w2)
+    if use_bias:
+        layer.w13_bias = torch.randn((expert_num, up_dim), dtype=dtype) / (
+            0.5 * up_dim**0.5
+        )
+        layer.w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
+            0.5 * hidden_size**0.5
+        )
+
+    moe = CPUFusedMOE(layer)
+
+    score = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk_num)
+    topk_ids = topk_ids.to(torch.int32)
+
+    output = moe.forward_method(
+        layer,
+        input,
+        topk_weight,
+        topk_ids,
+        act,
+    )
+
+    ref_output = ref_fused_moe(
+        input,
+        w13,
+        w2,
+        getattr(layer, "w13_bias", None),
+        getattr(layer, "w2_bias", None),
+        topk_weight,
+        topk_ids,
+        act,
+    )
+
+    assert _mock_zentorch_fused_moe[-1]["activation"] == act.value.lower()
+    assert _mock_zentorch_fused_moe[-1]["skip_weighted"] is False
+    torch.testing.assert_close(output, ref_output)

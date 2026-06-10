@@ -14,31 +14,10 @@ __all__ = [
     "has_zentorch_op",
     "is_zentorch_moe_supported",
     "_ZENTORCH_MOE_ACTIVATIONS",
-    "_moe_activation_to_str",
 ]
 
 
 _ZENTORCH_MOE_ACTIVATIONS = frozenset({"gelu", "gelu_tanh", "silu", "swigluoai"})
-
-
-def _moe_activation_to_str(activation: object) -> str:
-    """Normalize activation to a lowercase string (enum-safe)."""
-    try:
-        # Local import to avoid import cycles and keep this module lightweight.
-        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    except Exception:  # pragma: no cover - defensive for optional imports
-        MoEActivation = None  # type: ignore[assignment,misc]
-
-    raw: object
-    if MoEActivation is not None and isinstance(activation, MoEActivation):
-        raw = activation.value
-    elif isinstance(activation, str):
-        raw = activation
-    elif hasattr(activation, "value"):
-        raw = activation.value  # type: ignore[attr-defined]
-    else:
-        raw = activation
-    return str(raw).lower()
 
 
 def has_zentorch_op(op_names: list[str]) -> bool:
@@ -55,20 +34,29 @@ def has_zentorch_op(op_names: list[str]) -> bool:
 
 def is_zentorch_moe_supported(layer: torch.nn.Module) -> bool:
     if not has_zentorch_op(["zentorch_fused_moe"]):
-        logging.info("torch.ops.zentorch.zentorch_fused_moe is not registered")
+        logging.debug(
+            "Skipping zentorch fused-MoE: not a Zen CPU or "
+            "zentorch not loaded; using default MoE."
+        )
         return False
     moe_config = getattr(layer, "moe_config", None)
     if moe_config is not None and not moe_config.is_act_and_mul:
-        logging.info("is_act_and_mul=False is not supported")
+        logging.debug(
+            "Skipping zentorch fused-MoE: layer is not a gated "
+            "(act-and-mul, e.g. SwiGLU) MLP, the only structure supported."
+        )
         return False
     activation = getattr(layer, "activation", None)
     if activation is None:
-        logging.info("layer has no activation attribute")
+        logging.debug(
+            "Skipping zentorch fused-MoE: layer has no 'activation' "
+            "attribute, so the activation can't be verified."
+        )
         return False
-    act = _moe_activation_to_str(activation)
+    act = str(activation).lower()
     if act not in _ZENTORCH_MOE_ACTIVATIONS:
-        logging.info(
-            "activation %r is not supported (supported: %s)",
+        logging.debug(
+            "Skipping zentorch fused-MoE: activation %r unsupported (supported: %s).",
             act,
             _ZENTORCH_MOE_ACTIVATIONS,
         )

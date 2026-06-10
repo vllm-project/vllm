@@ -15,7 +15,6 @@ from vllm._custom_ops import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import (
-    _moe_activation_to_str,
     is_zentorch_moe_supported,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -239,12 +238,8 @@ class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
         if is_zentorch_moe_supported(layer):
             self.isa = "none"
-            self.act = _moe_activation_to_str(layer.activation)
+            self.act = str(layer.activation.value).lower()
             self.forward_method = self.forward_zentorch
-            logger.info_once(
-                "[zen_cpu] zentorch_fused_moe is supported for this layer; "
-                "continuing with other implementations"
-            )
             return
 
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
