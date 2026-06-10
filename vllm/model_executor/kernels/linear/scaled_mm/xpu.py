@@ -5,16 +5,15 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.model_executor.kernels.linear import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
 class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -84,3 +83,53 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         pass
+
+
+class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "XPUFp8BlockScaledMM only support on XPU"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        super().process_weights_after_loading(layer)
+        scale_attr = (
+            "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
+        )
+        scale = getattr(layer, scale_attr)
+        # Models with scale_fmt=ue8m0 (e.g. DeepSeek-V4) store weight scales
+        # as float8_e8m0fnu. The oneDNN fp8_gemm kernel dispatches to its
+        # "block quant" path only when NEITHER scale is e8m0:
+        #
+        #   is_block_quant = (m1_sc != e8m0) && (m2_sc != e8m0) && ...
+        #
+        # Since activation scales are always float32 (use_ue8m0=False on XPU,
+        # DeepGEMM requires Hopper/Blackwell), an e8m0 weight scale causes
+        # is_block_quant=false and falls into the wrong per-channel path,
+        # producing NaN. Converting e8m0→float32 here at load time (one-time,
+        # negligible overhead for small scale tensors) ensures the kernel sees
+        # matching dtypes and correctly enters the block-quant path with the
+        # actual group_size derived from scale tensor shapes.
+        if scale.dtype == torch.float8_e8m0fnu:
+            scale = scale.to(torch.float32)
+        replace_parameter(layer, scale_attr, scale.data.t().contiguous())
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
+        return torch.ops._xpu_C.fp8_gemm(
+            A,
+            B.t(),
+            self.config.out_dtype,
+            As,
+            Bs,
+            torch.Tensor(),
+        )

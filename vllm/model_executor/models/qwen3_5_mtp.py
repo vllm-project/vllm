@@ -209,13 +209,20 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         is_fused_expert = False
-        base_layer = (
-            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
-        )
-        fused_expert_params_mapping = [
-            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
-            (f"experts.{base_layer}w2_weight", "experts.down_proj", 0, "w2"),
-        ]
+        fused_expert_params_mapping: list[tuple[str, str, int, str]] = []
+        for param_name, ckpt_name, _, shard_id in fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_up_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="gate_up_proj",
+            num_experts=1,
+        ):
+            if shard_id == "w3":
+                continue
+            parts = ckpt_name.split(".")
+            fused_expert_params_mapping.append(
+                (f"{param_name}weight", f"{parts[0]}.{parts[2]}", 0, shard_id)
+            )
         num_experts = (
             self.config.num_experts if hasattr(self.config, "num_experts") else 0
         )
@@ -381,6 +388,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:
