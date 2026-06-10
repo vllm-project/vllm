@@ -121,9 +121,7 @@ REASONING_CASES = [
 
 @pytest.fixture(scope="module")
 def tokenizer():
-    # use command-a-reasoning-08-2025 for both cmd3 and cmd4 for tests
-    # update when cmd4 is open sourced
-    return AutoTokenizer.from_pretrained("CohereLabs/command-a-reasoning-08-2025")
+    return AutoTokenizer.from_pretrained("CohereLabs/command-a-plus-05-2026-w4a4")
 
 
 @pytest.fixture
