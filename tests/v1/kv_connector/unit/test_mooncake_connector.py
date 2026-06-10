@@ -11,6 +11,7 @@ import pytest
 import torch
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
@@ -24,6 +25,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    get_mooncake_bootstrap_addr,
+    should_launch_bootstrap_server,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
@@ -59,72 +62,6 @@ class FakeMooncakeWrapper:
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
         return 0
-
-
-def test_align_transfer_regions_supports_pp_layer_subset():
-    """PP producer stages should match decoder regions by layer identity."""
-
-    local_regions = [
-        TransferRegion(
-            layer_name="model.layers.1.self_attn",
-            layer_index=1,
-            base_addr=0x1000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-        TransferRegion(
-            layer_name="model.layers.3.self_attn",
-            layer_index=3,
-            base_addr=0x3000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-    ]
-    remote_regions = [
-        TransferRegion(
-            layer_name="model.layers.0.self_attn",
-            layer_index=0,
-            base_addr=0xA000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-        TransferRegion(
-            layer_name="model.layers.1.self_attn",
-            layer_index=1,
-            base_addr=0xB000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-        TransferRegion(
-            layer_name="model.layers.2.self_attn",
-            layer_index=2,
-            base_addr=0xC000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-        TransferRegion(
-            layer_name="model.layers.3.self_attn",
-            layer_index=3,
-            base_addr=0xD000,
-            block_len=256,
-            kv_block_len=128,
-        ),
-    ]
-
-    aligned_local, aligned_remote, err = _align_transfer_regions(
-        local_regions, remote_regions
-    )
-
-    assert err is None
-    assert [r.layer_name for r in aligned_local] == [
-        "model.layers.1.self_attn",
-        "model.layers.3.self_attn",
-    ]
-    assert [r.layer_name for r in aligned_remote] == [
-        "model.layers.1.self_attn",
-        "model.layers.3.self_attn",
-    ]
-    assert [r.base_addr for r in aligned_remote] == [0xB000, 0xD000]
 
 
 def test_align_transfer_regions_uses_layer_name_occurrences():
@@ -565,6 +502,104 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert "Engine ID mismatch" in response.text
 
 
+def _make_bootstrap_vllm_config(
+    *,
+    local_engines_only: bool = False,
+    data_parallel_rank_local: int = 0,
+    data_parallel_index: int = 0,
+    nnodes_within_dp: int = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            local_engines_only=local_engines_only,
+            data_parallel_rank_local=data_parallel_rank_local,
+            data_parallel_index=data_parallel_index,
+            nnodes_within_dp=nnodes_within_dp,
+            master_addr="model-parallel-master",
+            data_parallel_master_ip="data-parallel-master",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "tp_rank",
+        "pp_rank",
+        "local_engines_only",
+        "data_parallel_rank_local",
+        "data_parallel_index",
+        "expected",
+    ),
+    [
+        (1, 0, False, 0, 0, False),
+        (0, 1, False, 0, 0, False),
+        (0, 0, True, 0, 1, True),
+        (0, 0, True, 1, 0, False),
+        (0, 0, False, 0, 0, True),
+        (0, 0, False, 0, 1, False),
+    ],
+    ids=[
+        "nonzero_tp_rank",
+        "nonzero_pp_rank",
+        "local_engine_rank_zero",
+        "local_engine_nonzero_rank",
+        "internal_lb_first_dp_engine",
+        "internal_lb_nonzero_dp_engine",
+    ],
+)
+def test_should_launch_bootstrap_server_selects_single_owner(
+    tp_rank: int,
+    pp_rank: int,
+    local_engines_only: bool,
+    data_parallel_rank_local: int,
+    data_parallel_index: int,
+    expected: bool,
+):
+    vllm_config = _make_bootstrap_vllm_config(
+        local_engines_only=local_engines_only,
+        data_parallel_rank_local=data_parallel_rank_local,
+        data_parallel_index=data_parallel_index,
+    )
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_tensor_model_parallel_rank",
+            return_value=tp_rank,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_pp_group"
+        ) as mock_pp_group,
+    ):
+        mock_pp_group.return_value.rank_in_group = pp_rank
+        assert should_launch_bootstrap_server(vllm_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("local_engines_only", "nnodes_within_dp", "expected_host"),
+    [
+        (True, 2, "127.0.0.1"),
+        (False, 2, "model-parallel-master"),
+        (False, 1, "data-parallel-master"),
+    ],
+    ids=["local_engine", "multi_node_tp_or_pp", "single_node_internal_lb"],
+)
+def test_get_mooncake_bootstrap_addr_selects_expected_host(
+    local_engines_only: bool,
+    nnodes_within_dp: int,
+    expected_host: str,
+):
+    vllm_config = _make_bootstrap_vllm_config(
+        local_engines_only=local_engines_only,
+        nnodes_within_dp=nnodes_within_dp,
+    )
+
+    assert get_mooncake_bootstrap_addr(vllm_config) == (
+        expected_host,
+        envs.VLLM_MOONCAKE_BOOTSTRAP_PORT,
+    )
+
+
 def test_scheduler_request_finished():
     """
     Tests the scheduler-side logic when a request finishes.
@@ -622,7 +657,6 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_pp_group"
         ) as mock_pp,
-        patch("vllm.distributed.parallel_state.is_local_first_rank", return_value=True),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.should_launch_bootstrap_server",
             return_value=False,
@@ -946,6 +980,9 @@ async def test_kv_consumuer(monkeypatch):
         )
         decode_worker = decode_connector.connector_worker
         decode_worker.kv_caches_base_addr = [0x1000]
+        decode_worker.block_len_per_layer = [4096]
+        decode_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        decode_worker.registered_layer_indices = [0]
         decode_worker.rpc_port = 54321
 
         # A request to pull data arrives.
@@ -987,6 +1024,10 @@ async def test_kv_consumuer(monkeypatch):
         assert sent_meta.remote_hostname == "127.0.0.1"
         assert sent_meta.remote_port == 54321
         assert sent_meta.req_blocks["d-req-1"] == ("xfer-req-1", [[100, 101]])
+        assert sent_meta.kv_caches_base_addr == [0x1000]
+        assert sent_meta.block_lens == [4096]
+        assert sent_meta.registered_layer_names == ["model.layers.0.self_attn"]
+        assert sent_meta.registered_layer_indices == [0]
 
         # Verify internal state is updated correctly.
         assert "d-req-1" in decode_worker.finished_recving_reqs
