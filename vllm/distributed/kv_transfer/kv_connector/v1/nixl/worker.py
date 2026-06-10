@@ -40,11 +40,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     TransferHandle,
     compute_nixl_compatibility_hash,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.region_class import (
-    REPLICATE_CLASS,
-    SPLIT_CLASS,
-    RegionTransferClass,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
@@ -184,8 +179,8 @@ class NixlConnectorWorker:
             else 0
         )
 
-        # Transfer class per FA descriptor, in _build_fa_local emission order.
-        fa_desc_classes = self._fa_desc_classes(num_fa_descs)
+        # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
+        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)
@@ -193,47 +188,50 @@ class NixlConnectorWorker:
             handle: list[tuple[int, int, int]] = []
             for j, (addr, local_len, dev) in enumerate(src_blocks_data):
                 if j < num_fa_descs:
-                    handle.append(
-                        fa_desc_classes[j].local_split_desc(
-                            addr, local_len, dev, fa_slot, fa_num_splits
-                        )
-                    )
+                    if fa_desc_replicated[j]:
+                        # REPLICATE (MLA): whole block written on every rank.
+                        handle.append((addr, local_len, dev))
+                    else:
+                        # SPLIT (full-attn): this rank's head slice.
+                        chunk = local_len // fa_num_splits
+                        handle.append((addr + fa_slot * chunk, chunk, dev))
                 else:
                     chunk = local_len // ssm_num_splits
                     handle.append((addr + p_idx * chunk, chunk, dev))
             yield handle
 
-    def _fa_desc_classes(self, num_fa_descs: int) -> list[RegionTransferClass]:
-        """Transfer class per FA descriptor, in _build_fa_local emission order
+    def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
+        """Per-FA-descriptor replicate flag, in _build_fa_local emission order
         (region-major; K then optional V per region). Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
         if n_regions == 0 or self.num_regions == 0:
-            return [SPLIT_CLASS] * num_fa_descs
+            return [False] * num_fa_descs
         # Descriptors (blocks) per stream; all streams share the same count.
         nblk = num_fa_descs // self.num_regions
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-        classes: list[RegionTransferClass] = []
+        flags: list[bool] = []
         for i in range(n_regions):
-            region_cls = self._region_class(i)
-            classes.extend(
-                [region_cls] * (region_cls.num_streams(virtually_split) * nblk)
-            )
-        assert len(classes) == num_fa_descs, (
-            f"FA desc classes {len(classes)} != num_fa_descs {num_fa_descs}"
+            replicated = self._is_region_replicated(i)
+            # REPLICATE (MLA) is key-only -> 1 stream; SPLIT emits K and V
+            # (2 streams) under the virtually-split layout.
+            num_streams = 1 if replicated or not virtually_split else 2
+            flags.extend([replicated] * (num_streams * nblk))
+        assert len(flags) == num_fa_descs, (
+            f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
-        return classes
+        return flags
 
-    def _region_class(self, region_idx: int) -> RegionTransferClass:
-        """REPLICATE for MLA regions (replicated whole block), SPLIT otherwise.
+    def _is_region_replicated(self, region_idx: int) -> bool:
+        """Whether region ``region_idx`` is transferred REPLICATE vs SPLIT.
+
+        REPLICATE (MLA): identical on every rank, whole block read from one
+        rank at offset 0, key-only. SPLIT (full-attn): head-sharded across TP.
         Defaults to SPLIT when the per-region map is unset (e.g. tests that set
         block_len_per_layer without register_kv_caches).
         """
-        is_mla = (
-            region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
-        )
-        return REPLICATE_CLASS if is_mla else SPLIT_CLASS
+        return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
     def __init__(
         self,
@@ -1014,7 +1012,7 @@ class NixlConnectorWorker:
             # Exception: key-only REPLICATE regions (MLA) have no V half, so
             # they contribute a single desc stream and are not doubled.
             self.num_regions = sum(
-                self._region_class(i).num_streams(True)
+                1 if self._is_region_replicated(i) else 2
                 for i in range(len(self._region_is_mla))
             )
 
@@ -1184,7 +1182,7 @@ class NixlConnectorWorker:
 
             if (
                 self.transfer_topo.virtually_split_kv_in_blocks
-                and self._region_class(i).num_streams(True) == 2
+                and not self._is_region_replicated(i)
             ):
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
@@ -1211,13 +1209,12 @@ class NixlConnectorWorker:
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
         # SPLIT regions read their head slice from this many remote ranks at a
-        # per-rank offset; REPLICATE regions read the whole block once
-        # (see RegionTransferClass).
+        # per-rank offset; REPLICATE regions read the whole block once.
         split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            region_cls = self._region_class(i)
+            replicated = self._is_region_replicated(i)
             # Read our whole local region size from remote..
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
@@ -1227,9 +1224,11 @@ class NixlConnectorWorker:
                 # ..using remote kv_block_len as transfer unit
                 local_block_len = remote_kv_block_len
 
-            num_reads = region_cls.remote_num_reads(split_reads)
-            rank_offset = region_cls.remote_rank_offset(
-                plan.rank_offset_factor, remote_kv_block_len
+            # REPLICATE reads the whole block once at offset 0; SPLIT gathers
+            # its head slice from `split_reads` remote ranks at a per-rank offset.
+            num_reads = 1 if replicated else split_reads
+            rank_offset = (
+                0 if replicated else plan.rank_offset_factor * remote_kv_block_len
             )
             local_block_len = local_block_len // num_reads
 
@@ -1241,10 +1240,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            emits_v = (
-                self.transfer_topo.virtually_split_kv_in_blocks
-                and region_cls.num_streams(True) == 2
-            )
+            emits_v = self.transfer_topo.virtually_split_kv_in_blocks and not replicated
             if emits_v:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
@@ -1590,10 +1586,10 @@ class NixlConnectorWorker:
                 "Use HND layout on the prefill side."
             )
 
-        # Per-region block_len validation: each region's class enforces its own
-        # P/D invariant (REPLICATE: blocks-only; SPLIT: scales with tp_ratio).
-        # Whole-model MLA / replicated-KV is treated as all-REPLICATE.
-        # Mamba uses the ssm_sizes counterpart, so skip block_len here.
+        # Per-region block_len validation enforcing the P/D invariant.
+        # REPLICATE regions (MLA, or a whole-model MLA / replicated-KV transfer)
+        # only allow the number of blocks to differ; SPLIT regions scale with
+        # tp_ratio. Mamba uses the ssm_sizes counterpart, so skip block_len here.
         if not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
@@ -1602,16 +1598,32 @@ class NixlConnectorWorker:
                 remote_engine_id
             )
             for i, local_len in enumerate(self.block_len_per_layer):
-                region_cls = (
-                    REPLICATE_CLASS if model_replicated else self._region_class(i)
-                )
-                region_cls.validate_block_len(
-                    i,
-                    local_len,
-                    nixl_agent_meta.block_lens[i],
-                    tp_ratio,
-                    block_size_ratio,
-                )
+                replicated = model_replicated or self._is_region_replicated(i)
+                remote_len = nixl_agent_meta.block_lens[i]
+                if replicated:
+                    # Whole block copied; only the number of blocks may differ.
+                    assert local_len // block_size_ratio == remote_len, (
+                        "KV cache sizes must match between P and D when "
+                        f"replicated (region {i}: local={local_len}, "
+                        f"remote={remote_len}, bsr={block_size_ratio})."
+                    )
+                elif tp_ratio > 0:
+                    # D_TP >= P_TP: remote holds tp_ratio x local heads.
+                    assert remote_len == (local_len * tp_ratio) // block_size_ratio, (
+                        f"SPLIT region {i}: remote P KV block_len {remote_len} "
+                        f"must equal local {local_len} * tp_ratio {tp_ratio} "
+                        f"// block_size_ratio {block_size_ratio}."
+                    )
+                else:
+                    # P_TP > D_TP: local holds |tp_ratio| x remote heads.
+                    assert block_size_ratio == 1, (
+                        "Different local/remote block sizes are not supported "
+                        "when P TP > D TP."
+                    )
+                    assert remote_len == local_len // (-tp_ratio), (
+                        f"SPLIT region {i}: remote P KV block_len {remote_len} "
+                        f"must equal local {local_len} // |tp_ratio| {-tp_ratio}."
+                    )
 
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
@@ -2492,10 +2504,11 @@ class NixlConnectorWorker:
         if virtually_split and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            # Per-stream block length: block_len//2 for a 2-stream SPLIT
-            # region, else the whole block.
-            streams = self._region_class(layer_idx).num_streams(virtually_split)
-            block_len = self.block_len_per_layer[layer_idx] // streams
+            # Per-stream block length: a 2-stream SPLIT region (full-attn under
+            # the virtually-split layout) uses block_len//2; REPLICATE (MLA,
+            # key-only) and non-split layouts use the whole block.
+            two_streams = virtually_split and not self._is_region_replicated(layer_idx)
+            block_len = self.block_len_per_layer[layer_idx] // (2 if two_streams else 1)
         return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:

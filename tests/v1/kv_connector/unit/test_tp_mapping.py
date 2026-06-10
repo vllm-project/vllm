@@ -75,10 +75,10 @@ class TestTPMappingStructure:
 def _make_mock_worker_for_splits(group_spec_types):
     """Build a mock NixlConnectorWorker with _group_spec_types for split tests.
 
-    No per-region transfer classes are configured (``block_len_per_layer`` empty
-    and ``num_regions == 0``), so ``_fa_desc_classes`` takes its early-return path
-    and treats every FA descriptor as SPLIT, matching the legacy behavior these
-    tests assert.
+    No per-region replicate flags are configured (``block_len_per_layer`` empty
+    and ``num_regions == 0``), so ``_fa_desc_replicated`` takes its early-return
+    path and treats every FA descriptor as SPLIT, matching the legacy behavior
+    these tests assert.
     """
     worker = object.__new__(NixlConnectorWorker)
     worker._group_spec_types = group_spec_types
