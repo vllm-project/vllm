@@ -91,6 +91,56 @@ def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
     return None, None
 
 
+@cache
+def _get_cgroup_numa_used() -> dict[int, int] | None:
+    """Return per-NUMA-node bytes used by the current cgroup, or None.
+
+    Parses ``memory.numa_stat`` for v2 (``key N0=.. N1=..`` in bytes) or
+    v1 (``key=val N0=.. N1=..`` in pages). The ``anon`` + ``file`` rows
+    are summed to approximate the cgroup's resident footprint per node.
+    """
+    if sys.platform != "linux":
+        return None
+
+    v2_path = "/sys/fs/cgroup/memory.numa_stat"
+    v1_path = "/sys/fs/cgroup/memory/memory.numa_stat"
+    if os.path.exists(v2_path):
+        path, is_v2 = v2_path, True
+    elif os.path.exists(v1_path):
+        path, is_v2 = v1_path, False
+    else:
+        return None
+
+    wanted = {"anon", "file"}
+    page_size = os.sysconf("SC_PAGE_SIZE") if not is_v2 else 1
+    per_node: dict[int, int] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if not parts:
+                    continue
+                # v1: "anon=123 N0=10 N1=20" -> head = "anon"
+                # v2: "anon 12345 N0=10 N1=20" -> head = "anon"
+                head = parts[0].split("=", 1)[0]
+                if head not in wanted:
+                    continue
+                for tok in parts[1:]:
+                    if not tok.startswith("N") or "=" not in tok:
+                        continue
+                    node_str, val_str = tok[1:].split("=", 1)
+                    try:
+                        node_id = int(node_str)
+                        val = int(val_str) * page_size
+                    except ValueError:
+                        continue
+                    per_node[node_id] = per_node.get(node_id, 0) + val
+    except OSError:
+        return None
+
+    return per_node or None
+
+
 def get_memory_affinity(pid: int = 0) -> list[int]:
     pid = os.getpid() if pid == 0 else pid
     path = f"/proc/{pid}/status"
@@ -157,12 +207,27 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
 
     # Honor cgroup memory limit (containers / k8s pods). NUMA meminfo
     # reflects host-wide numbers; without this, gpu_memory_utilization
-    # would be applied to host RAM instead of the pod's limit.
+    # would be applied to host RAM instead of the pod's limit. Prefer
+    # ``memory.numa_stat`` so the per-node figures stay accurate on
+    # multi-NUMA pods instead of clamping every node to the global limit.
     cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
-    if cgroup_limit is not None and cgroup_limit < total_memory:
-        total_memory = cgroup_limit
-        cgroup_available = cgroup_limit - (cgroup_usage or 0)
-        available_memory = max(0, min(available_memory, cgroup_available))
+    if cgroup_limit is not None:
+        numa_used = _get_cgroup_numa_used()
+        if numa_used is not None:
+            total_used = sum(numa_used.values())
+            node_used = numa_used.get(node_id, 0)
+            # Distribute the pod-wide headroom proportionally to each
+            # node's host capacity so the sum stays within ``cgroup_limit``.
+            node_total_cap = min(total_memory, cgroup_limit)
+            total_memory = node_total_cap
+            cgroup_headroom = max(0, cgroup_limit - total_used)
+            available_memory = max(
+                0, min(available_memory - node_used, cgroup_headroom)
+            )
+        elif cgroup_limit < total_memory:
+            total_memory = cgroup_limit
+            cgroup_available = cgroup_limit - (cgroup_usage or 0)
+            available_memory = max(0, min(available_memory, cgroup_available))
 
     return MemoryNodeInfo(
         total_memory=total_memory,
