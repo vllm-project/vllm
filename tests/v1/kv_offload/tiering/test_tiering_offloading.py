@@ -24,7 +24,6 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingConfig
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -33,21 +32,6 @@ from vllm.v1.kv_offload.tiering.manager import (
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
-
-
-def _mock_cpu_offloading_config(
-    num_blocks: int,
-    eviction_policy: str = "lru",
-    enable_events: bool = False,
-) -> CPUOffloadingConfig:
-    return CPUOffloadingConfig(
-        num_blocks=num_blocks,
-        eviction_policy=eviction_policy,
-        enable_events=enable_events,
-        store_threshold=0,
-        max_tracker_size=64_000,
-        metric_definitions={},
-    )
 
 
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
@@ -115,9 +99,8 @@ class TestTieringOffloadingManager:
     def manager_setup(self):
         # Create primary tier (CPU-based)
         mock_region = _mock_mmap_region(5)
-        self.cpu_config = _mock_cpu_offloading_config(num_blocks=5)
         self.primary_tier = CPUPrimaryTierOffloadingManager(
-            config=self.cpu_config, mmap_region=mock_region
+            num_blocks=5, mmap_region=mock_region
         )
 
         mock_view = mock_region.create_kv_memoryview()
@@ -136,7 +119,6 @@ class TestTieringOffloadingManager:
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
-            spec=_MOCK_OFFLOADING_SPEC,
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
@@ -514,16 +496,13 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
-        cpu_config = _mock_cpu_offloading_config(num_blocks=5)
         primary_tier = CPUPrimaryTierOffloadingManager(
-            config=cpu_config, mmap_region=_mock_mmap_region(5)
+            num_blocks=5, mmap_region=_mock_mmap_region(5)
         )
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(
-            spec=_MOCK_OFFLOADING_SPEC,
-            primary_tier=primary_tier,
-            secondary_tiers=[],
+            primary_tier=primary_tier, secondary_tiers=[]
         )
 
         blocks = to_keys(range(3))

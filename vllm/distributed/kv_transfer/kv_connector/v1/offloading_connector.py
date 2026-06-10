@@ -212,8 +212,5 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return OffloadPromMetrics(
-            vllm_config,
-            metric_types,
-            labelnames,
-            per_engine_labelvalues,
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
         )

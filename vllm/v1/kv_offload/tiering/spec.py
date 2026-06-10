@@ -91,16 +91,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
-            if self.cpu_config.store_threshold >= 2:
-                raise ValueError(
-                    "store_threshold is not supported for TieringOffloadingSpec"
-                )
+            kv_events_config = self.vllm_config.kv_events_config
+            enable_events = (
+                kv_events_config is not None and kv_events_config.enable_kv_cache_events
+            )
 
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
                 instance_id=self.vllm_config.instance_id,
-                num_blocks=self.cpu_config.num_blocks,
+                num_blocks=self.num_blocks,
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
                 cpu_page_size=self.cpu_page_size_per_worker,
@@ -109,7 +109,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
-                config=self.cpu_config,
+                num_blocks=self.num_blocks,
+                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                enable_events=enable_events,
                 mmap_region=scheduler_mmap,
             )
 
@@ -139,18 +141,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # get_handlers(); secondary tier transfers are handled by the
             # secondary tier managers and need no additional handlers here.
             tiering_manager = TieringOffloadingManager(
-                spec=self,
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=self.cpu_config.enable_events,
+                enable_events=enable_events,
             )
+            if int(self.extra_config.get("store_threshold", 0)) >= 2:
+                raise ValueError(
+                    "store_threshold is not supported for TieringOffloadingSpec"
+                )
             self._manager = tiering_manager
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
                 "(%s, %s blocks) and %s secondary tier(s)",
-                self.cpu_config.eviction_policy,
-                self.cpu_config.num_blocks,
+                self.eviction_policy,
+                self.num_blocks,
                 len(secondary_tiers),
             )
 
@@ -161,7 +166,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
-            num_blocks=self.cpu_config.num_blocks,
+            num_blocks=self.num_blocks,
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
@@ -169,6 +174,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return CpuGpuOffloadingHandlers(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
-            num_cpu_blocks=self.cpu_config.num_blocks,
+            num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
         )

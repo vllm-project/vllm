@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
+from typing import Literal
 
 from typing_extensions import override
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -18,11 +18,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    METRIC_STORES_SKIPPED,
-    CPULoadStoreSpec,
-    CPUOffloadingConfig,
-)
+from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -45,31 +41,31 @@ class CPUOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
-        config: CPUOffloadingConfig,
+        num_blocks: int,
+        cache_policy: Literal["lru", "arc"] = "lru",
+        enable_events: bool = False,
+        store_threshold: int = 1,
+        max_tracker_size: int = 64_000,
     ):
-        self.config = config
         self.medium: str = CPULoadStoreSpec.medium()
-        self._num_blocks: int = config.num_blocks
+        self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
-        self.events: list[OffloadingEvent] | None = [] if config.enable_events else None
-        cache_policy = config.eviction_policy
+        self.events: list[OffloadingEvent] | None = [] if enable_events else None
         policy_cls = _CACHE_POLICIES.get(cache_policy)
         if policy_cls is None:
             raise ValueError(
                 f"Unknown cache policy: {cache_policy!r}. "
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
-        self._policy: CachePolicy = policy_cls(cache_capacity=self._num_blocks)
-        self.store_threshold: int = config.store_threshold
-        self.max_tracker_size: int = config.max_tracker_size
-
-        # metrics
+        self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
+        self.store_threshold: int = store_threshold
+        self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
-            OrderedDict() if self.store_threshold >= 2 else None
+            OrderedDict() if store_threshold >= 2 else None
         )
 
     # --- block pool ---
@@ -264,11 +260,11 @@ class CPUOffloadingManager(OffloadingManager):
             yield from self.events
             self.events.clear()
 
-    def get_stats(self) -> KVConnectorStats | None:
-        if not self.config.metric_definitions:
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        if self.store_threshold < 2:
             return None
 
-        stats = OffloadingConnectorStats(metric_metadata=self.config.metric_definitions)
+        stats = OffloadingConnectorStats()
         stats.increase_counter(
             METRIC_STORES_SKIPPED,
             self.stores_skipped_in_current_batch,

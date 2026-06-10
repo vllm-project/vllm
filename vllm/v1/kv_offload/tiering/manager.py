@@ -32,14 +32,13 @@ from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadingManager,
-    OffloadingSpec,
     OffloadKey,
     OffloadPolicy,
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingConfig
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
@@ -72,10 +71,16 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
     def __init__(
         self,
-        config: CPUOffloadingConfig,
+        num_blocks: int,
         mmap_region: SharedOffloadRegion,
+        cache_policy: str = "lru",
+        enable_events: bool = False,
     ):
-        super().__init__(config)
+        super().__init__(
+            num_blocks=num_blocks,
+            cache_policy=cache_policy,  # type: ignore[arg-type]
+            enable_events=enable_events,
+        )
         self._mmap_region = mmap_region
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
@@ -121,7 +126,6 @@ class TieringOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
-        spec: OffloadingSpec,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
         enable_events: bool = False,

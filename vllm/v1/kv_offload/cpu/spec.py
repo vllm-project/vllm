@@ -18,11 +18,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingMetricMetadata,
     OffloadingSpec,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    METRIC_STORES_SKIPPED,
-    CPULoadStoreSpec,
-    CPUOffloadingConfig,
-)
+from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -57,7 +53,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         world_size = vllm_config.parallel_config.world_size
-        num_blocks = 0
+        self.num_blocks = 0
         self.kv_bytes_per_offloaded_block = 0
         self.cpu_page_size_per_worker = 0
         assert kv_cache_config is not None
@@ -75,7 +71,9 @@ class CPUOffloadingSpec(OffloadingSpec):
             aligned_kv_bytes_per_offloaded_block = round_up(
                 kv_bytes_per_offloaded_block, self.BLOCK_SIZE_ALIGNMENT
             )
-            num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_offloaded_block
+            self.num_blocks = (
+                int(cpu_bytes_to_use) // aligned_kv_bytes_per_offloaded_block
+            )
 
             # Expose aligned_kv_bytes_per_offloaded_block as
             # kv_bytes_per_offloaded_block. Note that this might contain
@@ -89,39 +87,38 @@ class CPUOffloadingSpec(OffloadingSpec):
         # worker-side
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
-        kv_events_config = self.vllm_config.kv_events_config
-        enable_events = (
-            kv_events_config is not None and kv_events_config.enable_kv_cache_events
-        )
-
-        # store_threshold: how many times a block must appear in lookup()
-        # before it is eligible for CPU offloading.  Values < 2 disable
-        # filtering (a threshold of 1 equals no filter; 0 is the default).
-        store_threshold = int(self.extra_config.get("store_threshold", 0))
-
-        # Maximum entries in the internal tracker's LRU table.
-        max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
-
-        self.cpu_config = CPUOffloadingConfig(
-            num_blocks=num_blocks,
-            eviction_policy=self.extra_config.get("eviction_policy", "lru"),
-            enable_events=enable_events,
-            store_threshold=store_threshold,
-            max_tracker_size=max_tracker_size,
-            metric_definitions=self.metric_definitions,
-        )
+        self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            self._manager = CPUOffloadingManager(self.cpu_config)
+            kv_events_config = self.vllm_config.kv_events_config
+            enable_events = (
+                kv_events_config is not None and kv_events_config.enable_kv_cache_events
+            )
+
+            # store_threshold: how many times a block must appear in lookup()
+            # before it is eligible for CPU offloading.  Values < 2 disable
+            # filtering (a threshold of 1 equals no filter; 0 is the default).
+            store_threshold = int(self.extra_config.get("store_threshold", 0))
+
+            # Maximum entries in the internal tracker's LRU table.
+            max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
+
+            self._manager = CPUOffloadingManager(
+                num_blocks=self.num_blocks,
+                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                enable_events=enable_events,
+                store_threshold=store_threshold,
+                max_tracker_size=max_tracker_size,
+            )
         return self._manager
 
     def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
         return CpuGpuOffloadingHandlers(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
-            num_cpu_blocks=self.cpu_config.num_blocks,
+            num_cpu_blocks=self.num_blocks,
         )
 
     @override

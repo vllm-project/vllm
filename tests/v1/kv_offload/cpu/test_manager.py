@@ -8,15 +8,13 @@ import pytest
 
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
-    OffloadingCounterMetadata,
     OffloadingEvent,
-    OffloadingMetricMetadata,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingConfig
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
@@ -39,17 +37,13 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
-    metric_definitions: dict[str, OffloadingMetricMetadata] | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
-        CPUOffloadingConfig(
-            num_blocks=num_blocks,
-            eviction_policy=cache_policy,
-            enable_events=enable_events,
-            store_threshold=store_threshold,
-            max_tracker_size=max_tracker_size,
-            metric_definitions=metric_definitions or {},
-        )
+        num_blocks=num_blocks,
+        cache_policy=cache_policy,
+        enable_events=enable_events,
+        store_threshold=store_threshold,
+        max_tracker_size=max_tracker_size,
     )
 
 
@@ -173,11 +167,6 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
         num_blocks=4,
         cache_policy="lru",
         store_threshold=2,
-        metric_definitions={
-            STORES_SKIPPED: OffloadingCounterMetadata(
-                "Number of KV offload stores skipped."
-            )
-        },
     )
 
     prepare_store_output = manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)

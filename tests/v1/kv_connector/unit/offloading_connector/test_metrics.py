@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from prometheus_client import Counter, Gauge, Histogram
@@ -14,6 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     STORE_TIME,
     OffloadingConnectorStats,
     OffloadPromMetrics,
+    _MetricType,
+    _StatsKey,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -100,7 +103,6 @@ def test_build_kv_connector_stats_with_none():
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert stats.data == {}
     assert stats.is_empty()
 
 
@@ -110,7 +112,6 @@ def test_build_kv_connector_stats_with_empty_dict():
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert stats.data == {}
     assert stats.is_empty()
 
 
@@ -118,112 +119,154 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
     correct data."""
     serialized_data = {
-        LOAD_BYTES: 24,
-        LOAD_TIME: 1.5,
-        LOAD_SIZE: [16, 8],
-        STORE_BYTES: 3,
-        STORE_TIME: 0.3,
-        STORE_SIZE: [1, 2],
-        STORES_SKIPPED: 5,
-    }
-
-    stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
-
-    offload_connector_stats = stats
-    assert isinstance(offload_connector_stats, OffloadingConnectorStats)
-    assert offload_connector_stats.data[LOAD_BYTES] == 24
-    assert offload_connector_stats.data[LOAD_TIME] == 1.5
-    assert offload_connector_stats.data[LOAD_SIZE] == [16, 8]
-    assert offload_connector_stats.data[STORE_BYTES] == 3
-    assert offload_connector_stats.data[STORE_TIME] == 0.3
-    assert offload_connector_stats.data[STORE_SIZE] == [1, 2]
-    assert offload_connector_stats.data[STORES_SKIPPED] == 5
-
-
-def test_aggregate_same_connector():
-    """Test aggregating stats from the same connector type."""
-    stats1 = OffloadingConnectorStats(
-        data={
+        _StatsKey.TYPES: {
+            LOAD_BYTES: _MetricType.COUNTER,
+            LOAD_TIME: _MetricType.COUNTER,
+            LOAD_SIZE: _MetricType.HISTOGRAM,
+            STORE_BYTES: _MetricType.COUNTER,
+            STORE_TIME: _MetricType.COUNTER,
+            STORE_SIZE: _MetricType.HISTOGRAM,
+            STORES_SKIPPED: _MetricType.COUNTER,
+        },
+        _StatsKey.DATA: {
             LOAD_BYTES: 24,
             LOAD_TIME: 1.5,
             LOAD_SIZE: [16, 8],
             STORE_BYTES: 3,
             STORE_TIME: 0.3,
             STORE_SIZE: [1, 2],
-            STORES_SKIPPED: 1,
-            PENDING_STORES: 3,
-            LOOKUP_LATENCY: [0.1],
+            STORES_SKIPPED: 5,
         },
-        metric_metadata=_metric_metadata(),
+    }
+
+    stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
+
+    assert isinstance(stats, OffloadingConnectorStats)
+    values = stats.data[_StatsKey.DATA]
+    assert values[LOAD_BYTES] == 24
+    assert values[LOAD_TIME] == 1.5
+    assert values[LOAD_SIZE] == [16, 8]
+    assert values[STORE_BYTES] == 3
+    assert values[STORE_TIME] == 0.3
+    assert values[STORE_SIZE] == [1, 2]
+    assert values[STORES_SKIPPED] == 5
+
+
+def _make_stats_data(
+    metric_data: dict[str, Any],
+    metric_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a structured data dict from flat metric data and metadata."""
+    metric_types = {}
+    for key in metric_data:
+        md = metric_metadata[key]
+        if isinstance(md, OffloadingCounterMetadata):
+            metric_types[key] = _MetricType.COUNTER
+        elif isinstance(md, OffloadingGaugeMetadata):
+            metric_types[key] = _MetricType.GAUGE
+        elif isinstance(md, OffloadingHistogramMetadata):
+            metric_types[key] = _MetricType.HISTOGRAM
+    return {
+        _StatsKey.TYPES: metric_types,
+        _StatsKey.DATA: metric_data,
+    }
+
+
+def test_aggregate_same_connector():
+    """Test aggregating stats from the same connector type."""
+    metadata = _metric_metadata()
+    stats1 = OffloadingConnectorStats(
+        data=_make_stats_data(
+            {
+                LOAD_BYTES: 24,
+                LOAD_TIME: 1.5,
+                LOAD_SIZE: [16, 8],
+                STORE_BYTES: 3,
+                STORE_TIME: 0.3,
+                STORE_SIZE: [1, 2],
+                STORES_SKIPPED: 1,
+                PENDING_STORES: 3,
+                LOOKUP_LATENCY: [0.1],
+            },
+            metadata,
+        ),
     )
 
     stats2 = OffloadingConnectorStats(
-        data={
-            LOAD_BYTES: 10,
-            LOAD_TIME: 1.1,
-            LOAD_SIZE: [3, 7],
-            STORE_BYTES: 16,
-            STORE_TIME: 2,
-            STORE_SIZE: [16],
-            STORES_SKIPPED: 3,
-            PENDING_STORES: 1,
-            LOOKUP_LATENCY: [0.2, 0.3],
-        },
-        metric_metadata=_metric_metadata(),
+        data=_make_stats_data(
+            {
+                LOAD_BYTES: 10,
+                LOAD_TIME: 1.1,
+                LOAD_SIZE: [3, 7],
+                STORE_BYTES: 16,
+                STORE_TIME: 2,
+                STORE_SIZE: [16],
+                STORES_SKIPPED: 3,
+                PENDING_STORES: 1,
+                LOOKUP_LATENCY: [0.2, 0.3],
+            },
+            metadata,
+        ),
     )
 
     result = stats1.aggregate(stats2)
 
     assert result is stats1  # Should return self
-    offload_connector_stats = result
-    assert offload_connector_stats.data[LOAD_BYTES] == 34
-    assert offload_connector_stats.data[LOAD_TIME] == 2.6
-    assert offload_connector_stats.data[LOAD_SIZE] == [16, 8, 3, 7]
-    assert offload_connector_stats.data[STORE_BYTES] == 19
-    assert offload_connector_stats.data[STORE_TIME] == 2.3
-    assert offload_connector_stats.data[STORE_SIZE] == [1, 2, 16]
-    assert offload_connector_stats.data[STORES_SKIPPED] == 4
-    assert offload_connector_stats.data[PENDING_STORES] == 1
-    assert offload_connector_stats.data[LOOKUP_LATENCY] == [0.1, 0.2, 0.3]
+    values = result.data[_StatsKey.DATA]
+    assert values[LOAD_BYTES] == 34
+    assert values[LOAD_TIME] == 2.6
+    assert values[LOAD_SIZE] == [16, 8, 3, 7]
+    assert values[STORE_BYTES] == 19
+    assert values[STORE_TIME] == 2.3
+    assert values[STORE_SIZE] == [1, 2, 16]
+    assert values[STORES_SKIPPED] == 4
+    assert values[PENDING_STORES] == 1
+    assert values[LOOKUP_LATENCY] == [0.1, 0.2, 0.3]
 
 
-def test_aggregate_merges_metric_metadata():
+def test_aggregate_merges_types():
     stats1 = OffloadingConnectorStats(
-        data={LOAD_BYTES: 1},
-        metric_metadata={LOAD_BYTES: OffloadingCounterMetadata("load bytes")},
+        data={
+            _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
+            _StatsKey.DATA: {LOAD_BYTES: 1},
+        },
     )
     stats2 = OffloadingConnectorStats(
-        data={PENDING_STORES: 2},
-        metric_metadata={PENDING_STORES: OffloadingGaugeMetadata("pending stores")},
+        data={
+            _StatsKey.TYPES: {PENDING_STORES: _MetricType.GAUGE},
+            _StatsKey.DATA: {PENDING_STORES: 2},
+        },
     )
 
     result = stats1.aggregate(stats2)
 
-    assert result.data[PENDING_STORES] == 2
-    assert PENDING_STORES in stats1.metric_metadata
+    assert result.data[_StatsKey.DATA][PENDING_STORES] == 2
+    assert result.data[_StatsKey.TYPES][PENDING_STORES] == _MetricType.GAUGE
 
 
 def test_reduce():
     """Test that reduce() correctly reduces connector stats."""
+    metadata = _metric_metadata()
     stats = OffloadingConnectorStats(
-        data={
-            LOAD_BYTES: 34,
-            LOAD_TIME: 2.6,
-            LOAD_SIZE: [16, 8, 3, 7],
-            STORE_BYTES: 19,
-            STORE_TIME: 2.3,
-            STORE_SIZE: [1, 2, 16],
-            STORES_SKIPPED: 11,
-            PENDING_STORES: 2,
-            LOOKUP_LATENCY: [0.1, 0.2, 0.3],
-        },
-        metric_metadata=_metric_metadata(),
+        data=_make_stats_data(
+            {
+                LOAD_BYTES: 34,
+                LOAD_TIME: 2.6,
+                LOAD_SIZE: [16, 8, 3, 7],
+                STORE_BYTES: 19,
+                STORE_TIME: 2.3,
+                STORE_SIZE: [1, 2, 16],
+                STORES_SKIPPED: 11,
+                PENDING_STORES: 2,
+                LOOKUP_LATENCY: [0.1, 0.2, 0.3],
+            },
+            metadata,
+        ),
     )
 
     reduced = stats.reduce()
 
     assert isinstance(reduced, dict)
-    # Check that the stats were reduced (should have aggregated values)
     assert reduced[LOAD_BYTES] == 34
     assert reduced[LOAD_TIME] == 2.6
     assert reduced[f"{LOAD_SIZE}_count"] == 4
@@ -240,18 +283,22 @@ def test_reduce():
 
 def test_reset():
     """Test that reset() resets all connector stats."""
+    metadata = _metric_metadata()
     offload_connector_stats = OffloadingConnectorStats(
-        data={
-            LOAD_BYTES: 10,
-            LOAD_TIME: 1.1,
-            LOAD_SIZE: [3, 7],
-            STORE_BYTES: 16,
-            STORE_TIME: 2,
-            STORE_SIZE: [16],
-            STORES_SKIPPED: 4,
-            PENDING_STORES: 2,
-            LOOKUP_LATENCY: [0.1],
-        }
+        data=_make_stats_data(
+            {
+                LOAD_BYTES: 10,
+                LOAD_TIME: 1.1,
+                LOAD_SIZE: [3, 7],
+                STORE_BYTES: 16,
+                STORE_TIME: 2,
+                STORE_SIZE: [16],
+                STORES_SKIPPED: 4,
+                PENDING_STORES: 2,
+                LOOKUP_LATENCY: [0.1],
+            },
+            metadata,
+        ),
     )
 
     assert not offload_connector_stats.is_empty()
@@ -260,7 +307,6 @@ def test_reset():
 
     # After reset, stats should be empty
     assert offload_connector_stats.is_empty()
-    assert offload_connector_stats.data == {}
 
 
 def test_prom_metrics_observes_manager_counter():
@@ -275,7 +321,12 @@ def test_prom_metrics_observes_manager_counter():
         per_engine_labelvalues={0: ["model", "0"]},
     )
 
-    prom_metrics.observe({STORES_SKIPPED: 7})
+    prom_metrics.observe(
+        {
+            _StatsKey.TYPES: {STORES_SKIPPED: _MetricType.COUNTER},
+            _StatsKey.DATA: {STORES_SKIPPED: 7},
+        }
+    )
 
     counter = prom_metrics.offloading_metrics[(0, STORES_SKIPPED)]
     assert counter.increments == [7]
@@ -298,12 +349,22 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
 
     prom_metrics.observe(
         {
-            LOAD_BYTES: 24,
-            LOAD_TIME: 1.5,
-            LOAD_SIZE: [16, 8],
-            STORE_BYTES: 3,
-            STORE_TIME: 0.3,
-            STORE_SIZE: [1, 2],
+            _StatsKey.TYPES: {
+                LOAD_BYTES: _MetricType.COUNTER,
+                LOAD_TIME: _MetricType.COUNTER,
+                LOAD_SIZE: _MetricType.HISTOGRAM,
+                STORE_BYTES: _MetricType.COUNTER,
+                STORE_TIME: _MetricType.COUNTER,
+                STORE_SIZE: _MetricType.HISTOGRAM,
+            },
+            _StatsKey.DATA: {
+                LOAD_BYTES: 24,
+                LOAD_TIME: 1.5,
+                LOAD_SIZE: [16, 8],
+                STORE_BYTES: 3,
+                STORE_TIME: 0.3,
+                STORE_SIZE: [1, 2],
+            },
         }
     )
 
@@ -348,8 +409,14 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
 
     prom_metrics.observe(
         {
-            PENDING_STORES: 5,
-            LOOKUP_LATENCY: [0.2, 0.4],
+            _StatsKey.TYPES: {
+                PENDING_STORES: _MetricType.GAUGE,
+                LOOKUP_LATENCY: _MetricType.HISTOGRAM,
+            },
+            _StatsKey.DATA: {
+                PENDING_STORES: 5,
+                LOOKUP_LATENCY: [0.2, 0.4],
+            },
         }
     )
 
