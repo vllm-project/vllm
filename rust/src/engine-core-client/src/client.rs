@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
+use itertools::Itertools;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -10,7 +12,8 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
-use crate::protocol::utility::EngineCoreUtilityRequest;
+use crate::protocol::lora::LoraRequest;
+use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
 
@@ -22,7 +25,7 @@ pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TransportMode {
     /// The Rust process owns the startup handshake and allocates or binds the
     /// frontend transport addresses itself before replying to engine
@@ -569,6 +572,26 @@ impl EngineCoreClient {
         try_join_all(futures).await
     }
 
+    /// Call a utility method on all connected engines and return the shared
+    /// result if every engine agrees.
+    pub async fn call_utility_consensus<T, A>(&self, method: &str, args: A) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned + std::fmt::Debug + PartialEq,
+        A: serde::Serialize + std::fmt::Debug,
+    {
+        let results: Vec<T> = self.call_utility(method, args).await?;
+
+        if results.iter().all_equal() {
+            // `engine_count >= 1` is enforced during startup handshake so `results` must be non-empty.
+            Ok(results.into_iter().next().unwrap())
+        } else {
+            Err(Error::InconsistentUtilityResults {
+                method: method.to_string(),
+                values: format!("{results:?}"),
+            })
+        }
+    }
+
     /// Execute `collective_rpc` on all engines and flatten all engine results
     /// into one list.
     pub async fn collective_rpc<A, K>(
@@ -597,27 +620,8 @@ impl EngineCoreClient {
     }
 
     /// Return whether the engine is currently sleeping at any level.
-    ///
-    /// Under data parallel, all engines should agree on the sleep state: a
-    /// divergence signals a control-plane bug. Returns
-    /// `Error::InconsistentUtilityResults` if engines disagree.
     pub async fn is_sleeping(&self) -> Result<bool> {
-        let results: Vec<bool> = self.call_utility("is_sleeping", ()).await?;
-        // `engine_count >= 1` is enforced during startup handshake, so `results`
-        // is normally non-empty; fall back to a fail-loud error rather than
-        // indexing in case that invariant is ever bypassed.
-        let first = *results.first().ok_or_else(|| Error::InconsistentUtilityResults {
-            method: "is_sleeping".to_string(),
-            values: "[]".to_string(),
-        })?;
-        if results.iter().all(|&v| v == first) {
-            Ok(first)
-        } else {
-            Err(Error::InconsistentUtilityResults {
-                method: "is_sleeping".to_string(),
-                values: format!("{results:?}"),
-            })
-        }
+        self.call_utility_consensus("is_sleeping", ()).await
     }
 
     /// Reset the multi-modal cache.
@@ -641,26 +645,36 @@ impl EngineCoreClient {
         reset_running_requests: bool,
         reset_connector: bool,
     ) -> Result<bool> {
-        let results: Vec<bool> = self
+        Ok(self
             .call_utility(
                 "reset_prefix_cache",
                 (reset_running_requests, reset_connector),
             )
-            .await?;
-        // `engine_count >= 1` is enforced during startup handshake, so `results`
-        // is normally non-empty; fail loud rather than reporting a vacuous
-        // success (`[].all() == true`) in case that invariant is ever bypassed.
-        if results.is_empty() {
-            return Err(Error::InconsistentUtilityResults {
-                method: "reset_prefix_cache".to_string(),
-                values: "[]".to_string(),
-            });
-        }
-        Ok(results.into_iter().all(|ok| ok))
+            .await?
+            .into_iter()
+            .all(|reset| reset))
+    }
+
+    /// Load or refresh one LoRA adapter on every connected engine.
+    pub async fn add_lora(&self, lora_request: &LoraRequest) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("add_lora", (lora_request,))
+            .await?
+            .into_iter()
+            .all(|loaded| loaded))
+    }
+
+    /// Remove one LoRA adapter from every connected engine.
+    pub async fn remove_lora(&self, lora_id: u64) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("remove_lora", (lora_id,))
+            .await?
+            .into_iter()
+            .all(|removed| removed))
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: &str) -> Result<()> {
+    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
         self.call_utility::<(), _>("sleep", (level, mode)).await?;
         Ok(())
     }
@@ -670,6 +684,23 @@ impl EngineCoreClient {
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
         self.call_utility::<(), _>("wake_up", (tags,)).await?;
         Ok(())
+    }
+
+    /// Pause the scheduler so generation can be halted
+    pub async fn pause_scheduler(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
+        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+        Ok(())
+    }
+
+    /// Resume the scheduler after a pause
+    pub async fn resume_scheduler(&self) -> Result<()> {
+        self.call_utility::<(), _>("resume_scheduler", ()).await?;
+        Ok(())
+    }
+
+    /// Return whether the scheduler is currently in any pause state.
+    pub async fn is_scheduler_paused(&self) -> Result<bool> {
+        self.call_utility_consensus("is_scheduler_paused", ()).await
     }
 
     /// Shut down local client tasks and close transport state.

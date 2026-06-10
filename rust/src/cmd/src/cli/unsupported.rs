@@ -326,15 +326,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
 
-    /// If True, enable handling of LoRA adapters.
-    #[arg(
-        long,
-        visible_alias = "no-enable-lora",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_lora: Option<Unsupported>,
-
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
@@ -572,11 +563,6 @@ pub struct ServerUnsupportedArgs {
     /// Allowed headers.
     #[arg(long)]
     pub allowed_headers: Option<Unsupported>,
-
-    /// If provided, the server will require one of these keys to be presented
-    /// in the header.
-    #[arg(long)]
-    pub api_key: Option<Unsupported>,
 
     /// The file path to the SSL key file.
     #[arg(long)]

@@ -71,6 +71,7 @@ impl ManagedEngineArgs {
         self,
         model: String,
         max_model_len: Option<u32>,
+        language_model_only: bool,
         handshake_port: u16,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
@@ -78,6 +79,9 @@ impl ManagedEngineArgs {
         if let Some(max_model_len) = max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len.to_string());
+        }
+        if language_model_only {
+            python_args.push("--language-model-only".to_string());
         }
         if let Some(data_parallel_size_local) = self.data_parallel_size_local {
             python_args.push("--data-parallel-size-local".to_string());

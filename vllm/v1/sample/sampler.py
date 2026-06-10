@@ -58,11 +58,16 @@ class Sampler(nn.Module):
     9. Return the final `SamplerOutput`.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        use_fp64_gumbel: bool = False,
+    ):
         super().__init__()
-        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
+        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode, use_fp64_gumbel)
         self.pin_memory = is_pin_memory_available()
         self.logprobs_mode = logprobs_mode
+        self.use_fp64_gumbel = use_fp64_gumbel
 
     def forward(
         self,
