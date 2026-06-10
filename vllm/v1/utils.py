@@ -638,29 +638,54 @@ def report_usage_stats(
 
     from vllm.model_executor.model_loader import get_architecture_class_name
 
+    model_config = vllm_config.model_config
+    scheduler_config = vllm_config.scheduler_config
     parallel_config = vllm_config.parallel_config
+    attention_config = vllm_config.attention_config
+    compilation_config = vllm_config.compilation_config
+    speculative_config = vllm_config.speculative_config
 
     # Prepare KV connector string if applicable
     kv_connector = None
     if vllm_config.kv_transfer_config is not None:
         kv_connector = vllm_config.kv_transfer_config.kv_connector
 
+    # Attention backend is None when set to "auto" (resolved at runtime per platform).
+    attention_backend = (
+        attention_config.backend.name if attention_config.backend is not None else None
+    )
+
+    # CompilationMode is an IntEnum; report the name for readability in dashboards.
+    compilation_mode = (
+        compilation_config.mode.name if compilation_config.mode is not None else None
+    )
+
+    # Speculative decoding fields default to None when spec decode is disabled.
+    spec_decode_method = (
+        speculative_config.method if speculative_config is not None else None
+    )
+    num_speculative_tokens = (
+        speculative_config.num_speculative_tokens
+        if speculative_config is not None
+        else None
+    )
+
     usage_message.report_usage(
-        get_architecture_class_name(vllm_config.model_config),
+        get_architecture_class_name(model_config),
         usage_context,
         extra_kvs={
             # Common configuration
-            "dtype": str(vllm_config.model_config.dtype),
+            "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
-            "quantization": vllm_config.model_config.quantization,
+            "quantization": model_config.quantization,
             "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
             # Feature flags
             "enable_lora": bool(vllm_config.lora_config),
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
-            "enforce_eager": vllm_config.model_config.enforce_eager,
+            "enforce_eager": model_config.enforce_eager,
             "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
             # Distributed parallelism settings
             "tensor_parallel_size": parallel_config.tensor_parallel_size,
@@ -671,6 +696,21 @@ def report_usage_stats(
             "all2all_backend": parallel_config.all2all_backend,
             # KV connector used
             "kv_connector": kv_connector,
+            # Batching limits — tuning knobs operators commonly override
+            "max_model_len": model_config.max_model_len,
+            "max_num_seqs": scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": scheduler_config.max_num_batched_tokens,
+            # Attention backend (user-requested; None = auto-selected at runtime)
+            "attention_backend": attention_backend,
+            # torch.compile mode (e.g. NONE, STOCK_TORCH_COMPILE, VLLM_COMPILE)
+            "compilation_mode": compilation_mode,
+            # Speculative decoding configuration
+            "spec_decode_method": spec_decode_method,
+            "num_speculative_tokens": num_speculative_tokens,
+            # Wide expert parallel: load balancer + redundant/total expert counts
+            "enable_eplb": parallel_config.enable_eplb,
+            "num_redundant_experts": parallel_config.eplb_config.num_redundant_experts,
+            "num_experts": model_config.get_num_experts(),
         },
     )
 

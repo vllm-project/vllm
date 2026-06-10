@@ -61,7 +61,6 @@ def make_fused_moe_layer(
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
     )
@@ -77,6 +76,7 @@ def make_fused_moe_layer(
     )
 
     fml = fml.to(device)
+    re = fml.routed_experts
     w1_q, w2_q, quant_config = make_test_quant_config(
         test_config.num_local_experts,
         test_config.intermediate_size,
@@ -87,21 +87,21 @@ def make_fused_moe_layer(
         per_act_token_quant=False,
     )
 
-    fml.w13_weight.data = w1_q
-    fml.w2_weight.data = w2_q
+    re.w13_weight.data = w1_q
+    re.w2_weight.data = w2_q
 
-    fml.w2_input_scale.data = torch.randn_like(fml.w2_input_scale.data) / 5
-    fml.w13_input_scale.data = torch.randn_like(fml.w13_input_scale.data) / 5
-    fml.w2_weight_scale_2.data = torch.randn_like(fml.w2_weight_scale_2.data) / 5
-    fml.w13_weight_scale_2.data = torch.randn_like(fml.w13_weight_scale_2.data) / 5
-    fml.w2_weight_scale.data = (
-        torch.randn(fml.w2_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w2_weight_scale.data.dtype)
-    fml.w13_weight_scale.data = (
-        torch.randn(fml.w13_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w13_weight_scale.data.dtype)
+    re.w2_input_scale.data = torch.randn_like(re.w2_input_scale.data) / 5
+    re.w13_input_scale.data = torch.randn_like(re.w13_input_scale.data) / 5
+    re.w2_weight_scale_2.data = torch.randn_like(re.w2_weight_scale_2.data) / 5
+    re.w13_weight_scale_2.data = torch.randn_like(re.w13_weight_scale_2.data) / 5
+    re.w2_weight_scale.data = (
+        torch.randn(re.w2_weight_scale.data.shape, device=device) / 5
+    ).to(re.w2_weight_scale.data.dtype)
+    re.w13_weight_scale.data = (
+        torch.randn(re.w13_weight_scale.data.shape, device=device) / 5
+    ).to(re.w13_weight_scale.data.dtype)
 
-    nvfp4_fused_moe.process_weights_after_loading(fml)
+    nvfp4_fused_moe.process_weights_after_loading(re)
 
     fml.maybe_init_modular_kernel()
 

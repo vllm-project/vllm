@@ -324,23 +324,6 @@ IMAGE="${IMAGE_TAG_XPU:-${image_name}}"
 
 echo "Using image: ${IMAGE}"
 
-if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-  echo "Image already exists locally, skipping pull"
-else
-  echo "Image not found locally, waiting for lock..."
-
-  flock /tmp/docker-pull.lock bash -c "
-    if docker image inspect '${IMAGE}' >/dev/null 2>&1; then
-      echo 'Image already pulled by another runner'
-    else
-      echo 'Pulling image...'
-      timeout 900 docker pull '${IMAGE}'
-    fi
-  "
-
-  echo "Pull step completed"
-fi
-
 remove_docker_container() {
   docker rm -f "${container_name}" || true
 }
@@ -357,9 +340,12 @@ export HF_TOKEN ZE_AFFINITY_MASK
 
 {
   flock 9
-  if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    echo 'Image missing before container creation, pulling again...'
+  if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    echo "Image already exists locally, skipping pull"
+  else
+    echo "Image not found locally, pulling image..."
     timeout 900 docker pull "${IMAGE}"
+    echo "Pull step completed"
   fi
 
   docker create \
@@ -372,6 +358,8 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \
