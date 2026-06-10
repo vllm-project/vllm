@@ -186,25 +186,16 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-        # Used for unbounded (re-anchored) streaming sessions. When True, the
-        # request's RoPE position clock is periodically re-anchored (the live
-        # sliding window is shifted down by a multiple of the block size) so a
-        # session can run indefinitely without the absolute position counter
-        # ever reaching max_model_len. `reanchor_offset` is a diagnostic
-        # accumulator of the total number of tokens folded away by re-anchoring
-        # (used only in the re-anchor log line). See Scheduler's re-anchor path.
-        # Only set for realtime sliding-window models with
-        # `--enable-realtime-unbounded`.
+        # [EXPERIMENTAL] Unbounded (re-anchored) streaming; set only for realtime
+        # sliding-window models under --enable-realtime-unbounded.
+        # reanchor_stream: the RoPE clock is periodically re-anchored down so the
+        #   session never reaches max_model_len. reanchor_offset: total tokens
+        #   folded by re-anchoring (log/diagnostic only). pending_reanchor_d:
+        #   tokens owed to the worker as an R(-D) key re-rotation, carried forward
+        #   if the rebased request fails to schedule a step so it is never lost.
+        #   See Scheduler._reanchor_session.
         self.reanchor_stream = False
         self.reanchor_offset = 0
-        # Tokens owed to the worker as an R(-D) key re-rotation. The scheduler
-        # rebases the position clock eagerly (needed to allocate at the rebased
-        # positions), but the worker can only re-rotate the live keys once the
-        # request is actually in the persistent batch. If the request's rebase
-        # commits but it then fails to schedule that step (KV/encoder-budget
-        # pressure -> a break path), this carries the owed rotation forward so it
-        # is applied on the next step the request DOES schedule -- never silently
-        # dropped (which would leave keys on the old clock = corrupted attention).
         self.pending_reanchor_d = 0
 
         # If True, request should be aborted immediately after being added to

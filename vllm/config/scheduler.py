@@ -79,9 +79,8 @@ class SchedulerConfig:
     realtime_reanchor_margin_tokens: int = Field(default=4096, ge=1)
     """[EXPERIMENTAL] With `enable_realtime_unbounded`, re-anchor a streaming
     session's sliding window this many tokens before its position clock would
-    reach max_model_len. Must be smaller than
-    `(max_model_len - sliding_window)`; a value too close to max_model_len
-    leaves no room to re-anchor and silently disables the feature."""
+    reach max_model_len. Must be smaller than `(max_model_len - sliding_window)`;
+    a larger value leaves no head-room to re-anchor and is rejected at startup."""
 
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be

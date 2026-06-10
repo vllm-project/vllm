@@ -1141,20 +1141,15 @@ class GPUModelRunner(
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
         """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded realtime.
 
-        The scheduler has already rebased each request's position clock down by
-        ``D`` (dropping the oldest D tokens, all older than the sliding window)
-        AND the persistent-batch row has been fully rewritten from that rebased
-        state by ``_update_states`` -- a resumed Voxtral realtime session is
-        re-scheduled with WAITING status, so it is re-added as a fresh row whose
-        token ids, counters and block table already reflect the rebase. The one
-        thing the scheduler cannot do is the only thing left here: re-rotate the
-        live cached keys by the constant ``R(-D)`` in every KV group so each
-        key's effective RoPE position drops by D, while every in-window relative
-        attention score is preserved exactly (benchmarks/voxtral_realtime/
-        test_reanchor_math.py proves the identity for both groups).
+        The scheduler has already rebased each request's clock and block table
+        (via _update_states re-adding the resumed session). The only thing left
+        here is to re-rotate the live cached keys by the constant R(-D) in every
+        KV group, dropping each key's effective RoPE position by D while every
+        in-window relative score is preserved exactly (proven in
+        benchmarks/voxtral_realtime/test_reanchor_math.py).
 
         Runs at the between-steps barrier (after _update_states, before the
-        forward pass writes this step's new keys). Invalid under fp8 KV.
+        forward writes this step's keys). Invalid under fp8 KV.
         """
         if not reanchor_reqs:
             return
@@ -1173,15 +1168,9 @@ class GPUModelRunner(
         for req_id, D in reanchor_reqs.items():
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
-                # INVARIANT: the scheduler now ships reanchor_reqs ONLY for
-                # requests that scheduled this step (those whose
-                # pending_reanchor_d was drained in schedule()), so the request
-                # MUST be in the persistent batch here. If it is not, the owed
-                # rotation would be lost and the live keys would desync from the
-                # rebased clock (corrupted attention). That is a scheduler bug,
-                # not a recoverable state -- surface it LOUDLY rather than
-                # silently skipping. (Pending rotations that did NOT schedule are
-                # retained on the request and never reach this dict.)
+                # INVARIANT: reanchor_reqs only holds requests scheduled this
+                # step, so the request must be in the persistent batch. Absent
+                # => scheduler bug; log and skip.
                 logger.error(
                     "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
                     "but absent from persistent batch (idx=%s, D=%s); key "
@@ -1189,11 +1178,14 @@ class GPUModelRunner(
                     "stream. This should be unreachable; investigate schedule().",
                     req_id, idx, D)
                 continue
-            # By this point the persistent-batch row must already carry the
-            # rebased (small) clock from full re-add, not the pre-rebase value
-            # near max_model_len; the clock is logged below for observability.
+            # The persistent-batch row already carries the rebased (small) clock
+            # from full re-add; logged below for observability.
             clock = int(ib.num_computed_tokens_cpu[idx])
-            base = 1.0e6  # Voxtral rope_theta
+            # Voxtral/Ministral rope_theta. It is absent from the HF config
+            # (Mistral-format), so it is fixed here; this experimental path is
+            # validated for Voxtral realtime only. Startup rejects scaled rope
+            # and the head_size assert below tripwires any other rotary geometry.
+            base = 1.0e6
             for gid, group in enumerate(groups):
                 bt = ib.block_table.block_tables[gid]
                 n = int(bt.num_blocks_per_row[idx])
@@ -1211,18 +1203,11 @@ class GPUModelRunner(
                     kv = fctx[layer_name].kv_cache
                     if isinstance(kv, (list, tuple)):
                         kv = kv[0]
-                    # KV layout: (num_blocks, 2, block, num_kv_heads, head_size);
-                    # index 0 = key (post-RoPE), 1 = value (untouched).
-                    # head_size is read PER LAYER from the tensor, not from a
-                    # per-group spec: when the text & audio sliding windows are
-                    # EQUAL, vLLM merges the decoder and audio-encoder layers into
-                    # one UniformTypeKVCacheSpecs group (no single .head_size, and
-                    # mixed head sizes within the group). The Voxtral decoder is
-                    # NeoX-style (128-dim rotary, shift D); the causal audio
-                    # encoder is 64-dim and runs at pool x the decoder clock
-                    # (shift pool*D). rope_theta=1e6. Assert so a variant with
-                    # different rotary params fails loudly instead of silently
-                    # mis-rotating cached keys.
+                    # KV layout (num_blocks, 2, block, num_kv_heads, head_size);
+                    # index 0 = key (post-RoPE). head_size is read per layer, not
+                    # per group: equal text/audio windows merge the decoder
+                    # (128-dim NeoX, shift D) and audio encoder (64-dim GPT-J,
+                    # shift pool*D) into one mixed-head_size group.
                     head_size = kv.shape[-1]
                     assert head_size in (64, 128), (
                         f"re-anchor: unexpected rotary head_size {head_size}")
@@ -6327,13 +6312,10 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        # Realtime streaming models (Voxtral realtime,
-                        # Qwen3-ASR realtime, ...) process at most one new
-                        # multimodal chunk per generation step per session,
-                        # regardless of max_num_seqs. Profiling with the
-                        # cartesian product (max_num_seqs x max audio length)
-                        # OOMs on consumer GPUs while never reflecting runtime
-                        # memory pressure. Clamp to a single item.
+                        # Realtime models process at most one new mm chunk per
+                        # step per session; profiling the full
+                        # max_num_seqs x max-audio product OOMs on consumer GPUs
+                        # without reflecting runtime pressure. Clamp to one item.
                         # Refs vllm-project/vllm#38233.
                         if supports_realtime(self.model):
                             max_mm_items_per_batch = 1

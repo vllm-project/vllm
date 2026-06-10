@@ -931,22 +931,18 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
-        # [FIX] Ship the re-anchor key re-rotation to the worker ONLY for requests
-        # that actually scheduled this step (i.e. are in the persistent batch).
-        # _reanchor_session accumulates the owed rotation on
-        # request.pending_reanchor_d; a request whose clock/block rebase committed
-        # but which then broke out of the loop UNSCHEDULED (KV/encoder-budget
-        # pressure) keeps its pending rotation and gets re-rotated on a later step
-        # when it does schedule -- never silently skipped (the old per-step dict
-        # shipped it unconditionally, so the worker found idx=None and dropped the
-        # rotation, leaving the live keys on the old RoPE clock -> minutes of
-        # corrupted attention until they evicted past the sliding window).
-        for req in (
-            scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
-        ):
-            if req.pending_reanchor_d:
-                reanchor_reqs[req.request_id] = req.pending_reanchor_d
-                req.pending_reanchor_d = 0
+        # [EXPERIMENTAL] Ship each owed R(-D) key re-rotation to the worker, but
+        # only for requests that actually scheduled this step. A request whose
+        # rebase committed yet broke out unscheduled keeps its pending rotation
+        # (on request.pending_reanchor_d) and ships it on a later step it does
+        # schedule, so the rotation is never silently dropped.
+        if self.scheduler_config.enable_realtime_unbounded:
+            for req in (
+                scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
+            ):
+                if req.pending_reanchor_d:
+                    reanchor_reqs[req.request_id] = req.pending_reanchor_d
+                    req.pending_reanchor_d = 0
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -1168,24 +1164,18 @@ class Scheduler(SchedulerInterface):
         return sw
 
     def _reanchor_session(self, request: Request) -> bool:
-        """[EXPERIMENTAL] Re-anchor a streaming session's RoPE position clock down
-        by D tokens so it never reaches max_model_len (unbounded duration).
+        """[EXPERIMENTAL] Re-anchor a streaming session's RoPE clock down by D
+        tokens so it never reaches max_model_len (unbounded duration).
 
-        Drops the oldest D tokens (all older than the sliding window, hence already
-        evicted to null blocks), rebases the request's token/position bookkeeping
-        and the per-group block lists, and ACCUMULATES the owed key re-rotation on
-        ``request.pending_reanchor_d`` so the worker re-rotates the live cached keys
-        by R(-D). Called inline while scheduling the session's next chunk: the
-        request keeps this step's new tokens and is re-added to the persistent batch
-        with the rebased clock. The clock/block rebase must commit here (allocation
-        needs the rebased positions), but the rotation record is deferred to the
-        request object -- the scheduler ships it to the worker ONLY for requests that
-        actually schedule this step. If this request then breaks out unscheduled, the
-        pending rotation rides forward to the next step it schedules instead of being
-        silently lost (which would desync keys from the rebased clock -> corruption).
+        Drops the oldest D tokens (already evicted past the sliding window),
+        rebases the token/position bookkeeping and per-group block lists, and
+        accumulates the owed R(-D) key re-rotation on request.pending_reanchor_d.
+        The clock/block rebase commits here (allocation needs the rebased
+        positions); the worker applies the rotation once the request is in the
+        persistent batch (see schedule()'s reanchor_reqs build).
 
-        Returns True if a re-anchor was performed. Only for sliding-window models
-        with prefix caching disabled (so no block hashes to rebase).
+        Returns True if a re-anchor was performed. Sliding-window models only,
+        with prefix caching disabled (no block hashes to rebase).
         """
         sw = self._reanchor_sliding_window
         if sw is None or self.cache_config.enable_prefix_caching:
@@ -1269,10 +1259,8 @@ class Scheduler(SchedulerInterface):
             if blocks:
                 mgr_shift = d // mgr.block_size
                 del blocks[: min(mgr_shift, len(blocks))]
-        # (4) Owe the worker an R(-D) key re-rotation. Accumulate on the request
-        # (NOT a per-step dict) so the rotation survives if this request fails to
-        # schedule this step; it is shipped to the worker only once the request is
-        # actually in the persistent batch (see schedule()'s reanchor_reqs build).
+        # (4) Owe the worker an R(-D) key re-rotation; accumulate on the request
+        # so it survives an unscheduled step (shipped from schedule()).
         request.pending_reanchor_d += d
         request.reanchor_offset += d
         logger.info(

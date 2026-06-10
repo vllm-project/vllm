@@ -1001,41 +1001,50 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
-        if self.scheduler_config.enable_realtime_unbounded and (
-            self.cache_config is not None
-        ):
-            # RoPE re-anchoring re-rotates cached keys in place, which is invalid
-            # under a quantized KV cache. Reject at startup rather than aborting
-            # the engine at the first re-anchor event (hours into a stream).
+        if self.scheduler_config.enable_realtime_unbounded:
             from vllm.utils.torch_utils import is_quantized_kv_cache
 
-            if is_quantized_kv_cache(self.cache_config.cache_dtype):
+            # Re-anchoring re-rotates cached keys in place; a quantized KV cache
+            # cannot be rotated. Reject at startup, not hours into a stream.
+            if self.cache_config is not None and is_quantized_kv_cache(
+                self.cache_config.cache_dtype
+            ):
                 raise ValueError(
                     "enable_realtime_unbounded requires a non-fp8 KV cache; "
                     f"got cache_dtype={self.cache_config.cache_dtype!r}."
                 )
 
-            # Re-anchoring fires when the position clock reaches
-            # max_model_len - realtime_reanchor_margin_tokens. If the margin is
-            # not smaller than (max_model_len - sliding_window) that threshold
-            # collapses: re-anchoring either thrashes (firing every step, which
-            # drops audio) or never engages, silently disabling the feature.
-            # Reject at startup rather than degrade mysteriously at run time.
-            hf_config = self.model_config.hf_config
-            text_config = getattr(hf_config, "text_config", hf_config)
-            sliding_window = getattr(text_config, "sliding_window", None)
-            margin = self.scheduler_config.realtime_reanchor_margin_tokens
-            max_model_len = self.model_config.max_model_len
-            if sliding_window is not None and (
-                margin >= max_model_len - sliding_window
-            ):
-                raise ValueError(
-                    "enable_realtime_unbounded needs head-room for re-anchoring: "
-                    f"realtime_reanchor_margin_tokens ({margin}) must be smaller "
-                    f"than max_model_len - sliding_window ({max_model_len} - "
-                    f"{sliding_window} = {max_model_len - sliding_window}). Lower "
-                    "the margin or raise --max-model-len (>= 8192 recommended)."
-                )
+            if self.model_config is not None:
+                hf_config = self.model_config.hf_config
+                text_config = getattr(hf_config, "text_config", hf_config)
+                audio_config = getattr(hf_config, "audio_config", None)
+                sliding_window = getattr(text_config, "sliding_window", None)
+                margin = self.scheduler_config.realtime_reanchor_margin_tokens
+                max_model_len = self.model_config.max_model_len
+                # Re-anchoring fires at max_model_len - margin. If the margin is
+                # not smaller than (max_model_len - sliding_window) that
+                # threshold collapses and re-anchoring thrashes or never engages.
+                if sliding_window is not None and (
+                    margin >= max_model_len - sliding_window
+                ):
+                    raise ValueError(
+                        "enable_realtime_unbounded needs head-room for "
+                        "re-anchoring: realtime_reanchor_margin_tokens "
+                        f"({margin}) must be smaller than max_model_len - "
+                        f"sliding_window ({max_model_len} - {sliding_window} = "
+                        f"{max_model_len - sliding_window}). Lower the margin or "
+                        "raise --max-model-len (>= 8192 recommended)."
+                    )
+                # The R(-D) re-rotation assumes plain (unscaled) RoPE; a scaled
+                # rope (YaRN/linear) shifts the per-frequency angles and would
+                # corrupt the rotated keys. Reject rather than mis-rotate.
+                for name, cfg in (("text", text_config), ("audio", audio_config)):
+                    if cfg is not None and getattr(cfg, "rope_scaling", None):
+                        raise ValueError(
+                            "enable_realtime_unbounded does not support RoPE "
+                            f"scaling; {name}_config has rope_scaling="
+                            f"{getattr(cfg, 'rope_scaling')!r}."
+                        )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
