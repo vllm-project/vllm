@@ -21,6 +21,8 @@ mod gemma4;
 mod granite;
 mod kimi;
 mod qwen3;
+mod seed_oss;
+mod step3p5;
 
 use thiserror::Error;
 use vllm_tokenizer::DynTokenizer;
@@ -32,6 +34,8 @@ pub use self::gemma4::Gemma4ReasoningParser;
 pub use self::granite::GraniteReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
+pub use self::seed_oss::SeedOssReasoningParser;
+pub use self::step3p5::Step3p5ReasoningParser;
 
 /// DeepSeek V3 currently shares the standard `<think>...</think>` parser.
 pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
