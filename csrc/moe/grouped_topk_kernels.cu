@@ -438,8 +438,9 @@ __device__ inline bool is_finite(const T val) {
 
 // Scoring function enums
 enum ScoringFunc {
-  SCORING_NONE = 0,    // no activation function
-  SCORING_SIGMOID = 1  // apply sigmoid
+  SCORING_NONE = 0,     // no activation function
+  SCORING_SIGMOID = 1,  // apply sigmoid
+  SCORING_SOFTMAX = 2   // apply softmax (requires cross-thread reduction)
 };
 
 // Efficient sigmoid approximation from TensorRT-LLM
@@ -459,9 +460,14 @@ __device__ inline T apply_scoring(T val) {
     return val;
   } else if constexpr (SF == SCORING_SIGMOID) {
     return apply_sigmoid(val);
+  } else if constexpr (SF == SCORING_SOFTMAX) {
+    // For softmax, element-wise scoring is identity; the actual softmax
+    // normalization is performed as a separate reduction step in the kernel.
+    return val;
   } else {
-    static_assert(SF == SCORING_NONE || SF == SCORING_SIGMOID,
-                  "Unsupported ScoringFunc in apply_scoring");
+    static_assert(
+        SF == SCORING_NONE || SF == SCORING_SIGMOID || SF == SCORING_SOFTMAX,
+        "Unsupported ScoringFunc in apply_scoring");
     return val;
   }
 }
@@ -562,6 +568,75 @@ __global__ void grouped_topk_fused_kernel(
   asm volatile("griddepcontrol.wait;");  // I think all prolog can be put before
                                          // acqbulk because it's ptr arithmetic
 #endif
+
+  // For softmax, compute the softmax normalization across all experts in-place
+  // before proceeding with the standard grouped topk logic (which then uses
+  // SCORING_NONE-like identity on the already-normalized scores).
+  if constexpr (SF == SCORING_SOFTMAX) {
+    int32_t const group_off = warp_id * num_experts_per_group;
+
+    // Step 1: Each warp computes local max over its group's experts.
+    float local_max = -FLT_MAX;
+    for (int32_t i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+      float val = cuda_cast<float, T>(scores_token[group_off + i]);
+      local_max = fmaxf(local_max, val);
+    }
+    float warp_max = cg::reduce(tile, local_max, cg::greater<float>());
+
+    // Store per-warp max into shared memory for cross-warp reduction.
+    // Reuse s_group_scores (which has n_group entries of type T).
+    // We need float storage; cast the pointer.
+    float* s_reduction = reinterpret_cast<float*>(s_group_scores);
+    if (lane_id == 0) {
+      s_reduction[warp_id] = warp_max;
+    }
+    __syncthreads();
+
+    // Warp 0 reduces across all warps to get global max.
+    float global_max;
+    if (warp_id == 0) {
+      float val = (lane_id < n_group_i32) ? s_reduction[lane_id] : -FLT_MAX;
+      global_max = cg::reduce(tile, val, cg::greater<float>());
+      if (lane_id == 0) {
+        s_reduction[0] = global_max;
+      }
+    }
+    __syncthreads();
+    global_max = s_reduction[0];
+
+    // Step 2: Each warp computes local sum of exp(x - global_max).
+    float local_sum = 0.0f;
+    for (int32_t i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+      float val = cuda_cast<float, T>(scores_token[group_off + i]);
+      local_sum += expf(val - global_max);
+    }
+    float warp_sum = cg::reduce(tile, local_sum, cg::plus<float>());
+    if (lane_id == 0) {
+      s_reduction[warp_id] = warp_sum;
+    }
+    __syncthreads();
+
+    // Warp 0 reduces across all warps to get global sum.
+    float global_sum;
+    if (warp_id == 0) {
+      float val = (lane_id < n_group_i32) ? s_reduction[lane_id] : 0.0f;
+      global_sum = cg::reduce(tile, val, cg::plus<float>());
+      if (lane_id == 0) {
+        s_reduction[0] = global_sum;
+      }
+    }
+    __syncthreads();
+    global_sum = s_reduction[0];
+
+    // Step 3: Normalize scores in-place: scores_token[i] = exp(x-max)/sum.
+    float inv_sum = 1.0f / (global_sum + 1e-20f);
+    for (int32_t i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
+      float val = cuda_cast<float, T>(scores_token[group_off + i]);
+      float prob = expf(val - global_max) * inv_sum;
+      scores_token[group_off + i] = cuda_cast<T, float>(prob);
+    }
+    __syncthreads();
+  }
 
   // phase 1: per-group scan
   int32_t const group_offset = warp_id * num_experts_per_group;
@@ -697,6 +772,68 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
   int32_t laneIdx = threadIdx.x % WARP_SIZE;
   int32_t warpIdx = __shfl_sync(0xffffffff, threadIdx.x / WARP_SIZE, 0);
 
+  // For softmax, we need all threads to participate in the cross-thread
+  // reduction (including warps that would normally early-return for
+  // UseGroups). So we perform the softmax reduction before the early return.
+  if constexpr (SF == SCORING_SOFTMAX) {
+    // Determine which expert this thread maps to, considering grouping.
+    int32_t myExpert = threadIdx.x;
+    bool myValid = myExpert < numExperts;
+    if constexpr (UseGroups) {
+      myExpert = warpIdx * numExpertsPerGroup + laneIdx;
+      myValid = (warpIdx < numGroup) && (laneIdx < numExpertsPerGroup);
+    }
+
+    auto myScoreIdx = int64_t{blockIdx.x} * int64_t{numExperts} + myExpert;
+    float rawLogit =
+        myValid ? static_cast<float>(scores[myScoreIdx]) : -FLT_MAX;
+
+    // Step 1: Store raw logits into shared memory for later use.
+    smemScoreSigmoid[threadIdx.x] = rawLogit;
+
+    // Step 2: Compute max across all experts using warp + smem reduction.
+    float warpMax = cg::reduce(warp, rawLogit, cg::greater<float>());
+    if (laneIdx == 0) {
+      smemGroupScores[warpIdx] = warpMax;
+    }
+    __syncthreads();
+    float globalMax;
+    if (warpIdx == 0) {
+      float val = (laneIdx < NumWarps) ? smemGroupScores[laneIdx] : -FLT_MAX;
+      globalMax = cg::reduce(warp, val, cg::greater<float>());
+      if (laneIdx == 0) {
+        smemGroupScores[0] = globalMax;
+      }
+    }
+    __syncthreads();
+    globalMax = smemGroupScores[0];
+
+    // Step 3: Compute exp(logit - max) and sum across all experts.
+    float expVal = myValid ? expf(rawLogit - globalMax) : 0.0f;
+    float warpSum = cg::reduce(warp, expVal, cg::plus<float>());
+    if (laneIdx == 0) {
+      smemGroupScores[warpIdx] = warpSum;
+    }
+    __syncthreads();
+    float globalSum;
+    if (warpIdx == 0) {
+      float val = (laneIdx < NumWarps) ? smemGroupScores[laneIdx] : 0.0f;
+      globalSum = cg::reduce(warp, val, cg::plus<float>());
+      if (laneIdx == 0) {
+        smemGroupScores[0] = globalSum;
+      }
+    }
+    __syncthreads();
+    globalSum = smemGroupScores[0];
+
+    // Step 4: Normalize to get softmax probability and store to smem.
+    float prob = myValid ? (expVal / (globalSum + 1e-20f)) : 0.0f;
+    if (myValid) {
+      smemScoreSigmoid[myExpert] = prob;
+    }
+    __syncthreads();
+  }
+
   if constexpr (UseGroups) {
     if (warpIdx >= numGroup) {
       return;
@@ -724,10 +861,17 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
   // get our assigned thread score; each warp represents one expert group
   float score =
       expertSelected ? static_cast<float>(scores[scoreIdx]) : invalidScoreFloat;
-  auto scoreSigmoid = apply_scoring<SF>(score);
-  // write the sigmoid score to shared for later use
-  if (expertSelected) {
-    smemScoreSigmoid[threadExpert] = scoreSigmoid;
+
+  float scoreSigmoid;
+  if constexpr (SF == SCORING_SOFTMAX) {
+    // Softmax probabilities were already computed above and stored in smem.
+    scoreSigmoid = expertSelected ? smemScoreSigmoid[threadExpert] : 0.0f;
+  } else {
+    scoreSigmoid = apply_scoring<SF>(score);
+    // write the sigmoid score to shared for later use
+    if (expertSelected) {
+      smemScoreSigmoid[threadExpert] = scoreSigmoid;
+    }
   }
 
   // get the score with bias
@@ -964,7 +1108,12 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
     size_t const idx_bytes =
         static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
     size_t const internal_bytes = val_bytes_aligned + idx_bytes;
-    size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(T);
+    // For softmax, the s_group_scores area is reinterpreted as float* for
+    // reduction, so we need max(sizeof(T), sizeof(float)) per group entry.
+    size_t const per_group_bytes =
+        (SF == SCORING_SOFTMAX) ? sizeof(float) : sizeof(T);
+    size_t const extra_bytes =
+        16 + static_cast<size_t>(n_group) * per_group_bytes;
     config.dynamicSmemBytes = internal_bytes + extra_bytes;
     cudaLaunchKernelEx(&config, kernel_instance, scores, topk_values,
                        topk_indices, bias, num_tokens, num_experts, n_group,
@@ -998,6 +1147,15 @@ INSTANTIATE_NOAUX_TC(half, __nv_bfloat16, int32_t, SCORING_NONE);
 INSTANTIATE_NOAUX_TC(__nv_bfloat16, float, int32_t, SCORING_NONE);
 INSTANTIATE_NOAUX_TC(__nv_bfloat16, half, int32_t, SCORING_NONE);
 INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC(float, float, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(float, half, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(float, __nv_bfloat16, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(half, float, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(half, half, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(half, __nv_bfloat16, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, float, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, half, int32_t, SCORING_SOFTMAX);
+INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t, SCORING_SOFTMAX);
 }  // end namespace moe
 }  // namespace vllm
 
@@ -1023,14 +1181,21 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
   TORCH_CHECK(topk <= topk_group * (num_experts / n_group),
               "topk must be <= topk_group * (num_experts / n_group)");
   TORCH_CHECK(scoring_func == vllm::moe::SCORING_NONE ||
-                  scoring_func == vllm::moe::SCORING_SIGMOID,
-              "scoring_func must be SCORING_NONE (0) or SCORING_SIGMOID (1)");
+                  scoring_func == vllm::moe::SCORING_SIGMOID ||
+                  scoring_func == vllm::moe::SCORING_SOFTMAX,
+              "scoring_func must be SCORING_NONE (0), SCORING_SIGMOID (1)"
+              ", or SCORING_SOFTMAX (2)");
 
   // Always output float32 for topk_values (eliminates Python-side conversion)
   torch::Tensor topk_values = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
   torch::Tensor topk_indices = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+
+  // For softmax, the kernel normalizes scores in-place, so we must clone
+  // to avoid mutating the caller's gating_output tensor.
+  torch::Tensor scores_buf =
+      (scoring_func == vllm::moe::SCORING_SOFTMAX) ? scores.clone() : scores;
 
   auto stream = c10::cuda::getCurrentCUDAStream(scores.get_device());
   auto const sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);
@@ -1040,7 +1205,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     switch (sf) {                                                             \
       case vllm::moe::SCORING_NONE:                                           \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_NONE>(    \
-            reinterpret_cast<T*>(scores.mutable_data_ptr()),                  \
+            reinterpret_cast<T*>(scores_buf.mutable_data_ptr()),              \
             reinterpret_cast<float*>(topk_values.mutable_data_ptr()),         \
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
@@ -1049,7 +1214,16 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
         break;                                                                \
       case vllm::moe::SCORING_SIGMOID:                                        \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
-            reinterpret_cast<T*>(scores.mutable_data_ptr()),                  \
+            reinterpret_cast<T*>(scores_buf.mutable_data_ptr()),              \
+            reinterpret_cast<float*>(topk_values.mutable_data_ptr()),         \
+            reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
+            reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
+            num_experts, n_group, topk_group, topk, renormalize,              \
+            routed_scaling_factor, false, stream);                            \
+        break;                                                                \
+      case vllm::moe::SCORING_SOFTMAX:                                        \
+        vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SOFTMAX>( \
+            reinterpret_cast<T*>(scores_buf.mutable_data_ptr()),              \
             reinterpret_cast<float*>(topk_values.mutable_data_ptr()),         \
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
