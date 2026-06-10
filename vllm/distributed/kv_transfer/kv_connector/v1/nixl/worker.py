@@ -216,8 +216,10 @@ class NixlConnectorWorker:
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
         classes: list[RegionTransferClass] = []
         for i in range(n_regions):
-            cls = self._region_class(i)
-            classes.extend([cls] * (cls.num_streams(virtually_split) * nblk))
+            region_cls = self._region_class(i)
+            classes.extend(
+                [region_cls] * (region_cls.num_streams(virtually_split) * nblk)
+            )
         assert len(classes) == num_fa_descs, (
             f"FA desc classes {len(classes)} != num_fa_descs {num_fa_descs}"
         )
@@ -928,8 +930,6 @@ class NixlConnectorWorker:
             # `page_size` accounts for physical blocks, st KVCache is always
             # [`num_blocks` * `page_size`]
             curr_tensor_size_bytes = num_blocks * physical_page_size
-            if tensor_size_bytes is None:
-                tensor_size_bytes = curr_tensor_size_bytes
 
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
@@ -955,7 +955,20 @@ class NixlConnectorWorker:
                     self.block_len_per_layer.append(physical_page_size)
                 # MLA regions transfer as REPLICATE (whole block, offset 0);
                 # full-attn regions head-SPLIT across TP.
-                self._region_is_mla.append(isinstance(layer_spec, MLAAttentionSpec))
+                is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
+                self._region_is_mla.append(is_mla_region)
+
+                # HeteroTP cannot transfer differently-sized regions, so every
+                # non-MLA region in a group must share one tensor size (this also
+                # holds for Mamba-like models). The sole exception is the DeepSeek
+                # MLA indexer, which sits in a UniformTypeKVCacheSpecs group at a
+                # different size; MLA regions are therefore exempt.
+                if not is_mla_region:
+                    if tensor_size_bytes is None:
+                        tensor_size_bytes = curr_tensor_size_bytes
+                    assert tensor_size_bytes == curr_tensor_size_bytes, (
+                        "All non-MLA kv cache tensors must have the same size"
+                    )
 
                 if cache.shape[0] != num_blocks:
                     raise AssertionError(
@@ -1198,12 +1211,13 @@ class NixlConnectorWorker:
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
         # SPLIT regions read their head slice from this many remote ranks at a
-        # per-rank offset; REPLICATE regions read the whole block once (see cls).
+        # per-rank offset; REPLICATE regions read the whole block once
+        # (see RegionTransferClass).
         split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            cls = self._region_class(i)
+            region_cls = self._region_class(i)
             # Read our whole local region size from remote..
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
@@ -1213,8 +1227,8 @@ class NixlConnectorWorker:
                 # ..using remote kv_block_len as transfer unit
                 local_block_len = remote_kv_block_len
 
-            num_reads = cls.remote_num_reads(split_reads)
-            rank_offset = cls.remote_rank_offset(
+            num_reads = region_cls.remote_num_reads(split_reads)
+            rank_offset = region_cls.remote_rank_offset(
                 plan.rank_offset_factor, remote_kv_block_len
             )
             local_block_len = local_block_len // num_reads
@@ -1229,7 +1243,7 @@ class NixlConnectorWorker:
 
             emits_v = (
                 self.transfer_topo.virtually_split_kv_in_blocks
-                and cls.num_streams(True) == 2
+                and region_cls.num_streams(True) == 2
             )
             if emits_v:
                 # With FlashInfer index V separately to allow head splitting.
@@ -1588,8 +1602,10 @@ class NixlConnectorWorker:
                 remote_engine_id
             )
             for i, local_len in enumerate(self.block_len_per_layer):
-                cls = REPLICATE_CLASS if model_replicated else self._region_class(i)
-                cls.validate_block_len(
+                region_cls = (
+                    REPLICATE_CLASS if model_replicated else self._region_class(i)
+                )
+                region_cls.validate_block_len(
                     i,
                     local_len,
                     nixl_agent_meta.block_lens[i],
