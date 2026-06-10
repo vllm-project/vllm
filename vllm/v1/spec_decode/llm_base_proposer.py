@@ -75,6 +75,7 @@ class SpecDecodeBaseProposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self.runner = runner
         self._share_mtp_indices = False
 
         self.device = device
@@ -82,6 +83,14 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+        draft_hf_config = self.draft_model_config.hf_config
+        self.n_predict = int(
+            getattr(draft_hf_config, "n_predict", None)
+            or getattr(draft_hf_config, "num_nextn_predict_layers", 1)
+            or 1
+        )
+        self.use_multi_mtp_heads = self.method == "mtp" and self.n_predict > 1
+        self.num_mtp_prefill_heads = min(self.n_predict, self.num_speculative_tokens)
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -113,7 +122,7 @@ class SpecDecodeBaseProposer:
         # When True, all draft steps reuse the same position as the
         # first step instead of advancing by one each iteration.
         # Used by draft models with Q-only attention that share KV
-        # with the target and always predict from the same position.
+        # with the target.
         self.constant_draft_positions: bool = False
 
         self.parallel_drafting_token_id: int = 0
@@ -458,11 +467,20 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
-    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _compute_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
+    ) -> torch.Tensor:
+        if self.method == "mtp":
+            return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+        return self.model.compute_logits(hidden_states)
+
+    def _greedy_sample(
+        self, hidden_states: torch.Tensor, spec_step_idx: int = 0
+    ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+        return self._compute_logits(hidden_states, spec_step_idx).argmax(dim=-1)
 
     def _sample_from_logits(
         self,
@@ -481,10 +499,11 @@ class SpecDecodeBaseProposer:
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        spec_step_idx: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
-            return self._greedy_sample(hidden_states), None
-        logits = self.model.compute_logits(hidden_states)
+            return self._greedy_sample(hidden_states, spec_step_idx), None
+        logits = self._compute_logits(hidden_states, spec_step_idx)
         return self._sample_from_logits(logits, sampling_metadata)
 
     def take_last_draft_probs(self) -> torch.Tensor | None:
@@ -551,6 +570,10 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        first_pass_slot_mapping = self._get_slot_mapping(
+            slot_mapping_size,
+            slot_mappings=slot_mappings,  # type: ignore[arg-type]
+        )
         # Step 0 of index_share_for_mtp_iteration: let the MTP layer
         # compute its own indices (skip_topk=False) so subsequent steps
         # can reuse them.
@@ -563,10 +586,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            slot_mapping=self._get_slot_mapping(
-                slot_mapping_size,
-                slot_mappings=slot_mappings,  # type: ignore[arg-type]
-            ),
+            slot_mapping=first_pass_slot_mapping,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -591,6 +611,27 @@ class SpecDecodeBaseProposer:
                 0,
                 device=sample_hidden_states.device,
                 dtype=torch.int64,
+            )
+
+        if self._needs_multi_mtp_full_token_pass(num_tokens, batch_size):
+            draft_token_ids, draft_probs = self._sample_draft_tokens(
+                sample_hidden_states, sampling_metadata, spec_step_idx=0
+            )
+            draft_probs_list = None if draft_probs is None else [draft_probs]
+            return self._propose_multi_mtp_heads(
+                first_draft_token_ids=draft_token_ids,
+                draft_probs_list=draft_probs_list,
+                first_input_ids=self.input_ids[:num_tokens].clone(),
+                first_hidden_states=hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                sampling_metadata=sampling_metadata,
+                num_tokens=num_tokens,
+                num_input_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                per_layer_attn_metadata=per_layer_attn_metadata,
+                slot_mapping=first_pass_slot_mapping,
+                mm_embed_inputs=mm_embed_inputs,
             )
 
         # Early exit if there is only one draft token to be generated.
@@ -701,6 +742,8 @@ class SpecDecodeBaseProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+            if self.method == "mtp":
+                model_kwargs["spec_step_idx"] = token_index + 1
 
             with set_forward_context(
                 per_layer_attn_metadata,
@@ -719,7 +762,9 @@ class SpecDecodeBaseProposer:
 
             hidden_states = hidden_states[:batch_size]
             draft_token_ids, draft_probs = self._sample_draft_tokens(
-                last_hidden_states[:batch_size], sampling_metadata
+                last_hidden_states[:batch_size],
+                sampling_metadata,
+                spec_step_idx=token_index + 1,
             )
             if draft_probs is not None:
                 assert draft_probs_list is not None
@@ -727,6 +772,144 @@ class SpecDecodeBaseProposer:
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
+        draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        if draft_probs_list is not None:
+            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+        return draft_token_ids
+
+    def _needs_multi_mtp_full_token_pass(
+        self, num_tokens: int, batch_size: int
+    ) -> bool:
+        # Multi-head MTP has one predictor layer per draft depth. The later
+        # heads should consume the previous head hidden state at the same target
+        # position, not advance slot_mapping/seq_lens like an autoregressive
+        # roll-out of a single EAGLE layer.
+        return self.use_multi_mtp_heads and self.num_speculative_tokens > 1
+
+    def _get_multi_mtp_tail_token_ids(
+        self,
+        last_positions: torch.Tensor,
+        lookahead_steps: int,
+        fallback_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the per-request token used after shifting this MTP head input."""
+        runner = self.runner
+        if runner is None:
+            return fallback_token_ids
+
+        result = fallback_token_ids.clone()
+        input_batch = runner.input_batch
+        positions_cpu = last_positions.detach().cpu().tolist()
+        for batch_idx, last_pos in enumerate(positions_cpu):
+            req_id = input_batch.req_ids[batch_idx]
+            req_index = input_batch.req_id_to_index[req_id]
+            # first_input_ids has already been shifted by one token before
+            # entering _propose_multi_mtp_heads. Each additional MTP depth shifts
+            # once more, so depth 1 needs last_pos + 2, depth 2 needs last_pos + 3.
+            token_pos = int(last_pos) + lookahead_steps + 1
+            has_prompt_token = (
+                token_pos < input_batch.num_tokens_no_spec[req_index]
+                and input_batch.is_token_ids[req_index, token_pos]
+            )
+            if has_prompt_token:
+                result[batch_idx] = int(input_batch.token_ids_cpu[req_index, token_pos])
+                continue
+
+            is_prefill_chunk = bool(runner.discard_request_mask.np[req_index])
+            if is_prefill_chunk:
+                raise RuntimeError(
+                    "Multi-head MTP chunked prefill needs lookahead "
+                    f"token at position {token_pos}, but it is beyond the "
+                    "known prompt tokens. Keep the final prefill chunk at "
+                    "least num_speculative_tokens tokens, or add a tail "
+                    "backfill/cache path for this boundary case."
+                )
+        return result
+
+    def _propose_multi_mtp_heads(
+        self,
+        first_draft_token_ids: torch.Tensor,
+        draft_probs_list: list[torch.Tensor] | None,
+        first_input_ids: torch.Tensor,
+        first_hidden_states: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        num_tokens: int,
+        num_input_tokens: int,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        per_layer_attn_metadata: dict[str, object],
+        slot_mapping: dict[str, torch.Tensor],
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
+    ) -> torch.Tensor:
+        if self.uses_mrope:
+            raise NotImplementedError("Multi-head MTP expects 1D RoPE.")
+        if self.num_speculative_tokens > self.n_predict:
+            raise RuntimeError(
+                "Multi-head MTP currently requires num_speculative_tokens <= n_predict."
+            )
+
+        draft_token_ids_list = [first_draft_token_ids]
+        if self.num_speculative_tokens == 1:
+            if draft_probs_list is not None:
+                self._last_draft_probs = (
+                    draft_probs_list[0]
+                    .view(
+                        -1, self.num_speculative_tokens, draft_probs_list[0].shape[-1]
+                    )
+                    .contiguous()
+                )
+            return first_draft_token_ids.view(-1, self.num_speculative_tokens)
+
+        last_input_ids = first_input_ids
+        last_hidden_states = first_hidden_states
+        last_sample_token_ids = first_draft_token_ids.int()
+        last_positions = self.positions[token_indices_to_sample]
+
+        for spec_step_idx in range(1, self.num_speculative_tokens):
+            tail_token_ids = self._get_multi_mtp_tail_token_ids(
+                last_positions, spec_step_idx, last_sample_token_ids
+            )
+            self.input_ids[: num_tokens - 1] = last_input_ids[1:]
+            self.input_ids[token_indices_to_sample] = tail_token_ids
+            last_input_ids = self.input_ids[:num_tokens].clone()
+
+            self.hidden_states[:num_tokens] = last_hidden_states[:num_tokens]
+            (
+                head_cudagraph_runtime_mode,
+                head_num_input_tokens,
+                head_tokens_across_dp,
+            ) = self._determine_batch_execution_and_padding(num_tokens)
+            model_kwargs, _ = self.build_model_inputs_first_pass(
+                num_tokens, head_num_input_tokens, mm_embed_inputs
+            )
+            if self.method == "mtp":
+                model_kwargs["spec_step_idx"] = spec_step_idx
+
+            with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=head_num_input_tokens,
+                num_tokens_across_dp=head_tokens_across_dp,
+                cudagraph_runtime_mode=head_cudagraph_runtime_mode,
+                slot_mapping=slot_mapping,
+            ):
+                ret_hidden_states = self.model(**model_kwargs)
+                if not self.model_returns_tuple():
+                    last_hidden_states = ret_hidden_states
+                else:
+                    _, last_hidden_states = ret_hidden_states
+
+            sample_hidden_states = last_hidden_states[token_indices_to_sample]
+            draft_token_ids, draft_probs = self._sample_draft_tokens(
+                sample_hidden_states, sampling_metadata, spec_step_idx=spec_step_idx
+            )
+            if draft_probs is not None:
+                assert draft_probs_list is not None
+                draft_probs_list.append(draft_probs)
+            draft_token_ids_list.append(draft_token_ids)
+            last_sample_token_ids = draft_token_ids.int()
+
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
@@ -961,6 +1144,8 @@ class SpecDecodeBaseProposer:
         }
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+        if self.method == "mtp":
+            model_kwargs["spec_step_idx"] = 0
 
         return model_kwargs, num_input_tokens
 
@@ -1721,7 +1906,9 @@ class SpecDecodeBaseProposer:
             kv_cache_config, all_attn_layers
         )
 
-        attention_groups: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
+        attention_groups: dict[
+            tuple[int, tuple[str, str], KVCacheSpec], AttentionGroup
+        ] = {}
         for layer_name in self._draft_attn_layer_names:
             if layer_name not in layer_to_spec:
                 continue
@@ -1729,7 +1916,9 @@ class SpecDecodeBaseProposer:
             attn_backend = attn_layer.get_attn_backend()
             spec = layer_to_spec[layer_name]
             gid = layer_to_gid[layer_name]
-            group_key = (attn_backend.full_cls_name(), spec)
+            # Layers with the same backend/spec may still live in different
+            # KV cache groups and therefore need different block tables.
+            group_key = (gid, attn_backend.full_cls_name(), spec)
 
             if group_key not in attention_groups:
                 kernel_block_size = (

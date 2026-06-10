@@ -219,6 +219,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
+        self.mtp_min_final_prefill_chunk = 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -237,6 +238,16 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
+
+            draft_model_config = getattr(speculative_config, "draft_model_config", None)
+            draft_hf_config = getattr(draft_model_config, "hf_config", None)
+            n_predict = int(
+                getattr(draft_hf_config, "n_predict", None)
+                or getattr(draft_hf_config, "num_nextn_predict_layers", 1)
+                or 1
+            )
+            if speculative_config.method == "mtp" and n_predict > 1:
+                self.mtp_min_final_prefill_chunk = min(self.num_spec_tokens, n_predict)
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -362,6 +373,27 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
+    def _avoid_short_mtp_final_prefill_chunk(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> int:
+        min_tail = self.mtp_min_final_prefill_chunk
+        if min_tail <= 1 or num_new_tokens <= 0:
+            return num_new_tokens
+
+        prompt_remaining = request.num_prompt_tokens - num_computed_tokens
+        if num_new_tokens >= prompt_remaining:
+            return num_new_tokens
+
+        remaining_after = prompt_remaining - num_new_tokens
+        if remaining_after >= min_tail:
+            return num_new_tokens
+
+        adjusted = num_new_tokens - (min_tail - remaining_after)
+        return adjusted if adjusted > 0 else num_new_tokens
+
     def schedule(self) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -465,6 +497,10 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
                 )
+
+            num_new_tokens = self._avoid_short_mtp_final_prefill_chunk(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -800,6 +836,10 @@ class Scheduler(SchedulerInterface):
                     )
                     if num_new_tokens == 0:
                         break
+
+                num_new_tokens = self._avoid_short_mtp_final_prefill_chunk(
+                    request, num_computed_tokens, num_new_tokens
+                )
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
