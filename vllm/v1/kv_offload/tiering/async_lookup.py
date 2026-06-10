@@ -96,7 +96,6 @@ class AsyncLookupManager(ABC):
             queue.SimpleQueue()
         )
         self._need_to_drain: bool = False
-        self._results_ready = threading.Event()
 
         self._thread = threading.Thread(
             target=self._worker,
@@ -230,4 +229,3 @@ class AsyncLookupManager(ABC):
             # Post the entire batch as one item — no lock needed.
             if results:
                 self._pending_results.put(results)
-                self._results_ready.set()

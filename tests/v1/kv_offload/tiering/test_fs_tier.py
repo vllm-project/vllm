@@ -95,13 +95,17 @@ def lookup_and_wait(
     tier: FileSystemTierManager,
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
+    timeout: float = 1.0,
 ) -> list[bool]:
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
-    tier._lookup_manager._results_ready.clear()
     tier.on_schedule_end()
-    tier._lookup_manager._results_ready.wait()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not tier._lookup_manager._pending_results.empty():
+            break
+        time.sleep(0.01)
     return [tier.lookup(k, ctx) for k in keys]
 
 
