@@ -336,6 +336,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_states=conv_state_q,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
+                src_conv_state_indices=non_spec_conv_src_state_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
@@ -347,6 +348,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_states=conv_state_k,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
+                src_conv_state_indices=non_spec_conv_src_state_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
@@ -358,6 +360,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_states=conv_state_v,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
+                src_conv_state_indices=non_spec_conv_src_state_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata_narrowed,
             ).transpose(0, 1)
@@ -417,14 +420,13 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata_narrowed.num_prefills > 0:
             assert non_spec_state_indices_tensor is not None
             assert has_initial_state is not None
-            zero_idx = non_spec_state_indices_tensor[~has_initial_state]
-            recurrent_state[zero_idx] = 0
             prefill_src_indices = (
                 non_spec_ssm_src_state_indices
                 if non_spec_ssm_src_state_indices is not None
                 else non_spec_state_indices_tensor
             )
             initial_state = recurrent_state[prefill_src_indices].contiguous()
+            initial_state[~has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,

@@ -1532,6 +1532,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     : attn_metadata.num_decodes + 1
                 ],
                 ssm_state_indices=non_spec_state_indices_tensor,
+                src_ssm_state_indices=(
+                    non_spec_ssm_src_state_indices[: attn_metadata.num_decodes]
+                    if non_spec_ssm_src_state_indices is not None
+                    else None
+                ),
                 use_qk_l2norm_in_kernel=True,
             )
         else:
@@ -1544,7 +1549,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
             prefill_init_indices = (
-                non_spec_ssm_src_state_indices
+                non_spec_ssm_src_state_indices[attn_metadata.num_decodes :]
                 if non_spec_ssm_src_state_indices is not None
                 else prefill_state_indices
             )
