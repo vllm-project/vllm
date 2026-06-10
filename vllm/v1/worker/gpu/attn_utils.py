@@ -166,6 +166,66 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+def _reshape_attention_kv_cache(
+    kv_tensor: torch.Tensor,
+    kv_cache_spec: AttentionSpec,
+    unpermuted_kv_cache_shape: tuple[int, ...],
+    kv_cache_stride_order: tuple[int, ...],
+    num_blocks: int,
+) -> torch.Tensor:
+    kv_cache_shape = tuple(unpermuted_kv_cache_shape[i] for i in kv_cache_stride_order)
+    inv_order = [
+        kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+    ]
+
+    if kv_cache_spec.page_size_padded is not None:
+        # Use strided views to skip padding between logical pages.
+        dtype_size = get_dtype_size(kv_cache_spec.dtype)
+        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+
+        if unpermuted_kv_cache_shape[0] == num_blocks:
+            unpermuted_num_blocks_dim = 0
+        elif len(unpermuted_kv_cache_shape) > 1 and (
+            unpermuted_kv_cache_shape[1] == num_blocks
+        ):
+            unpermuted_num_blocks_dim = 1
+        else:
+            unpermuted_num_blocks_dim = unpermuted_kv_cache_shape.index(num_blocks)
+        num_blocks_dim = inv_order[unpermuted_num_blocks_dim]
+
+        strides = list(torch.empty(kv_cache_shape).stride())
+        unpadded_page_stride = strides[num_blocks_dim]
+        strides[num_blocks_dim] = page_stride
+
+        # FlashAttention-style layouts have an explicit K/V dimension adjacent
+        # to the block dimension. Avoid matching unrelated size-2 dims like
+        # head_size or num_kv_heads.
+        kv_dim = None
+        for dim in (
+            unpermuted_num_blocks_dim - 1,
+            unpermuted_num_blocks_dim + 1,
+        ):
+            if (
+                0 <= dim < len(unpermuted_kv_cache_shape)
+                and unpermuted_kv_cache_shape[dim] == 2
+            ):
+                kv_dim = dim
+                break
+        if kv_dim is not None:
+            strides[inv_order[kv_dim]] = unpadded_page_stride // 2
+
+        kv_cache = torch.as_strided(
+            kv_tensor,
+            size=kv_cache_shape,
+            stride=tuple(strides),
+        )
+    else:
+        # No padding — safe to use a contiguous view.
+        kv_cache = kv_tensor.view(kv_cache_shape)
+
+    return kv_cache.permute(*inv_order)
+
+
 def _reshape_kv_cache(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor],
@@ -206,7 +266,7 @@ def _reshape_kv_cache(
                     kv_cache_spec.storage_block_size // kernel_block_size
                 )
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-                kv_cache_shape = group.backend.get_kv_cache_shape(
+                unpermuted_kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
                     kernel_block_size,
                     kv_cache_spec.num_kv_heads,
@@ -217,39 +277,19 @@ def _reshape_kv_cache(
                 # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
                 try:
                     kv_cache_stride_order = group.backend.get_kv_cache_stride_order()
-                    assert len(kv_cache_stride_order) == len(kv_cache_shape)
+                    assert len(kv_cache_stride_order) == len(unpermuted_kv_cache_shape)
                 except (AttributeError, NotImplementedError):
-                    kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-                kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-                inv_order = [
-                    kv_cache_stride_order.index(i)
-                    for i in range(len(kv_cache_stride_order))
-                ]
+                    kv_cache_stride_order = tuple(range(len(unpermuted_kv_cache_shape)))
 
                 dtype = kv_cache_spec.dtype
                 kv_tensor = kv_raw_tensor.view(dtype)
-                if kv_cache_spec.page_size_padded is not None:
-                    # Use strided view to handle page_size_bytes that
-                    # include padding. This follows the same pattern as
-                    # MambaSpec handling in gpu_model_runner.py.
-                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                    # (i.e. the first physical dimension is the block
-                    # index), which holds for all current backends
-                    # (MLA, FlashAttention, TritonAttention, etc.).
-                    dtype_size = get_dtype_size(dtype)
-                    page_stride = kv_cache_spec.page_size_bytes // dtype_size
-                    strides = list(torch.empty(kv_cache_shape).stride())
-                    strides[inv_order[0]] = page_stride
-                    kv_cache = torch.as_strided(
-                        kv_tensor,
-                        size=kv_cache_shape,
-                        stride=tuple(strides),
-                    )
-                else:
-                    # No padding — safe to use a contiguous view.
-                    kv_cache = kv_tensor.view(kv_cache_shape)
-                kv_caches[layer_name] = kv_cache.permute(*inv_order)
+                kv_caches[layer_name] = _reshape_attention_kv_cache(
+                    kv_tensor,
+                    kv_cache_spec,
+                    unpermuted_kv_cache_shape,
+                    kv_cache_stride_order,
+                    kernel_num_blocks,
+                )
 
             elif isinstance(kv_cache_spec, MambaSpec):
                 has_mamba = True
