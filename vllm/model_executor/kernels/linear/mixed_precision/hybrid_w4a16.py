@@ -246,34 +246,57 @@ def _triton_w4a16_skinny_fmt_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-# Explicit gfx11 prefill tile selection, distilled from a per-shape
-# autotune sweep over the F.2 GEMM catalog (Qwen3 / Gemma / Llama prefill
-# shapes, M in {2048, 3968}). The autotuned winner is overwhelmingly
-# BLOCK_N=256 / num_warps=8 / BLOCK_K=32 — a wide-N tile keeps the workgroup
-# grid large enough to saturate the 40 CUs at M~2-4k while the wide N-tile makes
-# the tl.trans -> ds_read_b128 LDS readback efficient. BLOCK_K is fixed at 32
-# (<= every AWQ group size, so no group-boundary scale aliasing; BK>32 was
-# measured to regress). This replaces the legacy heuristic on gfx11x; other
-# arches keep it.
-def _select_skinny_gfx11_config(M: int, N: int, K: int) -> tuple[int, int, int]:
-    """Return (BLOCK_M, BLOCK_N, num_warps) for the gfx11 prefill skinny GEMM.
-
-    BLOCK_M=128 vs 64, re-tuned on the packed-dequant kernel (the kernel is no
-    longer ALU-bound, so this differs from the earlier scalar-kernel rule) via a
-    low-noise interleaved A/B over the full F.2 catalog (<2% CoV, 31 shapes,
-    zero mispicks):
-      * deep, non-cliff K (K>=3072 and K%2048!=0) -> BLOCK_M=128: the long
-        K-loop amortizes the wider M-tile (Qwen7B down -12.5%, gate_up -9.1%).
-      * very wide N (N>=16384) -> BLOCK_M=128: enough N-tiles that the halved
-        M-tile count still saturates the 40 CUs (lm_head, wide gate_up).
-      * otherwise BLOCK_M=64. K%2048==0 is the gfx1151 power-of-2 global-load
-        cliff where BLOCK_M=64's smaller A footprint is much faster unless N is
-        very wide (Gemma2B q/o, LLaMA8B q/o, Qwen3.5 GDN would lose 17-31% at
-        BLOCK_M=128); shallow K=2560 at small N also prefers 64.
-    """
-    block_n, num_warps = 256, 8
-    block_m = 128 if ((K >= 3072 and K % 2048 != 0) or N >= 16384) else 64
-    return block_m, block_n, num_warps
+# Explicit gfx11 prefill tile selection, tuned for the *packed-dequant* kernel
+# across the full M range under do_bench_cudagraph (the production path) over the
+# F.2 GEMM catalog. Four M tiers; BLOCK_K=128 dominates the small/mid tiers
+# (long per-block K work, occupancy-friendly narrow BLOCK_N), the distilled wide
+# BLOCK_N=256 tile takes over only at deep M:
+#
+#   * M <= 64: small tile BLOCK_M=32, BLOCK_K=128. A wide BLOCK_N here leaves
+#     only ceil(N/BN) workgroups -- e.g. 8 for N=2048/BN=256 -- starving the 40
+#     CUs (the M-blind BLOCK_N=256 was a 1.6-3x regression at M<=32). BLOCK_N=64
+#     for tall K (down_proj) gives more B-reuse; 32 otherwise.
+#   * 65 <= M <= 256: very wide N (>=16384) saturates with BLOCK_M=128/BN=64;
+#     tall K likes BLOCK_M=32/BN=64; else BLOCK_M=64/BN=32. BLOCK_K=128/64.
+#   * 257 <= M < 2048: the wide distilled tile (BN=256) wins for tall, narrow-N,
+#     non-cliff K (e.g. Qwen3-4B down 2560x9728); BLOCK_M=128/BN=64 elsewhere.
+#     The K%2048==0 cliff collapses BN=256 at these M (down 4096x12288 lost ~28%
+#     at M=1024), so it is excluded from the distilled branch.
+#   * M >= 2048 (deep prefill): the distilled BLOCK_N=256 / BLOCK_M=128 tile
+#     maximizes B-reuse and ds_read_b128 LDS readback; +13-50% over gfx11.
+#
+# (The earlier distilled table was M-blind, autotuned only at M in {2048,3968},
+# so it regressed every M<512 shape.) BLOCK_K is capped to group_size so a
+# K-block never straddles a quant group (scale aliasing); gs128 layers -- the
+# bulk -- pass the table BLOCK_K through unchanged, gs64/gs32 clamp to 64/32.
+def _select_skinny_gfx11_config(
+    M: int, N: int, K: int, group_size: int
+) -> tuple[int, int, int, int]:
+    """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for the gfx11 skinny GEMM."""
+    tall = K >= 2 * N  # tall-K (down_proj-like)
+    if M <= 64:
+        block_m, block_n, block_k, num_warps = 32, (64 if tall else 32), 128, 4
+    elif M <= 256:
+        if N >= 16384:  # very wide N (gate_up / lm_head)
+            block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+        elif tall:  # tall K (down_proj)
+            block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+        else:  # N ~= K (o_proj / qkv)
+            block_m, block_n, block_k, num_warps = 64, 32, 128, 4
+    elif M < 2048:
+        if tall and N < 4096 and K % 2048 != 0:  # narrow tall non-cliff K
+            block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        else:
+            block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+    else:  # M >= 2048 (deep prefill)
+        block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+    # Very narrow N (e.g. the L2 N=512 microbench shapes) at small/mid M: a wide
+    # BLOCK_N leaves too few N-tiles (ceil(512/256)=2) to fill the CUs, so clamp
+    # it -- BLOCK_N=32 restores ~16 N-tiles. At M>=1024 the M-tiles already
+    # saturate the CUs, so the wide tile is kept (clamping there costs ~5x).
+    if N <= 1024 and M <= 512:
+        block_n = min(block_n, 32)
+    return block_m, block_n, min(block_k, group_size), num_warps
 
 
 def triton_w4a16_skinny_fmt_gemm(
@@ -344,12 +367,13 @@ def triton_w4a16_skinny_fmt_gemm(
         assert out.is_contiguous(), "out must be contiguous"
         c = out
 
-    # On gfx11x, select the tile config per (M, N, K) from the
-    # distilled table (see _select_skinny_gfx11_config). BLOCK_K is fixed at 32,
-    # which is <= every supported AWQ group size (no group-boundary scale
-    # aliasing).
+    # On gfx11x, select the tile config per (M, N, K) from the per-M table
+    # (see _select_skinny_gfx11_config). BLOCK_K is capped to group_size there
+    # so a K-block never straddles a quant group (no scale aliasing).
     if on_gfx1x():
-        block_m, block_n, num_warps = _select_skinny_gfx11_config(M, N, K)
+        block_m, block_n, block_k, num_warps = _select_skinny_gfx11_config(
+            M, N, K, group_size
+        )
         grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
         # The kernel picks the packed (fp16/gfx1x) vs scalar unpack itself.
         _triton_w4a16_skinny_fmt_kernel[grid](
@@ -362,12 +386,13 @@ def triton_w4a16_skinny_fmt_gemm(
             N,
             K,
             K8,
+            stride_bn,
             num_groups,
             group_size=group_size,
             HAS_ZP=has_zp,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            BLOCK_K=32,
+            BLOCK_K=block_k,
             num_warps=num_warps,
             num_stages=1,  # >1 regresses badly for this kernel (no SW pipeline)
         )
