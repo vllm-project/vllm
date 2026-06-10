@@ -9,6 +9,7 @@ import ray
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -397,13 +398,27 @@ def qr_variable_input(rank, world_size):
     ranks = []
     for i in range(world_size):
         ranks.append(i)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="tcp://127.0.0.1:29500",
-        rank=rank,
-        world_size=world_size,
-    )
-    cpu_group = torch.distributed.new_group(ranks, backend="nccl")
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        dist.init_process_group(
+            backend="cpu:gloo,cuda:nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+            device_id=device,
+        )
+    else:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+        )
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        cpu_group = torch.distributed.split_group(
+            split_ranks=[ranks], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        cpu_group = torch.distributed.new_group(ranks, backend="nccl")
 
     handle = ops.qr_get_handle(_ptr)
     world_size = dist.get_world_size(group=cpu_group)
