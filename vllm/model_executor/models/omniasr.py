@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 
@@ -104,7 +105,10 @@ ISO_TO_OMNIASR_CODE = {
 
 @lru_cache(maxsize=8)
 def _load_lang_table(model_id: str) -> dict[str, int]:
-    path = hf_hub_download(repo_id=model_id, filename="lang_lookup.json")
+    if os.path.isdir(model_id):
+        path = os.path.join(model_id, "lang_lookup.json")
+    else:
+        path = hf_hub_download(repo_id=model_id, filename="lang_lookup.json")
     with open(path) as f:
         return json.load(f)
 
