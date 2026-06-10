@@ -35,11 +35,12 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
+    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -82,6 +83,10 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _remap_gemma4_expert_weight_name(name: str) -> str:
+    return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
 
 @triton.jit
@@ -234,13 +239,7 @@ class Gemma4MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-        if hidden_activation != "gelu_pytorch_tanh":
-            raise ValueError(
-                "Gemma4 uses `gelu_pytorch_tanh` as the hidden activation "
-                "function. Please set `hidden_act` and `hidden_activation` to "
-                "`gelu_pytorch_tanh`."
-            )
-        self.act_fn = GeluAndMul(approximate="tanh")
+        self.act_fn = get_act_and_mul_fn(hidden_activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
@@ -327,8 +326,9 @@ class Gemma4MoE(nn.Module):
         # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
         # FusedMoE's built-in fused_topk scopes softmax differently, so
         # a custom routing function is needed for numerical correctness.
-        per_expert_scale = self.per_expert_scale
-
+        # NOTE: self.per_expert_scale is read at call time (not captured into
+        # a local) so that torch.func.functional_call parameter substitution
+        # reaches the routing function correctly.
         def routing_function(
             hidden_states: torch.Tensor,
             gating_output: torch.Tensor,
@@ -337,10 +337,12 @@ class Gemma4MoE(nn.Module):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 return gemma4_fused_routing_kernel_triton(
-                    gating_output, topk, per_expert_scale
+                    gating_output, topk, self.per_expert_scale
                 )
 
-            return gemma4_routing_function_torch(gating_output, topk, per_expert_scale)
+            return gemma4_routing_function_torch(
+                gating_output, topk, self.per_expert_scale
+            )
 
         # FusedMoE experts with custom Gemma4 routing
         self.experts = FusedMoE(
@@ -356,7 +358,7 @@ class Gemma4MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=routing_function,
-            activation="gelu",
+            activation="gelu_tanh",
         )
 
     def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
@@ -1049,11 +1051,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Final norm: output = norm(x) * weight
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Embedding scale = sqrt(hidden_size)
-        # Downcast to model dtype (bfloat16 etc.) for numerical parity
+        # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
         self.register_buffer(
             "normalizer",
-            torch.tensor(config.hidden_size**0.5),
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=vllm_config.model_config.dtype,
+            ),
             persistent=False,
         )
 
@@ -1106,7 +1111,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             )
             self.hidden_states = torch.zeros(
                 (max_num_tokens, config.hidden_size),
-                dtype=self.embed_tokens.weight.dtype,
+                dtype=vllm_config.model_config.dtype,
                 device=device,
             )
             if (
@@ -1119,7 +1124,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         config.num_hidden_layers,
                         self.hidden_size_per_layer_input,
                     ),
-                    dtype=self.embed_tokens.weight.dtype,
+                    dtype=vllm_config.model_config.dtype,
                     device=device,
                 )
             else:
@@ -1140,11 +1145,6 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         ) -> IntermediateTensors:
             tensors: dict[str, torch.Tensor] = {
                 "hidden_states": torch.zeros(
-                    (batch_size, hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
-                "residual": torch.zeros(
                     (batch_size, hidden_size),
                     dtype=dtype,
                     device=device,
@@ -1312,13 +1312,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 per_layer_inputs = self.project_per_layer_inputs(
                     hidden_states, per_layer_embeds
                 )
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-            per_layer_inputs = intermediate_tensors.get("per_layer_inputs")
-
+            if per_layer_inputs is not None:
+                per_layer_inputs = intermediate_tensors["per_layer_inputs"]
+        residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
@@ -1342,13 +1341,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                    "per_layer_inputs": per_layer_inputs,
-                }
-            )
+            tensors: dict[str, torch.Tensor] = {
+                "hidden_states": hidden_states,
+            }
+            if per_layer_inputs is not None:
+                tensors["per_layer_inputs"] = per_layer_inputs
+            return IntermediateTensors(tensors)
         # Gemma4 incorporates residual into hidden_states directly
         # Apply norm without residual fusion when possible.
         if residual is None:
@@ -1377,45 +1375,40 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
-        #
-        # Use prefix matching to handle both weights and
-        # quantization scale parameters. The param_name is a prefix ending
-        # in underscore, and weight_name ends with a dot, so that:
-        #   "experts.0.gate_proj.weight_scale" -> "experts.w13_weight_scale"
-        #   "experts.0.gate_proj.weight" -> "experts.w13_weight"
         num_experts = getattr(self.config, "num_experts", None) or 0
-        expert_params_mapping = [
-            # (param_name, weight_name, expert_id, shard_id)
+        # Strategy A: dot-separated suffix
+        # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
+        dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+        )
+        # Strategy B: underscore-separated suffix
+        # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
+        underscore_suffix_expert_params_mapping = [
             (
-                "experts.w13_"
-                if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_",
-                f"experts.{expert_id}.{proj_name}.",
+                f"{param_name}weight_",
+                f"{weight_name.rstrip('.')}_",
                 expert_id,
                 shard_id,
             )
-            for expert_id in range(num_experts)
-            for shard_id, proj_name in [
-                ("w1", "gate_proj"),
-                ("w2", "down_proj"),
-                ("w3", "up_proj"),
-            ]
+            for (
+                param_name,
+                weight_name,
+                expert_id,
+                shard_id,
+            ) in dot_suffix_expert_params_mapping
         ]
+        expert_params_mapping = (
+            dot_suffix_expert_params_mapping + underscore_suffix_expert_params_mapping
+        )
         params_dict = dict(self.named_parameters())
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
@@ -1492,6 +1485,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    # Skip if name doesn't exist in params_dict (e.g., individual
+                    # expert weights that should have been handled above)
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
@@ -1657,7 +1654,7 @@ class Gemma4ForCausalLM(
                 # Remap individual 2D expert weights:
                 # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
                 # (This handles per-expert 2D quantized weights)
-                name = re.sub(r"\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+                name = _remap_gemma4_expert_weight_name(name)
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for

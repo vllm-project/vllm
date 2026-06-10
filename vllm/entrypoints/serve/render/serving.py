@@ -11,7 +11,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
@@ -19,8 +18,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
-    get_system_message,
+    build_harmony_preamble,
+    extract_instructions_from_messages,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
@@ -31,10 +30,9 @@ from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.utils import (
-    create_error_response,
-    get_max_tokens,
-)
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
@@ -136,7 +134,7 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat(request)
+        result = await self.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -164,6 +162,7 @@ class OpenAIServingRender:
             input_length,
             self.default_sampling_params,
             self.override_max_tokens,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
@@ -184,6 +183,8 @@ class OpenAIServingRender:
     async def render_chat(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -252,7 +253,7 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
-                skip_mm_cache=True,
+                skip_mm_cache=skip_mm_cache,
                 reasoning_parser=self.reasoning_parser,
             )
         else:
@@ -276,7 +277,7 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        result = await self.render_completion(request)
+        result = await self.render_completion(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
@@ -296,6 +297,7 @@ class OpenAIServingRender:
                 input_length,
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
             params = request.to_sampling_params(
                 max_tokens, self.default_sampling_params
@@ -322,6 +324,8 @@ class OpenAIServingRender:
     async def render_completion(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
@@ -344,7 +348,7 @@ class OpenAIServingRender:
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
-            skip_mm_cache=True,
+            skip_mm_cache=skip_mm_cache,
         )
 
         return engine_inputs
@@ -401,6 +405,9 @@ class OpenAIServingRender:
         # for more info: see comment in `maybe_serialize_tool_calls`
         _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
+        chat_messages = list(request.messages)
+        instructions, chat_messages = extract_instructions_from_messages(chat_messages)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
@@ -408,23 +415,18 @@ class OpenAIServingRender:
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
             raise ValueError(f"Harmony does not support {reasoning_effort=}")
-        sys_msg = get_system_message(
-            reasoning_effort=reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=should_include_tools,
-        )
-        messages.append(sys_msg)
-
-        # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
+        tools = request.tools if should_include_tools else None
+        messages.extend(
+            build_harmony_preamble(
+                instructions=instructions,
+                tools=tools,  # type: ignore[arg-type]
+                reasoning_effort=reasoning_effort,
+                with_custom_tools=should_include_tools,
             )
-            messages.append(dev_msg)
+        )
 
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        # Add remaining conversation messages.
+        messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
@@ -537,7 +539,10 @@ class OpenAIServingRender:
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                tokenize=(
+                    is_mistral_tokenizer(renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
             ),
         )
 

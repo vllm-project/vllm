@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import field
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -32,7 +33,7 @@ CacheDType = Literal[
     "fp8_per_token_head",
     "nvfp4",
 ]
-MambaDType = Literal["auto", "float32", "float16"]
+MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -44,13 +45,25 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
+    hash_block_size: int | None = Field(default=None, gt=0)
+    """Block size (in tokens) used for computing Request's block_hashes.
+
+    This can be set to a finer granularity than the physical KV cache block
+    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
+    by it. This enables prefix-caching keys to be computed at the finest common
+    granularity and then merged for larger physical block sizes.
+
+    This config is not static default. If left unspecified, vLLM will choose a
+    default based on the resolved KV cache groups (typically the smallest KV
+    cache block size when there are multiple groups).
+    """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -182,6 +195,8 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            # Prefix-caching implementation detail (doesn't affect compiled graph).
+            "hash_block_size",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
@@ -206,19 +221,26 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
+    @field_validator("block_size", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
         # another pydantic model (e.g. VllmConfig). Guard against that.
         if self._block_size_resolved:
             return self
-        object.__setattr__(self, "_block_size_resolved", True)
+        self._block_size_resolved = True
         if self.block_size is None:
-            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+            self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
-            object.__setattr__(self, "user_specified_block_size", True)
+            self.user_specified_block_size = True
         if self.mamba_block_size is not None:
-            object.__setattr__(self, "user_specified_mamba_block_size", True)
+            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("calculate_kv_scales", mode="after")

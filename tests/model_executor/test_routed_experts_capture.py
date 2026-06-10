@@ -25,10 +25,15 @@ def _capturer_with_buffer(
     num_layers: int = 4,
     num_experts_per_tok: int = 2,
     dp_rank: int = 0,
+    tp_size: int = 1,
 ) -> RoutedExpertsCapturer:
-    c = RoutedExpertsCapturer()
+    # Bypass __init__ so the test can use a CPU buffer and skip the
+    # VllmConfig dependency. The CUDA device-tensor allocation in the
+    # real constructor is not what we are exercising here.
+    c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
-    c._device_buffer = torch.full(
+    c.tp_size = tp_size
+    c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
         -1,
         dtype=torch.int32,
@@ -41,7 +46,9 @@ class DummyRouter(BaseRouter):
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.FUSED_TOPK
 
-    def _compute_routing(self, hidden_states, router_logits, indices_type):
+    def _compute_routing(
+        self, hidden_states, router_logits, indices_type, *, input_ids=None
+    ):
         topk_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
         topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
         return topk_weights, topk_ids
@@ -51,13 +58,11 @@ class DummyRouter(BaseRouter):
         return topk_ids + 10
 
 
-def _make_router() -> DummyRouter:
+def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
     return DummyRouter(
         top_k=2,
         global_num_experts=16,
-        eplb_state=EplbLayerState(),
-        enable_eplb=False,
-        indices_type_getter=None,
+        eplb_state=eplb_state,
     )
 
 
@@ -81,12 +86,12 @@ def test_base_router_capture_pre_eplb_mapping():
 
 
 def test_base_router_capture_with_eplb_enabled():
-    router = _make_router()
-    router.enable_eplb = True
-    router.eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
-    router.eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
-    router.eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
-    router.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    eplb_state = EplbLayerState()
+    eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
+    eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
+    eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
+    eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    router = _make_router(eplb_state=eplb_state)
 
     captured = []
 
@@ -109,6 +114,9 @@ def test_base_router_capture_with_eplb_enabled():
 def test_gpu_model_runner_binds_router_capture(monkeypatch):
     from vllm.v1.worker import gpu_model_runner as gmr
 
+    class _DummyRouter:
+        _routing_replay_out: torch.Tensor | None = None
+
     class DummyFusedMoE:
         def __init__(self):
             self.layer_id = 7
@@ -126,7 +134,7 @@ def test_gpu_model_runner_binds_router_capture(monkeypatch):
     # Patch the runtime import inside _bind_routed_experts_capturer.
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
-    monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
 
     dummy_self = types.SimpleNamespace(
         compilation_config=types.SimpleNamespace(
@@ -165,7 +173,7 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
 
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 
-    monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
 
     dummy_self = types.SimpleNamespace(
         compilation_config=types.SimpleNamespace(
@@ -192,8 +200,8 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     ctx = SimpleNamespace(dp_metadata=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
-    assert capturer._device_buffer[3, 0, 0].item() == -1
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
+    assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
@@ -210,7 +218,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     want = topk[2:5]
-    assert torch.equal(capturer._device_buffer[:3, 0, :], want)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], want)
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
@@ -223,7 +231,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
@@ -240,4 +248,4 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert capturer._device_buffer[0, 0, 0].item() == -1
+    assert capturer.device_buffer[0, 0, 0].item() == -1

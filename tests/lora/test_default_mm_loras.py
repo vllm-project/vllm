@@ -11,6 +11,7 @@ import pytest
 from huggingface_hub import snapshot_download
 
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..conftest import AudioTestAssets, VllmRunner
 from ..utils import create_new_process_for_each_test
@@ -76,6 +77,9 @@ def test_active_default_mm_lora(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @create_new_process_for_each_test()
 def test_inactive_default_mm_lora(
     vllm_runner: type[VllmRunner],
@@ -92,6 +96,9 @@ def test_inactive_default_mm_lora(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @create_new_process_for_each_test()
 def test_default_mm_lora_succeeds_with_redundant_lora_request(
     vllm_runner: type[VllmRunner],
@@ -107,6 +114,9 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @create_new_process_for_each_test()
 def test_default_mm_lora_fails_with_overridden_lora_request(
     vllm_runner: type[VllmRunner],
