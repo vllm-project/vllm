@@ -151,28 +151,6 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
-    def specialize(
-        cls,
-        device_capability: "DeviceCapability",
-    ) -> type["AttentionBackend"]:
-        """Resolve an architecture/configuration-specific backend class.
-
-        The registry enum remains the public selection surface. Backends that
-        share that public name but need different concrete implementations on
-        different GPU families can override this hook and return the concrete
-        backend class before validation and instantiation.
-        """
-        return cls
-
-    @classmethod
-    def normalize_kv_cache_dtype(
-        cls,
-        kv_cache_dtype: "CacheDType",
-    ) -> "CacheDType":
-        """Return the canonical KV-cache dtype required by this backend."""
-        return kv_cache_dtype
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 

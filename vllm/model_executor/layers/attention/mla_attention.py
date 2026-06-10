@@ -319,6 +319,22 @@ def _detect_output_quant_key(
     return kFp8StaticTensorSym
 
 
+def _canonicalize_sparse_mla_kv_cache_dtype(
+    attn_backend: type[AttentionBackend],
+    kv_cache_dtype: str,
+) -> str:
+    backend_name = attn_backend.get_name()
+    if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        return "fp8_ds_mla"
+    if (
+        backend_name == "FLASHINFER_MLA_SPARSE"
+        and attn_backend.__name__ == "FlashInferMLASparseSM120Backend"
+        and kv_cache_dtype in ("auto", "fp8", "fp8_e4m3")
+    ):
+        return "fp8_ds_mla"
+    return kv_cache_dtype
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -392,8 +408,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 num_heads=self.num_heads,
             )
 
-        normalized_kv_cache_dtype = self.attn_backend.normalize_kv_cache_dtype(
-            kv_cache_dtype
+        normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
+            self.attn_backend, kv_cache_dtype
         )
         if normalized_kv_cache_dtype != kv_cache_dtype:
             if cache_config is not None:

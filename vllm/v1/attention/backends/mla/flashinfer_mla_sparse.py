@@ -3,7 +3,7 @@
 """FlashInfer sparse MLA attention backend."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, NoReturn
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -39,13 +39,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-
-
-def _raise_unspecialized_dispatch(method: str) -> NoReturn:
-    raise RuntimeError(
-        "FLASHINFER_MLA_SPARSE is an architecture dispatcher. "
-        f"Call specialize(device_capability) before {method}()."
-    )
 
 
 class _FlashInferMLASparseBackendBase(AttentionBackend):
@@ -218,15 +211,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
                 )
         return None
 
-    @classmethod
-    def normalize_kv_cache_dtype(
-        cls,
-        kv_cache_dtype: CacheDType,
-    ) -> CacheDType:
-        if kv_cache_dtype in ("auto", "fp8", "fp8_e4m3"):
-            return "fp8_ds_mla"
-        return kv_cache_dtype
-
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -243,136 +227,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
-
-
-class FlashInferMLASparseBackend(AttentionBackend):
-    """Public FlashInfer sparse MLA backend dispatcher."""
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASHINFER_MLA_SPARSE"
-
-    @staticmethod
-    def _variant_for_capability(
-        device_capability: DeviceCapability,
-    ) -> type[AttentionBackend]:
-        if device_capability.major == 12:
-            return FlashInferMLASparseSM120Backend
-        return FlashInferMLASparseTRTLLMBackend
-
-    @classmethod
-    def specialize(
-        cls,
-        device_capability: DeviceCapability,
-    ) -> type[AttentionBackend]:
-        return cls._variant_for_capability(device_capability)
-
-    @classmethod
-    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in (10, 12)
-
-    @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
-        _raise_unspecialized_dispatch("get_impl_cls")
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        _raise_unspecialized_dispatch("get_supported_kernel_block_sizes")
-
-    @staticmethod
-    def get_builder_cls() -> type["FlashInferMLASparseMetadataBuilder"]:
-        _raise_unspecialized_dispatch("get_builder_cls")
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
-
-    @classmethod
-    def is_mla(cls) -> bool:
-        return True
-
-    @classmethod
-    def is_sparse(cls) -> bool:
-        return True
-
-    @classmethod
-    def validate_configuration(
-        cls,
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: CacheDType | None,
-        block_size: int | None,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        use_mm_prefix: bool,
-        use_per_head_quant_scales: bool,
-        device_capability: DeviceCapability,
-        attn_type: str,
-        use_non_causal: bool = False,
-        use_batch_invariant: bool = False,
-        use_kv_connector: bool = False,
-    ) -> list[str]:
-        return cls._variant_for_capability(device_capability).validate_configuration(
-            head_size=head_size,
-            dtype=dtype,
-            kv_cache_dtype=kv_cache_dtype,
-            block_size=block_size,
-            use_mla=use_mla,
-            has_sink=has_sink,
-            use_sparse=use_sparse,
-            use_mm_prefix=use_mm_prefix,
-            use_per_head_quant_scales=use_per_head_quant_scales,
-            device_capability=device_capability,
-            attn_type=attn_type,
-            use_non_causal=use_non_causal,
-            use_batch_invariant=use_batch_invariant,
-            use_kv_connector=use_kv_connector,
-        )
-
-    @classmethod
-    def supports_combination(
-        cls,
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: CacheDType | None,
-        block_size: int | None,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        device_capability: DeviceCapability,
-    ) -> str | None:
-        return cls._variant_for_capability(device_capability).supports_combination(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            use_mla,
-            has_sink,
-            use_sparse,
-            device_capability,
-        )
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        _raise_unspecialized_dispatch("get_kv_cache_shape")
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        _raise_unspecialized_dispatch("get_required_kv_cache_layout")
-
-    @classmethod
-    def normalize_kv_cache_dtype(
-        cls,
-        kv_cache_dtype: CacheDType,
-    ) -> CacheDType:
-        _raise_unspecialized_dispatch("normalize_kv_cache_dtype")
 
 
 @dataclass

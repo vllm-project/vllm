@@ -158,12 +158,21 @@ def _backend_cls_path(backend_cls: type[AttentionBackend]) -> str:
     return f"{module}.{qualname}"
 
 
-def _specialize_attn_backend(
+def _get_attn_backend_class(
     backend: AttentionBackendEnum,
     device_capability: DeviceCapability,
 ) -> type[AttentionBackend]:
-    backend_class = backend.get_class()
-    return backend_class.specialize(device_capability)
+    if (
+        backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+        and not backend.is_overridden()
+        and device_capability.major == 12
+    ):
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+            FlashInferMLASparseSM120Backend,
+        )
+
+        return FlashInferMLASparseSM120Backend
+    return backend.get_class()
 
 
 class _BackendCandidate(NamedTuple):
@@ -300,7 +309,7 @@ class CudaPlatformBase(Platform):
         )
         for priority, backend in enumerate(backend_priorities):
             try:
-                backend_class = _specialize_attn_backend(backend, device_capability)
+                backend_class = _get_attn_backend_class(backend, device_capability)
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -329,7 +338,7 @@ class CudaPlatformBase(Platform):
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
-                backend_class = _specialize_attn_backend(
+                backend_class = _get_attn_backend_class(
                     selected_backend, device_capability
                 )
                 invalid_reasons = backend_class.validate_configuration(

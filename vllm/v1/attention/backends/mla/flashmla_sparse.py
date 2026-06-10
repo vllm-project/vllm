@@ -129,15 +129,6 @@ class FlashMLASparseBackend(AttentionBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
-    @classmethod
-    def normalize_kv_cache_dtype(
-        cls,
-        kv_cache_dtype: CacheDType,
-    ) -> CacheDType:
-        if is_quantized_kv_cache(kv_cache_dtype):
-            return "fp8_ds_mla"
-        return kv_cache_dtype
-
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
