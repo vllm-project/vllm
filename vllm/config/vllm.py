@@ -782,10 +782,6 @@ class VllmConfig:
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-        num_kv_ranks = (
-            self.parallel_config.tensor_parallel_size
-            * self.parallel_config.pipeline_parallel_size
-        )
 
         if kv_offloading_backend == "native":
             if envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
@@ -797,12 +793,12 @@ class VllmConfig:
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
-            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
-            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
-            self.kv_transfer_config.kv_connector_extra_config = {
-                "lmcache.local_cpu": True,
-                "lmcache.max_local_cpu_size": kv_gb_per_rank,
-            }
+            # Default to LMCache multi-process (MP) mode. The actual KV
+            # storage capacity is managed by the standalone LMCache server
+            # process, so ``kv_offloading_size`` is not propagated here.
+            # ``LMCacheMPConnector`` falls back to ``tcp://localhost:5555``
+            # when host/port are not provided via extra_config.
+            self.kv_transfer_config.kv_connector = "LMCacheMPConnector"
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
@@ -2014,12 +2010,16 @@ class VllmConfig:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
+            elif speculative_config.method not in ("eagle", "eagle3", "mtp", "dflash"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
-            # V2 EagleSpeculator does not support parallel_drafting (required by PEagle)
-            if speculative_config.parallel_drafting:
-                unsupported.append("parallel drafting for speculative decoding")
+            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
+            # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dflash"
+            ):
+                unsupported.append("parallel drafting for EAGLE speculative decoding")
 
             if (
                 speculative_config.method == "eagle3"
