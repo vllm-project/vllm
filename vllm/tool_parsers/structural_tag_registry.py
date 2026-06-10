@@ -1,10 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any, Literal
 
-from xgrammar import StructuralTag
+from xgrammar import StructuralTag, normalize_tool_choice
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
+from xgrammar.openai_tool_call_schema import (
+    BuiltinToolParam,
+    FunctionToolParam,
+)
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    JSONSchemaFormat,
+    TagFormat,
+    TagsWithSeparatorFormat,
+    TriggeredTagsFormat,
+)
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -14,6 +26,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 ToolChoice = (
     Literal["none", "auto", "required"] | ChatCompletionNamedToolChoiceParam | None
 )
+SimplifiedToolChoice = Literal["auto", "required", "forced"]
+StructuralTagBuilder = Callable[
+    [
+        list[FunctionToolParam],
+        list[BuiltinToolParam],
+        SimplifiedToolChoice,
+        bool,
+    ],
+    StructuralTag,
+]
 
 # Keep this list in sync with xgrammar.builtin_structural_tag. It is used for
 # vLLM-side validation and for documenting the xgrammar builtin surface that
@@ -34,6 +56,22 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4",
     }
 )
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes"})
+SUPPORTED_STRUCTURAL_TAG_MODELS = (
+    XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+)
+
+_VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
+
+
+def register_vllm_structural_tag(model: str):
+    """Register a vLLM-owned structural tag builder."""
+
+    def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
+        _VLLM_STRUCTURAL_TAG_REGISTRY[model] = func
+        return func
+
+    return decorator
 
 
 def get_model_structural_tag(
@@ -47,14 +85,29 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    dumped_tools = [_model_dump(tool) for tool in tools]
+    dumped_tool_choice = _model_dump(tool_choice)
+
+    if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
+        function_tools, builtin_tools, simplified_tool_choice = normalize_tool_choice(
+            dumped_tools,
+            dumped_tool_choice,
+        )
+        return _VLLM_STRUCTURAL_TAG_REGISTRY[model](
+            function_tools,
+            builtin_tools,
+            simplified_tool_choice,
+            reasoning,
+        )
+
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
-        supported = sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS)
+        supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
 
     return get_xgrammar_model_structural_tag(
         model=model,
-        tools=[_model_dump(tool) for tool in tools],
-        tool_choice=_model_dump(tool_choice),
+        tools=dumped_tools,
+        tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
 
@@ -65,3 +118,63 @@ def _model_dump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return value.model_dump(exclude_none=True)
     return value
+
+
+def _get_function_parameters(function) -> dict[str, Any] | bool:
+    if getattr(function, "strict", None) is False:
+        return True
+    return function.parameters if function.parameters is not None else True
+
+
+def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+    arguments_field_prefix = '", "arguments": '
+    formats = [
+        ('<tool_call>{"name": "', "}</tool_call>"),
+        ('<tool_call>\n{"name": "', "}\n</tool_call>"),
+    ]
+    return [
+        TagFormat(
+            begin=begin + tool.function.name + arguments_field_prefix,
+            content=JSONSchemaFormat(
+                json_schema=_get_function_parameters(tool.function)
+            ),
+            end=end,
+        )
+        for tool in tools
+        for begin, end in formats
+    ]
+
+
+@register_vllm_structural_tag("hermes")
+def get_hermes_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    del builtin_tools, reasoning
+
+    tool_call_trigger = "<tool_call>"
+
+    if tool_choice == "auto":
+        tags = _hermes_tool_tags(tools)
+        suffix_tag = (
+            TriggeredTagsFormat(triggers=[tool_call_trigger], tags=tags)
+            if tags
+            else AnyTextFormat()
+        )
+    elif tool_choice == "forced":
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=_hermes_tool_tags(tools),
+            separator="",
+            at_least_one=True,
+            stop_after_first=True,
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=_hermes_tool_tags(tools),
+            separator="\n",
+            at_least_one=True,
+        )
+
+    return StructuralTag(format=suffix_tag)

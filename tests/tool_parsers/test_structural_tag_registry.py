@@ -21,12 +21,15 @@ from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 from vllm.tool_parsers.structural_tag_registry import (
+    SUPPORTED_STRUCTURAL_TAG_MODELS,
+    VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
     get_model_structural_tag,
 )
@@ -56,6 +59,13 @@ def test_vllm_builtin_models_match_xgrammar_builtin_registry():
     )
 
 
+def test_supported_structural_tag_models_include_vllm_builtins():
+    assert SUPPORTED_STRUCTURAL_TAG_MODELS == (
+        XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+    )
+    assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     model: str,
@@ -69,6 +79,87 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+def test_get_model_structural_tag_supports_vllm_hermes(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=sample_tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert tag.model_dump() == {
+        "type": "structural_tag",
+        "format": {
+            "type": "tags_with_separator",
+            "tags": [
+                {
+                    "type": "tag",
+                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "style": "json",
+                    },
+                    "end": "}</tool_call>",
+                },
+                {
+                    "type": "tag",
+                    "begin": '<tool_call>\n{"name": "get_weather", "arguments": ',
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "style": "json",
+                    },
+                    "end": "}\n</tool_call>",
+                }
+            ],
+            "separator": "\n",
+            "at_least_one": True,
+            "stop_after_first": False,
+        },
+    }
+
+
+def test_hermes_required_tool_calls_are_newline_separated():
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        ),
+    ]
+
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert tag.format.separator == "\n"
 
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
@@ -96,6 +187,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (DeepSeekV32ToolParser, "deepseek_v3_2"),
         (DeepSeekV4ToolParser, "deepseek_v4"),
         (Glm47MoeModelToolParser, "glm_4_7"),
+        (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
