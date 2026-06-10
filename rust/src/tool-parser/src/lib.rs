@@ -26,7 +26,7 @@ pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub use hy_v3::HyV3ToolParser;
 pub use json::{
     HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser, MistralToolParser,
-    Qwen3XmlToolParser,
+    Phi4MiniJsonToolParser, Qwen3XmlToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
@@ -119,6 +119,12 @@ pub trait ToolParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the parser-provided ID for a tool call by index, if the model
+    /// emitted one.
+    fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
+        None
     }
 
     /// Feed one decoded text delta into the parser, appending committed output

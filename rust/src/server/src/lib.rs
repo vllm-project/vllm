@@ -4,14 +4,17 @@ mod config;
 mod error;
 mod grpc;
 mod listener;
+mod lora;
 mod middleware;
 mod routes;
+mod server_info;
 mod state;
 mod utils;
 
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
+use axum::Router;
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
@@ -29,6 +32,7 @@ use vllm_text::TextLlm;
 
 use crate::listener::Listener;
 use crate::routes::build_router;
+use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine
@@ -39,6 +43,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         &config.model,
         LoadModelBackendsOptions {
             renderer: config.renderer,
+            language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config
@@ -87,7 +92,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
             .with_log_requests(config.enable_log_requests)
-            .with_request_id_headers(config.enable_request_id_headers),
+            .with_request_id_headers(config.enable_request_id_headers)
+            .with_server_info(ServerInfoSnapshot::from_config(config))
+            .with_api_keys(config.api_keys.clone()),
     ))
 }
 
@@ -97,6 +104,21 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 /// The server owns one `vllm-chat` facade, which in turn owns the lower
 /// `vllm-text` and `vllm-llm` layers, and shuts them down before returning.
 pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
+    serve_with_router_extension(config, shutdown, |router| router).await
+}
+
+/// Run the OpenAI-compatible HTTP server with an opt-in router extension.
+///
+/// The extension receives the finalized vLLM router and can merge additional
+/// routes before the server starts accepting requests.
+pub async fn serve_with_router_extension<F>(
+    config: Config,
+    shutdown: CancellationToken,
+    extend_router: F,
+) -> Result<()>
+where
+    F: FnOnce(Router) -> Router,
+{
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Also check shutdown during the (potentially long) startup handshake.
@@ -109,7 +131,7 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
     let model = state.primary_model_name().to_owned();
-    let app = build_router(state.clone());
+    let app = extend_router(build_router(state.clone()));
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)

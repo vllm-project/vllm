@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -21,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 # Dummy placeholder hash for store_mask's template computation.
 _DUMMY_BLOCK_HASH = BlockHash(b"\x00" * 32)
@@ -89,7 +89,10 @@ class MooncakeStoreCoordinator:
         ] = []
         for i, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
-            manager_cls = spec_manager_map[type(spec)]
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            assert manager_cls is not None, (
+                f"No manager registered for KVCacheSpec {spec}"
+            )
             for existing_spec, group_ids, existing_cls in attention_groups:
                 if existing_spec == spec:
                     assert manager_cls is existing_cls
