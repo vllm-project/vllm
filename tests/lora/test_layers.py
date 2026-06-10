@@ -618,6 +618,71 @@ def test_linear_replicated(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_linear_dora_scale_stacked(default_vllm_config, dist_init, device) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    dtype = (
+        torch.float16
+        if current_platform.is_cuda_alike() or current_platform.is_xpu()
+        else torch.float32
+    )
+    max_loras = 2
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=2,
+        lora_dtype=dtype,
+    )
+
+    linear = ReplicatedLinear(4, 3, bias=False, params_dtype=dtype)
+    linear.weight.data = torch.arange(12, dtype=dtype, device=device).reshape(3, 4)
+    lora_linear = ReplicatedLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+
+    lora_a = torch.tensor(
+        [[0.5, 0.25, -0.5, 1.0], [1.5, -0.25, 0.75, -1.0]],
+        dtype=dtype,
+        device=device,
+    )
+    lora_b = torch.tensor(
+        [[0.25, -0.5], [1.0, 0.5], [-0.75, 1.25]],
+        dtype=dtype,
+        device=device,
+    )
+    magnitude = torch.tensor([2.0, 3.0, 4.0], dtype=dtype, device=device)
+
+    lora_linear.set_lora(
+        1,
+        lora_a=lora_a,
+        lora_b=lora_b,
+        lora_magnitude_vector=magnitude,
+    )
+
+    expected_delta = lora_b.float() @ lora_a.float()
+    expected_norm = torch.linalg.vector_norm(
+        linear.weight.float() + expected_delta, dim=1
+    )
+    expected_scale = magnitude.float() / expected_norm
+
+    assert lora_linear.dora_enabled_stacked[1]
+    torch.testing.assert_close(
+        lora_linear.dora_scale_stacked[1].float(),
+        expected_scale,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+    lora_linear.reset_lora(1)
+    assert not lora_linear.dora_enabled_stacked[1]
+    torch.testing.assert_close(
+        lora_linear.dora_scale_stacked[1],
+        torch.ones_like(lora_linear.dora_scale_stacked[1]),
+    )
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])

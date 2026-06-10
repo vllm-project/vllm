@@ -329,6 +329,7 @@ class LoRAModelManager:
                 index,
                 module_lora.lora_a,
                 module_lora.lora_b,
+                lora_magnitude_vector=module_lora.lora_magnitude_vector,
             )
             logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True

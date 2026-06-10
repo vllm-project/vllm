@@ -177,6 +177,18 @@ class LoRAModel:
                 if pin_memory:
                     module_lora.lora_b = module_lora.lora_b.pin_memory()
 
+        if peft_helper.use_dora:
+            missing_magnitude = [
+                module_name
+                for module_name, module_lora in loras.items()
+                if module_lora.lora_magnitude_vector is None
+            ]
+            if missing_magnitude:
+                raise ValueError(
+                    "DoRA adapter is missing lora_magnitude_vector for "
+                    f"module(s): {missing_magnitude}."
+                )
+
         return cls(lora_model_id, peft_helper.r, loras)
 
     @classmethod

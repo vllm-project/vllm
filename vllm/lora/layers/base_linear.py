@@ -148,18 +148,32 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self.n_slices)
         )
+        self.dora_scale_stacked = torch.ones(
+            max_loras,
+            lora_b_out_size,
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.dora_enabled_stacked = torch.zeros(
+            max_loras,
+            dtype=torch.bool,
+            device=self.device,
+        )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+        self.dora_scale_stacked[index] = 1
+        self.dora_enabled_stacked[index] = False
 
     def set_lora(
         self,
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: torch.Tensor | None = None,
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
@@ -176,6 +190,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
+        if lora_magnitude_vector is not None:
+            self._set_dora_scale(index, lora_a, lora_b, lora_magnitude_vector)
+
         self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
             lora_a, non_blocking=True
         )
@@ -190,6 +207,47 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 f"{type(self.base_layer).__name__} must define quant_method for LoRA."
             )
         return quant_method
+
+    def _set_dora_scale(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor,
+    ) -> None:
+        if self.tp_size != 1:
+            raise NotImplementedError("DoRA currently only supports TP=1.")
+        if self.n_slices != 1:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
+        if not hasattr(self.base_layer, "weight"):
+            raise NotImplementedError(
+                "DoRA requires access to the unquantized base layer weight."
+            )
+
+        base_weight = self.base_layer.weight
+        if base_weight.shape != (lora_b.shape[0], lora_a.shape[1]):
+            raise ValueError(
+                "DoRA weight shapes are incompatible with the base layer: "
+                f"base_weight={tuple(base_weight.shape)}, "
+                f"lora_a={tuple(lora_a.shape)}, lora_b={tuple(lora_b.shape)}."
+            )
+        if lora_magnitude_vector.shape[0] != lora_b.shape[0]:
+            raise ValueError(
+                "DoRA magnitude vector shape is incompatible with lora_b: "
+                f"magnitude={tuple(lora_magnitude_vector.shape)}, "
+                f"lora_b={tuple(lora_b.shape)}."
+            )
+
+        delta_weight = lora_b.float() @ lora_a.float()
+        merged_weight = base_weight.float() + delta_weight
+        weight_norm = torch.linalg.vector_norm(merged_weight, dim=1)
+        weight_norm = torch.clamp(weight_norm, min=torch.finfo(weight_norm.dtype).eps)
+        dora_scale = lora_magnitude_vector.float() / weight_norm
+        self.dora_scale_stacked[index, : dora_scale.shape[0]].copy_(
+            dora_scale.to(dtype=self.dora_scale_stacked.dtype),
+            non_blocking=True,
+        )
+        self.dora_enabled_stacked[index] = True
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules

@@ -244,6 +244,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
+        self.dora_scale_stacked = torch.ones(
+            max_loras,
+            sum(self.output_slices),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.dora_enabled_stacked = torch.zeros(
+            max_loras,
+            dtype=torch.bool,
+            device=self.device,
+        )
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -304,7 +315,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: torch.Tensor | None = None,
     ):
+        if lora_magnitude_vector is not None:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
         self.reset_lora(index)
 
         # Expand packed adapter groups when they don't match n_slices.
@@ -720,9 +734,12 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: torch.Tensor | None = None,
     ):
         """Override to handle single tensor weights
         that need to be split into slices."""
+        if lora_magnitude_vector is not None:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
         self.reset_lora(index)
 
         # Handle case where checkpoint has single tensor weights

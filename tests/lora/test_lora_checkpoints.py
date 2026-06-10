@@ -209,3 +209,18 @@ def test_load_lora_tensors_rejects_unconfigured_dora_magnitude():
             _make_peft_helper(use_dora=False),
             device="cpu",
         )
+
+
+def test_load_dora_tensors_rejects_missing_magnitude():
+    tensors = {
+        "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
+        "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
+    }
+
+    with pytest.raises(ValueError, match="missing lora_magnitude_vector"):
+        LoRAModel.from_lora_tensors(
+            1,
+            tensors,
+            _make_peft_helper(use_dora=True),
+            device="cpu",
+        )
