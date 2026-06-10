@@ -47,6 +47,10 @@ repos:
         --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
+        # cohere start
+        # Provided by requirements/cuda.txt via -c constraints
+        --no-emit-package, transformers,
+        # cohere end
       ]
       files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
@@ -116,6 +120,10 @@ repos:
         --no-emit-package, nvidia-nvjitlink-cu13,
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
+        # cohere start
+        # Provided by requirements/rocm.txt via -c constraints
+        --no-emit-package, transformers,
+        # cohere end
       ]
       files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
     - id: pip-compile
