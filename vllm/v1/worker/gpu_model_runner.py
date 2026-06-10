@@ -1438,16 +1438,6 @@ class GPUModelRunner(
         for request in reqs_to_add:
             self.input_batch.add_request(request)
             self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
-            # Update the request state with the number of draft tokens for async
-            # scheduling. This tracks token generation progress and maintains
-            # request state. NOTE: The spec tokens are placeholders and not
-            # added to token_ids_cpu.
-            if self.use_async_scheduling:
-                req_state = self.requests[request.req_id]
-                spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                    request.req_id, []
-                )
-                req_state.prev_num_draft_len = len(spec_token_ids)
 
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
