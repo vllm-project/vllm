@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
+    VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -954,6 +955,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 25 MB
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
+    ),
+    # Maximum decoded audio duration in seconds.  Compressed audio files
+    # (e.g. OPUS at very low bitrate) can expand into gigabytes of float32
+    # PCM.  This limit is enforced *during* decoding so the memory is never
+    # allocated.  Default is 600s (10 minutes).
+    "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
+        os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
@@ -2156,6 +2164,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
