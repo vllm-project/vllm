@@ -658,17 +658,16 @@ def patch_worker_dependencies():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("local_pp_size", "local_pp_rank", "remote_pp_size", "expected_addrs"),
+    ("local_pp_size", "local_pp_rank", "expected_addrs"),
     [
-        (1, 0, 2, ["tcp://producer-pp0:1234", "tcp://producer-pp1:1234"]),
-        (2, 1, 2, ["tcp://producer-pp1:1234"]),
+        (1, 0, ["tcp://producer-pp0:1234", "tcp://producer-pp1:1234"]),
+        (2, 1, ["tcp://producer-pp1:1234"]),
     ],
     ids=["heterogeneous_pp_pulls_all_remote_pp", "matching_pp_pulls_same_rank"],
 )
 async def test_receive_kv_selects_remote_pp_workers(
     local_pp_size: int,
     local_pp_rank: int,
-    remote_pp_size: int,
     expected_addrs: list[str],
 ):
     """Decode workers should not hard-code producer pp_rank 0."""
@@ -695,7 +694,6 @@ async def test_receive_kv_selects_remote_pp_workers(
             }
         }
         decode_worker._tp_size["p-engine"] = 1
-        decode_worker._pp_size["p-engine"] = remote_pp_size
 
         pull_metas = {
             "d-req-1": PullReqMeta(
