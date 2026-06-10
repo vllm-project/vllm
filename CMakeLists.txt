@@ -1294,20 +1294,25 @@ define_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-# Set TORCH_TARGET_VERSION for stable ABI compatibility.
-# This ensures we only use C-shim APIs available in PyTorch 2.10.
-# _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-# which is currently set to 2.10.
-target_compile_definitions(_moe_C_stable_libtorch PRIVATE
-  TORCH_TARGET_VERSION=0x020A000000000000ULL)
-
 # Needed to use cuda/hip APIs from C-shim
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.11.
+  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.11.
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
   # Needed by CUTLASS kernels
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 elseif(VLLM_GPU_LANG STREQUAL "HIP")
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.10.
+  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.10.
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL)
   target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
 endif()
 

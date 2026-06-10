@@ -2,8 +2,6 @@
 
 #include <torch/csrc/stable/tensor.h>
 
-#include "core/scalar_type.hpp"
-
 #include <optional>
 #include <tuple>
 
