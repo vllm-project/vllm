@@ -57,7 +57,7 @@ from vllm.utils.humming import dtypes as humming_dtypes
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
