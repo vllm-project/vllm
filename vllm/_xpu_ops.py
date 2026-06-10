@@ -783,6 +783,8 @@ class xpu_ops:
         return_softmax_lse: bool | None = False,
         s_aux: torch.Tensor | None = None,
         return_attn_probs: bool | None = False,
+        mask_mod=None,
+        aux_tensors=None,
     ):
         assert cu_seqlens_k is not None or seqused_k is not None, (
             "cu_seqlens_k or seqused_k must be provided"
