@@ -155,9 +155,9 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
-            vllm_config.speculative_config is not None
-            or vllm_config.model_config.is_diffusion
+            self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
@@ -576,18 +576,18 @@ class EngineCore:
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
-        if self.check_for_draft_tokens and deferred_scheduler_output:
-            # If we are doing speculative decoding with structured output,
-            # we need to get the draft token ids from the prior step before
-            # we can compute the grammar bitmask for the deferred request.
-            draft_token_ids = self.model_executor.take_draft_token_ids()
-            if draft_token_ids is not None:
-                # Update the draft token ids in the scheduler output to
-                # filter out the invalid spec tokens, which will be padded
-                # with -1 and skipped by the grammar bitmask computation.
-                self.scheduler.update_draft_token_ids_in_output(
-                    draft_token_ids, deferred_scheduler_output
-                )
+        if deferred_scheduler_output:
+            # When draft tokens are used with structured output, validate them
+            # before computing the grammar bitmask for the deferred request.
+            if self.check_for_draft_tokens:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
+                if draft_token_ids is not None:
+                    # Update the draft token ids in the scheduler output to
+                    # filter out the invalid spec tokens, which will be padded
+                    # with -1 and skipped by the grammar bitmask computation.
+                    self.scheduler.update_draft_token_ids_in_output(
+                        draft_token_ids, deferred_scheduler_output
+                    )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
