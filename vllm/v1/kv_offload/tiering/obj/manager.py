@@ -242,10 +242,21 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         ``_pending_results`` and are surfaced by the next
         ``get_finished_jobs()`` call.
         """
+        start = time.monotonic()
+        warned = False
         while self._transfers:
             self._poll_active_transfers()
-            if self._transfers:
-                time.sleep(0.001)
+            if not self._transfers:
+                break
+            if not warned and time.monotonic() - start > 5.0:
+                logger.warning(
+                    "ObjectStoreSecondaryTierManager.drain_jobs: still "
+                    "draining after 5s (%d transfers in flight); a stuck "
+                    "transfer will block the engine.",
+                    len(self._transfers),
+                )
+                warned = True
+            time.sleep(0.001)
 
     def shutdown(self) -> None:
         for job_id, entry in self._transfers.items():
