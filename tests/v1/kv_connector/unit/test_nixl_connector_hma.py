@@ -258,7 +258,7 @@ def test_apply_prefix_caching_mamba_hybrid(
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
-    worker = object.__new__(cls=NixlConnectorWorker)
+    worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = True
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._group_spec_types = (FullAttentionSpec, MambaSpec)
