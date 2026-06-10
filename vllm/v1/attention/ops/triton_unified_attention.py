@@ -874,7 +874,7 @@ def unified_attention(
         head_size == 256
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
-        and current_platform.has_device_capability(100)
+        and current_platform.is_device_capability_family(100)
     )
     if tuned_large_head:
         BLOCK_M = 32
