@@ -9,6 +9,8 @@ No GPU or NIXL required.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -33,12 +35,15 @@ def _compute_mapping(
     num_kv_heads: int = 8,
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
 ) -> TPMapping:
-    return compute_tp_mapping(
+    transfer_topology = SimpleNamespace(
         tp_rank=tp_rank,
         tp_size=tp_size,
-        remote_tp_size=remote_tp_size,
         is_mla=is_mla,
         total_num_kv_heads=num_kv_heads,
+    )
+    return compute_tp_mapping(
+        transfer_topology=transfer_topology,
+        remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
     )
 

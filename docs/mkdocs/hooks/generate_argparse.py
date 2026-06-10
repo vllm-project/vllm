@@ -147,6 +147,7 @@ AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
 openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
 
@@ -260,6 +261,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "serve": create_parser(openai_cli_args.make_arg_parser),
         "chat": create_parser(ChatCommand.add_cli_args),
         "complete": create_parser(CompleteCommand.add_cli_args),
+        "launch_render": create_parser(RenderSubcommand.add_cli_args),
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
         # Benchmark CLI
         "bench_latency": create_parser(bench_latency.add_cli_args),

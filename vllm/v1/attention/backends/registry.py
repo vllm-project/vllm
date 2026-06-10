@@ -63,6 +63,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
+    TOKENSPEED_MLA = (
+        "vllm.v1.attention.backends.mla.tokenspeed_mla.TokenspeedMLABackend"
+    )
     FLASHINFER_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
         "FlashInferMLASparseBackend"
@@ -73,10 +76,20 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHMLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend"
     )
+    # DeepSeek V4 sparse MLA backends (model-driven; selected via the V4 layer).
+    FLASHMLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.sparse_mla.DeepseekV4FlashMLABackend"
+    )
+    FLASHINFER_MLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.nvidia.flashinfer_sparse."
+        "DeepseekV4FlashInferMLASparseBackend"
+    )
+    ROCM_FLASHMLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
+    )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
-    TREE_ATTN = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
@@ -192,16 +205,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     def clear_override(self) -> None:
         """Clear any override for this backend, reverting to the default."""
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
-
-
-MAMBA_TYPE_TO_BACKEND_MAP = {
-    "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
-    "mamba2": MambaAttentionBackendEnum.MAMBA2.name,
-    "short_conv": MambaAttentionBackendEnum.SHORT_CONV.name,
-    "linear_attention": MambaAttentionBackendEnum.LINEAR.name,
-    "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
-    "custom": MambaAttentionBackendEnum.CUSTOM.name,
-}
 
 
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}

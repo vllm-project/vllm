@@ -31,6 +31,23 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 logger = init_logger(__name__)
 
 
+def _cat_ubatch_outputs(
+    sorted_results: list,
+) -> "torch.Tensor | tuple[torch.Tensor, ...]":
+    """Concatenate per-ubatch model outputs along the batch dim.
+
+    Most models return a single hidden-states tensor per ubatch. Target
+    models running with auxiliary output (e.g. EAGLE3 speculative decoding,
+    which collects aux hidden states for the drafter) return a tuple of
+    tensors instead. Fan out over tuple components so `torch.cat` sees
+    matching shapes and the caller receives the same structure the model
+    produced for a single ubatch (#40769).
+    """
+    if sorted_results and isinstance(sorted_results[0], tuple):
+        return tuple(torch.cat(parts, dim=0) for parts in zip(*sorted_results))
+    return torch.cat(sorted_results, dim=0)
+
+
 @dataclass
 class UbatchMetadata:
     context: UBatchContext
@@ -266,7 +283,7 @@ class UBatchWrapper:
                 for thread in ubatch_threads:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
-                result = torch.cat(sorted_results, dim=0)
+                result = _cat_ubatch_outputs(sorted_results)
                 cudagraph_metadata.outputs = result
                 # Join offloader's copy stream after forward to avoid unjoined
                 # stream error. The last layer's start_prefetch forks copy_stream,
@@ -310,7 +327,7 @@ class UBatchWrapper:
             for thread in ubatch_threads:
                 thread.join()
         sorted_results = [value for position, value in sorted(results)]
-        result = torch.cat(sorted_results, dim=0)
+        result = _cat_ubatch_outputs(sorted_results)
         return result
 
     def _make_ubatch_metadata(

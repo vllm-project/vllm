@@ -5,6 +5,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -801,6 +802,36 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     assert isinstance(args["enabled"], bool)
 
 
+def test_whitespace_preserved_in_arg_values(glm4_moe_tokenizer):
+    """Test that string arguments preserve leading and trailing whitespace."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="apply_diff",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "s": {"type": "string"},
+                    },
+                    "required": ["s"],
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    model_output = """<tool_call>apply_diff
+<arg_key>s</arg_key>
+<arg_value>    indented code    </arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+
+    assert args["s"] == "    indented code    "
+
+
 def test_zero_argument_tool_call(glm4_moe_tool_parser, mock_request):
     """Regression: zero-argument tool call crash (PR #32321)."""
     model_output = """<tool_call>get_time
@@ -1333,3 +1364,122 @@ def test_stream_interval_content_between_tool_calls(
     args1 = json.loads("".join(tools_found[1]["args_fragments"]))
     assert args0 == {"city": "Beijing"}
     assert args1 == {"city": "Shanghai"}
+
+
+# ── FunctionTool (Responses API) tests ──────────────────────────────
+
+
+@pytest.fixture
+def function_tools():
+    return [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "unit": {"type": "string"},
+                },
+            },
+        ),
+        FunctionTool(
+            type="function",
+            name="calculate",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string"},
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+            },
+        ),
+    ]
+
+
+@pytest.fixture
+def glm4_moe_parser_function_tools(glm4_moe_tokenizer, function_tools):
+    return Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=function_tools)
+
+
+@pytest.fixture
+def mock_request_function_tools(function_tools) -> ChatCompletionRequest:
+    request = Mock(spec=ChatCompletionRequest)
+    request.tools = function_tools
+    return request
+
+
+def test_extract_tool_calls_with_function_tool(
+    glm4_moe_parser_function_tools, mock_request_function_tools
+):
+    model_output = """<tool_call>get_weather
+<arg_key>city</arg_key>
+<arg_value>Dallas</arg_value>
+<arg_key>unit</arg_key>
+<arg_value>fahrenheit</arg_value>
+</tool_call>"""
+
+    extracted = glm4_moe_parser_function_tools.extract_tool_calls(
+        model_output, request=mock_request_function_tools
+    )
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["city"] == "Dallas"
+    assert args["unit"] == "fahrenheit"
+
+
+def test_extract_tool_calls_with_function_tool_mixed_types(
+    glm4_moe_parser_function_tools, mock_request_function_tools
+):
+    model_output = """<tool_call>calculate
+<arg_key>operation</arg_key>
+<arg_value>add</arg_value>
+<arg_key>a</arg_key>
+<arg_value>42</arg_value>
+<arg_key>b</arg_key>
+<arg_value>3.14</arg_value>
+</tool_call>"""
+
+    extracted = glm4_moe_parser_function_tools.extract_tool_calls(
+        model_output, request=mock_request_function_tools
+    )
+    assert extracted.tools_called
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["operation"] == "add"
+    assert isinstance(args["a"], (int, float))
+    assert isinstance(args["b"], float)
+
+
+def test_streaming_with_function_tool(
+    glm4_moe_parser_function_tools, mock_request_function_tools
+):
+    _reset_streaming_state(glm4_moe_parser_function_tools)
+
+    chunks = [
+        "<tool_call>get_weather\n",
+        "<arg_key>city</arg_key>",
+        "<arg_value>Bei",
+        "jing",
+        "</arg_value>",
+        "</tool_call>",
+    ]
+
+    current_text = ""
+    for chunk in chunks:
+        current_text += chunk
+        glm4_moe_parser_function_tools.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request_function_tools,
+        )
+
+    assert len(glm4_moe_parser_function_tools.prev_tool_call_arr) == 1
+    args = json.loads(glm4_moe_parser_function_tools.prev_tool_call_arr[0]["arguments"])
+    assert args["city"] == "Beijing"

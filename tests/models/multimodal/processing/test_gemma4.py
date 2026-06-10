@@ -1,16 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
+
 import pytest
+import torch
 from PIL import Image as PILImage
 
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4ForConditionalGeneration,
+    Gemma4ImagePixelInputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.utils.mem_constants import GiB_bytes
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 # TODO: to be updated to "google/gemma-4-e2b-it" once the models are available
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
+
+
+def test_gemma4_image_schema_accepts_variable_patch_counts():
+    Gemma4ImagePixelInputs(
+        pixel_values=[
+            torch.randn(10080, 768),
+            torch.randn(2520, 768),
+        ],
+        pixel_position_ids=[
+            torch.zeros(10080, 2, dtype=torch.long),
+            torch.zeros(2520, 2, dtype=torch.long),
+        ],
+    )
+
+
+def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
+    field = MultiModalFieldConfig.batched("image").field
+    elems = field.build_elems(
+        "image",
+        "pixel_values",
+        [torch.randn(10080, 768), torch.randn(2520, 768)],
+    )
+
+    reduced = field.reduce_data(list(elems))
+
+    assert isinstance(reduced, list)
+    assert [tensor.shape for tensor in reduced] == [
+        torch.Size([10080, 768]),
+        torch.Size([2520, 768]),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -102,6 +141,39 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     assert tokens["video"] == 32 * (70 + 2 + 6)
 
 
+@pytest.mark.parametrize(
+    ("limit_mm_per_prompt", "expected_video_tokens"),
+    [
+        ({"video": 1}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1}}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 1}}, 1 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 8}}, 8 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 32}}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 40}}, 32 * (70 + 2 + 6)),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
+    model_id: str,
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]],
+    expected_video_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["image"] == 280
+    assert tokens["video"] == expected_video_tokens
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     ctx = build_model_context(
@@ -156,3 +228,60 @@ def test_limit_mm_per_prompt(
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
+
+
+# Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
+# admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
+# allocating 2.43 GiB int64 inside
+# ``F.one_hot(num_classes=position_embedding_size)`` and OOMing because only
+# 2.41 GiB was actually free.  The fix sizes ``chunk`` from currently-free GPU
+# memory and counts the ``F.one_hot`` transient as the dominant cost.
+
+_encoder_chunk = Gemma4ForConditionalGeneration._encoder_chunk
+
+# Gemma4 vision config default (HF: configuration_gemma4.py).
+_POSITION_EMBEDDING_SIZE = 10240
+# Video frame: max_soft_tokens=70, pooling_kernel_size=2 -> 70 * 4 patches.
+_VIDEO_PATCHES_PER_FRAME = 280
+
+
+def test_encoder_chunk_tight_budget_fits_in_free():
+    free = 3 * GiB_bytes  # L4 22 GiB after 26B AWQ load.
+    total = 22 * GiB_bytes
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE
+    )
+    one_hot_bytes = chunk * _VIDEO_PATCHES_PER_FRAME * 2 * _POSITION_EMBEDDING_SIZE * 8
+    assert one_hot_bytes <= free // 2
+
+
+def test_encoder_chunk_roomy_gpu_keeps_batching():
+    chunk = _encoder_chunk(
+        _VIDEO_PATCHES_PER_FRAME,
+        60 * GiB_bytes,
+        80 * GiB_bytes,
+        _POSITION_EMBEDDING_SIZE,
+    )
+    assert chunk > 8
+
+
+def test_encoder_chunk_zero_patches_is_safe():
+    assert (
+        _encoder_chunk(0, 60 * GiB_bytes, 80 * GiB_bytes, _POSITION_EMBEDDING_SIZE) == 1
+    )
+
+
+def test_encoder_chunk_zero_position_embedding_size_is_safe():
+    # Degenerate config: must not raise ZeroDivisionError.
+    assert (
+        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, 60 * GiB_bytes, 80 * GiB_bytes, 0) == 1
+    )
+
+
+def test_encoder_chunk_no_free_memory_falls_back_to_one():
+    assert (
+        _encoder_chunk(
+            _VIDEO_PATCHES_PER_FRAME, 0, 22 * GiB_bytes, _POSITION_EMBEDDING_SIZE
+        )
+        == 1
+    )
