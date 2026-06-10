@@ -1850,7 +1850,7 @@ def create_scheduler_with_priority(
         is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
         # Ensure admission/preemption mechanics are deterministic
-        watermark_scale=0.0,
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

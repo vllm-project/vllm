@@ -143,12 +143,12 @@ class SchedulerConfig:
     checking the first chunk. Prevents over-admission and KV cache thrashing
     with chunked prefill."""
 
-    watermark_scale: float = Field(default=64.0, ge=0.0)
-    """Tunable multiplier for the dynamic KV cache watermark, in approximate KV
-    cache tokens per running request per decode step. The watermark is the number
-    of free KV cache blocks kept in reserve when admitting waiting or preempted
-    requests into the running queue, to avoid frequent KV cache preemptions.
-    The watermark is capped at 4% of the total block capacity."""
+    watermark: float = Field(default=0.01, ge=0.0, lt=1.0)
+    """Fraction of total KV cache blocks to keep free (the watermark) when
+    admitting waiting or preempted requests into the running queue. This headroom
+    helps avoid frequent KV cache eviction and the resulting repeated preemption
+    of requests when GPU memory is scarce. Must be in the range [0.0, 1.0); 0.0
+    disables the watermark."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to

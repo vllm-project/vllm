@@ -4,7 +4,6 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import ceil
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
@@ -21,9 +20,6 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
-
-# Upper bound on watermark headroom, as a fraction of total KV cache blocks.
-WATERMARK_CAP_FRACTION = 0.04
 
 
 @dataclass
@@ -126,8 +122,7 @@ class KVCacheManager:
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        watermark_scale: float = 64.0,
-        num_spec_tokens: int = 0,
+        watermark: float = 0.01,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -162,18 +157,10 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
-        # Dynamic watermark: number of free KV cache blocks to keep in reserve
-        # when admitting waiting/preempted requests, to avoid frequent
-        # preemptions. The headroom grows linearly with the running-queue size
-        # up to a cap, set at 4% of total block capacity.
-        assert watermark_scale >= 0.0, "watermark_scale must be non-negative"
-        self.block_size = scheduler_block_size
-        # Adjust watermark scaling by num spec tokens
-        self.watermark_token_scale = watermark_scale * (1.0 + 0.5 * num_spec_tokens)
-        # Upper bound on the reserved headroom, in blocks (fixed fraction).
-        self.watermark_cap_blocks = int(
-            WATERMARK_CAP_FRACTION * kv_cache_config.num_blocks
-        )
+        # Watermark: minimum number of KV cache blocks to keep free when
+        # admitting waiting/preempted requests, to avoid frequent preemptions.
+        assert watermark >= 0.0, "watermark must be non-negative"
+        self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -190,14 +177,6 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
-
-    def get_watermark_blocks(self, num_running_reqs: int) -> int:
-        """Number of free KV cache blocks to keep in reserve when admitting a
-        waiting/preempted request. Grows linearly with the running-queue size."""
-        if num_running_reqs <= 0:
-            return 0
-        headroom_tokens = num_running_reqs * self.watermark_token_scale
-        return min(ceil(headroom_tokens / self.block_size), self.watermark_cap_blocks)
 
     @property
     def usage(self) -> float:
@@ -273,7 +252,6 @@ class KVCacheManager:
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
-        num_running_reqs: int = 0,
         reserved_blocks: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
@@ -300,9 +278,6 @@ class KVCacheManager:
                 free blocks to hold the full sequence, accounting for prefix cache hits
                 and sliding window. Used as an admission gate to prevent over-admitting
                 requests when chunked prefill would otherwise only check the first chunk
-            num_running_reqs: The number of requests currently in the running
-                queue. Used to size the dynamic watermark (free-block headroom)
-                applied when admitting a waiting/preempted request.
             reserved_blocks: Number of free blocks that must be left available for
                 other in-flight sequences to complete. The actual allocation is only
                 made if it fits within (free blocks - reserved_blocks). Used to gate
@@ -383,10 +358,9 @@ class KVCacheManager:
         )
 
         watermark_blocks = 0
-        # The watermark is applied to waiting/preempted requests only, and grows
-        # with the number of requests already in the running queue.
+        # The watermark is applied to waiting/preempted requests only.
         if request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
-            watermark_blocks = self.get_watermark_blocks(num_running_reqs)
+            watermark_blocks = self.watermark_blocks
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
