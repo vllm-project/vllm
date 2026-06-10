@@ -35,7 +35,7 @@ pub enum CoordinatorMode {
 }
 
 /// HTTP/API-server behavior switches that affect route-layer responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
@@ -43,16 +43,6 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
-}
-
-impl Default for ApiServerOptions {
-    fn default() -> Self {
-        Self {
-            enable_log_requests: false,
-            enable_prompt_tokens_details: false,
-            enable_request_id_headers: false,
-        }
-    }
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
