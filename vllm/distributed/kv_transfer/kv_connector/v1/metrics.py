@@ -51,6 +51,39 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Manages periodic logging and Prometheus recording of KV transfer metrics.
+
+    Pipeline (``observe`` → ``aggregate`` → ``reduce`` → ``log``):
+
+    1. **``observe(transfer_stats_data)``** — Called periodically when a
+       connector syncs with the scheduler.  The
+       ``transfer_stats_data`` dict is already **aggregated across all
+       workers** (TP ranks) by the time it reaches this method, so each
+       call contains observations from a single connector (or
+       ``MultiConnector``) for all ranks.
+
+    2. **``aggregate``** — Multiple ``observe`` calls within a logging
+       interval are accumulated into
+       ``self.transfer_stats_accumulator``.  The connector-specific
+       ``aggregate()`` method concatenates observation lists (via
+       ``list.extend``) from successive calls.
+
+    3. **``reduce``** — At the end of the interval, ``log()`` calls
+       ``reduce()`` on the accumulator, which computes summary
+       statistics (averages, percentiles, throughput) over the combined
+       pool of observations.  See the connector-specific stats class
+       (e.g. ``NixlKVConnectorStats``) for the exact semantics of
+       each metric.
+
+    4. **``log``** — The reduced dict is formatted as a human-readable
+       log line (``"KV Transfer metrics: ..."``) and emitted via the
+       configured ``log_fn`` (defaults to ``logger.info``).
+
+    Note: Stats arrive pre-aggregated across workers because each
+    worker sends its observations to the logger process independently,
+    and they are merged before ``observe`` is called.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
@@ -63,6 +96,13 @@ class KVConnectorLogging:
         self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        """Receive and accumulate connector transfer statistics.
+
+        Called periodically when a connector syncs with the scheduler.
+        ``transfer_stats_data`` is already aggregated across all TP ranks;
+        each call reflects observations from a single connector (or
+        ``MultiConnector``) for the entire rank group.
+        """
         # Should not be called when a KVConnector is not configured.
         assert self.connector_cls is not None
         # Called periodically when connector syncs with the scheduler.
@@ -91,7 +131,12 @@ class KVConnectorLogging:
             )
 
     def log(self, log_fn=logger.info):
-        """Log transfer metrics periodically, similar to throughput logging"""
+        """Log transfer metrics periodically, similar to throughput logging.
+
+        Calls ``reduce()`` on the accumulated stats to produce a summary
+        dict for the last logging interval, formats it as a log line, and
+        resets the accumulator for the next interval.
+        """
         if (
             self.transfer_stats_accumulator
             and not self.transfer_stats_accumulator.is_empty()
