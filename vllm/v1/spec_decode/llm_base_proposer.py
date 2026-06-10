@@ -1464,23 +1464,10 @@ class SpecDecodeBaseProposer:
                     f"{self.model.__class__.__name__} does not implement "
                     "get_top_tokens()."
                 )
-            # Warn if draft model has vocab remapping, which forces fallback
-            # to the full-logits path (negating the optimization).
-            if (
-                hasattr(self.model, "draft_id_to_target_id")
-                and self.model.draft_id_to_target_id is not None
-            ):
-                logger.warning(
-                    "use_local_argmax_reduction is enabled but draft model "
-                    "uses draft_id_to_target_id vocab remapping. The "
-                    "optimization will be bypassed (falling back to full "
-                    "logits gather + argmax)."
-                )
-            else:
-                logger.info(
-                    "Using local argmax reduction for draft token generation "
-                    "(communication: O(2*tp_size) vs O(vocab_size))."
-                )
+            logger.info(
+                "Using local argmax reduction for draft token generation "
+                "(communication: O(2*tp_size) vs O(vocab_size))."
+            )
 
     @torch.inference_mode()
     def dummy_run(
