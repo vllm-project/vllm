@@ -26,6 +26,9 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.mamba.linear.bailing_spec_decode_ops import (
+    bailing_linear_attention_decode_spec,
+)
 from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
@@ -208,6 +211,13 @@ class BailingMoELinearAttention(LinearAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def get_attn_backend(self):
+        from vllm.v1.attention.backends.bailing_linear_attn import (
+            BailingLinearAttentionBackend,
+        )
+
+        return BailingLinearAttentionBackend
+
     @staticmethod
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         """Load weight for linear attention layers.
@@ -369,8 +379,34 @@ class BailingMoELinearAttention(LinearAttention):
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
         decode_state_indices = getattr(attn_metadata, "state_indices_tensor_d", None)
-        if decode_state_indices is None:
-            decode_state_indices = state_indices_tensor
+        num_accepted_tokens = getattr(attn_metadata, "num_accepted_tokens", None)
+        query_start_loc = getattr(attn_metadata, "query_start_loc_d", None)
+        if (
+            decode_state_indices is not None
+            and decode_state_indices.dim() > 1
+            and num_accepted_tokens is not None
+            and query_start_loc is not None
+        ):
+            return bailing_linear_attention_decode_spec(
+                q,
+                k,
+                v,
+                kv_cache,
+                self.tp_slope,
+                decode_state_indices,
+                query_start_loc,
+                num_accepted_tokens,
+                q_start=0,
+                q_end=attn_metadata.num_decode_tokens,
+                slot_start=0,
+                slot_end=attn_metadata.num_decodes,
+                block_size=32,
+            )
+        decode_state_indices = (
+            state_indices_tensor
+            if decode_state_indices is None
+            else decode_state_indices
+        )
         hidden = linear_attention_decode(
             q,
             k,
@@ -383,7 +419,5 @@ class BailingMoELinearAttention(LinearAttention):
             slot_start=0,
             slot_end=attn_metadata.num_decodes,
             block_size=32,
-            num_accepted_tokens=getattr(attn_metadata, "num_accepted_tokens", None),
-            query_start_loc=getattr(attn_metadata, "query_start_loc_d", None),
         )
         return hidden
