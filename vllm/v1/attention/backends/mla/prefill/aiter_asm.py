@@ -33,10 +33,6 @@ _KVLEN_GRANULARITY = 128
 # Hardcoded because torch.cuda.get_device_properties() is slow to call on the
 # per-forward metadata path; the value is fixed for the only supported arch.
 _GFX950_CU_NUM = 256
-# TEMPORARY DIAGNOSTIC: multiplier on the logits/attn_lse partial-tile scratch
-# in _run_kernel, used to test whether the 256-concurrency page fault is an
-# undersized-partial-buffer bug. Set back to 1 (or remove) once concluded.
-_DEBUG_PARTIAL_TILE_SAFETY = 16
 
 
 class AiterAsmPrefillBackend(MLAPrefillBackend):
@@ -531,13 +527,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         tile_q = _FP8_PREFILL_TILE_Q
         num_partial_tiles = ps["num_partial_tiles"]
 
-        # TEMPORARY DIAGNOSTIC: over-size the partial scratch by a large factor
-        # to test whether the 256-concurrency GPU page fault is caused by
-        # logits/attn_lse being too small. If the fault disappears with this,
-        # the partial-tile sizing is the culprit; if it persists, look elsewhere
-        # (kv_indices / K-V workspace). Revert once the experiment concludes.
-        alloc_partial_tiles = num_partial_tiles * _DEBUG_PARTIAL_TILE_SAFETY
-
         out_dtype = self._prefill_metadata.output_dtype
         assert out_dtype is not None
         out = torch.empty(
@@ -556,12 +545,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # torch.empty hits the caching allocator, which amortizes reuse for
         # the common shapes after warmup.
         logits = torch.empty(
-            (alloc_partial_tiles * tile_q, nhead, v_head_dim),
+            (num_partial_tiles * tile_q, nhead, v_head_dim),
             dtype=torch.float32,
             device=q.device,
         )
         attn_lse = torch.empty(
-            (alloc_partial_tiles * tile_q, nhead),
+            (num_partial_tiles * tile_q, nhead),
             dtype=torch.float32,
             device=q.device,
         )
