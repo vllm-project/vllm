@@ -15,7 +15,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.import_utils import has_deep_ep, has_mori
+from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -863,3 +863,66 @@ class MoriAll2AllManager(All2AllManagerBase):
             mori_kwargs, self._make_handle
         )
         return handle
+
+
+class DeepEPV2All2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on DeepEP v2 ElasticBuffer (unified API).
+    Uses NCCL Gin backend with analytical SM calculation.
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        assert has_deep_ep_v2(), (
+            "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
+            "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
+        )
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+        self._num_sms: int | None = None
+
+    def _make_all2all_kwargs(
+        self,
+        num_max_tokens_per_rank: int,
+        hidden: int,
+        num_topk: int,
+        use_fp8_dispatch: bool,
+    ) -> dict:
+        return dict(
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            hidden=hidden,
+            num_topk=num_topk,
+            use_fp8_dispatch=use_fp8_dispatch,
+            allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
+            prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
+            allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),
+            explicitly_destroy=True,
+        )
+
+    def get_handle(self, kwargs):
+        import deep_ep  # type: ignore[import-not-found]
+
+        num_experts = kwargs.pop("num_experts", 256)
+        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        logger.debug("DeepEP v2 all2all args %s", buffer_kwargs)
+        handle: deep_ep.ElasticBuffer = self.handle_cache.get_or_create(
+            buffer_kwargs, deep_ep.ElasticBuffer
+        )
+        if self._num_sms is None:
+            self._num_sms = handle.get_theoretical_num_sms(
+                num_experts=num_experts,
+                num_topk=kwargs["num_topk"],
+            )
+        return handle
+
+    def max_sms_used(self) -> int | None:
+        return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()

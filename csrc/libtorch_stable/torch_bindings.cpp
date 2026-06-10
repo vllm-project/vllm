@@ -27,13 +27,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 #endif
 
 #ifndef USE_ROCM
@@ -562,9 +561,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
-#ifndef USE_ROCM
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
 
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
