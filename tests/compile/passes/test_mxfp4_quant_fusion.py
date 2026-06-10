@@ -9,7 +9,6 @@ from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-# --- Helpers ------------------------------------------------------------------
 
 _NEEDS_ROCM_AITER = pytest.mark.skipif(
     not (current_platform.is_rocm() and is_aiter_found_and_supported()),
@@ -26,7 +25,6 @@ _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
 )
 
 
-# --- UNIT TESTS: feature probes
 
 
 def test_unit_probe_rmsnorm_mxfp4_returns_bool():
@@ -42,7 +40,6 @@ def test_unit_probe_rmsnorm_false_without_aiter():
     assert rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant() is False
 
 
-# --- UNIT TESTS: get_*_op staticmethods
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -61,10 +58,8 @@ def test_unit_get_ops_exist():
         assert op is not None, f"{name}() returned None"
 
 
-# --- UNIT TESTS: VllmPatternReplacement subclass structure
 
 
-# --- UNIT TESTS: DeepSeek-R1 shape traces
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -87,13 +82,11 @@ def test_unit_deepseek_shape_no_residual(epsilon):
     )
 
 
-# --- UNIT TESTS: model helper guard
 # _AiterRMSNormMXFP4QuantModel uses torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant.
 # The _NEEDS_MXFP4_STANDALONE marker on every test that instantiates it ensures
 # AITER is available before the op is accessed, so the class can safely live at
 # module scope.
 
-# --- UNIT TESTS: registration ordering in RocmAiterRMSNormQuantFusionPass
 
 
 @_NEEDS_ROCM_AITER
@@ -168,7 +161,6 @@ def test_unit_uuid_changes_with_mxfp4(monkeypatch):
     )
 
 
-# --- FUNCTIONAL TESTS: numerical correctness
 
 
 class _RMSNormMXFP4Model(torch.nn.Module):
@@ -330,7 +322,6 @@ def test_functional_scale_numerically_correct(eps):
     )
 
 
-# --- FUNCTIONAL TESTS: graph-level fusion (pattern matcher fires)
 
 
 @_NEEDS_MXFP4_STANDALONE
@@ -476,7 +467,6 @@ def test_functional_fused_matches_unfused_output(
     )
 
 
-# --- UNIT TESTS: both patterns fire on a symbolic FX graph
 
 
 class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
