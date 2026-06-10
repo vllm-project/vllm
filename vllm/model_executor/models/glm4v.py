@@ -48,7 +48,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.processors.glm4v import (
-    GLM4VImageProcessorFast,
+    GLM4VImageProcessor,
     GLM4VProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -398,7 +398,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("size", {"width": image_size, "height": image_size})
 
-        return GLM4VImageProcessorFast(**kwargs)
+        return GLM4VImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
         return GLM4VProcessor(

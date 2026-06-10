@@ -45,7 +45,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.qwen_vl import (
-    QwenVLImageProcessorFast,
+    QwenVLImageProcessor,
     QwenVLProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -443,7 +443,7 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("size", {"width": image_size, "height": image_size})
 
-        return QwenVLImageProcessorFast(**kwargs)
+        return QwenVLImageProcessor(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
         return QwenVLProcessor(
