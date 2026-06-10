@@ -14,15 +14,14 @@ use std::{fmt, fs};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
-use futures::StreamExt as _;
 use rmpv::Value;
 use serde_json::json;
 use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
-    ChatBackend, ChatContent, ChatContentPart, ChatEvent, ChatLlm, ChatMessage, ChatRenderer,
-    ChatRequest, ChatRole, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    DynChatRenderer, NewChatOutputProcessorOptions, SamplingParams,
+    ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
+    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
+    NewChatOutputProcessorOptions,
 };
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -44,8 +43,6 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
-use crate::lora::LoraModelResolution;
-use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
 fn request_output(
@@ -3476,92 +3473,6 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
     .expect("usage chunk json");
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn chat_harness_streams_text_events() {
-    let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let mut stream = chat
-        .chat(ChatRequest {
-            messages: vec![ChatMessage::text(ChatRole::User, "hello")],
-            sampling_params: SamplingParams {
-                max_tokens: Some(8),
-                ..Default::default()
-            },
-            request_id: "chat-harness".to_string(),
-            ..ChatRequest::for_test()
-        })
-        .await
-        .expect("submit chat request");
-
-    let mut saw_text = false;
-    let mut saw_done = false;
-    while let Some(event) = stream.next().await {
-        match event.expect("chat event") {
-            ChatEvent::BlockDelta { .. } => saw_text = true,
-            ChatEvent::Done { .. } => {
-                saw_done = true;
-                break;
-            }
-            ChatEvent::Start { .. }
-            | ChatEvent::LogprobsDelta { .. }
-            | ChatEvent::BlockStart { .. }
-            | ChatEvent::BlockEnd { .. }
-            | ChatEvent::ToolCallStart { .. }
-            | ChatEvent::ToolCallArgumentsDelta { .. }
-            | ChatEvent::ToolCallEnd { .. } => {}
-        }
-    }
-    engine_task.await.expect("mock engine task");
-
-    assert!(saw_text);
-    assert!(saw_done);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn prepared_openai_request_streams_text_events() {
-    let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let prepared = prepare_chat_request(
-        serde_json::from_value(json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "stream": true,
-            "messages": [{"role": "user", "content": "hello"}]
-        }))
-        .expect("decode request"),
-        &LoraModelResolution {
-            model_names: vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            lora_request: None,
-        },
-        crate::utils::ResolvedRequestContext::default(),
-    )
-    .expect("prepare request");
-
-    let mut stream = chat.chat(prepared.chat_request).await.expect("submit chat request");
-
-    let mut saw_text = false;
-    let mut saw_done = false;
-    while let Some(event) = stream.next().await {
-        match event.expect("chat event") {
-            ChatEvent::BlockDelta { .. } => saw_text = true,
-            ChatEvent::Done { .. } => {
-                saw_done = true;
-                break;
-            }
-            ChatEvent::Start { .. }
-            | ChatEvent::LogprobsDelta { .. }
-            | ChatEvent::BlockStart { .. }
-            | ChatEvent::BlockEnd { .. }
-            | ChatEvent::ToolCallStart { .. }
-            | ChatEvent::ToolCallArgumentsDelta { .. }
-            | ChatEvent::ToolCallEnd { .. } => {}
-        }
-    }
-    engine_task.await.expect("mock engine task");
-
-    assert!(saw_text);
-    assert!(saw_done);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

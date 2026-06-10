@@ -10,7 +10,6 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
-
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
