@@ -1,5 +1,5 @@
 # FFM overlay for gfx1250 builds
-ARG BASE_IMAGE
+ARG BASE_IMAGE=rocm/vllm-private:juan_455_npi_test
 FROM ${BASE_IMAGE}
 
 # extract tarball into /root/x/ffm/.
