@@ -347,3 +347,220 @@ def test_indexer_k_quant_and_cache_into_unified_slot_view():
     # Zero bleed into the neighbour layers' segments.
     assert unified[:, 0].abs().max().item() == 0
     assert unified[:, 2].abs().max().item() == 0
+
+
+def test_flashattn_mla_dense_decode_unified_slot_view():
+    """FA3 decode (FLASH_ATTN_MLA backend) must read a unified-slot
+    block-major view bit-identically to a contiguous per-layer cache."""
+    try:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+    except ImportError:
+        pytest.skip("vllm_flash_attn is not available")
+    from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+
+    if not flash_attn_supports_mla():
+        pytest.skip("FA3 MLA requires a Hopper device")
+
+    torch.manual_seed(0)
+    dev = "cuda"
+    dt = torch.bfloat16
+    kv_lora_rank = 512
+    rope_dim = 64
+    entry = kv_lora_rank + rope_dim  # 576
+    h_q = 16
+    page = 64
+    num_blocks = 64
+    bs = 4
+    n_layers = 3
+    layer = 1
+
+    q_pe = torch.randn(bs, h_q, rope_dim, device=dev, dtype=dt) * 0.1
+    q_nope = torch.randn(bs, h_q, kv_lora_rank, device=dev, dtype=dt) * 0.1
+    kv_data = torch.randn(num_blocks, page, entry, device=dev, dtype=dt) * 0.1
+
+    # (A) contiguous per-layer reference.
+    cache_contiguous = kv_data.clone().contiguous()
+
+    # (B) unified slot: view one layer -> inflated stride(0), non-zero offset.
+    unified = torch.randn(num_blocks, n_layers, page, entry, device=dev, dtype=dt) * 0.1
+    unified[:, layer].copy_(kv_data)
+    cache_view = unified[:, layer]
+    assert not cache_view.is_contiguous()
+    assert cache_view.stride(0) == n_layers * page * entry
+
+    max_blk = num_blocks // bs
+    block_table = torch.arange(num_blocks, device=dev, dtype=torch.int32).view(
+        bs, max_blk
+    )
+    seq_lens = torch.full((bs,), max_blk * page, device=dev, dtype=torch.int32)
+    cu_seqlens_q = torch.arange(bs + 1, device=dev, dtype=torch.int32)
+
+    def run(cache):
+        kv_c_cache = cache[..., :kv_lora_rank]
+        k_pe_cache = cache[..., kv_lora_rank:]
+        out = flash_attn_varlen_func(
+            q=q_pe,
+            k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
+            v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
+            q_v=q_nope,
+            max_seqlen_q=1,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_k=int(seq_lens.max().item()),
+            seqused_k=seq_lens,
+            block_table=block_table,
+            softmax_scale=entry**-0.5,
+            causal=True,
+            fa_version=3,
+        )
+        return out.clone().float()
+
+    out_ref = run(cache_contiguous)
+    out_view = run(cache_view)
+    assert torch.isfinite(out_ref).all()
+    assert out_ref.abs().max().item() > 0.0
+    assert (out_ref - out_view).abs().max().item() == 0.0
+
+
+def test_flashmla_dense_fp8_decode_unified_slot_view():
+    """FlashMLA dense fp8 decode (FLASHMLA backend with quantized KV cache)
+    must read a unified-slot block-major view bit-identically to a contiguous
+    per-layer fp8 cache."""
+    import vllm.v1.attention.ops.flashmla as fm
+
+    ok, reason = fm.is_flashmla_dense_supported()
+    if not ok:
+        pytest.skip(reason)
+
+    torch.manual_seed(0)
+    dev = "cuda"
+    head_dim = 576
+    hdv = 512
+    h_q = 128
+    page = 64
+    num_blocks = 64
+    bs = 4
+    n_layers = 3
+    layer = 1
+
+    q = torch.randn(bs, 1, h_q, head_dim, device=dev, dtype=torch.bfloat16) * 0.1
+    kv_data = (torch.randn(num_blocks, page, head_dim, device=dev) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+
+    # (A) contiguous per-layer reference.
+    cache_contiguous = kv_data.clone().contiguous()
+
+    # (B) unified slot: view one layer -> inflated stride(0), non-zero offset.
+    unified = (torch.randn(num_blocks, n_layers, page, head_dim, device=dev) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    unified[:, layer].copy_(kv_data)
+    cache_view = unified[:, layer]
+    assert not cache_view.is_contiguous()
+    assert cache_view.stride(0) == n_layers * page * head_dim
+
+    max_blk = num_blocks // bs
+    block_table = torch.arange(num_blocks, device=dev, dtype=torch.int32).view(
+        bs, max_blk
+    )
+    cache_seqlens = torch.full((bs,), max_blk * page, device=dev, dtype=torch.int32)
+    descale = torch.ones(1, device=dev, dtype=torch.float32)
+
+    def run(kc):
+        tile_md, num_splits = fm.get_mla_metadata_dense_fp8(cache_seqlens, h_q, 1)
+        out, _ = fm.flash_mla_with_kvcache_fp8(
+            q=q,
+            k_cache=kc.unsqueeze(-2),  # Add head dim of 1
+            block_table=block_table,
+            cache_seqlens=cache_seqlens,
+            head_dim_v=hdv,
+            tile_scheduler_metadata=tile_md,
+            num_splits=num_splits,
+            softmax_scale=head_dim**-0.5,
+            causal=True,
+            descale_q=descale,
+            descale_k=descale,
+        )
+        return out.clone().float()
+
+    out_ref = run(cache_contiguous)
+    out_view = run(cache_view)
+    assert torch.isfinite(out_ref).all()
+    assert out_ref.abs().max().item() > 0.0
+    assert (out_ref - out_view).abs().max().item() == 0.0
+
+
+def test_flashinfer_mla_dense_fp8_decode_unified_slot_view():
+    """FlashInfer MLA dense decode with an fp8 KV cache must read a
+    unified-slot block-major view bit-identically to a contiguous per-layer
+    cache."""
+    try:
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+    except ImportError:
+        pytest.skip("flashinfer is not available")
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FlashInfer trtllm-gen MLA requires sm100")
+
+    torch.manual_seed(0)
+    dev = "cuda"
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    qk_nope_head_dim = 128
+    head_dim = kv_lora_rank + qk_rope_head_dim  # 576
+    num_qo_heads = 128
+    page = 64
+    num_blocks = 64
+    bs = 4
+    n_layers = 3
+    layer = 1
+
+    # With a quantized KV cache the decode query is quantized to fp8 as well
+    # (trtllm-gen has no bf16-query x fp8-cache decode kernel).
+    q = (torch.randn(bs, 1, num_qo_heads, head_dim, device=dev) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+    kv_data = (torch.randn(num_blocks, 1, page, head_dim, device=dev) * 0.1).to(
+        torch.float8_e4m3fn
+    )
+
+    # (A) contiguous per-layer reference.
+    kv_contiguous = kv_data.clone().contiguous()
+
+    # (B) unified slot: view one layer -> inflated stride(0), non-zero offset.
+    unified = (
+        torch.randn(num_blocks, n_layers, 1, page, head_dim, device=dev) * 0.1
+    ).to(torch.float8_e4m3fn)
+    unified[:, layer].copy_(kv_data)
+    kv_view = unified[:, layer]
+    assert not kv_view.is_contiguous()
+    assert kv_view.stride(0) == n_layers * 1 * page * head_dim
+
+    max_blk = num_blocks // bs
+    block_tables = torch.arange(num_blocks, device=dev, dtype=torch.int32).view(
+        bs, max_blk
+    )
+    seq_lens = torch.full((bs,), max_blk * page, device=dev, dtype=torch.int32)
+    ws = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=dev)
+    scale = head_dim**-0.5
+
+    def run(kv):
+        return trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv,
+            workspace_buffer=ws,
+            qk_nope_head_dim=qk_nope_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_seq_len=int(seq_lens.max().item()),
+            bmm1_scale=scale,
+            bmm2_scale=1.0,
+        ).clone()
+
+    out_ref = run(kv_contiguous).float()
+    out_view = run(kv_view).float()
+    assert torch.isfinite(out_ref).all()
+    assert (out_ref - out_view).abs().max().item() == 0.0
