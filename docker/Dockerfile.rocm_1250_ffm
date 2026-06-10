@@ -11,4 +11,4 @@ ENV HSA_MODEL_TOPOLOGY=/root/x/ffm/topology/mi450
 ENV HSA_MODEL_NUM_THREADS=64
 
 ### Remove AMD SMI
-RUN pip uninstall -y amd_smi && rm -rf ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi/amd_smi
+RUN pip uninstall -y amdsmi && rm -rf ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi/amdsmi
