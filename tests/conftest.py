@@ -350,23 +350,7 @@ _R = TypeVar("_R")
 
 
 def _fix_v4_tied_weights_keys(model_cls: type) -> None:
-    """Normalise v4-format ``_tied_weights_keys`` to the v5 ``dict[str, str]`` form.
-
-    Transformers v5 changed ``PreTrainedModel._tied_weights_keys`` from
-    ``list[str]`` (names of tied weights) to ``dict[str, str]`` (mapping from
-    tied weight name to its source weight name).  Models loaded via
-    ``trust_remote_code`` that were written against v4 still define the old
-    list format, causing an ``AttributeError`` inside
-    ``get_expanded_tied_weights_keys`` when the code calls ``tied_mapping.keys()``.
-
-    Because the dynamic module is cached in ``sys.modules``, patching the class
-    attribute here persists into the subsequent ``from_pretrained()`` call.
-
-    The only widespread tying pattern in decoder-only LLMs is
-    ``lm_head.weight`` → ``model.embed_tokens.weight``.  Keys that do not
-    match this pattern are skipped with a warning so the caller can detect
-    models that need an explicit mapping added here.
-    """
+    """Convert a v4 list-format _tied_weights_keys to the transformers v5 dict form."""
     tied = getattr(model_cls, "_tied_weights_keys", None)
     if not isinstance(tied, list) or len(tied) == 0:
         return
@@ -391,7 +375,7 @@ def _fix_v4_tied_weights_keys(model_cls: type) -> None:
         )
 
     if result:
-        model_cls._tied_weights_keys = result
+        setattr(model_cls, "_tied_weights_keys", result)
 
 
 class HfRunner:
