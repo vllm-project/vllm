@@ -1719,6 +1719,9 @@ class EngineCoreProc(EngineCore):
         logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_restore" + "-"*20)
         self.collective_rpc("aclrt_snapshot_process_restore")
 
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_unlock" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_unlock")
+
         logger.info(f"[snapshot] [engine] " + "-"*20 + "after_snapshot_restore_update_info_for_worker" + "-"*20)
         local_ip = get_local_ip()
         os.environ['HCCL_IF_IP'] = local_ip
