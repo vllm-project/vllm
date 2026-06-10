@@ -19,6 +19,20 @@ logger = init_logger(__name__)
 CK_MXFP4_MOE_DIM_ALIGNMENT = 256
 
 
+def should_use_cdna4_mx_scale_swizzle() -> bool:
+    """Whether to use the CDNA4 swizzled scale layout for mxfp4 on gfx950.
+
+    CDNA4 swizzle requires BLOCK_K%256==0; at TP>=4 the A8W4 dispatch
+    picks BK<256 tiles for the smaller per-rank shapes, so swizzle must
+    be off. Used by both the weight-load swizzle in `_swizzle_mxfp4` and
+    the kernel-argument gate in `aiter_mxfp4_w4a8_moe`; they must agree.
+    """
+    from vllm.distributed import get_tensor_model_parallel_world_size
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
+
+
 def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
@@ -44,10 +58,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
-
         value_layout = StridedLayout
-        if on_gfx950():
+        if should_use_cdna4_mx_scale_swizzle():
             try:
                 # triton < 3.6
                 from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
