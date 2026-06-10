@@ -119,6 +119,23 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         # TRITON_ATTN fallback for heterogeneous head dims).
         Gemma4Config.verify_and_update_config(vllm_config)
 
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support DiffusionGemma's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None and not attention_config.use_non_causal:
+            attention_config.use_non_causal = True
+            logger.info(
+                "DiffusionGemma uses mixed causal/bidirectional attention "
+                "within a batch; setting use_non_causal=True to exclude "
+                "FlashInfer from auto-selection."
+            )
+
         # Auto-create DiffusionConfig from HF config if not provided.
         if vllm_config.diffusion_config is None:
             from vllm.config.diffusion import DiffusionConfig
