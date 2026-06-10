@@ -144,6 +144,30 @@ impl RoundtripCase {
             json_fmt: spaced_json_fmt(),
         }
     }
+
+    /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
+    fn seed_oss() -> Self {
+        Self {
+            model_id: "ByteDance-Seed/Seed-OSS-36B-Instruct",
+            assistant_stop_suffix: "<seed:eos>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// Step-3.5 with `<think>` / `</think>` reasoning tags and newline trimming.
+    fn step3p5() -> Self {
+        Self {
+            model_id: "stepfun-ai/Step-3.5-Flash",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -168,6 +192,8 @@ roundtrip_tests! {
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    seed_oss => [reasoning_and_content],
+    step3p5 => [reasoning_and_content],
 
     // Note: Kimi K2.5 strips the reasoning content in history.
     kimi_k25 => [tool_call_mix],
