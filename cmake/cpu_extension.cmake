@@ -369,6 +369,18 @@ else()
     add_compile_definitions(-DVLLM_NUMA_DISABLED)
 endif()
 
+# check if the pytorch wheel ships libopenblas.so.
+set(VLLM_OPENBLAS_LIB "")
+if (NOT ENABLE_X86_ISA)
+    file(GLOB _VLLM_TORCH_OPENBLAS_LIBS
+        "${TORCH_INSTALL_PREFIX}/lib/libopenblas*.so*")
+    # Note: we don't link openblas directly to _C extension, as it's available through libtorch.so 
+    if (_VLLM_TORCH_OPENBLAS_LIBS)
+        list(GET _VLLM_TORCH_OPENBLAS_LIBS 0 VLLM_OPENBLAS_LIB)
+        message(STATUS "CPU OpenBLAS library: ${VLLM_OPENBLAS_LIB}")
+    endif()
+endif()
+
 #
 # Generate CPU attention dispatch header
 #
@@ -387,6 +399,7 @@ endif()
 #
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
+    "csrc/cpu/sgl-kernels/fla.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
@@ -396,10 +409,23 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
+        VLLM_RVV_VLEN GREATER 0 AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	
+    set(VLLM_EXT_SRC
+        "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -411,7 +437,6 @@ endif()
 
 if (ENABLE_X86_ISA)
     set(VLLM_EXT_SRC_SGL
-        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/sgl-kernels/conv.cpp"
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
@@ -423,6 +448,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")
 
     set(VLLM_EXT_SRC_AVX512
+        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/shm.cpp"
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
@@ -439,6 +465,7 @@ if (ENABLE_X86_ISA)
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
     set(VLLM_EXT_SRC_AVX2
+        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
@@ -512,6 +539,9 @@ else()
         USE_SABI 3
         WITH_SOABI
     )
+    if (VLLM_OPENBLAS_LIB)
+        target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
+    endif()
 endif()
 
 message(STATUS "Enabling C extension.")

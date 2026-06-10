@@ -15,7 +15,6 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -24,7 +23,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
@@ -115,6 +115,7 @@ class OpenAISpeechToText(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         if self.model_cls.supports_segment_timestamp:
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
@@ -216,7 +217,11 @@ class OpenAISpeechToText(OpenAIServing):
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
             with io.BytesIO(audio_data) as buf:
-                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
+                y, sr = load_audio(
+                    buf,
+                    sr=self.asr_config.sample_rate,
+                    max_duration_s=self.max_audio_decode_duration_s,
+                )
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 

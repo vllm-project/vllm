@@ -104,7 +104,7 @@ impl DeepSeekDsmlToolParser {
                         self.tool_parameters.convert_param_with_schema(
                             &name,
                             &param.name,
-                            &param.value,
+                            param.value,
                         )
                     };
                     arguments.insert(param.name, value);
