@@ -19,7 +19,7 @@ from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -170,13 +170,22 @@ class KVCacheSpec:
         my_rank: int,
         other_tp: int,
         other_rank: int,
-        total_num_kv_heads: int,
+        model_config: ModelConfig,
+        *,
+        mamba_view: bool = False,
     ) -> list[torch.Tensor]:
         """Return the sub-tensor(s) to transfer for a TP mapping.
 
         The base implementation returns the tensor unchanged.  Subclasses
         override to select head overlaps (attention) or channel chunks
         (Mamba/SSM).
+
+        Args:
+            mamba_view: when True, called from the Mamba transfer path
+                (``_build_mamba_remote``).  When False (default), called
+                from the FA transfer path (``_build_fa_remote``).
+                ``MambaSpec`` uses this to skip C-narrowing in the FA
+                path where mamba descriptors are structural placeholders.
         """
         return [tensor]
 
@@ -304,37 +313,46 @@ class AttentionSpec(KVCacheSpec):
         my_rank: int,
         other_tp: int,
         other_rank: int,
-        total_num_kv_heads: int,
+        model_config: ModelConfig,
+        *,
+        mamba_view: bool = False,
     ) -> list[torch.Tensor]:
-        # When total_num_kv_heads < tp_size, GQA replicates all heads
-        # to every rank; otherwise each rank holds a disjoint shard.
-        if total_num_kv_heads >= my_tp:
-            my_start = my_rank * total_num_kv_heads // my_tp
-            my_end = (my_rank + 1) * total_num_kv_heads // my_tp
-        else:
-            my_start, my_end = 0, total_num_kv_heads
+        total_kv = model_config.get_total_num_kv_heads()
 
-        if total_num_kv_heads >= other_tp:
-            other_start = other_rank * total_num_kv_heads // other_tp
-            other_end = (other_rank + 1) * total_num_kv_heads // other_tp
+        if total_kv >= my_tp:
+            my_start = my_rank * total_kv // my_tp
+            my_end = (my_rank + 1) * total_kv // my_tp
         else:
-            other_start, other_end = 0, total_num_kv_heads
+            my_head = my_rank * total_kv // my_tp
+            my_start, my_end = my_head, my_head + 1
+
+        if total_kv >= other_tp:
+            other_start = other_rank * total_kv // other_tp
+            other_end = (other_rank + 1) * total_kv // other_tp
+        else:
+            other_head = other_rank * total_kv // other_tp
+            other_start, other_end = other_head, other_head + 1
 
         overlap_start = max(my_start, other_start)
         overlap_end = min(my_end, other_end)
-        if overlap_start >= overlap_end:
-            return []
-
-        # GQA dedup: when total_num_kv_heads < my_tp, multiple ranks
-        # hold the same head — only transfer from the canonical rank.
-        if total_num_kv_heads < my_tp:
-            canonical = overlap_start * my_tp // total_num_kv_heads
-            if my_rank != canonical:
-                return []
+        assert overlap_start < overlap_end, (
+            f"No head overlap between local rank {my_rank}/{my_tp} "
+            f"[{my_start},{my_end}) and remote rank {other_rank}/{other_tp} "
+            f"[{other_start},{other_end}) with total_kv={total_kv}. "
+            f"TP mapping should not pair these ranks."
+        )
 
         h_start = overlap_start - other_start
         h_len = overlap_end - overlap_start
-        return [tensor.narrow(_DIM4_H, h_start, h_len)]
+
+        if tensor.shape[_DIM4_H] > 1:
+            return [tensor.narrow(_DIM4_H, h_start, h_len)]
+
+        # Mamba view (H=1): map head overlap to proportional C slice
+        other_heads = other_end - other_start
+        C = tensor.shape[_DIM4_C]
+        c_per_head = C // other_heads
+        return [tensor.narrow(_DIM4_C, h_start * c_per_head, h_len * c_per_head)]
 
     def transfer_shapes(
         self,
@@ -342,6 +360,8 @@ class AttentionSpec(KVCacheSpec):
         virtually_split: bool,
         mamba_view: bool = False,
     ) -> list[tuple[int, int, int, int]]:
+        if mamba_view:
+            return super().transfer_shapes(shape, virtually_split, mamba_view=True)
         B, _, N, flat_C = shape
         if self.kv_quant_mode.is_nvfp4:
             nvfp4_dim = nvfp4_kv_cache_full_dim(self.head_size)
@@ -564,7 +584,9 @@ class MLAAttentionSpec(FullAttentionSpec):
         my_rank: int,
         other_tp: int,
         other_rank: int,
-        total_num_kv_heads: int,
+        model_config: ModelConfig,
+        *,
+        mamba_view: bool = False,
     ) -> list[torch.Tensor]:
         return [tensor]
 
@@ -741,7 +763,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         my_rank: int,
         other_tp: int,
         other_rank: int,
-        total_num_kv_heads: int,
+        model_config: ModelConfig,
+        *,
+        mamba_view: bool = False,
     ) -> list[torch.Tensor]:
         return [tensor]
 
@@ -892,12 +916,25 @@ class MambaSpec(KVCacheSpec):
         my_rank: int,
         other_tp: int,
         other_rank: int,
-        total_num_kv_heads: int,
+        model_config: ModelConfig,
+        *,
+        mamba_view: bool = False,
     ) -> list[torch.Tensor]:
+        if not mamba_view:
+            # FA path: mamba descriptors are structural placeholders.
+            # No C-narrowing — the payload must match local FA descriptors.
+            return [tensor]
+        assert my_tp != other_tp or my_tp > 1, (
+            "Mamba state is always TP-sharded (never replicated)."
+        )
         if my_tp <= other_tp:
             return [tensor]
         tp_ratio = my_tp // other_tp
         C = tensor.shape[_DIM4_C]
+        assert C % tp_ratio == 0, (
+            f"Mamba state C={C} not evenly divisible by tp_ratio={tp_ratio}. "
+            f"Mamba state must always be shardable (no replication)."
+        )
         chunk = C // tp_ratio
         local_offset = my_rank % tp_ratio
         return [tensor.narrow(_DIM4_C, local_offset * chunk, chunk)]
