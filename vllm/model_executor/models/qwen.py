@@ -8,6 +8,7 @@
 """Inference-only QWen model compatible with HuggingFace weights."""
 
 import json
+import math
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -93,6 +94,8 @@ class QWenAttention(nn.Module):
         num_heads: int,
         max_position_embeddings: int,
         rope_parameters: dict[str, Any] | None = None,
+        use_logn_attn: bool = False,
+        seq_length: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -135,6 +138,18 @@ class QWenAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        # LogN attention scaling for long-context extrapolation.
+        # Scales queries by log_{seq_length}(position) for positions beyond
+        # the training sequence length, compensating for attention dilution.
+        self.use_logn_attn = use_logn_attn
+        if use_logn_attn:
+            logn_list = [
+                max(1.0, math.log(i + 1) / math.log(seq_length))
+                for i in range(max_position_embeddings)
+            ]
+            logn_tensor = torch.tensor(logn_list, dtype=torch.float32)
+            self.register_buffer("logn_tensor", logn_tensor, persistent=False)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -143,6 +158,9 @@ class QWenAttention(nn.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        if self.use_logn_attn:
+            logn_scale = self.logn_tensor[positions].to(q.dtype)
+            q = q * logn_scale.unsqueeze(-1)
         attn_output = self.attn(q, k, v)
         output, _ = self.c_proj(attn_output)
         return output
@@ -159,11 +177,31 @@ class QWenBlock(nn.Module):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
+        # Translate Qwen1's use_dynamic_ntk into DynamicNTKAlphaRotaryEmbedding
+        # parameters. The original Qwen1 dynamically adjusts RoPE base per
+        # forward pass; we precompute with the alpha for max context length.
+        rope_params = getattr(config, "rope_parameters", None)
+        if rope_params is not None:
+            rope_params = dict(rope_params)
+            if (
+                getattr(config, "use_dynamic_ntk", False)
+                and rope_params.get("rope_type", "default") == "default"
+            ):
+                seq_length = getattr(config, "seq_length", 8192)
+                max_pos = config.max_position_embeddings
+                if max_pos > seq_length:
+                    context_value = math.log(max_pos / seq_length, 2) + 1
+                    ntk_alpha = 2 ** math.ceil(context_value) - 1
+                    rope_params["rope_type"] = "dynamic"
+                    rope_params["alpha"] = float(max(ntk_alpha, 1))
+
         self.attn = QWenAttention(
             config.hidden_size,
             config.num_attention_heads,
             config.max_position_embeddings,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=rope_params,
+            use_logn_attn=getattr(config, "use_logn_attn", False),
+            seq_length=getattr(config, "seq_length", 8192),
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
