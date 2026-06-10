@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -442,3 +443,81 @@ def test_prom_metrics_uses_configured_manager_metrics():
     )
 
     assert STORES_SKIPPED not in prom_metrics._offloading_metric_metadata
+
+
+def test_aggregate_into_empty_stats():
+    """Aggregating non-empty stats into a fresh (empty) stats object works."""
+    empty = OffloadingConnectorStats()
+    assert empty.is_empty()
+
+    non_empty = OffloadingConnectorStats(
+        data={
+            _StatsKey.TYPES: {
+                LOAD_BYTES: _MetricType.COUNTER,
+                LOAD_SIZE: _MetricType.HISTOGRAM,
+                PENDING_STORES: _MetricType.GAUGE,
+            },
+            _StatsKey.DATA: {
+                LOAD_BYTES: 42,
+                LOAD_SIZE: [10, 20],
+                PENDING_STORES: 3,
+            },
+        },
+    )
+
+    result = empty.aggregate(non_empty)
+
+    assert result is empty
+    values = result.data[_StatsKey.DATA]
+    assert values[LOAD_BYTES] == 42
+    assert values[LOAD_SIZE] == [10, 20]
+    assert values[PENDING_STORES] == 3
+
+
+def test_prom_metrics_multi_engine_routing():
+    """Metrics are routed to the correct engine index."""
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"], 1: ["model", "1"]},
+    )
+
+    prom_metrics.observe(
+        {
+            _StatsKey.TYPES: {LOAD_BYTES: _MetricType.COUNTER},
+            _StatsKey.DATA: {LOAD_BYTES: 100},
+        },
+        engine_idx=1,
+    )
+
+    engine0 = prom_metrics.offloading_metrics[(0, LOAD_BYTES)]
+    engine1 = prom_metrics.offloading_metrics[(1, LOAD_BYTES)]
+    assert engine0.increments == []
+    assert engine1.increments == [100]
+
+
+def test_prom_metrics_rejects_undeclared_metric():
+    """observe() asserts if a metric was never declared in metadata."""
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    with pytest.raises(AssertionError):
+        prom_metrics.observe(
+            {
+                _StatsKey.TYPES: {"unknown:metric": _MetricType.COUNTER},
+                _StatsKey.DATA: {"unknown:metric": 1},
+            }
+        )
