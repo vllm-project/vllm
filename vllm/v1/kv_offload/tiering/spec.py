@@ -38,7 +38,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
-from vllm.v1.kv_offload.cpu.common import CPUOffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -92,7 +91,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
-            if self.store_threshold >= 2:
+            if self.cpu_config.store_threshold >= 2:
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
@@ -101,7 +100,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # primary tier can eagerly create a memoryview over _base.
             scheduler_mmap = SharedOffloadRegion(
                 instance_id=self.vllm_config.instance_id,
-                num_blocks=self.num_blocks,
+                num_blocks=self.cpu_config.num_blocks,
                 rank=None,
                 kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
                 cpu_page_size=self.cpu_page_size_per_worker,
@@ -110,14 +109,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
-                config=CPUOffloadingConfig(
-                    num_blocks=self.num_blocks,
-                    eviction_policy=self.eviction_policy,
-                    enable_events=self.enable_events,
-                    store_threshold=self.store_threshold,
-                    max_tracker_size=self.max_tracker_size,
-                    metric_definitions=self.metric_definitions,
-                ),
+                config=self.cpu_config,
                 mmap_region=scheduler_mmap,
             )
 
@@ -150,15 +142,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 spec=self,
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=self.enable_events,
+                enable_events=self.cpu_config.enable_events,
             )
             self._manager = tiering_manager
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
                 "(%s, %s blocks) and %s secondary tier(s)",
-                self.eviction_policy,
-                self.num_blocks,
+                self.cpu_config.eviction_policy,
+                self.cpu_config.num_blocks,
                 len(secondary_tiers),
             )
 
@@ -169,7 +161,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
-            num_blocks=self.num_blocks,
+            num_blocks=self.cpu_config.num_blocks,
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
@@ -177,6 +169,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return CpuGpuOffloadingHandlers(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
-            num_cpu_blocks=self.num_blocks,
+            num_cpu_blocks=self.cpu_config.num_blocks,
             mmap_region=worker_mmap,
         )

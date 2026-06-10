@@ -268,9 +268,7 @@ class CPUOffloadingManager(OffloadingManager):
         if not self.config.metric_definitions:
             return None
 
-        stats = OffloadingConnectorStats(
-            metric_metadata=self.config.metric_definitions
-        )
+        stats = OffloadingConnectorStats(metric_metadata=self.config.metric_definitions)
         stats.increase_counter(
             METRIC_STORES_SKIPPED,
             self.stores_skipped_in_current_batch,

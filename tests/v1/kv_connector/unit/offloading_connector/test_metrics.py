@@ -37,6 +37,7 @@ class _FakeMetric:
         self.observed: list[int | float] = []
         self.increments: list[int | float] = []
         self.set_values: list[int | float] = []
+        self.labelvalues: tuple[object, ...] = ()
 
     def labels(self, *labelvalues):
         child = _FakeMetric(**self.kwargs)
@@ -314,14 +315,10 @@ def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
     assert prom_metrics.offloading_metrics[(0, STORE_SIZE)].observed == [1, 2]
 
     assert prom_metrics.counter_kv_bytes[(0, "CPU_to_GPU")].increments == [24]
-    assert prom_metrics.counter_kv_transfer_time[(0, "CPU_to_GPU")].increments == [
-        1.5
-    ]
+    assert prom_metrics.counter_kv_transfer_time[(0, "CPU_to_GPU")].increments == [1.5]
     assert prom_metrics.histogram_transfer_size[(0, "CPU_to_GPU")].observed == [16, 8]
     assert prom_metrics.counter_kv_bytes[(0, "GPU_to_CPU")].increments == [3]
-    assert prom_metrics.counter_kv_transfer_time[(0, "GPU_to_CPU")].increments == [
-        0.3
-    ]
+    assert prom_metrics.counter_kv_transfer_time[(0, "GPU_to_CPU")].increments == [0.3]
     assert prom_metrics.histogram_transfer_size[(0, "GPU_to_CPU")].observed == [1, 2]
 
 

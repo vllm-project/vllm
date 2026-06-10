@@ -135,7 +135,6 @@ class TieringOffloadingManager(OffloadingManager):
                             Network). Can be None or empty list.
             enable_events: Whether to track offloading events
         """
-        super().__init__(spec)
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 

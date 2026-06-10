@@ -145,9 +145,6 @@ The class provides the following primitives:
 
 
 class OffloadingManager(ABC):
-    def __init__(self, spec: "OffloadingSpec"):
-        self.spec = spec
-
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """

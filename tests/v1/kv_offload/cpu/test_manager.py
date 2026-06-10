@@ -203,9 +203,7 @@ def test_cpu_manager():
     Tests CPUOffloadingManager with lru policy.
     """
     # initialize a CPU manager with a capacity of 4 blocks
-    cpu_manager = make_cpu_manager(
-        num_blocks=4, cache_policy="lru", enable_events=True
-    )
+    cpu_manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
 
     # prepare store [1, 2]
     prepare_store_output = cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
