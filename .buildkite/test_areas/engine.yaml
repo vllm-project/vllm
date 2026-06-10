@@ -26,6 +26,12 @@ steps:
   - tests/test_jit_monitor.py
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: Engine (1 GPU)
   key: engine-1-gpu
@@ -38,7 +44,7 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
