@@ -151,7 +151,7 @@ kubectl create secret generic hf-token \
 
 Save one of the following manifests to `modelserving.yaml`:
 
-??? code "Yaml"
+??? code "modelserving.yaml"
     === "Multiprocessing (default)"
         ```yaml
         apiVersion: workload.serving.volcano.sh/v1alpha1

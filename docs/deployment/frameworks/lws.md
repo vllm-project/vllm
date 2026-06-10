@@ -12,10 +12,10 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 ## Deploy and Serve
 
-Deploy the following yaml file `lws.yaml` (MP Mode as default, Ray Mode is supported as well)
+Deploy the following yaml file `lws.yaml` (we have examples that use multiprocessing or Ray):
 
-??? code "Yaml"
-    === "Multi-Processing Mode (default)"
+??? code "lws.yaml"
+    === "Multiprocessing (default)"
         ```yaml
         apiVersion: leaderworkerset.x-k8s.io/v1
         kind: LeaderWorkerSet
@@ -109,7 +109,7 @@ Deploy the following yaml file `lws.yaml` (MP Mode as default, Ray Mode is suppo
           type: ClusterIP
         ```
 
-    === "Ray Mode"
+    === "Ray"
         ```yaml
         apiVersion: leaderworkerset.x-k8s.io/v1
         kind: LeaderWorkerSet
@@ -224,7 +224,7 @@ vllm-0-1   1/1     Running   0          2s
 
 Verify that the distributed tensor-parallel inference works:
 
-=== "MP (default)"
+=== "Multiprocessing (default)"
     ```bash
     kubectl logs vllm-0 | grep -i "Model loading"
     kubectl logs vllm-0-1 | grep -i "Model loading"
