@@ -8,23 +8,11 @@
 
 namespace vllm {
 
-// Logic: one WARP per (token, group). Each of the 32 lanes owns EPT =
-// group_size / 32 contiguous elements, sweeps the group in a single coalesced
-// wide vector load (gate and up), and the per-group abs-max is a pure
-// warp-shuffle reduction -- no shared memory and no __syncthreads.
-// kWarpsPerBlock groups are packed into one 128-thread block.
-//
-// This replaces the previous one-block-per-group design, whose log2(group_size)
-// shared-memory tree reduction (one __syncthreads per level) and one-element
-// scalar loads left the kernel memory-latency-bound and ~2x off peak. The op
-// sequence (fp32 SiLU, fmaxf abs-max) is unchanged, and fmaxf is
-// order-invariant, so the per-group scale stays bit-identical.
-constexpr int kWarpsPerBlock = 4;  // 4 groups per 128-thread block
+// Logic: one thread block per (token, group) pair
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
           int32_t group_size>
-__global__ void
-__launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
+__global__ void silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
     float* __restrict__ scales,      // Output: [num_tokens, hidden_size /
@@ -36,98 +24,82 @@ __launch_bounds__(kWarpsPerBlock * 32) silu_and_mul_per_block_quant_kernel(
 ) {
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
-  static_assert(group_size % 32 == 0,
-                "group_size must be a multiple of the warp size");
-  // Elements per thread: 2 for group_size=64, 4 for group_size=128. Each maps
-  // to a single vector load/store per lane (4B/8B in, 2B/4B out).
-  constexpr int EPT = group_size / 32;
 
-  int const tid = threadIdx.x;
-  int const warp_id = tid >> 5;
-  int const lane_id = tid & 31;
+  // Grid: (num_tokens, num_groups)
   int const token_idx = blockIdx.x;
+  int const group_idx = blockIdx.y;
+  int const tid = threadIdx.x;  // tid in [0, group_size)
   int const num_tokens = gridDim.x;
-  // num_groups is no longer gridDim.y (we pack kWarpsPerBlock groups per
-  // block), so recover it from the compile-time group_size.
-  int const num_groups = hidden_size / group_size;
-  int const group_idx = blockIdx.y * kWarpsPerBlock + warp_id;
-  if (group_idx >= num_groups) return;  // whole warp exits together (no sync)
 
-  // Input layout: [gate || up] concatenated along the last dimension. Each lane
-  // owns the EPT contiguous elements at group_start + lane_id * EPT, so the
-  // warp reads the whole group as one fully-coalesced wide load for gate and
-  // for up.
+  // Input layout: [gate || up] concatenated along last dimension
   int const input_stride = hidden_size * 2;
   int const group_start = group_idx * group_size;
-  int const lane_base = group_start + lane_id * EPT;
+
+  // Pointers to this token's data
   scalar_t const* token_input_gate =
-      input + token_idx * input_stride + lane_base;
+      input + token_idx * input_stride + group_start;
   scalar_t const* token_input_up = token_input_gate + hidden_size;
-  scalar_out_t* token_output = out + token_idx * hidden_size + lane_base;
+  scalar_out_t* token_output = out + token_idx * hidden_size + group_start;
 
   // Scale pointer for this group
+  int const num_groups = gridDim.y;
   float* group_scale_ptr = is_scale_transposed
                                ? scales + group_idx * num_tokens + token_idx
                                : scales + token_idx * num_groups + group_idx;
 
-  // Step 1: one wide vector load per lane for gate and up, then SiLU(gate) * up
-  // in fp32. (group_start and hidden_size are both multiples of EPT because
-  // group_size = 32 * EPT divides hidden_size, so these loads are aligned.)
-  struct alignas(sizeof(scalar_t) * EPT) InVec {
-    scalar_t v[EPT];
-  };
-  InVec const gate_v = *reinterpret_cast<InVec const*>(token_input_gate);
-  InVec const up_v = *reinterpret_cast<InVec const*>(token_input_up);
+  // Shared memory for reduction (compile-time sized)
+  __shared__ float shared_max[group_size];
 
-  float result[EPT];  // SiLU(gate) * up, kept in registers
-  float thread_max = 0.0f;
+  // Step 1: Each thread loads one element, computes SiLU, stores in register
+  float gate = static_cast<float>(token_input_gate[tid]);
+  float up = static_cast<float>(token_input_up[tid]);
+
+  // Compute SiLU(gate) * up
+  float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
+  float silu_gate = gate * sigmoid_gate;
+  float result = silu_gate * up;  // Keep in register
+
+  // Step 2: Reduce to find group max
+  shared_max[tid] = fabsf(result);
+  __syncthreads();
+
+// Power-of-2 reduction (group_size guaranteed to be power of 2)
 #pragma unroll
-  for (int k = 0; k < EPT; ++k) {
-    float gate = static_cast<float>(gate_v.v[k]);
-    float up = static_cast<float>(up_v.v[k]);
-    float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
-    float silu_gate = gate * sigmoid_gate;
-    result[k] = silu_gate * up;
-    thread_max = fmaxf(thread_max, fabsf(result[k]));
+  for (int stride = group_size / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + stride]);
+    }
+    __syncthreads();
   }
 
-  // Step 2: per-group abs-max via warp-shuffle. fmaxf is order-invariant, so
-  // the group max (and therefore the scale) is bit-identical to the tree
-  // reduction.
-#pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    thread_max =
-        fmaxf(thread_max, __shfl_xor_sync(0xffffffffu, thread_max, offset));
-  }
+  // Step 3: Compute scale (thread 0), broadcast via shared memory
+  if (tid == 0) {
+    float group_max = shared_max[0];
 
-  // Step 3: compute the group scale in registers; lane 0 writes it to global.
-  float const group_max = thread_max;
-  float const quant_range = quant_type_max_v<scalar_out_t>;
-  float group_scale = group_max / quant_range;
+    float const quant_range = quant_type_max_v<scalar_out_t>;
+    float group_scale = group_max / quant_range;
 
-  // Apply scale upper bound if provided
-  if (scale_ub != nullptr) {
-    group_scale = fminf(group_scale, *scale_ub);
-  }
+    // Apply scale upper bound if provided
+    if (scale_ub != nullptr) {
+      group_scale = fminf(group_scale, *scale_ub);
+    }
 
-  // Use minimum safe scaling factor
-  group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    // Use minimum safe scaling factor
+    group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
 
-  if (lane_id == 0) {
+    // Store scale to global memory
     *group_scale_ptr = group_scale;
-  }
 
-  // Step 4: quantize the EPT owned elements and write them with one wide store.
-  struct alignas(sizeof(scalar_out_t) * EPT) OutVec {
-    scalar_out_t q[EPT];
-  };
-  OutVec out_v;
-#pragma unroll
-  for (int k = 0; k < EPT; ++k) {
-    out_v.q[k] = vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result[k],
-                                                                  group_scale);
+    // Reuse shared_max[0] to broadcast scale
+    shared_max[0] = group_scale;
   }
-  *reinterpret_cast<OutVec*>(token_output) = out_v;
+  __syncthreads();
+
+  float group_scale = shared_max[0];
+
+  // Step 4: Quantize and write output
+  token_output[tid] =
+      vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result, group_scale);
 }
 
 }  // namespace vllm
@@ -170,11 +142,8 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
-  // One warp per group; vllm::kWarpsPerBlock groups packed per 128-thread
-  // block.
-  dim3 grid(num_tokens,
-            (num_groups + vllm::kWarpsPerBlock - 1) / vllm::kWarpsPerBlock);
-  dim3 block(vllm::kWarpsPerBlock * 32);
+  dim3 grid(num_tokens, num_groups);
+  dim3 block(group_size);
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "silu_and_mul_per_block_quant", [&] {
