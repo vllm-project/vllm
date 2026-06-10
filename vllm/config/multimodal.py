@@ -192,6 +192,11 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    pixel_prune_threshold: float | None = Field(default=None, ge=0.0, lt=1.0)
+    """L∞ distance between a patch and its prediction for PixelPrune
+    near-exact matching. Value sits in range [0;1); ``None`` (default)
+    disables PixelPrune. Larger values prune more aggressively.
+    """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
@@ -336,3 +341,6 @@ class MultiModalConfig:
 
     def is_multimodal_pruning_enabled(self):
         return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+
+    def is_pixel_prune_enabled(self):
+        return self.pixel_prune_threshold is not None and self.pixel_prune_threshold < 1
