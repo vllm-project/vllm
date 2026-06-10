@@ -153,3 +153,12 @@ steps:
   - tests/models/multimodal/pooling
   commands:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/models/multimodal/pooling

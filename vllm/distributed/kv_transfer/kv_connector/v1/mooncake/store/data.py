@@ -213,7 +213,6 @@ class ReqMeta:
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -223,7 +222,6 @@ class ReqMeta:
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
-        original_block_size: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
@@ -274,7 +272,6 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            original_block_size=original_block_size,
         )
 
 

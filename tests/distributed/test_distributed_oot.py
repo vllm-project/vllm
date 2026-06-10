@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from tests.entrypoints.openai.chat_completion.test_oot_registration import (
+from tests.plugins_tests.test_oot_registration_online import (
     run_and_test_dummy_opt_api_server,
 )
 
