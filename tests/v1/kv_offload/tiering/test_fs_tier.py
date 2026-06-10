@@ -17,11 +17,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheGroupSpec,
-    SlidingWindowSpec,
-)
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
@@ -286,95 +281,3 @@ def test_store_load_data_integrity(fs_tier):
         assert torch.allclose(tensor[bid], expected[i]), (
             f"Block {bid} data mismatch after store+load"
         )
-
-
-# ---------------------------------------------------------------------------
-# parallel_agnostic predicate: enabled only for a single full-attention group
-# ---------------------------------------------------------------------------
-
-
-def _mock_spec_with_groups(groups: list, tp: int = 2):
-    vllm_config = MagicMock()
-    vllm_config.model_config.model = "test-model"
-    vllm_config.cache_config.block_size = 16
-    vllm_config.cache_config.cache_dtype = "torch.float32"
-    vllm_config.parallel_config.tensor_parallel_size = tp
-    vllm_config.parallel_config.pipeline_parallel_size = 1
-    vllm_config.parallel_config.prefill_context_parallel_size = 1
-    vllm_config.parallel_config.decode_context_parallel_size = 1
-    vllm_config.parallel_config.rank = 0
-    kv_cache_config = MagicMock()
-    kv_cache_config.kv_cache_groups = groups
-    spec = MagicMock()
-    spec.vllm_config = vllm_config
-    spec.kv_cache_config = kv_cache_config
-    spec.block_size_factor = 1
-    return spec
-
-
-def _full_attention_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=["layer0"],
-        kv_cache_spec=FullAttentionSpec(
-            block_size=16, num_kv_heads=4, head_size=128, dtype=torch.float32
-        ),
-    )
-
-
-def _sliding_window_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
-        layer_names=["layer0"],
-        kv_cache_spec=SlidingWindowSpec(
-            block_size=16,
-            num_kv_heads=4,
-            head_size=128,
-            dtype=torch.float32,
-            sliding_window=128,
-        ),
-    )
-
-
-@pytest.fixture
-def make_fs_tier(tmp_path):
-    created: list = []
-
-    def _make(groups: list, tp: int = 2) -> FileSystemTierManager:
-        tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
-        view = memoryview(tensor.numpy())
-        root = tmp_path / f"tier{len(created)}"
-        root.mkdir()
-        tier = FileSystemTierManager(
-            offloading_spec=_mock_spec_with_groups(groups, tp),
-            primary_kv_view=view,
-            tier_type="fs",
-            root_dir=str(root),
-            n_read_threads=2,
-            n_write_threads=2,
-        )
-        created.append((tier, tensor))
-        return tier
-
-    yield _make
-    for tier, _ in created:
-        tier.shutdown()
-
-
-def test_parallel_agnostic_enabled_for_single_full_attention(make_fs_tier):
-    # A single full-attention group => parallel-agnostic layout: tp/pp/rank are
-    # collapsed out of the file mapper (tp forced to 1, rank to 0) so the cache
-    # is shared across tensor-parallel sizes.
-    tier = make_fs_tier([_full_attention_group()], tp=2)
-    assert tier.file_mapper.fields["tp_size"] == 1
-    assert tier.file_mapper.rank == 0
-
-
-def test_parallel_agnostic_disabled_for_multiple_groups(make_fs_tier):
-    # More than one KV-cache group (hybrid model) => keep per-layout namespacing.
-    tier = make_fs_tier([_full_attention_group(), _full_attention_group()], tp=2)
-    assert tier.file_mapper.fields["tp_size"] == 2
-
-
-def test_parallel_agnostic_disabled_for_non_full_attention(make_fs_tier):
-    # Single group but not full attention (sliding window) => keep namespacing.
-    tier = make_fs_tier([_sliding_window_group()], tp=2)
-    assert tier.file_mapper.fields["tp_size"] == 2

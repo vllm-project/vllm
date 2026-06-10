@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 
 import torch
 
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     make_offload_key,
@@ -129,6 +134,66 @@ def test_get_config_file_path():
     fm = make_mapper_from_offloading_spec()
     config_path = fm.get_config_file_path()
     assert config_path == f"{fm.base_path}/config.json"
+
+
+# ---------------------------------------------------------------------------
+# parallel_agnostic: honored only for a single non-MLA full-attention group
+# ---------------------------------------------------------------------------
+
+
+def _full_attention_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        layer_names=["layer0"],
+        kv_cache_spec=FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=128, dtype=torch.float32
+        ),
+    )
+
+
+def _sliding_window_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        layer_names=["layer0"],
+        kv_cache_spec=SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.float32,
+            sliding_window=128,
+        ),
+    )
+
+
+def test_parallel_agnostic_enabled_for_single_full_attention():
+    # tp/rank are collapsed out of the namespace so the cache is shared
+    # across tensor-parallel sizes.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        kv_cache_groups=[_full_attention_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 1
+    assert fm.rank == 0
+
+
+def test_parallel_agnostic_disabled_for_multiple_groups():
+    # More than one KV-cache group (hybrid model) => keep per-layout namespacing.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        kv_cache_groups=[_full_attention_group(), _full_attention_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+
+
+def test_parallel_agnostic_disabled_for_non_full_attention():
+    # Single group but not full attention (sliding window) => keep namespacing.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        kv_cache_groups=[_sliding_window_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
 
 
 def test_parallel_agnostic_excludes_mla():
