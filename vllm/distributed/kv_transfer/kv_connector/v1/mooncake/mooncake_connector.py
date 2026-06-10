@@ -1132,17 +1132,16 @@ class MooncakeConnectorWorker:
             meta.registered_layer_names,
             meta.registered_layer_indices,
         )
-        if meta.registered_layer_names:
-            local_regions, remote_regions, align_err = _align_transfer_regions(
-                local_regions, remote_regions
+        local_regions, remote_regions, align_err = _align_transfer_regions(
+            local_regions, remote_regions
+        )
+        if align_err is not None:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=align_err,
             )
-            if align_err is not None:
-                response = MooncakeXferResponse(
-                    status=MooncakeXferResponseStatus.ERROR,
-                    err_msg=align_err,
-                )
-                await sock.send_multipart((identity, self._encoder.encode(response)))
-                return
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
@@ -1903,17 +1902,9 @@ class MooncakeConnectorWorker:
         self,
         base_addrs: list[int],
         block_lens: list[int],
-        layer_names: list[str] | None = None,
-        layer_indices: list[int] | None = None,
+        layer_names: list[str],
+        layer_indices: list[int],
     ) -> list[TransferRegion]:
-        if (
-            layer_names is None
-            or layer_indices is None
-            or len(layer_names) != len(base_addrs)
-            or len(layer_indices) != len(base_addrs)
-        ):
-            layer_names = [f"positional:{idx}" for idx in range(len(base_addrs))]
-            layer_indices = list(range(len(base_addrs)))
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
@@ -2016,9 +2007,9 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     if parallel_config.local_engines_only:
         # In hybrid or external LB mode, connect to local server.
         host = "127.0.0.1"
-    elif parallel_config.pipeline_parallel_size > 1:
-        # Internal LB multi-node PP uses the model-parallel master as the
-        # single bootstrap endpoint for all PP ranks in the engine.
+    elif parallel_config.nnodes_within_dp > 1:
+        # Internal LB multi-node TP/PP uses the model-parallel master as the
+        # single bootstrap endpoint for all ranks in the engine.
         host = parallel_config.master_addr
     else:
         host = parallel_config.data_parallel_master_ip
