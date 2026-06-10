@@ -47,10 +47,14 @@ from torch.fx.experimental.symbolic_shapes import is_concrete_int
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from ..vllm_inductor_pass import (
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    VllmPatternReplacement,
+)
+from .matcher_utils import RMSNORM_EPS_VALUES
 
 # ---------------------------------------------------------------------------
 # Registry types
@@ -104,12 +108,13 @@ class GemmSpec:
 
 
 def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
-    rms_eps = (1e-6, 1e-5)
     producers = [
         ProducerSpec(
             name="aiter_group_fp8_quant",
             op=rocm_aiter_ops.get_group_quant_op(),
-            with_zero_init_op=rocm_aiter_ops.get_group_quant_with_zero_init_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
+            ),
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -118,30 +123,30 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             name="aiter_rmsnorm_fp8_group_quant",
             op=rocm_aiter_ops.get_rmsnorm_group_fused_quant_op(),
             with_zero_init_op=(
-                rocm_aiter_ops.get_rmsnorm_fp8_group_quant_with_zero_init_op()
+                torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
-            eps_values=rms_eps,
+            eps_values=RMSNORM_EPS_VALUES,
         ),
         ProducerSpec(
             name="aiter_rmsnorm_with_add_fp8_group_quant",
             op=rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op(),
             with_zero_init_op=(
-                rocm_aiter_ops.get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op()
+                torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
             ),
             fp8_output_index=0,
             residual_output_index=1,
             scales_output_index=2,
             static_kwargs={"group_size": 128},
-            eps_values=rms_eps,
+            eps_values=RMSNORM_EPS_VALUES,
         ),
         ProducerSpec(
             name="aiter_act_mul_and_fp8_group_quant",
             op=rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op(),
             with_zero_init_op=(
-                rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_with_zero_init_op()
+                torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
             ),
             fp8_output_index=0,
             scales_output_index=1,
@@ -151,30 +156,30 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             name="aiter_gemma_rmsnorm_fp8_group_quant",
             op=rocm_aiter_ops.get_gemma_rmsnorm_fp8_group_quant_op(),
             with_zero_init_op=(
-                rocm_aiter_ops.get_gemma_rmsnorm_fp8_group_quant_with_zero_init_op()
+                torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
-            eps_values=rms_eps,
+            eps_values=RMSNORM_EPS_VALUES,
         ),
         ProducerSpec(
             name="aiter_gated_rmsnorm_fp8_group_quant",
             op=rocm_aiter_ops.get_gated_rmsnorm_fp8_group_quant_op(),
             with_zero_init_op=(
-                rocm_aiter_ops.get_gated_rmsnorm_fp8_group_quant_with_zero_init_op()
+                torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
-            eps_values=rms_eps,
+            eps_values=RMSNORM_EPS_VALUES,
         ),
     ]
     gemms = [
         GemmSpec(
             name="aiter_gemm_a8w8_blockscale",
             op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale.default,
-            out_op=rocm_aiter_ops.get_gemm_a8w8_blockscale_out_op(),
+            out_op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_out.default,
         )
     ]
     return producers, gemms
@@ -186,18 +191,6 @@ __all__ = [
     "ProducerSpec",
     "build_default_registries",
 ]
-
-
-def _example_bf16(*shape: int) -> torch.Tensor:
-    return torch.empty(*shape, dtype=torch.bfloat16, device="cuda")
-
-
-def _example_fp8(*shape: int) -> torch.Tensor:
-    return torch.empty(*shape, dtype=current_platform.fp8_dtype(), device="cuda")
-
-
-def _example_fp32(*shape: int) -> torch.Tensor:
-    return torch.empty(*shape, dtype=torch.float32, device="cuda")
 
 
 def _make_extra_check(gemm: GemmSpec, min_k: int) -> Callable[[pm.Match], bool]:
@@ -313,10 +306,10 @@ def _make_2_input_producer_pattern(
         return gemm_results[-1]
 
     example_inputs = [
-        _example_bf16(8, 128),  # x (M, K)
-        _example_bf16(128),  # weight (K,)
-        _example_fp8(64, 128),  # B (N, K)  (FP8 weight)
-        _example_fp32(64, 1),  # Bs (N, K/group)  (block scales)
+        VllmPatternReplacement.empty_bf16(8, 128),  # x (M, K)
+        VllmPatternReplacement.empty_bf16(128),  # weight (K,)
+        VllmPatternReplacement.empty_fp8(64, 128),  # B (N, K)
+        VllmPatternReplacement.empty_fp32(64, 1),  # Bs (N, K/group)
     ]
 
     return (
@@ -400,11 +393,11 @@ def _make_2_input_with_residual_producer_pattern(
         return gemm_results[-1], residual_out
 
     example_inputs = [
-        _example_bf16(8, 128),  # x (M, K)
-        _example_bf16(8, 128),  # residual (M, K)
-        _example_bf16(128),  # weight (K,)
-        _example_fp8(64, 128),  # B (N, K)
-        _example_fp32(64, 1),  # Bs (N, K/group)
+        VllmPatternReplacement.empty_bf16(8, 128),  # x (M, K)
+        VllmPatternReplacement.empty_bf16(8, 128),  # residual (M, K)
+        VllmPatternReplacement.empty_bf16(128),  # weight (K,)
+        VllmPatternReplacement.empty_fp8(64, 128),  # B (N, K)
+        VllmPatternReplacement.empty_fp32(64, 1),  # Bs (N, K/group)
     ]
 
     return (
@@ -472,9 +465,9 @@ def _make_act_mul_group_quant_producer_pattern(
         return gemm_results[-1]
 
     example_inputs = [
-        _example_bf16(8, 256),  # x (M, 2*K); silu+mul halves last dim
-        _example_fp8(64, 128),  # B (N, K)
-        _example_fp32(64, 1),  # Bs (N, K/group)
+        VllmPatternReplacement.empty_bf16(8, 256),  # x (M, 2*K)
+        VllmPatternReplacement.empty_fp8(64, 128),  # B (N, K)
+        VllmPatternReplacement.empty_fp32(64, 1),  # Bs (N, K/group)
     ]
 
     return (
@@ -536,9 +529,9 @@ def _make_group_quant_producer_pattern(
         return gemm_results[-1]
 
     example_inputs = [
-        _example_bf16(8, 128),  # x (M, K)
-        _example_fp8(64, 128),  # B (N, K)
-        _example_fp32(64, 1),  # Bs (N, K/group)
+        VllmPatternReplacement.empty_bf16(8, 128),  # x (M, K)
+        VllmPatternReplacement.empty_fp8(64, 128),  # B (N, K)
+        VllmPatternReplacement.empty_fp32(64, 1),  # Bs (N, K/group)
     ]
 
     return (
@@ -609,11 +602,11 @@ def _make_gated_producer_pattern(
         return gemm_results[-1]
 
     example_inputs = [
-        _example_bf16(8, 128),  # x
-        _example_bf16(8, 128),  # z
-        _example_bf16(128),  # weight
-        _example_fp8(64, 128),  # B
-        _example_fp32(64, 1),  # Bs
+        VllmPatternReplacement.empty_bf16(8, 128),  # x
+        VllmPatternReplacement.empty_bf16(8, 128),  # z
+        VllmPatternReplacement.empty_bf16(128),  # weight
+        VllmPatternReplacement.empty_fp8(64, 128),  # B
+        VllmPatternReplacement.empty_fp32(64, 1),  # Bs
     ]
 
     return (

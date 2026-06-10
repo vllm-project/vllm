@@ -35,6 +35,7 @@ from .matcher_utils import (
     MatcherQuantFP8,
     MatcherRMSNormGated,
     MatcherSiluAndMul,
+    RMSNORM_EPS_VALUES,
 )
 from .rms_quant_fusion import (
     FusedRMSQuantKey,
@@ -582,7 +583,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # additionally covers the rms_norm -> view -> 2x quant shape that
         # appears when the FP8 linear path inserts a 2D-flatten boilerplate
         # (DSv3.2 MLA indexer q_c norm).
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             # Fuse aiter rms_norm + 2x aiter group fp8 quant
             DoubleAiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
@@ -817,7 +818,7 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
         # gpt-oss has hidden size 2880
         # padded to a multiple of 128 on gfx942 and 256 on gfx950 respectively
         hidden_size = 2880
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             for x_pad_to_multiple in [128, 256]:
                 AddAiterRMSNormPadPattern(
                     epsilon, hidden_size, x_pad_to_multiple
@@ -928,5 +929,5 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "mla_dual_rms_norm_fusion_pass")
 
-        for epsilon in [1e-5, 1e-6]:
+        for epsilon in RMSNORM_EPS_VALUES:
             self.register(MLADualRMSNormPattern(epsilon))

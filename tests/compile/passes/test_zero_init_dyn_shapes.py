@@ -53,7 +53,7 @@ def _compile_and_check(fn, *args):
 
 
 def test_group_quant_dynamic_M():
-    op = rocm_aiter_ops.get_group_quant_with_zero_init_op()
+    op = torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
 
     def fn(x, y):
         # y is the zero-init buffer; pretend N=256
@@ -66,7 +66,7 @@ def test_group_quant_dynamic_M():
 
 
 def test_rmsnorm_group_quant_dynamic_M():
-    op = rocm_aiter_ops.get_rmsnorm_fp8_group_quant_with_zero_init_op()
+    op = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
 
     def fn(x, y, w):
         res = auto_functionalized(
@@ -86,7 +86,9 @@ def test_rmsnorm_group_quant_dynamic_M():
 
 
 def test_rmsnorm_with_add_group_quant_dynamic_M():
-    op = rocm_aiter_ops.get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op()
+    op = (
+        torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
+    )
 
     def fn(x, y, r, w):
         res = auto_functionalized(
@@ -108,7 +110,7 @@ def test_rmsnorm_with_add_group_quant_dynamic_M():
 
 
 def test_act_mul_group_quant_dynamic_M():
-    op = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_with_zero_init_op()
+    op = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
 
     def fn(x, y):
         res = auto_functionalized(op, x=x, gemm_out_zero_init=y, group_size=128)

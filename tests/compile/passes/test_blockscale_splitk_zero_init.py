@@ -32,6 +32,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.platforms import current_platform
 
 # ---------------------------------------------------------------------------
 # Always-on smoke tests of the registry module (no ROCm required)
@@ -72,30 +73,18 @@ GROUP_SIZE = 128
 EPS = 1e-6
 
 
-def _fp8_dtype() -> torch.dtype:
-    """Platform-appropriate FP8 dtype.
-
-    gfx942 (MI300X) uses ``float8_e4m3fnuz``; gfx950 (MI355X) uses
-    ``float8_e4m3fn``. The test is shape-only (we never read the contents),
-    so we just defer to whatever vllm's ``current_platform`` reports.
-    """
-    from vllm.platforms import current_platform
-
-    return current_platform.fp8_dtype()
-
-
 class _GemmaRMSNormGroupQuantModule(torch.nn.Module):
     """Gemma RMSNorm + FP8 group quant -> blockscale GEMM."""
 
     def __init__(self, K: int, N: int, eps: float = EPS):
         super().__init__()
         self.eps = eps
-        self._fp8 = _fp8_dtype()
         self.weight = torch.nn.Parameter(
             torch.ones(K, dtype=torch.bfloat16), requires_grad=False
         )
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
@@ -126,7 +115,6 @@ class _GatedRMSNormGroupQuantModule(torch.nn.Module):
     def __init__(self, K: int, N: int, eps: float = EPS):
         super().__init__()
         self.eps = eps
-        self._fp8 = _fp8_dtype()
         assert K % GROUP_SIZE == 0, (
             "K must be a multiple of head_dim=128 for gated RMSNorm group quant"
         )
@@ -136,7 +124,8 @@ class _GatedRMSNormGroupQuantModule(torch.nn.Module):
             torch.ones(self._head_dim, dtype=torch.bfloat16), requires_grad=False
         )
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
@@ -177,12 +166,11 @@ class _GroupQuantModule(torch.nn.Module):
     Qwen3-Next-class models on gfx950.
     """
 
-    def __init__(self, K: int, N: int, eps: float = EPS):
+    def __init__(self, K: int, N: int):
         super().__init__()
-        self.eps = eps
-        self._fp8 = _fp8_dtype()
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
@@ -209,12 +197,12 @@ class _RMSNormGroupQuantModule(torch.nn.Module):
     def __init__(self, K: int, N: int, eps: float = EPS):
         super().__init__()
         self.eps = eps
-        self._fp8 = _fp8_dtype()
         self.weight = torch.nn.Parameter(
             torch.ones(K, dtype=torch.bfloat16), requires_grad=False
         )
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
@@ -243,12 +231,12 @@ class _RMSNormWithAddGroupQuantModule(torch.nn.Module):
     def __init__(self, K: int, N: int, eps: float = EPS):
         super().__init__()
         self.eps = eps
-        self._fp8 = _fp8_dtype()
         self.weight = torch.nn.Parameter(
             torch.ones(K, dtype=torch.bfloat16), requires_grad=False
         )
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
@@ -282,10 +270,10 @@ class _ActMulGroupQuantModule(torch.nn.Module):
 
     def __init__(self, K: int, N: int):
         super().__init__()
-        self._fp8 = _fp8_dtype()
         # x has 2*K columns (gate_up); GEMM B is (N, K).
         self.B = torch.nn.Parameter(
-            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
         )
         self.Bs = torch.nn.Parameter(
             torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),

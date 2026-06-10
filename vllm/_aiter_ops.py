@@ -1035,18 +1035,6 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl(
     )
 
 
-def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_fp8_group_quant_fake(
-        x, weight, variance_epsilon, group_size
-    )
-
-
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
     x: torch.Tensor,
     gemm_out_zero_init: torch.Tensor,
@@ -1062,19 +1050,6 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
         variance_epsilon,
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
-    )
-
-
-def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
-        x, residual, weight, variance_epsilon, group_size
     )
 
 
@@ -1213,6 +1188,21 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     return x_fp8, out_bs
 
 
+def _fake_without_gemm_out_zero_init(
+    fake_impl: Callable[..., object],
+    arg_index: int,
+) -> Callable[..., object]:
+    def fake(*args, **kwargs):
+        if "gemm_out_zero_init" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs.pop("gemm_out_zero_init")
+        else:
+            args = (*args[:arg_index], *args[arg_index + 1 :])
+        return fake_impl(*args, **kwargs)
+
+    return fake
+
+
 def _rocm_aiter_group_fp8_quant_with_zero_init_impl(
     x: torch.Tensor,
     gemm_out_zero_init: torch.Tensor,
@@ -1225,14 +1215,6 @@ def _rocm_aiter_group_fp8_quant_with_zero_init_impl(
     )
 
 
-def _rocm_aiter_group_fp8_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_group_fp8_quant_fake(x, group_size)
-
-
 def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
     x: torch.Tensor,
     gemm_out_zero_init: torch.Tensor,
@@ -1243,14 +1225,6 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
     )
-
-
-def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_act_mul_and_fp8_group_quant_fake(x, group_size)
 
 
 def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
@@ -1331,18 +1305,6 @@ def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl(
         variance_epsilon,
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
-    )
-
-
-def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gemma_rmsnorm_fp8_group_quant_fake(
-        x, weight, variance_epsilon, group_size
     )
 
 
@@ -1453,19 +1415,6 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl(
         variance_epsilon,
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
-    )
-
-
-def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_fake(
-    x: torch.Tensor,
-    z: torch.Tensor,
-    weight: torch.Tensor,
-    gemm_out_zero_init: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gated_rmsnorm_fp8_group_quant_fake(
-        x, z, weight, variance_epsilon, group_size
     )
 
 
@@ -2140,7 +2089,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_rmsnorm_fp8_group_quant_fake, 1
+                ),
             )
 
             direct_register_custom_op(
@@ -2159,7 +2110,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake, 1
+                ),
             )
 
             direct_register_custom_op(
@@ -2172,7 +2125,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_act_mul_and_fp8_group_quant_fake, 1
+                ),
             )
 
             direct_register_custom_op(
@@ -2192,7 +2147,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_group_fp8_quant_with_zero_init",
                 op_func=_rocm_aiter_group_fp8_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_group_fp8_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_group_fp8_quant_fake, 1
+                ),
             )
 
             direct_register_custom_op(
@@ -2220,7 +2177,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_gemma_rmsnorm_fp8_group_quant_fake, 2
+                ),
             )
 
             direct_register_custom_op(
@@ -2233,7 +2192,9 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl,
                 mutates_args=["gemm_out_zero_init"],
-                fake_impl=_rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_fake,
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_gated_rmsnorm_fp8_group_quant_fake, 3
+                ),
             )
 
             direct_register_custom_op(
@@ -2309,42 +2270,12 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
 
     @staticmethod
-    def get_group_quant_with_zero_init_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
-
-    @staticmethod
-    def get_rmsnorm_fp8_group_quant_with_zero_init_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
-
-    @staticmethod
-    def get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
-
-    @staticmethod
-    def get_act_mul_fused_fp8_group_quant_with_zero_init_op() -> OpOverload:
-        return (
-            torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
-        )
-
-    @staticmethod
     def get_gemma_rmsnorm_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant.default
 
     @staticmethod
-    def get_gemma_rmsnorm_fp8_group_quant_with_zero_init_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init.default
-
-    @staticmethod
     def get_gated_rmsnorm_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant.default
-
-    @staticmethod
-    def get_gated_rmsnorm_fp8_group_quant_with_zero_init_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init.default
-
-    @staticmethod
-    def get_gemm_a8w8_blockscale_out_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_out.default
 
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
