@@ -124,7 +124,7 @@ def test_get_model_structural_tag_supports_vllm_hermes(
                         "style": "json",
                     },
                     "end": "}\n</tool_call>",
-                }
+                },
             ],
             "separator": "\n",
             "at_least_one": True,
