@@ -298,12 +298,25 @@ def prepare_nvfp4_moe_layer_for_marlin(
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
-    logger.warning_once(
-        "Your GPU does not have native support for FP4 computation but "
-        "FP4 quantization is being used. Weight-only FP4 compression will "
-        "be used leveraging the Marlin kernel. This may degrade "
-        "performance for compute-heavy workloads."
-    )
+    if current_platform.has_device_capability(100):
+        # Native FP4 hardware (SM100+ / SM12x): MARLIN was selected for a
+        # reason other than missing hardware support, e.g. no native NvFp4
+        # MoE backend supports the model's activation or deployment
+        # configuration, or the backend was forced explicitly.
+        logger.warning_once(
+            "This GPU supports native FP4 computation, but the Marlin "
+            "(weight-only FP4) MoE backend was selected instead of a native "
+            "FP4 MoE backend (e.g. because none supports this model's "
+            "activation or deployment configuration). This may degrade "
+            "performance for compute-heavy workloads."
+        )
+    else:
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression "
+            "will be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
 
     input_dtype = get_marlin_input_dtype(prefix="")
     if input_dtype is not None and input_dtype.itemsize == 1:
