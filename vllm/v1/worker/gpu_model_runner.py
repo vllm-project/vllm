@@ -130,6 +130,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.mome_attn import MomeAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -2347,7 +2348,12 @@ class GPUModelRunner(
 
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
-                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
+                builder,
+                (
+                    Mamba2AttentionMetadataBuilder,
+                    GDNAttentionMetadataBuilder,
+                    MomeAttentionMetadataBuilder,
+                ),
             ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
@@ -2362,6 +2368,10 @@ class GPUModelRunner(
                 ):
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
                         self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
+                    )
+                if isinstance(builder, MomeAttentionMetadataBuilder):
+                    extra_attn_metadata_args["num_prompt_tokens"] = (
+                        self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs_padded]
                     )
 
             if for_cudagraph_capture:
