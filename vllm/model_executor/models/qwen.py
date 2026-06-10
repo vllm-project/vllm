@@ -5,9 +5,10 @@
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
-"""Inference-only QWen model compatible with HuggingFace weights."""
 
+"""Inference-only QWen model compatible with HuggingFace weights."""
 import json
+import math
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -75,7 +76,8 @@ class QWenMLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+                f"Unsupported activation: {hidden_act}. "
+                "Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
 
@@ -87,6 +89,7 @@ class QWenMLP(nn.Module):
 
 
 class QWenAttention(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -95,6 +98,9 @@ class QWenAttention(nn.Module):
         rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        # FIX (Issue #36880): added use_logn_attn and seq_length params
+        use_logn_attn: bool = False,
+        seq_length: int = 2048,
         prefix: str = "",
     ):
         super().__init__()
@@ -104,6 +110,7 @@ class QWenAttention(nn.Module):
         assert self.total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = self.total_num_heads // tensor_model_parallel_world_size
         self.head_dim = hidden_size // self.total_num_heads
+
         self.c_attn = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -120,7 +127,6 @@ class QWenAttention(nn.Module):
             prefix=f"{prefix}.c_proj",
         )
         self.scaling = self.head_dim**-0.5
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
@@ -135,6 +141,32 @@ class QWenAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        # FIX (Issue #36880): implement logn-scaling for long-context Qwen1
+        # The official Qwen1 implementation scales query vectors by
+        # log(position) / log(seq_length) when the sequence is longer than
+        # seq_length, to stabilise attention entropy in long-context settings.
+        self.use_logn_attn = use_logn_attn
+        self.seq_length = seq_length
+        if use_logn_attn:
+            # Pre-compute the logn tensor up to max_position_embeddings.
+            # Shape: (1, max_position_embeddings, 1, 1) for broadcasting over
+            # (batch, seq, heads, head_dim).
+            logn_values = torch.log(
+                torch.arange(1, max_position_embeddings + 1, dtype=torch.float32)
+            ) / math.log(seq_length)
+            # Clamp so positions <= seq_length are scaled by exactly 1.0
+            # (no-op), while longer positions receive a scaling > 1.0.
+            logn_values = logn_values.clamp(min=1.0)
+            # Register as a non-trainable buffer so it moves with the model
+            # to the correct device automatically.
+            self.register_buffer(
+                "logn_tensor",
+                logn_values.view(1, max_position_embeddings, 1, 1),
+                persistent=False,
+            )
+        else:
+            self.logn_tensor = None
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -143,12 +175,24 @@ class QWenAttention(nn.Module):
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+
+        # FIX (Issue #36880): apply logn scaling when sequence exceeds
+        # the model's training seq_length (same condition as original Qwen1).
+        if self.use_logn_attn and self.logn_tensor is not None:
+            seq_len = q.size(1)
+            if seq_len > self.seq_length:
+                # positions is (seq_len,); index into pre-computed buffer.
+                # q shape: (batch, seq, num_heads_local, head_dim)
+                logn_scale = self.logn_tensor[:, positions, :, :].type_as(q)
+                q = q * logn_scale.squeeze(0)  # broadcast over batch dim
+
         attn_output = self.attn(q, k, v)
         output, _ = self.c_proj(attn_output)
         return output
 
 
 class QWenBlock(nn.Module):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -159,6 +203,10 @@ class QWenBlock(nn.Module):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
+        # FIX (Issue #36880): pass use_logn_attn / seq_length from config
+        use_logn_attn = getattr(config, "use_logn_attn", False)
+        seq_length = getattr(config, "seq_length", 2048)
+
         self.attn = QWenAttention(
             config.hidden_size,
             config.num_attention_heads,
@@ -166,11 +214,11 @@ class QWenBlock(nn.Module):
             rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
+            use_logn_attn=use_logn_attn,
+            seq_length=seq_length,
             prefix=f"{prefix}.attn",
         )
-
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-
         self.mlp = QWenMLP(
             config.hidden_size,
             config.intermediate_size // 2,
@@ -190,6 +238,7 @@ class QWenBlock(nn.Module):
             hidden_states = self.ln_1(hidden_states)
         else:
             hidden_states, residual = self.ln_1(hidden_states, residual)
+
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -203,9 +252,9 @@ class QWenBlock(nn.Module):
 
 @support_torch_compile
 class QWenModel(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -219,12 +268,16 @@ class QWenModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: QWenBlock(config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: QWenBlock(
+                config, cache_config, quant_config, prefix=prefix
+            ),
             prefix=f"{prefix}.h",
         )
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            )
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -254,15 +307,18 @@ class QWenModel(nn.Module):
                 hidden_states,
                 residual,
             )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
 
 
 class QWenBaseModel(nn.Module):
+
     def __init__(
         self,
         *,
@@ -274,9 +330,11 @@ class QWenBaseModel(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
+
         self.transformer = transformer_type(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
@@ -288,6 +346,7 @@ class QWenBaseModel(nn.Module):
         )
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
+
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
@@ -303,7 +362,9 @@ class QWenBaseModel(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
@@ -336,9 +397,11 @@ class QWenBaseModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                loaded_params.add(name)
         return loaded_params
 
 
@@ -361,7 +424,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
                 "of this model. Please use the vision model by setting "
                 f"`--hf-overrides '{json.dumps(hf_overrides)}'`"
             )
-
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def forward(
