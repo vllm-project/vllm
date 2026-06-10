@@ -77,6 +77,12 @@ async def resume(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/device_unlock")
+async def device_unlock(raw_request: Request):
+    await engine_client(raw_request).device_unlock()
+    return Response(status_code=200)
+
+
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return

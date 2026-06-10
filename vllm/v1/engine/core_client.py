@@ -247,6 +247,9 @@ class EngineCoreClient(ABC):
     async def resume_async(self, data_parallel_master_ip: str|None = None, model_path=None) -> None:
         raise NotImplementedError
 
+    async def device_unlock_async(self) -> None:
+        raise NotImplementedError
+
     async def is_sleeping_async(self) -> bool:
         raise NotImplementedError
 
@@ -1145,7 +1148,20 @@ class AsyncMPClient(MPClient):
         time_after_suspend = time.perf_counter()
         logger.info(
             "It took %.6f seconds to fall suspend.", time_after_suspend - time_before_suspend
-        )  
+        )
+
+    async def device_unlock_async(self) -> None:
+        if not self.is_suspend:
+            logger.warning("[snapshot] api server is not suspend, skip device_unlock.")
+            return
+
+        time_before_unlock = time.perf_counter()
+        await self.call_utility_async("device_unlock")
+        time_after_unlock = time.perf_counter()
+        logger.info(
+            "It took %.6f seconds to device_unlock.",
+            time_after_unlock - time_before_unlock,
+        )
 
     async def resume_async(self, data_parallel_master_ip: str|None = None, model_path=None) -> None:
         if not self.is_suspend:

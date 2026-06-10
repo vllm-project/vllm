@@ -181,6 +181,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def device_unlock(self) -> None:
+        """Unlock NPU devices after snapshot checkpoint."""
+        ...
+
+    @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
         ...
