@@ -1939,7 +1939,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-0".to_vec(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1993,7 +1993,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-1".to_vec(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
