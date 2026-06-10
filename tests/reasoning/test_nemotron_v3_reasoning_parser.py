@@ -170,3 +170,109 @@ def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
 
     assert reasoning == "This is truncated reasoning"
     assert content is None
+
+
+# ---------------------------------------------------------------------------
+# adjust_request tests — reasoning_effort translation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "effort,expected_kwargs",
+    [
+        pytest.param("low", {"low_effort": True}, id="low_sets_low_effort"),
+        pytest.param(
+            "none", {"enable_thinking": False}, id="none_sets_enable_thinking_false"
+        ),
+        pytest.param("medium", {}, id="medium_is_noop"),
+        pytest.param("high", {}, id="high_is_noop"),
+    ],
+)
+def test_adjust_request_reasoning_effort(
+    tokenizer: FakeNemotronTokenizer,
+    effort: str,
+    expected_kwargs: dict,
+):
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort=effort,
+    )
+
+    result = parser.adjust_request(request)
+
+    for key, value in expected_kwargs.items():
+        assert result.chat_template_kwargs.get(key) == value
+
+
+def test_adjust_request_none_effort_is_noop(tokenizer: FakeNemotronTokenizer):
+    """reasoning_effort=None should leave chat_template_kwargs untouched."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort=None,
+        chat_template_kwargs={"custom_key": "custom_value"},
+    )
+
+    result = parser.adjust_request(request)
+
+    assert result.chat_template_kwargs == {"custom_key": "custom_value"}
+
+
+def test_adjust_request_does_not_overwrite_existing_kwargs(
+    tokenizer: FakeNemotronTokenizer,
+):
+    """User-provided chat_template_kwargs must not be overwritten."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort="low",
+        chat_template_kwargs={"low_effort": False},  # user explicitly set False
+    )
+
+    result = parser.adjust_request(request)
+
+    assert result.chat_template_kwargs["low_effort"] is False
+
+
+def test_adjust_request_initialises_none_chat_template_kwargs(
+    tokenizer: FakeNemotronTokenizer,
+):
+    """When chat_template_kwargs is None, it should be created as a new dict."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort="low",
+        chat_template_kwargs=None,
+    )
+
+    result = parser.adjust_request(request)
+
+    assert result.chat_template_kwargs is not None
+    assert result.chat_template_kwargs["low_effort"] is True
+
+
+def test_adjust_request_none_effort_does_not_overwrite_enable_thinking_true(
+    tokenizer: FakeNemotronTokenizer,
+):
+    """reasoning_effort='none' must not override an explicit enable_thinking=True."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        reasoning_effort="none",
+        chat_template_kwargs={"enable_thinking": True},  # user explicitly wants thinking
+    )
+
+    result = parser.adjust_request(request)
+
+    assert result.chat_template_kwargs["enable_thinking"] is True
