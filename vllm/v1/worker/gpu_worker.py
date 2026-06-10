@@ -423,6 +423,10 @@ class Worker(WorkerBase):
                 != CUDAGraphMode.NONE
             ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+                # Belt-and-suspenders: never let a negative estimate inflate
+                # the available KV cache memory, even if the profiler returns
+                # one despite the per-capture clamps.
+                cudagraph_memory_estimate = max(cudagraph_memory_estimate, 0)
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (

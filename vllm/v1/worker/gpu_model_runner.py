@@ -6439,6 +6439,10 @@ class GPUModelRunner(
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
+                        # Flush the caching allocator so the free-memory
+                        # snapshot reflects only graph-capture allocations,
+                        # reducing noise from prior freelist fragmentation.
+                        torch.accelerator.empty_cache()
                         mem_before = torch.cuda.mem_get_info()[0]
                         self._warmup_and_capture(
                             desc,
@@ -6454,7 +6458,23 @@ class GPUModelRunner(
                         )
                         torch.accelerator.synchronize()
                         free_after = torch.cuda.mem_get_info()[0]
-                        mem_samples.append(mem_before - free_after)
+                        # Allocator non-monotonicity (freelist consolidation,
+                        # MTP lazy buffer cleanup, or unified-memory page
+                        # migration) can make free_after exceed mem_before,
+                        # yielding a negative delta. Clamp to zero to match the
+                        # encoder path below and avoid inflating the available
+                        # KV cache estimate.
+                        delta = mem_before - free_after
+                        if delta < 0:
+                            logger.warning(
+                                "CUDA graph capture for %s freed memory "
+                                "(%d MiB); this may indicate allocator "
+                                "fragmentation or lazy buffer cleanup. "
+                                "Clamping to zero.",
+                                mode.name,
+                                -delta // (1 << 20),
+                            )
+                        mem_samples.append(max(delta, 0))
 
                     first_capture = mem_samples[0]
                     # Use at least 1 MiB per graph for driver overhead
