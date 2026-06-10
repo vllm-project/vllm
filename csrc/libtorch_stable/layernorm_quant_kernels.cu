@@ -253,7 +253,7 @@ void rms_norm_static_fp8_quant(
                         out.mutable_data_ptr<fp8_t>(),                         \
                         input.mutable_data_ptr<scalar_in_t>(), input_stride,   \
                         residual.mutable_data_ptr<scalar_in_t>(),              \
-                        weight.const_data_ptr<scalar_t>(),                  \
+                        weight.const_data_ptr<scalar_t>(),                     \
                         scale.const_data_ptr<float>(), epsilon, num_tokens,    \
                         hidden_size);                                          \
               });                                                              \
