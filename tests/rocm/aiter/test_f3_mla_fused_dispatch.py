@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for F3: fused RoPE + MLA KV-cache write dispatch in AiterMLAImpl.
-
-F3 auto-enables when rocm_aiter_ops.has_fused_rope_mla_kv_cache() returns True
-(i.e. aiter.fused_qk_rope_concat_and_cache_mla is importable). No env var is
-required — follows the same pattern as has_fused_rmsnorm_mxfp4_quant() for F2.
-"""
 
 from __future__ import annotations
 
@@ -22,9 +15,7 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
 )
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 # DeepSeek-V3/R1 MLA dimensions
 KV_LORA_RANK = 512
@@ -367,9 +358,7 @@ class TestDoRopeAndKVCacheUpdate:
             )
 
 
-# ---------------------------------------------------------------------------
 # Tests: F3 dispatch bypasses rotary_emb (partial fusion — see note below)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests")
