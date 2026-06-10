@@ -1187,9 +1187,13 @@ class MLACommonBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # MLA kernels require contiguous per-layer KV cache views.
-            # Identity permutation keeps num_layers first in physical
-            # layout, signaling cross-layer allocation is unsupported.
+            # The cross-layer (block-major) layout gives per-layer cache views
+            # whose block-dim stride exceeds block_size * entry_size. Only
+            # decode kernels verified to honor that stride may opt in by
+            # overriding this to a non-identity permutation (see TritonMLA,
+            # CutlassMLA, FlashAttnMLA). The identity permutation here keeps
+            # num_layers first, signaling cross-layer allocation is
+            # unsupported for backends not yet verified.
             return (0, 1, 2, 3)
         return (0, 1, 2)
 
