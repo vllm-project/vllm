@@ -17,23 +17,8 @@ class StructuredOutputsWorker:
         self.grammar_bitmask = torch.zeros(
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
-        self.vocab_size = vocab_size
         self.device = device
         self.copy_stream = torch.cuda.Stream()
-
-    def _ensure_capacity(self, num_masks: int) -> None:
-        if num_masks <= self.grammar_bitmask.shape[0]:
-            return
-
-        new_size = max(num_masks, self.grammar_bitmask.shape[0] * 2)
-        self.logits_indices = torch.zeros(
-            new_size, dtype=torch.int32, device=self.device
-        )
-        self.grammar_bitmask = torch.zeros(
-            (new_size, cdiv(self.vocab_size, 32)),
-            dtype=torch.int32,
-            device=self.device,
-        )
 
     def apply_grammar_bitmask(
         self,
@@ -59,21 +44,13 @@ class StructuredOutputsWorker:
         if not mapping:
             return
 
+        # The scheduler may produce more bitmask rows than logits (e.g.
+        # diffusion models schedule canvas-length tokens but denoise steps
+        # emit fewer logits). Trim to match the actual logits count.
         num_masks = grammar_bitmask.shape[0]
-        if num_masks != len(mapping):
-            if num_masks < len(mapping):
-                raise AssertionError(
-                    f"grammar bitmask has {num_masks} rows for "
-                    f"{len(mapping)} logits rows"
-                )
-
-            # Async scheduling can pad scheduled speculative tokens with -1
-            # placeholders. The CPU bitmask builder needs scratch rows for
-            # those placeholders, but the GPU worker only applies masks to the
-            # logits rows actually present in this sample call.
+        if num_masks > len(mapping):
             grammar_bitmask = grammar_bitmask[: len(mapping)]
-
-        self._ensure_capacity(grammar_bitmask.shape[0])
+        assert grammar_bitmask.shape[0] == len(mapping)
 
         # Asynchronously copy the bitmask to GPU.
         with torch.cuda.stream(self.copy_stream):

@@ -211,20 +211,7 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
-        # Size the lookahead from VllmConfig.num_speculative_tokens, which accounts
-        # for BOTH speculative_config (e.g. MTP) AND the diffusion (dLLM) canvas.
-        # Reading speculative_config alone under-counts when the diffusion path
-        # schedules extra tokens, leaving max_num_spec_tokens=0 and a bitmask of
-        # only max_num_seqs rows — the serial fill loop below then indexes past the
-        # end (IndexError -> EngineCore crash).
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
-
-        # Exact number of bitmask rows this batch needs: one per request plus one
-        # per scheduled speculative/diffusion token for that request.
-        required_rows = sum(
-            1 + len(scheduled_spec_decode_tokens.get(req_id, ()))
-            for req_id in structured_output_request_ids
-        )
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -233,23 +220,9 @@ class StructuredOutputManager:
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
-            initial_rows = max(
-                max_batch_size * (1 + max_num_spec_tokens), required_rows
+            self._grammar_bitmask = self.backend.allocate_token_bitmask(
+                max_batch_size * (1 + max_num_spec_tokens)
             )
-            self._grammar_bitmask = self.backend.allocate_token_bitmask(initial_rows)
-        elif self._grammar_bitmask.shape[0] < required_rows:
-            # Defensive grow: if a batch ever needs more rows than the initial
-            # estimate (e.g. variable diffusion lookahead), reallocate instead of
-            # indexing out of bounds. Bounds the bitmask to what is actually
-            # required for this batch.
-            assert self.backend is not None
-            logger.warning_once(
-                "Growing structured-output bitmask from %d to %d rows to fit "
-                "scheduled speculative/diffusion tokens.",
-                self._grammar_bitmask.shape[0],
-                required_rows,
-            )
-            self._grammar_bitmask = self.backend.allocate_token_bitmask(required_rows)
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
