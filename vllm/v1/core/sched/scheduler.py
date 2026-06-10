@@ -780,6 +780,20 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free(request)
                     break
 
+                # Record local prefix cache stats now that the request is
+                # actually being scheduled. Doing this here (rather than in
+                # KVCacheManager.get_computed_blocks) avoids double-counting a
+                # request whose earlier scheduling attempt failed to allocate
+                # slots and was returned to the waiting queue.
+                if self.log_stats and request.num_computed_tokens == 0:
+                    prefix_cache_stats = self.kv_cache_manager.prefix_cache_stats
+                    assert prefix_cache_stats is not None
+                    prefix_cache_stats.record(
+                        num_tokens=request.num_tokens,
+                        num_hits=num_new_local_computed_tokens,
+                        preempted=request.num_preemptions > 0,
+                    )
+
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is

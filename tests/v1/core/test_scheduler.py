@@ -1479,6 +1479,59 @@ def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
     assert external_stats.preempted_requests == 0
 
 
+def test_local_prefix_cache_stats_not_counted_until_scheduled():
+    """Regression test for prefix cache stats over-counting (issue #43736).
+
+    ``KVCacheManager.get_computed_blocks`` is called for a waiting request
+    before the scheduler tries to allocate its KV slots. Previously the local
+    prefix cache stats were recorded inside that lookup, so a request whose
+    allocation fails (and is left in the waiting queue, to be retried on a later
+    step) had its query/hit counted on every attempt -- inflating the reported
+    hit rate. The stats must be recorded only once the request is actually
+    scheduled.
+
+    A single ``schedule()`` call is enough to expose the bug: with the KV cache
+    sized for only one request, the second request reaches ``get_computed_blocks``
+    but then fails to allocate, so it must not be counted.
+    """
+    BLOCK_SIZE = 16
+    NUM_BLOCKS = 10
+    # Each request needs (NUM_BLOCKS // 2 + 1) = 6 blocks, so only one of the two
+    # requests can be resident at a time; the other fails to allocate and waits.
+    NUM_TOKENS = (NUM_BLOCKS // 2 + 1) * BLOCK_SIZE
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+        num_blocks=NUM_BLOCKS,
+    )
+
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=NUM_TOKENS,
+        max_tokens=2,
+        block_size=BLOCK_SIZE,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    # One request schedules; the other reaches get_computed_blocks() but cannot
+    # allocate slots and stays in the waiting queue.
+    scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+
+    # Read the live accumulator directly (schedule() does not drain it). Only the
+    # scheduled request should have been recorded; the waiting request must not
+    # be counted until it is actually scheduled.
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.requests == 1, (
+        f"expected only the scheduled request to be counted, got "
+        f"{stats.requests} -- a waiting (unscheduled) request was double-counted"
+    )
+    assert stats.queries == NUM_TOKENS
+
+
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
 )

@@ -225,14 +225,9 @@ class KVCacheManager:
             )
         )
 
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.record(
-                num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
-                preempted=request.num_preemptions > 0,
-            )
-
+        # NOTE: prefix cache stats are recorded by the scheduler once the request
+        # is actually scheduled, not here, to avoid double-counting lookups that
+        # fail to allocate and are retried on a later step (see #43736).
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
