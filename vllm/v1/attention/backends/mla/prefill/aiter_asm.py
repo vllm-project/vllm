@@ -321,6 +321,48 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             int(reduce_partial_map_size),
         )
 
+        # TEMPORARY DIAGNOSTIC: the 256-concurrency MAF is an OOB write that
+        # poisons a neighbor allocation. The leading suspect is that the host
+        # bound num_partial_tiles under-counts the partial slots the PS
+        # scheduler actually emits (reduce_indptr[-1]), so the prefill ASM
+        # kernel writes partial_o_loc rows past logits/attn_lse. Read the
+        # device-truth partial count (a host sync) and hard-assert
+        # num_partial_tiles covers it BEFORE the corrupting launch, so the
+        # first under-count aborts cleanly with full numbers. Remove once the
+        # root cause is confirmed.
+        actual = int(reduce_indptr[-1].item())
+        max_partial_loc = (
+            int(reduce_partial_map[:actual].max().item()) if actual > 0 else -1
+        )
+        needed = max_partial_loc // _FP8_PREFILL_TILE_Q + 1 if actual > 0 else 0
+        logger.info(
+            "PARTIALS_DBG causal=%s batch=%d max_qlen=%s max_kvlen=%s | "
+            "qt=%d tgs_per_cluster=%d num_partial_tiles=%d | "
+            "actual_reduce_indptr=%d max_partial_loc=%d needed_tiles=%d",
+            is_causal,
+            qo_indptr_cpu.numel() - 1,
+            max_qlen,
+            max_kvlen,
+            qt,
+            tgs_per_cluster,
+            num_partial_tiles,
+            actual,
+            max_partial_loc,
+            needed,
+        )
+        assert num_partial_tiles >= actual, (
+            f"num_partial_tiles={num_partial_tiles} < reduce_indptr[-1]="
+            f"{actual} (causal={is_causal}, batch="
+            f"{qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
+            f"max_kvlen={max_kvlen}): host bound under-counts emitted "
+            f"partial slots; prefill ASM would write OOB."
+        )
+        assert num_partial_tiles >= needed, (
+            f"num_partial_tiles={num_partial_tiles} < needed={needed} "
+            f"(max_partial_loc={max_partial_loc}, causal={is_causal}): "
+            f"highest partial_o_loc row exceeds logits/attn_lse extent."
+        )
+
         return {
             "work_indptr": work_indptr,
             "work_info": work_info,
