@@ -50,13 +50,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.humming import GemmType as HummingGemmType
+from vllm.utils.humming import HummingLayerMeta, HummingMethod, dtypes
 from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
-
-if has_humming():
-    from humming import dtypes
-    from humming.config import GemmType as HummingGemmType
-    from humming.layer import HummingLayerMeta, HummingMethod
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
