@@ -2931,8 +2931,11 @@ def main(args):
         with time_counter(args.time_generate):
             outputs = llm.chat(messages, sampling_params=sampling_params)
 
+        print("-" * 50)
         for o in outputs:
-            print(o.outputs[0].text)
+             generated_text = o.outputs[0].text
+             print(generated_text)
+             print("-" * 50)
         return
 
     with time_counter(args.time_generate):
