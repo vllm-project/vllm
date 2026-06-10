@@ -618,8 +618,6 @@ class ModelConfig:
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "QwenVLForConditionalGeneration":
-                self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
