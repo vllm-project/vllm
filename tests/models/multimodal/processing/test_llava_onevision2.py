@@ -162,6 +162,17 @@ def test_validate_file_scheme_allowed_inside_allowed_dir():
     )
 
 
+def test_validate_file_scheme_percent_encoded_traversal_blocked():
+    # ``%2e%2e`` decodes to ``..``; the confinement check must URL-decode first
+    # (url2pathname) so the path cannot stay literally under the allowed root
+    # here while the codec module decodes and escapes downstream.
+    with pytest.raises(ValueError):
+        _validate_video_source(
+            "file:///tmp/ov2/%2e%2e/%2e%2e/etc/passwd",
+            _model_config(local="/tmp/ov2"),
+        )
+
+
 def test_validate_data_url_allowed():
     # data: URLs carry inline bytes and need no filesystem/network access.
     _validate_video_source("data:video/mp4;base64,AAAA", _model_config())
