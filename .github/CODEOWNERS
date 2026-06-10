@@ -23,8 +23,13 @@
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
 /vllm/config/cache.py @heheda12345
+
+# Config utils
+/vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
