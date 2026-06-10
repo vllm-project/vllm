@@ -17,17 +17,17 @@ if current_platform.is_rocm():
     )
 
 
-@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("hidden_dim", [2**n for n in range(10)])
-def test_hadacore(batch_size, hidden_dim, dtype=torch.bfloat16, device="cuda"):
+@pytest.mark.parametrize("inplace", [False, True])
+def test_hadacore(hidden_dim, inplace, dtype=torch.bfloat16, device="cuda"):
     x = torch.eye(hidden_dim, dtype=dtype, device=device)
     hadamard = deterministic_hadamard_matrix(
         hidden_dim, dtype=torch.float64, device="cuda"
     ) / math.sqrt(hidden_dim)
 
-    y = ops.hadacore_transform(x.clone())
+    y = ops.hadacore_transform(x.clone(), inplace=inplace)
     y_true = (x.to(hadamard.dtype) @ hadamard.T).to(y.dtype)
     assert torch.allclose(y, y_true)
 
-    y = ops.hadacore_transform(y)
+    y = ops.hadacore_transform(y, inplace=inplace)
     assert torch.allclose(y, x)
