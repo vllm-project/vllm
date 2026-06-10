@@ -119,9 +119,8 @@ class DualQueueThreadPool:
             self._condition.notify(n_tasks)
 
     def get_finished(self) -> list[tuple[JobId, bool]]:
-        # Lock-free: workers append under _condition, but the manager is the
-        # only popper. deque guarantees individual append/popleft are atomic,
-        # so no external synchronization is needed for this single-reader path.
+        # No lock needed: deque is thread-safe for concurrent append/popleft,
+        # and the manager is the sole popper.
         jobs = []
         while self._finished_q:
             jobs.append(self._finished_q.popleft())
