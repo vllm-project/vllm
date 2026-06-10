@@ -2,17 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend selector."""
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
-from vllm.model_executor.layers.attention.mla_attention import get_mla_prefill_scale
-from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
-    yarn_get_mscale,
-)
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.prefill.selector import (
@@ -56,62 +51,6 @@ def _make_vllm_config(
     mock_vllm_config.model_config = model_config
     mock_vllm_config.attention_config = attention_config
     return mock_vllm_config
-
-
-class TestMLAPrefillScale:
-    """Tests for the MLA prefill softmax scale."""
-
-    def test_uses_qk_head_dim_for_deepseek_v2_style_mla(self):
-        model_config = SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                q_lora_rank=None,
-                kv_lora_rank=512,
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-                rope_parameters={"rope_type": "default"},
-            )
-        )
-
-        assert get_mla_prefill_scale(model_config) == pytest.approx(192**-0.5)
-
-    def test_applies_deepseek_yarn_mscale(self):
-        model_config = SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                q_lora_rank=None,
-                kv_lora_rank=512,
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-                rope_parameters={
-                    "rope_type": "yarn",
-                    "factor": 40,
-                    "mscale_all_dim": 0.707,
-                },
-            )
-        )
-
-        mscale = yarn_get_mscale(40, 0.707)
-        assert get_mla_prefill_scale(model_config) == pytest.approx(
-            192**-0.5 * mscale * mscale
-        )
-
-    def test_deepseek_v4_style_mla_does_not_apply_yarn_mscale(self):
-        model_config = SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                compress_ratios=[4],
-                q_lora_rank=1536,
-                head_dim=128,
-                qk_rope_head_dim=64,
-                rope_parameters={
-                    "rope_type": "yarn",
-                    "factor": 40,
-                    "mscale_all_dim": 0.707,
-                },
-            )
-        )
-
-        assert get_mla_prefill_scale(model_config) == pytest.approx(128**-0.5)
 
 
 class TestGetMLAPrefillBackend:
@@ -330,36 +269,21 @@ class TestMLAPrefillBackendParsing:
             )
 
 
-class TestDeprecatedFlagMigration:
-    """Tests for _migrate_deprecated_mla_prefill_flags in AttentionConfig."""
+class TestMLAPrefillBackendConfig:
+    """Tests for mla_prefill_backend configuration in AttentionConfig."""
 
-    def test_no_deprecated_flags_leaves_backend_none(self):
+    def test_default_backend_is_none(self):
         config = AttentionConfig()
         assert config.mla_prefill_backend is None
 
-    def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
-        config = AttentionConfig(use_trtllm_ragged_deepseek_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
-
-    def test_disable_flashinfer_prefill_migrates_to_flash_attn(self):
-        config = AttentionConfig(disable_flashinfer_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
-
-    def test_explicit_backend_ignores_deprecated_flags(self):
+    def test_explicit_flash_attn_backend(self):
         config = AttentionConfig(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
-            use_cudnn_prefill=True,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
-    def test_cudnn_raises_error(self):
-        match = "cuDNN MLA prefill backend has been removed"
-        with pytest.raises(ValueError, match=match):
-            AttentionConfig(use_cudnn_prefill=True)
-
-    def test_trtllm_takes_priority_over_disable_flashinfer(self):
+    def test_explicit_trtllm_ragged_backend(self):
         config = AttentionConfig(
-            use_trtllm_ragged_deepseek_prefill=True,
-            disable_flashinfer_prefill=True,
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED

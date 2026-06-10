@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from copy import deepcopy
-from unittest.mock import MagicMock
 
 import pytest
 import regex as re
+from openai.types.responses import FunctionTool, WebSearchTool
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.utils import (
+    find_tool_properties,
+    get_json_schema_from_tools,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -281,8 +284,6 @@ def test_structured_outputs_json_without_parameters(
 @pytest.mark.parametrize("empty_params", [False, True])
 @pytest.mark.parametrize("delta_len", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_streaming_output_valid(output, empty_params, delta_len):
-    self = MagicMock()
-
     output = deepcopy(output)
     if empty_params:
         output = [{"name": o["name"], "parameters": {}} for o in output]
@@ -295,14 +296,13 @@ def test_streaming_output_valid(output, empty_params, delta_len):
         delta_text = output_json[i : i + delta_len]
         current_text = previous_text + delta_text
 
-        delta_message, function_name_returned = (
-            OpenAIServingChat.extract_tool_call_required_streaming(
-                self,
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-            )
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
         )
 
         if delta_message:
@@ -332,8 +332,6 @@ def test_streaming_output_valid(output, empty_params, delta_len):
 
 
 def test_streaming_output_valid_with_trailing_extra_data():
-    self = MagicMock()
-
     output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
     output_json = json.dumps(output) + "\nDONE"
 
@@ -345,14 +343,13 @@ def test_streaming_output_valid_with_trailing_extra_data():
         delta_text = output_json[i : i + delta_len]
         current_text = previous_text + delta_text
 
-        delta_message, function_name_returned = (
-            OpenAIServingChat.extract_tool_call_required_streaming(
-                self,
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-            )
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
         )
 
         if delta_message:
@@ -361,3 +358,37 @@ def test_streaming_output_valid_with_trailing_extra_data():
         previous_text = current_text
 
     assert len(messages) > 0
+
+
+FUNCTION_TOOL = FunctionTool(
+    type="function",
+    name="get_weather",
+    parameters={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+)
+WEB_SEARCH_TOOL = WebSearchTool(type="web_search")
+
+
+class TestNonFunctionToolsSkipped:
+    """Non-function tools (web_search, etc.) must be silently skipped
+    by the tool-schema utilities instead of raising TypeError."""
+
+    def test_find_tool_properties_skips_web_search(self):
+        tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
+        props = find_tool_properties(tools, "get_weather")
+        assert props == {"city": {"type": "string"}}
+
+    def test_find_tool_properties_only_non_function_tools(self):
+        props = find_tool_properties([WEB_SEARCH_TOOL], "get_weather")
+        assert props == {}
+
+    def test_get_json_schema_with_mixed_tools(self):
+        tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+        assert isinstance(schema, dict)
+        any_of = schema["items"]["anyOf"]
+        assert len(any_of) == 1
+        assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]

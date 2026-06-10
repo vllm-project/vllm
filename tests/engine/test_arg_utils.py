@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, config
+from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -116,6 +116,10 @@ class DummyConfig:
     """Regular bool with default True"""
     optional_bool: bool | None = None
     """Optional bool with default None"""
+
+    optional_bool_or_str: bool | str | None = None
+    """Optional bool-or-str with default None"""
+
     optional_literal: Literal["x", "y"] | None = None
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = Field(default_factory=lambda: (1, 2, 3))
@@ -170,6 +174,11 @@ def test_get_kwargs():
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
+    # optional bool-or-str should accept an optional string value
+    assert kwargs["optional_bool_or_str"]["type"] is str
+    assert kwargs["optional_bool_or_str"]["nargs"] == "?"
+    assert kwargs["optional_bool_or_str"]["const"] is True
+    assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
     assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
     # tuples should have the correct nargs
@@ -195,6 +204,32 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+
+
+def test_hf_token_get_kwargs():
+    kwargs = get_kwargs(ModelConfig)["hf_token"]
+
+    assert kwargs["type"] is str
+    assert kwargs["nargs"] == "?"
+    assert kwargs["const"] is True
+    assert "action" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [
+        ([], None),
+        (["--hf-token"], True),
+        (["--hf-token", "hf_secret"], "hf_secret"),
+        (["--hf-token", "None"], "None"),
+    ],
+)
+def test_hf_token_cli_arg(cli_args, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(cli_args)
+
+    assert args.hf_token == expected
 
 
 @pytest.mark.parametrize(
@@ -333,11 +368,7 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
-            "--attention-config.use_trtllm_ragged_deepseek_prefill",
-            "true",
             "--attention-config.use_trtllm_attention",
-            "true",
-            "--attention-config.disable_flashinfer_prefill",
             "true",
             "--attention-config.disable_flashinfer_q_quantization",
             "true",
@@ -350,9 +381,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
-    assert engine_args.attention_config.disable_flashinfer_prefill is True
     assert engine_args.attention_config.disable_flashinfer_q_quantization is True
 
     # set to string form of a dict with all fields
@@ -362,10 +391,7 @@ def test_attention_config():
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
             '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_cudnn_prefill": false, '
-            '"use_trtllm_ragged_deepseek_prefill": false, '
             '"use_trtllm_attention": false, '
-            '"disable_flashinfer_prefill": false, '
             '"disable_flashinfer_q_quantization": false}',
         ]
     )
@@ -376,10 +402,7 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 2
     assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
-    assert engine_args.attention_config.use_cudnn_prefill is False
-    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
     assert engine_args.attention_config.use_trtllm_attention is False
-    assert engine_args.attention_config.disable_flashinfer_prefill is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
 
     # test --attention-backend flows into VllmConfig.attention_config
@@ -590,3 +613,31 @@ def test_ir_op_priority():
 )
 def test_expand_json_human_readable_numbers(input_json, expected_json):
     assert _expand_json_human_readable_numbers(input_json) == expected_json
+
+
+@pytest.mark.parametrize(
+    "uri",
+    ["s3://bucket/model", "gs://bucket/model", "az://container/model"],
+)
+def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
+    """Cloud storage URIs should not be passed to get_model_path()
+    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model=uri)
+    # model should remain the original cloud URI, not raise
+    assert args.model == uri
+
+
+def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
+    """Cloud storage tokenizer URI should not be passed to
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
+    assert args.model == "s3://bucket/model"
+    assert args.tokenizer == "s3://bucket/tokenizer"
