@@ -200,6 +200,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -532,6 +533,15 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        # Tracks which in-flight requests reference each cached encoder
+        # output and defers scheduler-requested eviction while an entry may
+        # still be read (async-scheduling rollback, spec-decode drafting,
+        # mm_hash reuse across requests). Shares the encoder_cache dict so
+        # all existing readers observe evictions.
+        self.encoder_cache_tracker = EncoderCache(
+            eager_eviction=self.model_config.is_encoder_decoder,
+            encoder_outputs=self.encoder_cache,
+        )
         self.late_interaction_runner = LateInteractionRunner()
 
         # Encoder CUDA graph manager (initialized after model load if enabled)
@@ -926,7 +936,7 @@ class GPUModelRunner(
         This should be called when model weights are updated to ensure
         stale embeddings computed with old weights are not reused.
         """
-        self.encoder_cache.clear()
+        self.encoder_cache_tracker.reset_encoder_cache()
         self.late_interaction_runner.clear()
 
     def post_kv_cache_wake_up(self) -> None:
@@ -1136,6 +1146,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self.encoder_cache_tracker.remove_request(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1153,9 +1164,10 @@ class GPUModelRunner(
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
-        # Free the cached encoder outputs.
+        # Free the cached encoder outputs. Eviction is deferred for entries
+        # still referenced by an in-flight request; see EncoderCache.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            self.encoder_cache.pop(mm_hash, None)
+            self.encoder_cache_tracker.free_encoder_cache(mm_hash)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -1234,6 +1246,10 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+            if new_req_data.mm_features:
+                self.encoder_cache_tracker.add_request(
+                    req_id, new_req_data.mm_features
+                )
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
@@ -1566,6 +1582,9 @@ class GPUModelRunner(
 
         req_state.prompt_token_ids = new_req_data.prompt_token_ids
         req_state.mm_features = new_req_data.mm_features
+        self.encoder_cache_tracker.update_request(
+            req_id, new_req_data.mm_features or []
+        )
         req_state.prompt_embeds = new_req_data.prompt_embeds
         req_state.sampling_params = new_req_data.sampling_params
         req_state.pooling_params = new_req_data.pooling_params

@@ -181,7 +181,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
-            self.encoder_cache = EncoderCache()
+            # For encoder-decoder models, the scheduler frees encoder
+            # outputs only once they are provably dead (cross-attention KV
+            # cached), so eviction can be eager. For other multimodal
+            # models, eviction is deferred while any in-flight request
+            # still references the entry. See EncoderCache.
+            self.encoder_cache = EncoderCache(
+                eager_eviction=self.model_config.is_encoder_decoder
+            )
 
         # Speculative decoding.
         self.speculator = None
