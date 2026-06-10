@@ -136,21 +136,7 @@ def test_non_structural_tag_parser_uses_schema_constraints(
     assert out.structured_outputs.structural_tag is None
 
 
-def test_structural_tag_reasoning_uses_reasoning_parser_and_enable_thinking():
-    parser = ToolParser(MagicMock())
-    assert not parser._structural_tag_reasoning_enabled()
-
-    parser.reasoning_parser_enabled = True
-    assert parser._structural_tag_reasoning_enabled()
-
-    parser.chat_template_kwargs = {"enable_thinking": False}
-    assert not parser._structural_tag_reasoning_enabled()
-
-    parser.chat_template_kwargs = {"enable_thinking": True}
-    assert parser._structural_tag_reasoning_enabled()
-
-
-def test_get_structural_tag_passes_request_time_reasoning_flag(
+def test_get_structural_tag_disables_reasoning(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools: list[ChatCompletionToolsParam],
 ):
@@ -172,14 +158,7 @@ def test_get_structural_tag_passes_request_time_reasoning_flag(
         tool_choice="auto",
     )
     parser = Qwen3XMLToolParser(MagicMock(), tools=sample_tools)
-    parser.reasoning_parser_enabled = True
-    parser.chat_template_kwargs = {"enable_thinking": False}
 
     parser.get_structural_tag(request)
 
-    parser = Qwen3XMLToolParser(MagicMock(), tools=sample_tools)
-    parser.reasoning_parser_enabled = True
-
-    parser.get_structural_tag(request)
-
-    assert captured == [False, True]
+    assert captured == [False]
