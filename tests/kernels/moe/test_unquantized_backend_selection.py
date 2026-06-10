@@ -117,13 +117,15 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
     return_value=(True, None),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
-def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
+def test_select_cuda_flashinfer_trtllm_backend(
+    mock_is_supported_trtllm_monolithic,
+):
     """Test CUDA backend selection when FlashInfer TRTLLM is available and enabled."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
@@ -146,6 +148,93 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
 
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsMonolithic"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
+    return_value=(False, "monolithic unsupported"),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
+    return_value=(True, None),
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
+)
+def test_select_cuda_flashinfer_trtllm_modular_backend(
+    mock_is_supported_trtllm_modular,
+    mock_is_supported_trtllm_monolithic,
+):
+    """Test CUDA backend selection falls back to FlashInfer TRTLLM modular."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "has_device_capability", return_value=True),
+    ):
+        moe_config = make_dummy_moe_config()
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.use_dp = False
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize(
+    "all2all_backend",
+    [
+        "allgather_reducescatter",
+        "deepep_high_throughput",
+        "mori_high_throughput",
+        "mori_low_latency",
+        "flashinfer_nvlink_two_sided",
+        "flashinfer_nvlink_one_sided",
+    ],
+)
+def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
+    mock_supports_current_device,
+    all2all_backend,
+):
+    """Test standard-format all2all backends select TRTLLM modular BF16."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = all2all_backend
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
 
 
 @patch(
@@ -153,7 +242,11 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
     return_value=True,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
+    return_value=(False, None),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
     return_value=(False, None),
 )
 @patch(
@@ -164,9 +257,10 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
 def test_select_cuda_flashinfer_cutlass_backend(
-    mock_has_flashinfer,
-    mock_is_supported_trtllm,
     mock_is_supported_cutlass,
+    mock_is_supported_trtllm_modular,
+    mock_is_supported_trtllm_monolithic,
+    mock_has_flashinfer,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
     and FlashInfer CUTLASS is available."""
