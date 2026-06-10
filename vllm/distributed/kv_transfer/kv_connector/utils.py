@@ -482,7 +482,9 @@ class TransferTopology:
         return self._engines[(remote_engine_id, remote_pp_rank)]
 
     def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
-        self._engines.pop(remote_engine_id, None)  # type: ignore[call-overload]
+        # Remove all pp_rank entries for the remote engine.
+        for key in [k for k in self._engines if k[0] == remote_engine_id]:
+            del self._engines[key]
 
     # ============================================================
     # Layout properties
