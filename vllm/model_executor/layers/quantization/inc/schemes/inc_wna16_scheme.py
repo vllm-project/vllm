@@ -90,7 +90,7 @@ class INCWna16Scheme(INCScheme):
         del config, prefix
         # XPU and CPU do not support MoE quantization yet
         if current_platform.is_xpu() or current_platform.is_cpu():
-            from vllm.model_executor.layers.fused_moe.layer import (
+            from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
 
