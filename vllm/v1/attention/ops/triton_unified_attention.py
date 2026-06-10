@@ -862,6 +862,26 @@ def unified_attention(
     )
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
+    # Tuned launch parameters; ``None`` lets Triton pick its defaults.
+    launch_num_warps: int | None = None
+    launch_num_stages: int | None = None
+
+    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
+    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
+    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
+    # more query rows per block + 8 warps is ~2x faster on B200.
+    tuned_large_head = (
+        head_size == 256
+        and max_seqlen_q > 1
+        and num_queries_per_kv <= 16
+        and current_platform.has_device_capability(100)
+    )
+    if tuned_large_head:
+        BLOCK_M = 32
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 8
+        launch_num_stages = 2
+
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -889,6 +909,11 @@ def unified_attention(
     TILE_SIZE_DECODE = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
+
+    # Wider KV tile for the tuned large-head path (see above). Only the 2D
+    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
+    if tuned_large_head:
+        TILE_SIZE_PREFILL = 128
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -985,6 +1010,12 @@ def unified_attention(
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
+    launch_kwargs: dict[str, int] = {}
+    if launch_num_warps is not None:
+        launch_kwargs["num_warps"] = launch_num_warps
+    if launch_num_stages is not None:
+        launch_kwargs["num_stages"] = launch_num_stages
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -1057,6 +1088,7 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        **launch_kwargs,
     )
 
     if use_3d:
