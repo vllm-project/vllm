@@ -1342,6 +1342,20 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_scheduler_config_rejects_negative_long_prefill_threshold():
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            long_prefill_token_threshold=-1,
+            max_model_len=4096,
+            is_encoder_decoder=False,
+        )
+
+
+def test_model_config_rejects_max_logprobs_below_unlimited_sentinel():
+    with pytest.raises(ValidationError):
+        ModelConfig(max_logprobs=-2)
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
