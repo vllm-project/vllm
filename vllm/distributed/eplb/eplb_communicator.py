@@ -289,9 +289,7 @@ class TorchDistXCCLStagedEplbCommunicator(EplbCommunicator):
         try:
             for op, tensor, peer_rank in self._ops:
                 send_or_recv = (
-                    torch.distributed.isend
-                    if op == "send"
-                    else torch.distributed.irecv
+                    torch.distributed.isend if op == "send" else torch.distributed.irecv
                 )
                 p2p_ops.append(
                     P2POp(
