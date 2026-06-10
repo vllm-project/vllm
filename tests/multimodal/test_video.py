@@ -18,6 +18,7 @@ from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     Molmo2VideoBackend,
+    PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackend,
     VideoLoader,
     get_video_loader_backend_for_processor,
@@ -239,6 +240,52 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
         PyNvVideoCodecVideoBackend._decoder_slots = old_slots
         PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
         PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+
+
+def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
+    events: list[tuple[object, ...]] = []
+
+    class FakeStream:
+        cuda_stream = "cuda-stream"
+
+    class FakeDecoder:
+        def __init__(self, file_path: str, **kwargs):
+            events.append(
+                (
+                    "create",
+                    file_path,
+                    kwargs["gpu_id"],
+                    kwargs["cuda_stream"],
+                    kwargs["decoder_cache_size"],
+                )
+            )
+
+        def reconfigure_decoder(self, file_path: str):
+            events.append(("reconfigure", file_path))
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    slot = PyNvVideoCodecDecoderSlot(FakeStream())
+
+    decoder = slot.get_decoder("first.mp4", FakeNvc, device_index=7)
+    assert slot.get_decoder("first.mp4", FakeNvc, device_index=7) is decoder
+    assert slot.get_decoder("second.mp4", FakeNvc, device_index=7) is decoder
+
+    assert events == [
+        (
+            "create",
+            "first.mp4",
+            7,
+            "cuda-stream",
+            PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+        ),
+        ("reconfigure", "second.mp4"),
+    ]
+    assert slot.source_path == "second.mp4"
 
 
 # ============================================================================
