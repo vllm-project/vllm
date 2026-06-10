@@ -720,6 +720,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    system_prompt: str | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -945,6 +946,7 @@ async def benchmark(
             extra_headers=extra_headers,
             extra_body=extra_body,
             request_id=request_id,
+            system_prompt=system_prompt,
         )
         tasks.append(
             asyncio.create_task(
@@ -1090,6 +1092,7 @@ async def benchmark(
             "start_times": [output.start_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
+            "request_ids": [output.request_id for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
             "rtfx": metrics.rtfx,
@@ -1103,6 +1106,7 @@ async def benchmark(
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
+            "request_ids": [output.request_id for output in outputs],
         }
 
     if rps_change_events:
@@ -1357,6 +1361,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="System prompt/instruction to be passed with each request.",
+    )
     parser.add_argument(
         "--endpoint",
         type=str,
@@ -1979,6 +1989,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        system_prompt=args.system_prompt,
     )
 
     # Save config and results to json
