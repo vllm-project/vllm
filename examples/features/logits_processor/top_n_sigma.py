@@ -74,8 +74,8 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
         self.req_info: dict[int, float] = {}
-        self._cached_rows_cpu: torch.Tensor | None = None
-        self._cached_n_sigmas_cpu: torch.Tensor | None = None
+        self._rows_cpu: torch.Tensor | None = None
+        self._n_sigmas_cpu: torch.Tensor | None = None
 
     def is_argmax_invariant(self) -> bool:
         return True
@@ -93,25 +93,25 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
 
         # Rebuild CPU caches after dict update (cheap: small tensors)
         if self.req_info:
-            self._cached_rows_cpu = torch.tensor(
+            self._rows_cpu = torch.tensor(
                 list(self.req_info.keys()), dtype=torch.long
             )
-            self._cached_n_sigmas_cpu = torch.tensor(
+            self._n_sigmas_cpu = torch.tensor(
                 list(self.req_info.values()), dtype=torch.float32
             )
         else:
-            self._cached_rows_cpu = None
-            self._cached_n_sigmas_cpu = None
+            self._rows_cpu = None
+            self._n_sigmas_cpu = None
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if self._cached_rows_cpu is None:
+        if self._rows_cpu is None:
             return logits
 
         # Move cached CPU tensors to GPU (non-blocking for pinned memory)
-        rows = self._cached_rows_cpu.to(
+        rows = self._rows_cpu.to(
             device=logits.device, non_blocking=True
         )
-        n_sigmas = self._cached_n_sigmas_cpu.to(
+        n_sigmas = self._n_sigmas_cpu.to(
             device=logits.device, dtype=logits.dtype, non_blocking=True
         )
 
@@ -167,17 +167,31 @@ sampling_params_list = [
 
 def main():
     llm = LLM(
-        model="facebook/opt-125m",
+        model="/jiangdingfeng/zy/vllm0/Qwen2.5-0.5B-Instruct",
         logits_processors=[TopNSigmaLogitsProcessor],
     )
-    outputs = llm.generate(prompts, sampling_params_list)
+    # Ordered by config: [s0_p0, s0_p1, ..., s1_p0, s1_p1, ...]
+    all_params = [s for s in sampling_params_list for _ in prompts]
+    all_prompts = prompts * len(sampling_params_list)
+
+    outputs = llm.generate(all_prompts, all_params)
+    config_labels = [
+        "top_n_sigma=2.0",
+        "baseline (no filter)",
+        "top_n_sigma=1.0",
+        "baseline (no filter)",
+    ]
+    n_prompts = len(prompts)
+
     print("\nTop-n-sigma Logits Processor Demo\n" + "=" * 60)
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt:    {prompt!r}")
-        print(f"Output:    {generated_text!r}")
+    for cfg_idx, label in enumerate(config_labels):
+        print(f"\n[{label}]")
         print("-" * 60)
+        for p_idx in range(n_prompts):
+            out = outputs[cfg_idx * n_prompts + p_idx]
+            print(f"Prompt:  {out.prompt!r}")
+            print(f"Output:  {out.outputs[0].text!r}")
+            print()
 
 
 if __name__ == "__main__":
