@@ -63,18 +63,22 @@ def compile_regex_with_timeout(fn: Callable[[], _T], pattern: str) -> _T:
     if timeout <= 0:
         return fn()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except TimeoutError:
-            future.cancel()
-            raise ValueError(
-                f"Regex compilation timed out after {timeout}s. "
-                "The pattern may be too complex or contain constructs that "
-                "cause exponential state-space explosion (e.g. nested "
-                f"quantifiers). Pattern: {pattern[:200]}"
-            ) from None
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Regex compilation timed out after {timeout}s. "
+            "The pattern may be too complex or contain constructs that "
+            "cause exponential state-space explosion (e.g. nested "
+            f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
 
 
 def apply_grammar_bitmask(
