@@ -2745,17 +2745,17 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
 
     @register_fake("_rocm_C::wvSplitK_int4_g")
     def _wvSplitK_int4_g_fake(
-        in_a: torch.Tensor,
-        in_b: torch.Tensor,
+        in_w: torch.Tensor,
+        in_x: torch.Tensor,
         in_scale: torch.Tensor,
         in_zero_points: torch.Tensor | None,
         in_bias: torch.Tensor | None,
         CuCount: int,
         group_size: int,
     ) -> torch.Tensor:
-        N = in_b.size(0)
-        M = in_a.size(0)
-        return torch.empty((N, M), dtype=in_b.dtype, device=in_b.device)
+        N = in_x.size(0)
+        M = in_w.size(0)
+        return torch.empty((N, M), dtype=in_x.dtype, device=in_x.device)
 
 
 def fused_moe_wvSplitK_int4_gemm(

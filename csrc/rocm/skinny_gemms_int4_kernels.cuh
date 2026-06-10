@@ -14,6 +14,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <utility>  // std::in_range
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
@@ -212,8 +213,10 @@ __device__ __forceinline__ void wvSplitK_int4_compute_sml_(
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const scalar_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, scalar_t* s) {
-  const int K_packed = K / 2;
+    const int CuCount, scalar_t* s, const int B_row_stride_bytes) {
+  // B_row_stride_bytes is the per-row byte stride of the packed weights;
+  // pass K/2 for the contiguous default, or K/2 + pad for the padded layout
+  // (see gfx1151 K%2048 cliff workaround).
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -255,9 +258,9 @@ __device__ __forceinline__ void wvSplitK_int4_compute_sml_(
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
 
-          const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+          const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
           for (int y = 0; y < YTILE; y++) {
-            const float* src = (const float*)(&B_[y * K_packed]);
+            const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
             for (int i = 0; i < A_CHUNK / 8; i++)
               bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -476,26 +479,25 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const scalar_t* __restrict__ A, const scalar_t* scale,
                           const scalar_t* zero_points,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
-                          const int _WvPrGrp, const int CuCount) {
+                          const int _WvPrGrp, const int CuCount,
+                          const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   __shared__ scalar_t s[max_lds_len];
   load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K, max_lds_len);
   wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
                              GROUP_SIZE, HAS_ZERO_POINTS>(
       K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
-      s);
+      s, B_row_stride_bytes);
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx,
-                                      const int By, const uint8_t* B_packed,
-                                      const scalar_t* __restrict__ A,
-                                      const scalar_t* scale,
-                                      const scalar_t* zero_points,
-                                      const scalar_t* __restrict__ BIAS,
-                                      scalar_t* C, const int _WvPrGrp,
-                                      const int CuCount) {
+__global__ void wvSplitK_int4_hf_sml_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const scalar_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
@@ -513,9 +515,8 @@ __device__ __forceinline__ void wvSplitK_int4_compute_(
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const scalar_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, scalar_t* s) {
+    const int CuCount, scalar_t* s, const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  const int K_packed = K / 2;
 
   union bigTypeA {
     scalar_t h[A_CHUNK];
@@ -568,9 +569,9 @@ __device__ __forceinline__ void wvSplitK_int4_compute_(
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
 
-          const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
+          const uint8_t* B_ = &B_packed[(m + 0) * B_row_stride_bytes + k_ / 2];
           for (int y = 0; y < YTILE; y++) {
-            const float* src = (const float*)(&B_[y * K_packed]);
+            const float* src = (const float*)(&B_[y * B_row_stride_bytes]);
   #pragma unroll
             for (int i = 0; i < A_CHUNK / 8; i++)
               bigB[y][k2].f[i] = loadnt((float*)&src[i]);
@@ -805,26 +806,25 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       const uint8_t* B_packed, const scalar_t* __restrict__ A,
                       const scalar_t* scale, const scalar_t* zero_points,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
-                      const int _WvPrGrp, const int CuCount) {
+                      const int _WvPrGrp, const int CuCount,
+                      const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   __shared__ scalar_t s[max_lds_len];
   load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K, max_lds_len);
   wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
-                         GROUP_SIZE, HAS_ZERO_POINTS>(K, M, Bx, By, B_packed, A,
-                                                      scale, zero_points, BIAS,
-                                                      C, _WvPrGrp, CuCount, s);
+                         GROUP_SIZE, HAS_ZERO_POINTS>(
+      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
+      s, B_row_stride_bytes);
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void wvSplitK_int4_hf_(const int K, const int M, const int Bx,
-                                  const int By, const uint8_t* B_packed,
-                                  const scalar_t* __restrict__ A,
-                                  const scalar_t* scale,
-                                  const scalar_t* zero_points,
-                                  const scalar_t* __restrict__ BIAS,
-                                  scalar_t* C, const int _WvPrGrp,
-                                  const int CuCount) {
+__global__ void wvSplitK_int4_hf_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const scalar_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int B_row_stride_bytes) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
@@ -874,12 +874,12 @@ static int mindiv_int4(int N, int div1, int div2) {
       wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS, \
                             _HAS_ZP><<<grid, block, 0, stream>>>(            \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
-          __wvPrGrp, CuCount);                                               \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                       \
     else                                                                     \
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,     \
                         _HAS_ZP><<<grid, block, 0, stream>>>(                \
           K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
-          __wvPrGrp, CuCount);                                               \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                       \
   }
 
 // Backwards-compatible wrapper: existing call sites get WvPrGrp=16, AC=16.
@@ -1056,7 +1056,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS) moe_wvSplitK_int4_hf_sml_(
 
     wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL,
                                N, GROUP_SIZE, HAS_ZERO_POINTS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s);
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s, K / 2);
   }
 }
 
@@ -1113,7 +1113,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
     wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
                            GROUP_SIZE, HAS_ZERO_POINTS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s);
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s, K / 2);
   }
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
