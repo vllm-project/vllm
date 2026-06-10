@@ -98,6 +98,11 @@ class ParserManager:
         if not tool_parser_name and not reasoning_parser_name:
             return None
 
+        if reasoning_parser_name == "openai_gptoss" or tool_parser_name == "openai":
+            from vllm.parser.harmony_parser import HarmonyParser
+
+            return HarmonyParser
+
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
             tool_parser_name, enable_auto_tools, model_name

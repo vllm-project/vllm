@@ -144,7 +144,7 @@ _TOOL_PARSERS_TO_REGISTER = {
     ),
     "openai": (
         "openai_tool_parser",
-        "OpenAIToolParser",
+        "GptOssToolParser",
     ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
