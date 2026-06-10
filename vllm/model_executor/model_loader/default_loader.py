@@ -94,6 +94,32 @@ class DefaultModelLoader(BaseModelLoader):
             "enable_weights_track", None
         )
 
+        enable_multithread_load = extra_config.get("enable_multithread_load", False)
+        if not isinstance(enable_multithread_load, bool):
+            raise ValueError(
+                "model_loader_extra_config['enable_multithread_load'] must "
+                "be a JSON boolean, got "
+                f"{type(enable_multithread_load).__name__} "
+                f"({enable_multithread_load!r}). Example: "
+                "--model-loader-extra-config "
+                '\'{"enable_multithread_load": true, "num_threads": 6}\''
+            )
+        self.enable_multithread_load: bool = enable_multithread_load
+
+        num_threads = extra_config.get("num_threads", self.DEFAULT_NUM_THREADS)
+        if (
+            isinstance(num_threads, bool)
+            or not isinstance(num_threads, int)
+            or num_threads < 1
+        ):
+            raise ValueError(
+                "model_loader_extra_config['num_threads'] must be a "
+                f"positive JSON integer, got {type(num_threads).__name__} "
+                f"({num_threads!r}). Example: --model-loader-extra-config "
+                '\'{"enable_multithread_load": true, "num_threads": 6}\''
+            )
+        self.num_threads: int = num_threads
+
     def _prepare_weights(
         self,
         model_name_or_path: str,
@@ -212,7 +238,6 @@ class DefaultModelLoader(BaseModelLoader):
         self, source: "Source"
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
-        extra_config = self.load_config.model_loader_extra_config
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path,
             source.subfolder,
@@ -242,13 +267,11 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
-                if extra_config.get("enable_multithread_load"):
+                if self.enable_multithread_load:
                     weights_iterator = multi_thread_safetensors_weights_iterator(
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
-                        max_workers=extra_config.get(
-                            "num_threads", self.DEFAULT_NUM_THREADS
-                        ),
+                        max_workers=self.num_threads,
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(
@@ -264,14 +287,12 @@ class DefaultModelLoader(BaseModelLoader):
                         ),
                     )
         else:
-            if extra_config.get("enable_multithread_load"):
+            if self.enable_multithread_load:
                 weights_iterator = multi_thread_pt_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                     self.load_config.pt_load_map_location,
-                    max_workers=extra_config.get(
-                        "num_threads", self.DEFAULT_NUM_THREADS
-                    ),
+                    max_workers=self.num_threads,
                 )
             else:
                 weights_iterator = pt_weights_iterator(
