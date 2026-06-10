@@ -25,6 +25,7 @@ async def transcribe_and_check(
     file,
     *,
     language: str,
+    extra_body: dict | None = None,
     expected_text: str,
     expected_seconds: int | None = None,
     case_sensitive: bool = False,
@@ -38,6 +39,7 @@ async def transcribe_and_check(
         model=model_name,
         file=file,
         language=language,
+        extra_body=extra_body,
         response_format="text",
         temperature=0.0,
     )
@@ -153,4 +155,29 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
             foscolo,
             language="it",
             expected_text="ove il mio corpo fanciulletto",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3-ASR-0.6B"])
+async def test_basic_audio_with_hotwords(
+    mary_had_lamb, model_name, rocm_aiter_fa_attention
+):
+    server_args = ["--enforce-eager", *ROCM_EXTRA_ARGS]
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
+    with RemoteOpenAIServer(
+        model_name, server_args, env_dict=ROCM_ENV_OVERRIDES
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        await transcribe_and_check(
+            client,
+            model_name,
+            mary_had_lamb,
+            language="en",
+            extra_body={"hotwords": "lamb sheep"},
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
         )
