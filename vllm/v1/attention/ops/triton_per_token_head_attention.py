@@ -25,7 +25,9 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_decode_attention import _fwd_kernel_stage2
 from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
-from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import unpack_int4_nibbles
+from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
+    unpack_int4_nibbles,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 

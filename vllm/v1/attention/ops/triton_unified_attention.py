@@ -809,7 +809,7 @@ def unified_attention(
     # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
     # sub-byte unpack); everything else goes through the core kernel below.
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        from vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head import (
+        from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
             unified_attention_int4,
         )
 

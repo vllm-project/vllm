@@ -440,7 +440,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     pre-rotation); INT8 and FP8 share the per-(token, head) absmax kernel.
     """
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        from vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head import (
+        from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
             reshape_and_cache_int4,
         )
 

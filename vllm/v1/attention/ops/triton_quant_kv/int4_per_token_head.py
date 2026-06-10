@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention (read-path) kernel + launcher for the sub-byte packed INT4 mode.
+"""Sub-byte packed (INT4) per-token-head KV cache mode.
 
-The :func:`_attn_packed` kernel handles INT4 (``PACKING_FACTOR=2``): it
-splits Q/KV into 2 interleaved streams, unpacks the cache nibbles, runs
-the split dot, and applies the asymmetric zero-point correction.
-
-Everything else (prologue, masking, online softmax, tile loop, 2D/3D
-epilogue) is the shared attention skeleton.
+INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
+and hides a 4-bit zero-point in the scale's low mantissa bits — too
+different from the core kernel to share it. Owns the whole mode: nibble
+pack/unpack, the reshape (write) kernel, the split-dot attention (read)
+kernel, and the public ``reshape_and_cache_int4`` / ``unified_attention_int4``
+entry points. (INT8 / FP8 per-token-head are in ``int8_fp8_per_token_head``.)
 """
 
 from __future__ import annotations
@@ -30,10 +30,290 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     softmax_step,
     store_segm_reduce_scalars,
 )
-from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import unpack_int4_nibbles
+from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
+
+# 2 x int4 packed per storage byte.
+_INT4_PACKING_FACTOR = 2
+
+
+# ----------------------------------------------------------------------
+# Nibble pack / unpack (shared write+read format)
+# ----------------------------------------------------------------------
+
+
+@triton.jit
+def pack_int4_nibbles(lo, hi):
+    """Pack two uint8 values (each in [0, 15]) into one byte."""
+    return (lo & 0xF) | ((hi & 0xF) << 4)
+
+
+@triton.jit
+def unpack_int4_nibbles(packed):
+    """Split one packed byte into the (low, high) nibble pair as uint8."""
+    return packed & 0xF, (packed >> 4) & 0xF
+
+
+# ----------------------------------------------------------------------
+# Write path: RHT + pack + per-(token, head) scale
+# ----------------------------------------------------------------------
+
+
+@triton.jit
+def _reshape_cache_int4_kernel(
+    key_ptr,
+    value_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    k_scale_cache_ptr,
+    v_scale_cache_ptr,
+    slot_mapping_ptr,
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_val_tok: tl.int64,
+    stride_val_head: tl.int64,
+    stride_kc_blk: tl.int64,
+    stride_kc_slot: tl.int64,
+    stride_kc_head: tl.int64,
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_ks_blk: tl.int64,
+    stride_ks_slot: tl.int64,
+    stride_ks_head: tl.int64,
+    stride_vs_blk: tl.int64,
+    stride_vs_slot: tl.int64,
+    stride_vs_head: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
+    PACKED_HEAD_PADDED: tl.constexpr,
+):
+    """INT4 asymmetric quantization with zero-point steganography."""
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+
+    slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
+    if slot < 0:
+        return
+
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
+
+    half_offs = tl.arange(0, PACKED_HEAD_PADDED)
+    even_offs = half_offs * 2
+    odd_offs = half_offs * 2 + 1
+
+    half_k = head_size // 2
+    even_k_mask = even_offs < head_size
+    odd_k_mask = odd_offs < head_size
+    key_base = key_ptr + tok * stride_key_tok + head * stride_key_head
+
+    k_even = tl.load(key_base + even_offs, mask=even_k_mask, other=0.0).to(tl.float32)
+    k_odd = tl.load(key_base + odd_offs, mask=odd_k_mask, other=0.0).to(tl.float32)
+
+    k_min = tl.minimum(
+        tl.min(tl.where(even_k_mask, k_even, float("inf"))),
+        tl.min(tl.where(odd_k_mask, k_odd, float("inf"))),
+    )
+    k_max = tl.maximum(
+        tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
+        tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
+    )
+    k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
+    k_zp_f = tl.clamp(
+        tl.where(
+            -k_min / k_scale >= 0,
+            (-k_min / k_scale + 0.5).to(tl.int32),
+            (-k_min / k_scale - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    inv_k = 1.0 / k_scale
+    k_even_s = k_even * inv_k + k_zp_f
+    k_odd_s = k_odd * inv_k + k_zp_f
+    k_even_q = tl.clamp(
+        tl.where(
+            k_even_s >= 0,
+            (k_even_s + 0.5).to(tl.int32),
+            (k_even_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+    k_odd_q = tl.clamp(
+        tl.where(
+            k_odd_s >= 0,
+            (k_odd_s + 0.5).to(tl.int32),
+            (k_odd_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    k_zp_int = k_zp_f.to(tl.int32)
+    k_scale_bits = k_scale.to(tl.int32, bitcast=True)
+    k_scale_packed = ((k_scale_bits & -16) | (k_zp_int & 0xF)).to(
+        tl.float32, bitcast=True
+    )
+
+    tl.store(
+        k_scale_cache_ptr
+        + blk * stride_ks_blk
+        + slot_in_blk * stride_ks_slot
+        + head * stride_ks_head,
+        k_scale_packed,
+    )
+
+    k_packed = pack_int4_nibbles(k_even_q.to(tl.uint8), k_odd_q.to(tl.uint8))
+    tl.store(
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + head * stride_kc_head
+        + half_offs,
+        k_packed,
+        mask=half_offs < half_k,
+    )
+
+    half_v = head_size_v // 2
+    even_v_mask = even_offs < head_size_v
+    odd_v_mask = odd_offs < head_size_v
+    val_base = value_ptr + tok * stride_val_tok + head * stride_val_head
+
+    v_even = tl.load(val_base + even_offs, mask=even_v_mask, other=0.0).to(tl.float32)
+    v_odd = tl.load(val_base + odd_offs, mask=odd_v_mask, other=0.0).to(tl.float32)
+
+    v_min = tl.minimum(
+        tl.min(tl.where(even_v_mask, v_even, float("inf"))),
+        tl.min(tl.where(odd_v_mask, v_odd, float("inf"))),
+    )
+    v_max = tl.maximum(
+        tl.max(tl.where(even_v_mask, v_even, float("-inf"))),
+        tl.max(tl.where(odd_v_mask, v_odd, float("-inf"))),
+    )
+    v_scale = tl.maximum((v_max - v_min) / 15.0, 1e-6)
+    v_zp_f = tl.clamp(
+        tl.where(
+            -v_min / v_scale >= 0,
+            (-v_min / v_scale + 0.5).to(tl.int32),
+            (-v_min / v_scale - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    inv_v = 1.0 / v_scale
+    v_even_s = v_even * inv_v + v_zp_f
+    v_odd_s = v_odd * inv_v + v_zp_f
+    v_even_q = tl.clamp(
+        tl.where(
+            v_even_s >= 0,
+            (v_even_s + 0.5).to(tl.int32),
+            (v_even_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+    v_odd_q = tl.clamp(
+        tl.where(
+            v_odd_s >= 0,
+            (v_odd_s + 0.5).to(tl.int32),
+            (v_odd_s - 0.5).to(tl.int32),
+        ).to(tl.float32),
+        0.0,
+        15.0,
+    )
+
+    v_zp_int = v_zp_f.to(tl.int32)
+    v_scale_bits = v_scale.to(tl.int32, bitcast=True)
+    v_scale_packed = ((v_scale_bits & -16) | (v_zp_int & 0xF)).to(
+        tl.float32, bitcast=True
+    )
+
+    tl.store(
+        v_scale_cache_ptr
+        + blk * stride_vs_blk
+        + slot_in_blk * stride_vs_slot
+        + head * stride_vs_head,
+        v_scale_packed,
+    )
+
+    v_packed = pack_int4_nibbles(v_even_q.to(tl.uint8), v_odd_q.to(tl.uint8))
+    tl.store(
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + head * stride_vc_head
+        + half_offs,
+        v_packed,
+        mask=half_offs < half_v,
+    )
+
+
+def _run_reshape_kernel(
+    kernel,
+    *,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    k_scale_cache: torch.Tensor,
+    v_scale_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    packing_factor: int,
+) -> None:
+    """Launch the packed INT4 reshape kernel."""
+    num_tokens, num_kv_heads, head_size = key.shape
+    head_size_v = value.shape[2]
+    assert head_size % packing_factor == 0 and head_size_v % packing_factor == 0
+    packed_padded = triton.next_power_of_2(
+        max(head_size, head_size_v) // packing_factor
+    )
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        num_warps = 4
+    else:
+        num_warps = min(16, max(1, packed_padded // 32))
+
+    kernel[(num_tokens, num_kv_heads)](
+        key_ptr=key,
+        value_ptr=value,
+        key_cache_ptr=key_cache,
+        value_cache_ptr=value_cache,
+        k_scale_cache_ptr=k_scale_cache,
+        v_scale_cache_ptr=v_scale_cache,
+        slot_mapping_ptr=slot_mapping,
+        stride_key_tok=key.stride(0),
+        stride_key_head=key.stride(1),
+        stride_val_tok=value.stride(0),
+        stride_val_head=value.stride(1),
+        stride_kc_blk=key_cache.stride(0),
+        stride_kc_slot=key_cache.stride(1),
+        stride_kc_head=key_cache.stride(2),
+        stride_vc_blk=value_cache.stride(0),
+        stride_vc_slot=value_cache.stride(1),
+        stride_vc_head=value_cache.stride(2),
+        stride_ks_blk=k_scale_cache.stride(0),
+        stride_ks_slot=k_scale_cache.stride(1),
+        stride_ks_head=k_scale_cache.stride(2),
+        stride_vs_blk=v_scale_cache.stride(0),
+        stride_vs_slot=v_scale_cache.stride(1),
+        stride_vs_head=v_scale_cache.stride(2),
+        block_size=key_cache.shape[1],
+        head_size=head_size,
+        head_size_v=head_size_v,
+        PACKED_HEAD_PADDED=packed_padded,
+        num_warps=num_warps,
+    )
+
+
+# ----------------------------------------------------------------------
+# Read path: split-dot attention over the packed cache
+# ----------------------------------------------------------------------
 
 
 @triton.jit
@@ -565,3 +845,105 @@ def _launch_packed_attn(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
         )
+
+
+# ----------------------------------------------------------------------
+# Public entry points
+# ----------------------------------------------------------------------
+
+
+def reshape_and_cache_int4(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    *,
+    k_scale_cache: torch.Tensor,
+    v_scale_cache: torch.Tensor,
+) -> None:
+    """Pre-rotate (RHT), pack to INT4 and write into the paged cache."""
+    key = single_rht(key.float()).to(key.dtype)
+    value = single_rht(value.float()).to(value.dtype)
+    _run_reshape_kernel(
+        _reshape_cache_int4_kernel,
+        key=key,
+        value=value,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+        slot_mapping=slot_mapping,
+        packing_factor=_INT4_PACKING_FACTOR,
+    )
+
+
+def unified_attention_int4(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    seqused_k: torch.Tensor,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    window_size: tuple[int, int],
+    block_table: torch.Tensor,
+    softcap: float,
+    sinks: torch.Tensor | None,
+    alibi_slopes: torch.Tensor | None,
+    use_alibi_sqrt: bool,
+    qq_bias: torch.Tensor | None,
+    output_scale: torch.Tensor | None,
+    mm_prefix_range: torch.Tensor | None,
+    k_scale_cache: torch.Tensor,
+    v_scale_cache: torch.Tensor,
+    seq_threshold_3D: int | None = None,
+    num_par_softmax_segments: int | None = None,
+    softmax_segm_output: torch.Tensor | None = None,
+    softmax_segm_max: torch.Tensor | None = None,
+    softmax_segm_expsum: torch.Tensor | None = None,
+) -> None:
+    """Paged attention over the INT4 packed cache, writing into *out*.
+
+    The forward RHT has norm ``sqrt(head_size)``, so ``softmax_scale`` is
+    divided by ``head_size`` and the inverse RHT divides the output by
+    ``head_size`` as well.
+    """
+    q_orig_dtype = q.dtype
+    q = single_rht(q.float()).to(q_orig_dtype)
+    head_size = q.shape[2]
+    softmax_scale = softmax_scale / head_size
+
+    _launch_packed_attn(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        out=out,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        seqused_k=seqused_k,
+        softmax_scale=softmax_scale,
+        window_size=window_size,
+        block_table=block_table,
+        softcap=softcap,
+        sinks=sinks,
+        alibi_slopes=alibi_slopes,
+        use_alibi_sqrt=use_alibi_sqrt,
+        qq_bias=qq_bias,
+        output_scale=output_scale,
+        mm_prefix_range=mm_prefix_range,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        packing_factor=_INT4_PACKING_FACTOR,
+    )
+
+    out_f = single_rht(out.float(), inverse=True) / head_size
+    out.copy_(out_f.to(q_orig_dtype))
