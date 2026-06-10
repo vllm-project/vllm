@@ -1414,7 +1414,13 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and generated_token_ids:
+            if scheduled_spec_token_ids:
+                # A scheduled-spec request always commits at least one token,
+                # since `sample_recovered_tokens_kernel` never emits an
+                # out-of-vocab id. Assert the invariant rather than silently
+                # skipping accounting, which would leave `num_computed_tokens`
+                # too high and could stall the request.
+                assert generated_token_ids
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted

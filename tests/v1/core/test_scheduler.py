@@ -906,12 +906,22 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert stats.num_accepted_tokens_per_pos == expected[3]
 
 
-def test_spec_decoding_stats_empty_output():
-    """Test that spec decoding stats handle empty output tokens gracefully.
+def test_spec_decoding_empty_output_asserts():
+    """An empty sampled-token row for a request that had speculative tokens
+    scheduled is an invariant violation, and the scheduler asserts it.
 
-    This is a regression test for a bug where empty sampled_token_ids
-    would cause num_accepted = len([]) - 1 = -1, leading to a
-    ValueError when incrementing a Prometheus counter with a negative value.
+    Background: #33729 made the scheduler *skip* rejection accounting whenever
+    ``generated_token_ids`` was empty, to avoid ``num_accepted = len([]) - 1 =
+    -1`` crashing a Prometheus counter. That hid the real bug instead of fixing
+    it: the recovered-token kernel could emit an out-of-vocabulary id that
+    ``RejectionSampler.parse_output`` then dropped, producing the empty row.
+    Skipping the accounting left ``num_computed_tokens`` too high, which could
+    stall the request (no schedulable work despite being unfinished).
+
+    With the recovered-token kernel fixed to always emit an in-vocab id, a
+    request that had spec tokens scheduled always commits at least one token,
+    so the scheduler enforces ``assert generated_token_ids`` rather than
+    silently tolerating the broken state.
     """
     num_spec_tokens = 3
     scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
@@ -921,11 +931,9 @@ def test_spec_decoding_stats_empty_output():
 
     scheduler.add_request(request)
 
-    # Initial schedule (prefill)
+    # Initial schedule (prefill) and a sampled token to begin decoding.
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 1
-
-    # Complete the prefill with a sampled token
     model_runner_output = ModelRunnerOutput(
         req_ids=[req_id],
         req_id_to_index={req_id: 0},
@@ -936,34 +944,26 @@ def test_spec_decoding_stats_empty_output():
     )
     scheduler.update_from_output(output, model_runner_output)
 
-    # Add draft tokens for speculation
+    # Add draft tokens and schedule them for verification.
     draft_token_ids = DraftTokenIds([req_id], [[1, 2, 3]])
     scheduler.update_draft_token_ids(draft_token_ids)
-
-    # Schedule the speculated tokens for validation
     output = scheduler.schedule()
     assert req_id in output.scheduled_spec_decode_tokens
     assert len(output.scheduled_spec_decode_tokens[req_id]) == 3
 
-    # Simulate empty output tokens (e.g., due to request abortion or error)
-    # This would previously cause num_accepted = -1 and crash
+    # An empty sampled-token row for a request that had spec tokens scheduled
+    # cannot happen once the recovered-token kernel is fixed; the scheduler
+    # enforces the invariant with an assertion.
     model_runner_output = ModelRunnerOutput(
         req_ids=[req_id],
         req_id_to_index={req_id: 0},
-        sampled_token_ids=[[]],  # Empty output tokens
+        sampled_token_ids=[[]],  # Empty output tokens.
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
     )
-
-    # This should not raise an error
-    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
-
-    # Spec decoding stats should be None since no tokens were generated
-    scheduler_stats = (
-        engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
-    )
-    assert scheduler_stats is None or scheduler_stats.spec_decoding_stats is None
+    with pytest.raises(AssertionError):
+        scheduler.update_from_output(output, model_runner_output)
 
 
 def test_no_spec_tokens_scheduled_for_prefill_chunks():

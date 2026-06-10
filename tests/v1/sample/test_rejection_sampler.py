@@ -937,6 +937,75 @@ def test_sample_recovered_tokens(
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
 
 
+@pytest.mark.parametrize("vocab_size", [50000, 129280])
+@pytest.mark.parametrize("no_draft_probs", [True, False])
+def test_sample_recovered_tokens_nan_target_probs_stay_in_vocab(
+    vocab_size: int, no_draft_probs: bool
+):
+    """All-NaN ``target_probs`` must not yield an out-of-vocabulary token id.
+
+    When the target model emits NaN logits, ``target_probs`` is all-NaN. For a
+    ``vocab_size`` that is not a multiple of the kernel ``BLOCK_SIZE`` (8192),
+    the final tile contains padding positions whose score is ``0.0``. Those
+    zeros used to win the NaN-propagating ``tl.max`` reduction and yield
+    ``recovered_id == vocab_size`` (out of bounds).
+    ``RejectionSampler.parse_output`` keeps only ids ``< vocab_size``, so such a
+    row collapses to an empty list, which then stalls the scheduler. The kernel
+    must instead return an in-vocab id.
+
+    ``vocab_size=129280`` matches the DeepSeek V3.2 setup where this was first
+    observed.
+    """
+    batch_size = 2
+    max_spec_len = 2
+    num_tokens = batch_size * max_spec_len
+
+    # Draft token ids are arbitrary in-vocab ids.
+    draft_token_ids = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE_TYPE)
+
+    draft_probs = None
+    if not no_draft_probs:
+        draft_probs = torch.full(
+            (num_tokens, vocab_size),
+            1.0 / vocab_size,
+            dtype=torch.float32,
+            device=DEVICE_TYPE,
+        )
+
+    # Degenerate target distribution: the model emitted NaN logits.
+    target_probs = torch.full(
+        (num_tokens, vocab_size),
+        float("nan"),
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE)
+    generators = {
+        i: torch.Generator(device=DEVICE_TYPE).manual_seed(i) for i in range(batch_size)
+    }
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False, temperature=temperature, generators=generators
+    )
+    spec_decode_metadata = create_spec_decode_metadata(
+        draft_token_ids.reshape(batch_size, max_spec_len).tolist(), target_probs
+    )
+
+    recovered_token_ids = sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=DEVICE_TYPE,
+    )
+
+    assert torch.all(recovered_token_ids >= 0)
+    assert torch.all(recovered_token_ids < vocab_size)
+
+
 def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
     batch_size = 2
     vocab_size = 64
