@@ -38,7 +38,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ..transcription.protocol import (
     TranscriptionResponse,
@@ -146,7 +146,9 @@ class OpenAISpeechToText(OpenAIServing):
             max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
         )
-        self._preprocess_semaphore = asyncio.Semaphore(num_audio_preprocess_workers)
+        self._decode_and_chunk_speech_async = make_async(
+            self._decode_and_chunk_speech, executor=self._preprocess_executor
+        )
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
@@ -158,11 +160,6 @@ class OpenAISpeechToText(OpenAIServing):
     def shutdown(self) -> None:
         if (executor := getattr(self, "_preprocess_executor", None)) is not None:
             executor.shutdown(wait=False)
-
-    async def _run_preprocess_step(self, func: Callable[..., R], *args) -> R:
-        loop = asyncio.get_running_loop()
-        async with self._preprocess_semaphore:
-            return await loop.run_in_executor(self._preprocess_executor, func, *args)
 
     def _decode_and_chunk_speech(
         self,
@@ -277,10 +274,7 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
-        chunks, duration = await self._run_preprocess_step(
-            self._decode_and_chunk_speech,
-            audio_data,
-        )
+        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
