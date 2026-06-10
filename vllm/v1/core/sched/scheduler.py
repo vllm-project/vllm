@@ -442,7 +442,7 @@ class Scheduler(SchedulerInterface):
                     request, num_new_tokens
                 )
 
-            if num_new_tokens <= 0:
+            if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
                 # 1. No new tokens to schedule. This may happen when
