@@ -62,15 +62,15 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_TEST_COMMANDS: >-
+      export VLLM_USE_V2_MODEL_RUNNER=1 &&
+      cd tests &&
+      pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed(num_gpus=2)" -k "not ray and not True" &&
+      TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
   source_file_dependencies:
     - vllm/v1/worker/gpu/
     - vllm/v1/worker/gpu_worker.py
     - tests/basic_correctness/test_basic_correctness.py
     - tests/v1/distributed/test_async_llm_dp.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'export VLLM_USE_V2_MODEL_RUNNER=1 &&
-      cd tests &&
-      pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed(num_gpus=2)" -k "not ray and not True" &&
-      TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"'
+    - bash .buildkite/scripts/hardware_ci/run-intel-test.sh
