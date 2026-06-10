@@ -1726,7 +1726,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
                         * padded_local_max_context_chunk_across_ranks
-                    )
+                    ).pin_memory()
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts
