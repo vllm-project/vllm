@@ -132,9 +132,7 @@ def _create_gdn_builder(
         block_size=BLOCK_SIZE,
     )
     if full_cuda_graph:
-        vllm_config.compilation_config.cudagraph_mode = (
-            CUDAGraphMode.FULL_AND_PIECEWISE
-        )
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
