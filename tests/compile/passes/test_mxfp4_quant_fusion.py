@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit and functional tests for MXFP4 kernel fusion patterns.
-
-Covers:
-  Unit tests (no GPU required):
-    - Feature probes always return bool
-    - VllmPatternReplacement subclass structure (pattern/replacement/get_inputs)
-    - Registration ordering (Pattern B before Pattern A for greedy matching)
-    - uuid() changes when MXFP4 patterns are added to RocmAiterRMSNormQuantFusionPass
-
-  Functional tests (ROCm + AITER required):
-    - Standalone RMSNorm + MXFP4 quant: fused op appears / standalone quant disappears
-    - Standalone fused_add_RMSNorm + MXFP4 quant: fused op with residual
-    - Numerical correctness: fused vs unfused output within tolerance
-    - Epsilon variants: 1e-5 and 1e-6 both registered and matched
-    - DeepSeek-R1 shape (hidden_size=7168) pattern traces correctly
-
-Similar models used as references:
-  - AiterRMSFp8GroupQuantPattern  (rocm_aiter_fusion.py) — same 2-node pattern shape
-  - AiterFusedAddRMSFp8GroupQuantPattern — same 3-node residual-add shape
-  - test_aiter_fusion_rmsnorm_quant (test_fusion.py) — exact test harness template
-"""
-
 import math
 
 import pytest
@@ -52,7 +30,6 @@ _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
 
 
 def test_unit_probe_rmsnorm_mxfp4_returns_bool():
-    """has_fused_rmsnorm_mxfp4_quant() must always return bool."""
     result = rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant()
     assert isinstance(result, bool), (
         f"has_fused_rmsnorm_mxfp4_quant returned {type(result)}, expected bool"
@@ -60,13 +37,6 @@ def test_unit_probe_rmsnorm_mxfp4_returns_bool():
 
 
 def test_unit_probe_rmsnorm_false_without_aiter():
-    """Probe must return False (not raise) when AITER is absent.
-
-    Guards against a regression where the try/except in has_fused_rmsnorm_mxfp4_quant()
-    is changed to a bare attribute access that would raise ImportError or
-    AttributeError instead of returning False, breaking callers that rely on
-    the bool contract for conditional dispatch.
-    """
     if is_aiter_found_and_supported():
         pytest.skip("AITER is present — probe may return True or False")
     assert rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant() is False
@@ -77,11 +47,6 @@ def test_unit_probe_rmsnorm_false_without_aiter():
 
 @_NEEDS_MXFP4_STANDALONE
 def test_unit_get_ops_exist():
-    """All new get_*_op staticmethods must return non-None OpOverloads.
-
-    Guarded by _NEEDS_MXFP4_STANDALONE because get_fused_rmsnorm_mxfp4_quant_op()
-    returns None when has_fused_rmsnorm_mxfp4_quant() is False (older AITER build).
-    """
     ops = {
         "get_dynamic_mxfp4_quant_op": rocm_aiter_ops.get_dynamic_mxfp4_quant_op,
         "get_fused_rmsnorm_mxfp4_quant_op": (
@@ -105,11 +70,6 @@ def test_unit_get_ops_exist():
 @_NEEDS_MXFP4_STANDALONE
 @pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
 def test_unit_deepseek_shape_no_residual(epsilon):
-    """Fused op output shapes match MXFP4 packing rules at DS-R1 hidden_size=7168.
-
-    Exercises the fused kernel (not just arithmetic) to confirm the packing
-    contract holds at the target model's actual hidden dimension.
-    """
     hidden_size = 7168
     num_tokens = 4
     fused_op = rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op()
@@ -138,9 +98,6 @@ def test_unit_deepseek_shape_no_residual(epsilon):
 
 @_NEEDS_ROCM_AITER
 def test_unit_standalone_registration_order(monkeypatch):
-    """AiterFusedAddRMSNormMXFP4QuantPattern (3-node, with residual) must be
-    registered before AiterRMSNormMXFP4QuantPattern (2-node, no residual) so
-    greedy matching handles residual sites first."""
     import vllm.config
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
         AiterFusedAddRMSNormMXFP4QuantPattern,
@@ -187,8 +144,6 @@ def test_unit_standalone_registration_order(monkeypatch):
 
 @_NEEDS_ROCM_AITER
 def test_unit_uuid_changes_with_mxfp4(monkeypatch):
-    """RocmAiterRMSNormQuantFusionPass uuid must differ when MXFP4 patterns
-    are registered vs not (regression guard for cache invalidation)."""
     import vllm.config
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
         RocmAiterRMSNormQuantFusionPass,
@@ -217,12 +172,6 @@ def test_unit_uuid_changes_with_mxfp4(monkeypatch):
 
 
 class _RMSNormMXFP4Model(torch.nn.Module):
-    """Minimal model: RMSNorm → MXFP4-quant (no residual).
-
-    Used as functional test fixture.  The pattern matcher should replace the
-    two-op subgraph with a single rocm_aiter_rmsnorm_mxfp4_quant call.
-    """
-
     def __init__(self, hidden_size: int, eps: float):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size, dtype=torch.bfloat16))
@@ -238,11 +187,6 @@ class _RMSNormMXFP4Model(torch.nn.Module):
 
 
 class _FusedAddRMSNormMXFP4Model(torch.nn.Module):
-    """Minimal model: fused_add_RMSNorm → MXFP4-quant (with residual).
-
-    The pattern matcher should replace with rocm_aiter_rmsnorm_add_mxfp4_quant.
-    """
-
     def __init__(self, hidden_size: int, eps: float):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size, dtype=torch.bfloat16))
@@ -262,11 +206,6 @@ class _FusedAddRMSNormMXFP4Model(torch.nn.Module):
 
 
 def _dequant_mxfp4(fp4: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Rough dequantization: unpack uint8 → two FP4 values, scale, sum.
-
-    Only used for rough numeric proximity check — not a full FP4 decoder.
-    We compare scale tensors directly since they are float32.
-    """
     # Each uint8 byte = two 4-bit values packed as lo | (hi << 4)
     lo = (fp4 & 0x0F).float()
     hi = (fp4 >> 4).float()
@@ -287,11 +226,6 @@ def _dequant_mxfp4(fp4: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("num_tokens", [1, 8, 32])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 def test_functional_standalone_no_residual_scale_shape(hidden_size, num_tokens, eps):
-    """After fusion: output fp4 and scale tensors have the correct MXFP4 shapes.
-
-    Mirrors the shape contract verified by AiterRMSFp8GroupQuantPattern tests
-    in test_fusion.py.  Uses rocm_aiter_rmsnorm_mxfp4_quant directly.
-    """
     fused_op = rocm_aiter_ops.get_fused_rmsnorm_mxfp4_quant_op()
     weight = torch.ones(hidden_size, dtype=torch.bfloat16, device="cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
@@ -317,8 +251,6 @@ def test_functional_standalone_no_residual_scale_shape(hidden_size, num_tokens, 
 @pytest.mark.parametrize("num_tokens", [4, 16])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 def test_functional_standalone_with_residual_outputs(hidden_size, num_tokens, eps):
-    """rocm_aiter_rmsnorm_add_mxfp4_quant returns 3 tensors with correct shapes:
-    (fp4, scale, residual_out)."""
     fused_op = rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op()
     weight = torch.ones(hidden_size, dtype=torch.bfloat16, device="cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda")
@@ -339,10 +271,6 @@ def test_functional_standalone_with_residual_outputs(hidden_size, num_tokens, ep
 @pytest.mark.parametrize("num_tokens", [1, 8])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 def test_functional_residual_update_correct(num_tokens, eps):
-    """residual_out from the fused add+norm+quant op must equal x + residual_in.
-
-    This mirrors TC-2.5 in test_f2_rmsnorm_fused.py for the pattern-matched path.
-    """
     hidden_size = 256
     fused_op = rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op()
     weight = torch.ones(hidden_size, dtype=torch.bfloat16, device="cuda")
@@ -364,11 +292,6 @@ def test_functional_residual_update_correct(num_tokens, eps):
 @_NEEDS_MXFP4_STANDALONE
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 def test_functional_scale_numerically_correct(eps):
-    """MXFP4 block scales produced by fused kernel must be numerically close
-    to scales from a reference two-step path (RMSNorm → standalone quant).
-
-    Mirrors the dq comparison in test_f2_rmsnorm_fused.py TC-2.2/2.3/2.4.
-    """
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     hidden_size = 256
@@ -417,14 +340,6 @@ def test_functional_scale_numerically_correct(eps):
 def test_functional_pattern_fires_no_residual(
     hidden_size, num_tokens, eps, monkeypatch
 ):
-    """Compile _RMSNormMXFP4Model through RocmAiterRMSNormQuantFusionPass and
-    verify:
-      1. The fused op (rocm_aiter_rmsnorm_mxfp4_quant) appears in the compiled graph.
-      2. The standalone dynamic_mxfp4_quant op is eliminated.
-      3. matched_count == 1 (one occurrence of the 2-node subgraph).
-
-    Mirrors test_aiter_fusion_rmsnorm_quant in test_fusion.py.
-    """
     import vllm.config
     from tests.compile.backend import TestBackend
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
@@ -476,12 +391,6 @@ def test_functional_pattern_fires_no_residual(
 def test_functional_pattern_fires_with_residual(
     hidden_size, num_tokens, eps, monkeypatch
 ):
-    """Compile _FusedAddRMSNormMXFP4Model and verify:
-      1. rocm_aiter_rmsnorm_add_mxfp4_quant appears.
-      2. matched_count == 1.
-
-    Mirrors the fused_add path in AiterFusedAddRMSFp8GroupQuantPattern tests.
-    """
     import vllm.config
     from tests.compile.backend import TestBackend
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
@@ -537,11 +446,6 @@ def test_functional_pattern_fires_with_residual(
 def test_functional_fused_matches_unfused_output(
     hidden_size, num_tokens, eps, monkeypatch
 ):
-    """Numerical regression: fused path and unfused path (norm → quant separately)
-    must produce scale tensors within 2 E8M0 ULPs.
-
-    Mirrors TC-2.2/2.3/2.4 of test_f2_rmsnorm_fused.py.
-    """
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -576,21 +480,6 @@ def test_functional_fused_matches_unfused_output(
 
 
 class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
-    """Exercises F2 patterns in RocmAiterRMSNormQuantFusionPass.
-
-    Two rms_norm sites covering both registered patterns:
-
-    * norm[0]: rms_norm → dynamic_mxfp4_quant (no residual)
-               → AiterRMSNormMXFP4QuantPattern
-
-    * norm[1]: fused_add_rms_norm → dynamic_mxfp4_quant (with residual)
-               → AiterFusedAddRMSNormMXFP4QuantPattern
-
-    Analogous to TestAiterAllReduceRMSNormGroupQuantFP8Model in PR#42864's
-    test_fusion_all_reduce.py. Does not require distributed setup since
-    RocmAiterRMSNormQuantFusionPass is not AR-gated.
-    """
-
     def __init__(self, hidden_size=256, eps=1e-6, dtype=torch.bfloat16):
         super().__init__()
         self.hidden_size = hidden_size
@@ -614,10 +503,6 @@ class _AiterRMSNormMXFP4QuantModel(torch.nn.Module):
 
 @_NEEDS_MXFP4_STANDALONE
 def test_mxfp4_patterns_fire_on_model(monkeypatch):
-    """Prove both MXFP4 patterns fire on a compiled model with two norm sites.
-    Checks: matched_count==2, both fused ops appear, standalone quant absent.
-    Analogous to PR#42864's distributed AR+RMS+quant test but without
-    distributed setup — RocmAiterRMSNormQuantFusionPass is not AR-gated."""
     import vllm.config
     from tests.compile.backend import TestBackend
     from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
