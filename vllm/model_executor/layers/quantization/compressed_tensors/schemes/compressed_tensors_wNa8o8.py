@@ -9,7 +9,8 @@ weight-only matmul, rather than a fused int8 GEMM.
 """
 
 from collections.abc import Callable
-
+from fractions import Fraction
+import math
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
@@ -36,7 +37,11 @@ __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
 
 WNA8O8_SUPPORTED_TYPES_MAP = {
     2: scalar_types.uint2b2,
+    3: scalar_types.uint3b4,
     4: scalar_types.uint4b8,
+    5: scalar_types.uint5b16,
+    6: scalar_types.uint6b32,
+    7: scalar_types.uint7b64,
     8: scalar_types.uint8b128,
 }
 
@@ -60,7 +65,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         quant_format: str = "pack-quantized",
     ):
         self.num_bits = num_bits
-        self.pack_factor = 32 // num_bits
+        self.pack_factor = Fraction(32, num_bits)
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
         self.has_input_act = has_input_act
@@ -141,6 +146,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                 ),
             )
         else:
+            packed_input_dim = math.ceil(input_size_per_partition/32) * self.num_bits
             layer.register_parameter(
                 "weight_packed",
                 PackedvLLMParameter(
@@ -151,7 +157,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                     weight_loader=weight_loader,
                     data=torch.empty(
                         out,
-                        input_size_per_partition // self.pack_factor,
+                        packed_input_dim,
                         dtype=torch.int32,
                     ),
                 ),
