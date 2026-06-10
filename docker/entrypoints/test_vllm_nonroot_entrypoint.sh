@@ -48,6 +48,27 @@ run_wrapper() {
 
 fail() { echo "FAIL: $*" >&2; echo "--- stdout ---" >&2; cat "$1" >&2; exit 1; }
 
+normalize_path() {
+    _p="$1"
+    if [ -d "$_p" ]; then
+        (cd "$_p" 2>/dev/null && pwd -P) || printf '%s' "$_p"
+    else
+        printf '%s' "$_p"
+    fi
+}
+
+assert_pwd_preserved() {
+    _out="$1"
+    _expected_pwd="$2"
+    _case="$3"
+    _actual_pwd="$(grep '^PWD=' "$_out" | sed 's/^PWD=//')"
+    _expected_norm="$(normalize_path "$_expected_pwd")"
+    _actual_norm="$(normalize_path "$_actual_pwd")"
+
+    [ "$_actual_norm" = "$_expected_norm" ] \
+        || fail "$_out" "$_case: cwd not preserved (got PWD=$_actual_pwd, expected=$_expected_pwd)"
+}
+
 expect_default_home() {
     _out="$1"
     _case="$2"
@@ -183,8 +204,7 @@ case8_cwd="$WORKDIR/case8-cwd"
 mkdir -p "$case8_cwd"
 out="$WORKDIR/case8.out"
 (cd "$case8_cwd" && run_wrapper "$out" "HOME=$case8_home" "USER=alice" "LOGNAME=alice" -- --model ./relpath)
-grep -q "^PWD=$case8_cwd\$" "$out" \
-    || fail "$out" "case8: writable cwd not preserved (got $(grep '^PWD=' "$out"))"
+assert_pwd_preserved "$out" "$case8_cwd" "case8"
 grep -q "^ARGV=serve --model \\./relpath\$" "$out" \
     || fail "$out" "case8: relative argv not preserved"
 echo "PASS: case8 (writable cwd preserved; relative argv still resolves from caller's cwd)"
@@ -204,8 +224,7 @@ mkdir -p "$case9_ro"
 chmod 0555 "$case9_ro"
 out="$WORKDIR/case9.out"
 (cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model ./foo)
-grep -q "^PWD=$case9_ro\$" "$out" \
-    || fail "$out" "case9: read-only cwd was rewritten (got $(grep '^PWD=' "$out"))"
+assert_pwd_preserved "$out" "$case9_ro" "case9"
 grep -q "^ARGV=serve --model \\./foo\$" "$out" \
     || fail "$out" "case9: relative argv not preserved"
 chmod 0700 "$case9_ro"
@@ -232,8 +251,7 @@ else
         run_wrapper "$out" "HOME=$case10_home" "USER=alice" "LOGNAME=alice" -- --model foo
     )
     chmod 0700 "$case10_cwd"
-    grep -q "^PWD=$case10_home\$" "$out" \
-        || fail "$out" "case10: inaccessible cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
+    assert_pwd_preserved "$out" "$case10_home" "case10"
     echo "PASS: case10 (inaccessible cwd falls back to \$HOME)"
 fi
 

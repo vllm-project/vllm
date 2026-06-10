@@ -532,7 +532,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
             _mm512_bslli_epi128(_mm512_cvtepu16_epi32(v.reg), 2))) {}
 
   explicit FP32Vec16(const BF16Vec32& v, int upper) {
-    __m256i v_half_i = _mm512_extracti32x8_epi32(v.reg, upper);
+    __m256i v_half_i = upper ? _mm512_extracti32x8_epi32(v.reg, 1)
+                             : _mm512_extracti32x8_epi32(v.reg, 0);
     reg = _mm512_cvtph_ps(v_half_i);
   }
 

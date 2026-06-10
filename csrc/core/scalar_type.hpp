@@ -7,7 +7,12 @@
 #include <variant>
 
 // For STD_TORCH_CHECK
-#include <torch/headeronly/util/Exception.h>
+#if __has_include(<torch/headeronly/util/Exception.h>)
+  #include <torch/headeronly/util/Exception.h>
+#else
+  #include <c10/util/Exception.h>
+  #define STD_TORCH_CHECK TORCH_CHECK
+#endif
 
 namespace vllm {
 

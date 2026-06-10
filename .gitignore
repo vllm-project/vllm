@@ -32,6 +32,7 @@ vllm/vllm-rs
 # Distribution / packaging
 .Python
 build/
+build_py_fallback_check/
 !requirements/build/
 cmake-build-*/
 CMakeUserPresets.json

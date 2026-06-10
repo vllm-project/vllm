@@ -7,6 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     set(MACOSX_FOUND TRUE)
+    set(ENABLE_NUMA OFF)
 endif()
 
 
@@ -18,7 +19,9 @@ set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
-set (ENABLE_NUMA TRUE)
+if (NOT DEFINED ENABLE_NUMA)
+    set(ENABLE_NUMA TRUE)
+endif()
 
 #
 # Check the compile flags
@@ -61,15 +64,29 @@ if (NOT MACOSX_FOUND)
     endif()
 endif()
 
-
-function (find_isa CPUINFO TARGET OUT)
-    string(FIND ${CPUINFO} ${TARGET} ISA_FOUND)
-    if(NOT ISA_FOUND EQUAL -1)
-        set(${OUT} ON PARENT_SCOPE)
+# If on macOS (x86) /proc/cpuinfo is not available, populate CPUINFO
+# from sysctl so find_isa() receives a valid first argument and
+# does not fail with incorrect argument count.
+if (MACOSX_FOUND AND NOT DEFINED CPUINFO)
+    execute_process(COMMAND sysctl -a
+                    RESULT_VARIABLE SYSCTL_RET
+                    OUTPUT_VARIABLE CPUINFO
+                    ERROR_QUIET
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT SYSCTL_RET EQUAL 0)
+        # Fall back to a safe placeholder so find_isa() receives a
+        # single-token first argument instead of being empty.
+        set(CPUINFO "none")
     else()
-        set(${OUT} OFF PARENT_SCOPE)
+        # Sanitize CPUINFO to a single token to avoid argument splitting
+        # when expanded unquoted in calls like: find_isa(${CPUINFO} "Power11" ...)
+        string(REGEX REPLACE "\\s+" "_" CPUINFO "${CPUINFO}")
     endif()
-endfunction()
+endif()
+
+
+# find_isa helper removed; detection is performed inline below to avoid
+# argument-splitting issues when CPUINFO contains list separators.
 
 
 function(check_sysctl TARGET OUT)
@@ -93,14 +110,64 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
 else()
-    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
-    find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
-    find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
-    find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
-    find_isa(${CPUINFO} "S390" S390_FOUND)
-    find_isa(${CPUINFO} "zvfhmin" RVV_FP16_FOUND) # Check for RISC-V Vector FP16 support
-    find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
+    # Detect various ISAs by searching CPUINFO directly (avoid function calls
+    # which can be sensitive to argument splitting when CPUINFO contains
+    # list-separator characters).
+    string(FIND "${CPUINFO}" "Power11" _ISA_FOUND)
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(POWER11_FOUND ON)
+    else()
+        set(POWER11_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "POWER10" _ISA_FOUND)
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(POWER10_FOUND ON)
+    else()
+        set(POWER10_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "POWER9" _ISA_FOUND)
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(POWER9_FOUND ON)
+    else()
+        set(POWER9_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "asimd" _ISA_FOUND) # Check for ARM NEON support
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(ASIMD_FOUND ON)
+    else()
+        set(ASIMD_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "bf16" _ISA_FOUND) # Check for ARM BF16 support
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(ARM_BF16_FOUND ON)
+    else()
+        set(ARM_BF16_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "S390" _ISA_FOUND)
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(S390_FOUND ON)
+    else()
+        set(S390_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "zvfhmin" _ISA_FOUND) # Check for RISC-V Vector FP16 support
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(RVV_FP16_FOUND ON)
+    else()
+        set(RVV_FP16_FOUND OFF)
+    endif()
+
+    string(FIND "${CPUINFO}" "zvfbfmin" _ISA_FOUND) # Check for RISC-V Vector BF16 support
+    if(NOT _ISA_FOUND EQUAL -1)
+        set(RVV_BF16_FOUND ON)
+    else()
+        set(RVV_BF16_FOUND OFF)
+    endif()
 
     # Support cross-compilation by allowing override via environment variables
     if (ENABLE_ARM_BF16)
@@ -111,13 +178,22 @@ endif()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
     set(ENABLE_X86_ISA ON)
-    if (NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
-            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3))
-        message(FATAL_ERROR "X86 backend requires gcc/g++ >= 12.3")
+    if (APPLE)
+        if (NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+                 CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"))
+            message(FATAL_ERROR "macOS x86 backend requires Clang/AppleClang (GCC emits incompatible TLS symbols with PyTorch libc10)")
+        endif()
+    else()
+        if (NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+                CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3))
+            message(FATAL_ERROR "X86 backend requires gcc/g++ >= 12.3")
+        endif()
     endif()
     list(APPEND CXX_COMPILE_FLAGS "-mf16c")
     list(APPEND CXX_COMPILE_FLAGS_AVX512 ${CXX_COMPILE_FLAGS})
     list(APPEND CXX_COMPILE_FLAGS_AVX2 ${CXX_COMPILE_FLAGS})
+    list(APPEND CXX_COMPILE_FLAGS_AVX2
+        "-mavx2")
     list(APPEND CXX_COMPILE_FLAGS_AVX512
         "-mavx512f"
         "-mavx512vl"
@@ -129,8 +205,6 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mamx-tile"
         "-mavx512bf16"
         "-mavx512vnni")
-    list(APPEND CXX_COMPILE_FLAGS_AVX2
-        "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
     if (POWER9_FOUND)
@@ -436,20 +510,20 @@ if(USE_ONEDNN)
 endif()
 
 if (ENABLE_X86_ISA)
-    set(VLLM_EXT_SRC_SGL
-        "csrc/cpu/sgl-kernels/conv.cpp"
-        "csrc/cpu/sgl-kernels/gemm.cpp"
-        "csrc/cpu/sgl-kernels/gemm_int8.cpp"
-        "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
-        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
-        "csrc/cpu/sgl-kernels/moe.cpp"
-        "csrc/cpu/sgl-kernels/moe_int8.cpp"
-        "csrc/cpu/sgl-kernels/moe_int4.cpp"
-        "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+    if (NOT MACOSX_FOUND)
+        set(VLLM_EXT_SRC_SGL
+            "csrc/cpu/sgl-kernels/conv.cpp"
+            "csrc/cpu/sgl-kernels/gemm.cpp"
+            "csrc/cpu/sgl-kernels/gemm_int8.cpp"
+            "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+            "csrc/cpu/sgl-kernels/gemm_int4.cpp"
+            "csrc/cpu/sgl-kernels/moe.cpp"
+            "csrc/cpu/sgl-kernels/moe_int8.cpp"
+            "csrc/cpu/sgl-kernels/moe_int4.cpp"
+            "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+    endif()
 
     set(VLLM_EXT_SRC_AVX512
-        "csrc/cpu/sgl-kernels/fla.cpp"
-        "csrc/cpu/shm.cpp"
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
@@ -464,8 +538,13 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
+    if (NOT MACOSX_FOUND)
+        list(PREPEND VLLM_EXT_SRC_AVX512
+            "csrc/cpu/sgl-kernels/fla.cpp"
+            "csrc/cpu/shm.cpp")
+    endif()
+
     set(VLLM_EXT_SRC_AVX2
-        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
@@ -478,13 +557,36 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
+    if (NOT MACOSX_FOUND)
+        list(PREPEND VLLM_EXT_SRC_AVX2
+            "csrc/cpu/sgl-kernels/fla.cpp")
+    endif()
+
+    # On macOS x86, importing AVX512/AMX-compiled extension modules can raise
+    # SIGILL on machines without those features during dynamic loading. Build
+    # all CPU ISA-named modules from the AVX2-safe source set/flags instead.
+    if (MACOSX_FOUND)
+        set(VLLM_EXT_SRC_AVX512 ${VLLM_EXT_SRC_AVX2})
+        set(VLLM_EXT_SRC_SGL)
+        set(CPU_EXT_FLAGS_MAIN ${CXX_COMPILE_FLAGS_AVX2})
+        set(CPU_EXT_FLAGS_AVX512 ${CXX_COMPILE_FLAGS_AVX2})
+    else()
+        set(CPU_EXT_FLAGS_MAIN ${CXX_COMPILE_FLAGS_AVX512_AMX})
+        set(CPU_EXT_FLAGS_AVX512 ${CXX_COMPILE_FLAGS_AVX512})
+    endif()
+
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
     message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
 
-    set(_C_LIBS numa dnnl_ext)
-    set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa dnnl_ext)
+    set(_C_LIBS dnnl_ext)
+    set(_C_AVX512_LIBS dnnl_ext)
+    set(_C_AVX2_LIBS dnnl_ext)
+    if(ENABLE_NUMA)
+        list(APPEND _C_LIBS numa)
+        list(APPEND _C_AVX512_LIBS numa)
+        list(APPEND _C_AVX2_LIBS numa)
+    endif()
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
@@ -493,13 +595,15 @@ if (ENABLE_X86_ISA)
         LANGUAGE CXX
         SOURCES ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}
         LIBRARIES ${_C_LIBS}
-        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512_AMX}
+        COMPILE_FLAGS ${CPU_EXT_FLAGS_MAIN}
         USE_SABI 3
         WITH_SOABI
     )
 
-    # For AMX kernels
-    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+    if (NOT MACOSX_FOUND)
+        # For AMX kernels
+        target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+    endif()
 
     # AVX512F 
     define_extension_target(
@@ -508,10 +612,11 @@ if (ENABLE_X86_ISA)
         LANGUAGE CXX
         SOURCES ${VLLM_EXT_SRC_AVX512}
         LIBRARIES ${_C_AVX512_LIBS}
-        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
+        COMPILE_FLAGS ${CPU_EXT_FLAGS_AVX512}
         USE_SABI 3
         WITH_SOABI
     )
+    target_compile_definitions(_C_AVX512 PRIVATE VLLM_PYTHON_MODULE_NAME=_C_AVX512 VLLM_CPU_ISA_VARIANT_MODULE)
 
     # AVX2 
     define_extension_target(
@@ -524,6 +629,7 @@ if (ENABLE_X86_ISA)
         USE_SABI 3
         WITH_SOABI
     )
+    target_compile_definitions(_C_AVX2 PRIVATE VLLM_PYTHON_MODULE_NAME=_C_AVX2 VLLM_CPU_ISA_VARIANT_MODULE)
 else()
     message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
     #
