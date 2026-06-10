@@ -431,63 +431,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Marlin generation script has not changed, skipping generation.")
     endif()
 
-    if (MARLIN_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_float16.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
-
-      file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_bfloat16.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
-    endif()
-
-    if (MARLIN_SM75_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_SM75_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_SM75_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
-    endif()
-
-    if (MARLIN_FP8_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
-        CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_TEMPLATE_FP8_KERNEL_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
-    endif()
-
-    set(MARLIN_SRCS
-       "csrc/quantization/marlin/marlin.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_SRCS}"
-      CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-      set_source_files_properties(${MARLIN_SRCS}
-        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-    endif()
-    list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
-
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_OTHER_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
@@ -673,7 +616,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       set(MARLIN_STABLE_SRCS
          "csrc/quantization/marlin/marlin_int4_fp8_preprocess.cu"
          "csrc/quantization/marlin/gptq_marlin_repack.cu"
-         "csrc/quantization/marlin/awq_marlin_repack.cu")
+         "csrc/quantization/marlin/awq_marlin_repack.cu"
+         "csrc/quantization/marlin/marlin.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_STABLE_SRCS}"
         CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
@@ -682,6 +626,52 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
           PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
       endif()
       list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_STABLE_SRCS}")
+
+      if (MARLIN_ARCHS)
+        file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_float16.cu")
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
+          CUDA_ARCHS "${MARLIN_ARCHS}")
+        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+          set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
+            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+        endif()
+        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+
+        file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_bfloat16.cu")
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
+          CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
+        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+          set_source_files_properties(${MARLIN_TEMPLATE_BF16_KERNEL_SRC}
+            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+        endif()
+        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
+      endif()
+
+      if (MARLIN_SM75_ARCHS)
+        file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
+          CUDA_ARCHS "${MARLIN_SM75_ARCHS}")
+        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+          set_source_files_properties(${MARLIN_TEMPLATE_SM75_KERNEL_SRC}
+            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+        endif()
+        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
+      endif()
+
+      if (MARLIN_FP8_ARCHS)
+        file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
+        set_gencode_flags_for_srcs(
+          SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
+          CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
+        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+          set_source_files_properties(${MARLIN_TEMPLATE_FP8_KERNEL_SRC}
+            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+        endif()
+        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
+      endif()
     endif()
 
     set_gencode_flags_for_srcs(
