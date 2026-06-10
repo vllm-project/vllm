@@ -68,12 +68,10 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     _DIM4_B,
-    _DIM4_H,
-    AttentionSpec,
     FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -81,7 +79,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     num_states_for,
 )
-
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -100,6 +97,7 @@ def build_region_meta(
     block_stride_bytes: int,
     region_content_bytes: int,
     virtually_split: bool,
+    mamba_view: bool = False,
 ) -> list[torch.Tensor]:
     """Build 4D ``[B, H, N, C]`` meta tensors for one KV cache region.
 
@@ -107,6 +105,9 @@ def build_region_meta(
     delegates to ``spec.transfer_shapes`` for spec-specific decomposition
     (head split, K/V split), then materialises meta tensors with the
     correct layout permutation and block-stride override.
+
+    When *mamba_view* is True, ``MambaSpec.transfer_shapes`` returns 4 shapes
+    for the 3-read sub-projection decomposition (x, B, C, SSM).
     """
     dtype = getattr(spec, "dtype", torch.int8)
     elem = get_dtype_size(dtype)
@@ -115,7 +116,7 @@ def build_region_meta(
     flat_C = region_content_bytes // (N * elem)
     flat_shape = (num_blocks, 1, N, flat_C)
 
-    shapes = spec.transfer_shapes(flat_shape, virtually_split)
+    shapes = spec.transfer_shapes(flat_shape, virtually_split, mamba_view=mamba_view)
 
     order = layout.layer_stride_order
     inv = [list(order).index(i) for i in range(4)]
@@ -124,8 +125,7 @@ def build_region_meta(
     offset_elems = 0
     for shape in shapes:
         phys_shape = tuple(shape[o] for o in order)
-        phys_strides = list(
-            torch.empty(phys_shape, device="meta").stride())
+        phys_strides = list(torch.empty(phys_shape, device="meta").stride())
         phys_strides[inv[_DIM4_B]] = block_stride_bytes // elem
 
         meta = torch.as_strided(
@@ -138,8 +138,6 @@ def build_region_meta(
         offset_elems += shape[1] * shape[2] * shape[3]
 
     return metas
-
-
 
 
 class NixlConnectorWorker:
@@ -316,13 +314,13 @@ class NixlConnectorWorker:
                 "3-read Mamba conv transfer requires DS conv state layout. "
                 "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
             )
-            mamba_spec = next(
+            self._mamba_spec: MambaSpec = next(
                 spec
                 for spec in self._layer_specs.values()
                 if isinstance(spec, MambaSpec)
             )
             self._conv_decomp = derive_mamba_conv_split(
-                mamba_spec,
+                self._mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
@@ -1094,38 +1092,45 @@ class NixlConnectorWorker:
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
-        blocks, enabling the 3-read transfer with DS conv layout."""
+        """Build 4 desc regions per layer for local mamba blocks.
+
+        Same pattern as ``_build_fa_local`` but with ``mamba_view=True``
+        so that ``MambaSpec.transfer_shapes`` returns the 3-read
+        sub-projection decomposition (x, B, C, SSM).
+        """
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
         )
-        assert self._conv_decomp is not None
-        conv_offsets = self._conv_decomp.local_conv_offsets
-        conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
         physical_per_logical = self._physical_blocks_per_logical_kv_block
+        layout = KVCacheLayout.from_layout_string(self.kv_cache_layout)
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
-            # Jump one page_size, but ssm page_size may be bigger when kernel
-            # locks block size to a specific value (physical_per_logical scale).
+            spec = self.spec_per_region[i]
             page_stride = (
                 self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
             )
-            for off, sz in conv_offsets:
-                for blk in range(num_blocks):
-                    result.append(
-                        (base_addr + blk * page_stride + off, sz, self.device_id)
-                    )
-            # SSM temporal state follows the conv state.
-            for blk in range(num_blocks):
-                result.append(
-                    (
-                        base_addr + blk * page_stride + conv_size,
-                        ssm_size,
-                        self.device_id,
-                    )
+            content = (
+                spec.content_bytes
+                if isinstance(spec, MambaSpec)
+                else self.block_len_per_layer[i] // block_size_ratio
+            )
+
+            metas = build_region_meta(
+                spec=spec,
+                num_blocks=num_blocks,
+                block_size=self.block_size,
+                layout=layout,
+                block_stride_bytes=page_stride,
+                region_content_bytes=content,
+                virtually_split=False,
+                mamba_view=True,
+            )
+            for meta in metas:
+                result.extend(
+                    self._view_to_descriptors(meta, base_addr, self.device_id)
                 )
         return result
 
@@ -1134,44 +1139,61 @@ class NixlConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
+        remote_tp_rank: int = 0,
+        remote_tp_size: int = 1,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
-        for the 3-read transfer.  For hetero-TP, each D rank reads only its
-        sub-projection slice from the P rank."""
-        assert self._conv_decomp is not None
-        effective_ratio = max(tp_ratio, 1)
-        # Mamba conv state is always TP-sharded, even when attention KV
-        # is replicated (num_kv_heads < tp_size).
-        local_offset = self.tp_rank % effective_ratio
-        conv_size_remote = nixl_agent_meta.ssm_sizes[0]
+        """Build 4 remote desc regions per layer for the 3-read transfer.
 
-        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
-        if tp_ratio >= 1:
-            ssm_read_size = self._mamba_ssm_size[1]
-        else:
-            ssm_read_size = nixl_agent_meta.ssm_sizes[1]
+        Same pattern as ``_build_fa_remote`` but with ``mamba_view=True``
+        so that ``MambaSpec.transfer_shapes`` returns the 3-read
+        sub-projection decomposition, and ``slice_for_tp_transfer``
+        handles hetero-TP narrowing.
+        """
+        assert self.transfer_topo is not None
+        total_num_kv_heads = self.transfer_topo.total_num_kv_heads
+        my_tp = self.transfer_topo.tp_size
+        my_rank = self.transfer_topo.tp_rank
 
+        layout = KVCacheLayout.from_layout_string(nixl_agent_meta.kv_cache_layout)
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
         device_id = nixl_agent_meta.device_id
+        remote_content = sum(nixl_agent_meta.ssm_sizes)
 
         result: list[tuple[int, int, int]] = []
-        # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
-        # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            spec = self.spec_per_region[i]
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
-            for off, sz in conv_offsets:
-                for blk in range(num_blocks):
-                    result.append((base_addr + blk * page_stride + off, sz, device_id))
-            # SSM temporal state is also TP-sharded on the heads dimension.
-            for blk in range(num_blocks):
-                ssm_addr = (
-                    base_addr
-                    + blk * page_stride
-                    + conv_size_remote
-                    + local_offset * ssm_read_size
+            content = (
+                remote_content
+                if isinstance(spec, MambaSpec)
+                else nixl_agent_meta.block_lens[i]
+            )
+
+            metas = build_region_meta(
+                spec=spec,
+                num_blocks=num_blocks,
+                block_size=nixl_agent_meta.block_size,
+                layout=layout,
+                block_stride_bytes=page_stride,
+                region_content_bytes=content,
+                virtually_split=False,
+                mamba_view=True,
+            )
+
+            for meta in metas:
+                sliced_list = spec.slice_for_tp_transfer(
+                    meta,
+                    my_tp,
+                    my_rank,
+                    remote_tp_size,
+                    remote_tp_rank,
+                    total_num_kv_heads,
                 )
-                result.append((ssm_addr, ssm_read_size, device_id))
+                for sliced in sliced_list:
+                    result.extend(
+                        self._view_to_descriptors(sliced, base_addr, device_id)
+                    )
         return result
 
     def _build_fa_local(
@@ -1194,16 +1216,15 @@ class NixlConnectorWorker:
                 num_blocks=num_blocks,
                 block_size=self.block_size,
                 layout=layout,
-                block_stride_bytes=(
-                    self.block_stride_per_layer[i] // block_size_ratio),
-                region_content_bytes=(
-                    self.block_len_per_layer[i] // block_size_ratio),
+                block_stride_bytes=(self.block_stride_per_layer[i] // block_size_ratio),
+                region_content_bytes=(self.block_len_per_layer[i] // block_size_ratio),
                 virtually_split=virtually_split,
             )
 
             for meta in metas:
-                result.extend(self._view_to_descriptors(
-                    meta, base_addr, self.device_id))
+                result.extend(
+                    self._view_to_descriptors(meta, base_addr, self.device_id)
+                )
 
         return result
 
@@ -1241,8 +1262,7 @@ class NixlConnectorWorker:
         my_tp = self.transfer_topo.tp_size
         my_rank = self.transfer_topo.tp_rank
 
-        layout = KVCacheLayout.from_layout_string(
-            nixl_agent_meta.kv_cache_layout)
+        layout = KVCacheLayout.from_layout_string(nixl_agent_meta.kv_cache_layout)
         num_blocks = nixl_agent_meta.num_blocks
         device_id = nixl_agent_meta.device_id
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
@@ -1264,14 +1284,17 @@ class NixlConnectorWorker:
 
             for meta in metas:
                 sliced_list = spec.slice_for_tp_transfer(
-                    meta, my_tp, my_rank,
-                    remote_tp_size, remote_tp_rank,
+                    meta,
+                    my_tp,
+                    my_rank,
+                    remote_tp_size,
+                    remote_tp_rank,
                     total_num_kv_heads,
                 )
                 for sliced in sliced_list:
                     result.extend(
-                        self._view_to_descriptors(
-                            sliced, base_addr, device_id))
+                        self._view_to_descriptors(sliced, base_addr, device_id)
+                    )
 
         return result
 
@@ -1493,6 +1516,8 @@ class NixlConnectorWorker:
                     nixl_agent_meta,
                     tp_ratio,
                     transfer_info,
+                    remote_tp_rank=remote_tp_rank,
+                    remote_tp_size=remote_tp_size,
                 )
             )
 
