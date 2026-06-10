@@ -34,8 +34,8 @@ FILE_HEAD_COMMENT = """
 FILE_HEAD = (
     FILE_HEAD_COMMENT
     + """
-#include "quantization/marlin/kernel.h"
-#include "quantization/marlin/marlin_template.h"
+#include "kernel.h"
+#include "marlin_template.h"
 
 namespace MARLIN_NAMESPACE_NAME {
 """

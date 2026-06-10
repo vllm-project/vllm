@@ -23,7 +23,7 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
-#include "quantization/marlin/kernel.h"
+#include "kernel.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/accelerator.h>
@@ -269,7 +269,7 @@ MarlinFuncPtr get_marlin_kernel(
   int num_bits = b_type.size_bits();
   auto kernel = MarlinDefault;
 
-  #include "libtorch_stable/quantization/marlin/kernel_selector.h"
+  #include "kernel_selector.h"
 
   return kernel;
 }

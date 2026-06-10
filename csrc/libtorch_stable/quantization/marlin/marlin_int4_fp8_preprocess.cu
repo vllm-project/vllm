@@ -1,5 +1,5 @@
 
-#include "quantization/marlin/marlin.cuh"
+#include "marlin.cuh"
 
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
