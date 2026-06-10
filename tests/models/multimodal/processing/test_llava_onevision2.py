@@ -23,11 +23,13 @@ import pytest
 
 from vllm.model_executor.models.llava_onevision2 import (
     _CODEC_VIDEO_MARKER,
+    LlavaOnevision2VideoBackend,
     _extract_codec_video_paths,
-    _extract_video_paths,
+    _frame_video_to_pil_and_timestamps,
     _validate_video_source,
     prepare_codec_video_input,
 )
+from vllm.multimodal.video import VideoSourceMetadata, VideoTargetMetadata
 
 
 def _model_config(local: str = "", domains=None):
@@ -100,12 +102,12 @@ def test_extract_codec_video_paths_mixed_batch_returns_none():
 # ---------------------------------------------------------------------------
 # Media access controls (_validate_video_source)
 #
-# Both video backends keep the raw path/URL string alive past vLLM's
+# The codec backend keeps the raw path/URL string alive past vLLM's
 # MultiModalDataParser, so the model re-applies the gates from
-# vllm/multimodal/media/connector.py before the string reaches
-# qwen_vl_utils.fetch_video / the codec module. These tests pin that the
-# self-contained validator matches MediaConnector's behaviour for
-# --allowed-media-domains and --allowed-local-media-path.
+# vllm/multimodal/media/connector.py before the string reaches the codec
+# module. (Frame videos go through the connector, which gates them already.)
+# These tests pin that the self-contained validator matches MediaConnector's
+# behaviour for --allowed-media-domains and --allowed-local-media-path.
 # ---------------------------------------------------------------------------
 
 
@@ -171,37 +173,104 @@ def test_validate_unsupported_scheme_blocked():
 
 
 # ---------------------------------------------------------------------------
-# Validation engages for *all* path-based backends, including native.
+# Frame backend marker -> PIL + timestamps (_frame_video_to_pil_and_timestamps)
 #
-# _call_hf_processor validates the result of _extract_video_paths before the
-# backend dispatch, so the gate fires whenever a raw path reaches the frame OR
-# native backend. These tests pin the precondition: string payloads are
-# extracted to paths (so _validate_video_sources runs), while pre-decoded
-# inputs return None (validation correctly skipped). This guards against
-# silently disabling native-backend validation, which would re-open the
-# video_backend="native" SSRF / local-file-read bypass.
+# Non-codec videos reach _call_hf_processor as a ``(frames_ndarray, metadata)``
+# tuple -- produced by the registered ``LlavaOnevision2VideoBackend`` for real
+# ``video_url`` inputs, or by the dummy-inputs builder during profiling
+# (``video_needs_metadata=True``). The helper materialises PIL frames and
+# per-frame timestamps (``frame_index / fps``), padding the frame count up to
+# the even temporal-merge boundary.
 # ---------------------------------------------------------------------------
 
 
-def test_extract_video_paths_returns_paths_for_string_payloads():
-    # Single, flat-list, and nested-list path payloads must all yield the raw
-    # path strings that _validate_video_sources then checks.
-    assert _extract_video_paths("/x/solo.mp4") == ["/x/solo.mp4"]
-    assert _extract_video_paths(["/x/1.mp4", "/x/2.mp4"]) == [
-        "/x/1.mp4",
-        "/x/2.mp4",
-    ]
-    assert _extract_video_paths([["/x/1.mp4"], ["/x/2.mp4"]]) == [
-        "/x/1.mp4",
-        "/x/2.mp4",
-    ]
+def test_frame_video_to_pil_and_timestamps_basic():
+    frames = np.zeros((4, 8, 8, 3), dtype=np.uint8)
+    metadata = {"fps": 2.0, "frames_indices": [0, 4, 8, 12]}
+    pil_frames, timestamps = _frame_video_to_pil_and_timestamps((frames, metadata))
+
+    assert len(pil_frames) == 4
+    assert all(f.size == (8, 8) for f in pil_frames)
+    # timestamps = frame_index / fps
+    assert timestamps == [0.0, 2.0, 4.0, 6.0]
 
 
-def test_extract_video_paths_returns_none_for_predecoded_inputs():
-    # Pre-decoded frames (ndarray / list of ndarray) carry no path, so
-    # validation is skipped (nothing to fetch from a URL/filesystem).
+def test_frame_video_to_pil_and_timestamps_even_pads_odd_frame_count():
+    # Odd frame count -> last frame repeated to satisfy temporal merge=2.
+    frames = np.zeros((3, 8, 8, 3), dtype=np.uint8)
+    metadata = {"fps": 1.0, "frames_indices": [0, 1, 2]}
+    pil_frames, timestamps = _frame_video_to_pil_and_timestamps((frames, metadata))
+
+    assert len(pil_frames) == 4
+    assert len(timestamps) == 4
+    # The padded frame reuses the final index/timestamp.
+    assert timestamps == [0.0, 1.0, 2.0, 2.0]
+
+
+def test_frame_video_to_pil_and_timestamps_defaults_when_metadata_sparse():
+    # Missing frames_indices -> sequential range; missing/zero fps -> default.
+    frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)
+    pil_frames, timestamps = _frame_video_to_pil_and_timestamps((frames, {}))
+
+    assert len(pil_frames) == 2
+    # Default fps is 1.0, indices fall back to range(T).
+    assert timestamps == [0.0, 1.0]
+
+
+def test_frame_video_to_pil_and_timestamps_rejects_non_tuple():
+    # Bare arrays (no metadata) must be rejected: the frame backend requires
+    # the (frames, metadata) tuple produced by the registered loader.
     plain = np.zeros((4, 8, 8, 3), dtype=np.uint8)
-    assert _extract_video_paths(plain) is None
-    assert _extract_video_paths([plain, plain]) is None
-    assert _extract_video_paths(None) is None
-    assert _extract_video_paths([]) is None
+    with pytest.raises(ValueError):
+        _frame_video_to_pil_and_timestamps(plain)
+
+
+# ---------------------------------------------------------------------------
+# LlavaOnevision2VideoBackend.compute_frames_index_to_sample honors the caller
+# supplied VideoTargetMetadata (passed via --media-io-kwargs) so benchmarks can
+# override the conservative defaults (fps=1.0, max_frames=32). Unset target
+# fields (sentinel <= 0) fall back to those OV2 hf-chat reference constants.
+# ---------------------------------------------------------------------------
+
+
+def _src(total_frames: int, fps: float) -> VideoSourceMetadata:
+    return VideoSourceMetadata(
+        total_frames_num=total_frames,
+        original_fps=fps,
+        duration=total_frames / fps if fps > 0 else 0.0,
+    )
+
+
+def test_backend_defaults_cap_at_32_frames():
+    # 300 frames @ 1fps source, target unset -> capped at default max_frames=32.
+    src = _src(300, 1.0)
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=300.0)
+    idx = LlavaOnevision2VideoBackend.compute_frames_index_to_sample(src, target)
+
+    assert len(idx) == 32
+    assert idx[0] == 0
+    assert idx[-1] == 299
+    assert len(idx) % 2 == 0
+
+
+def test_backend_target_num_frames_overrides_default_cap():
+    # VSI-Bench parity: target.num_frames=128 must lift the 32-frame cap.
+    src = _src(300, 1.0)
+    target = VideoTargetMetadata(num_frames=128, fps=-1, max_duration=300.0)
+    idx = LlavaOnevision2VideoBackend.compute_frames_index_to_sample(src, target)
+
+    assert len(idx) == 128
+    assert idx[0] == 0
+    assert idx[-1] == 299
+
+
+def test_backend_target_fps_controls_sampling_when_below_cap():
+    # 60 frames @ 30fps (2s) with target fps=1 -> ~2 frames (even-padded).
+    src = _src(60, 30.0)
+    target = VideoTargetMetadata(num_frames=128, fps=1.0, max_duration=300.0)
+    idx = LlavaOnevision2VideoBackend.compute_frames_index_to_sample(src, target)
+
+    # fps-derived nframes (2) is below the 128 cap, so fps wins.
+    assert len(idx) <= 8
+    assert len(idx) % 2 == 0
+
