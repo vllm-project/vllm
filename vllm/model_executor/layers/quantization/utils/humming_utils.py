@@ -5,31 +5,8 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
-from humming import dtypes as humming_dtypes
-from humming.config.enum import WeightScaleType
-from humming.layer import HummingInputSchema, HummingMethod
-from humming.schema import (
-    BaseInputSchema,
-    BaseWeightSchema,
-    CompressedTensorsInputSchema,
-    CompressedTensorsWeightSchema,
-    Fp8InputSchema,
-    Fp8WeightSchema,
-    GptOssMxfp4WeightSchema,
-    HummingWeightSchema,
-    Mxfp4WeightSchema,
-)
-from humming.schema.awq import AWQWeightSchema
-from humming.schema.bitnet import BitnetWeightSchema
-from humming.schema.gptq import GPTQWeightSchema
-from humming.schema.modelopt import (
-    ModeloptMxfp8WeightSchema,
-    ModeloptNvfp4InputSchema,
-    ModeloptNvfp4WeightSchema,
-)
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-import vllm.utils.humming as _hm
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -56,6 +33,27 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
+from vllm.utils.humming import (
+    AWQWeightSchema,
+    BaseInputSchema,
+    BaseWeightSchema,
+    BitnetWeightSchema,
+    CompressedTensorsInputSchema,
+    CompressedTensorsWeightSchema,
+    Fp8InputSchema,
+    Fp8WeightSchema,
+    GptOssMxfp4WeightSchema,
+    GPTQWeightSchema,
+    HummingInputSchema,
+    HummingMethod,
+    HummingWeightSchema,
+    ModeloptMxfp8WeightSchema,
+    ModeloptNvfp4InputSchema,
+    ModeloptNvfp4WeightSchema,
+    Mxfp4WeightSchema,
+    WeightScaleType,
+)
+from vllm.utils.humming import dtypes as humming_dtypes
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
@@ -884,190 +882,6 @@ def _process_single_sublayer(
     )
 
     return current_weight_schema, current_input_schema
-
-
-def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
-    weight_schema = BaseWeightSchema.from_config(quant_config)
-    input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
-    if humming_is_layer_skipped(input_quant_config, layer.layer_name):
-        input_schema = HummingInputSchema()
-    else:
-        # TODO: read input_quant_config from quant_config
-        input_schema = HummingInputSchema.from_config(input_quant_config)
-
-    is_gated = layer.moe_config.activation.is_gated
-    shape_config = {
-        "w13": (
-            layer.moe_config.intermediate_size_per_partition * 2,
-            layer.moe_config.hidden_dim,
-        ),
-        "w2": (
-            layer.moe_config.hidden_dim,
-            layer.moe_config.intermediate_size_per_partition * (1 if is_gated else 2),
-        ),
-    }
-
-    layer.weight_schemas = {}
-    layer.input_schemas = {}
-
-    for sublayer_name in shape_config:
-        # Step 1: convert weight to humming standard format
-        tensors: dict[str, torch.Tensor] = dict(
-            (key.removeprefix(sublayer_name + "_"), value)
-            for key, value in layer.state_dict().items()
-            if key.startswith(sublayer_name + "_")
-        )
-
-        shape_n, shape_k = shape_config[sublayer_name]
-        shape_n_stacks = [shape_n]
-        shape_k_stacks = [shape_k]
-        if sublayer_name == "w13":
-            shape_n_stacks = [shape_n // 2] * 2
-
-        weight_schema_new, tensors = weight_schema.convert_humming(
-            tensors=tensors,
-            shape_n_stacks=shape_n_stacks,
-            shape_k_stacks=shape_k_stacks,
-            num_experts=layer.local_num_experts,
-            param_dtype=layer.params_dtype,
-        )
-
-        layer.weight_schemas[sublayer_name] = weight_schema_new
-        layer.input_schemas[sublayer_name] = input_schema
-
-        for name, _ in list(layer.named_parameters()):
-            if not name.startswith(sublayer_name + "_"):
-                continue
-            delattr(layer, name)
-
-        for name, tensor in tensors.items():
-            name = f"{sublayer_name}_{name}"
-            param = torch.nn.Parameter(tensor, requires_grad=False)
-            setattr(layer, name, param)
-
-        # Step 2: transform weight (humming standard format) for forwarding
-        HummingMethod.prepare_layer_meta(
-            layer=layer,
-            shape_n=shape_n,
-            shape_k=shape_k,
-            pad_n_to_multiple=256,
-            pad_k_to_multiple=128,
-            input_schema=input_schema,
-            weight_schema=weight_schema_new,
-            has_bias=layer.moe_config.has_bias,
-            num_experts=layer.num_experts,
-            torch_dtype=layer.params_dtype,
-            sublayer_name=sublayer_name,
-        )
-
-        HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
-
-    if not hasattr(layer, "locks"):
-        device = layer.w13_weight.device
-        locks = torch.zeros(1024, dtype=torch.int32, device=device)
-        layer.register_buffer("locks", locks)
-
-
-def process_weights_after_loading(
-    input_schema,
-    weight_schema,
-    force_weight_schema,
-    layer: RoutedExperts,
-):
-    layer.weight_schemas = {}
-    layer.input_schemas = {}
-    for sublayer_name, configs in layer.sublayer_configs.items():
-        # convert from checkpoint format to humming format
-        if not isinstance(weight_schema, _hm.HummingWeightSchema):
-            tensors: dict[str, torch.Tensor] = dict(
-                (key.removeprefix(sublayer_name + "_"), value)
-                for key, value in layer.state_dict().items()
-                if key.startswith(sublayer_name + "_")
-            )
-
-            shape_k_stacks = [configs["shape_k"]]
-            shape_n_stacks = [configs["shape_n"]]
-            if sublayer_name == "w13":
-                shape_n_stacks = [configs["shape_n"] // 2] * 2
-
-            weight_schema, tensors = weight_schema.convert_humming(
-                tensors=tensors,
-                shape_n_stacks=shape_n_stacks,
-                shape_k_stacks=shape_k_stacks,
-                param_dtype=layer.param_dtype,
-                num_experts=layer.num_experts,
-            )
-
-            input_schema, _ = input_schema.convert_humming(
-                tensors=tensors,
-                shape_n_stacks=shape_n_stacks,
-                shape_k_stacks=shape_k_stacks,
-                param_dtype=layer.param_dtype,
-                num_experts=layer.num_experts,
-            )
-
-            for name, _ in list(layer.named_parameters()):
-                if not name.startswith(sublayer_name + "_"):
-                    continue
-                delattr(layer, name)
-
-            for name, tensor in tensors.items():
-                name = f"{sublayer_name}_{name}"
-                param = torch.nn.Parameter(tensor, requires_grad=False)
-                setattr(layer, name, param)
-
-        layer.weight_schemas[sublayer_name] = weight_schema
-        layer.input_schemas[sublayer_name] = input_schema
-
-        # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
-        assert isinstance(weight_schema, _hm.HummingWeightSchema)
-        force_requant = force_weight_schema is not None
-        if force_requant and weight_schema != force_weight_schema:
-            tensors = dict(
-                (key.removeprefix(sublayer_name + "_"), value)
-                for key, value in layer.state_dict().items()
-                if key.startswith(sublayer_name + "_")
-            )
-
-            tensors = weight_schema.requant_tensors(
-                tensors=tensors,
-                target_weight_schema=force_weight_schema,
-                param_dtype=layer.param_dtype,
-            )
-
-            weight_schema = force_weight_schema
-
-            for name, _ in list(layer.named_parameters()):
-                if not name.startswith(sublayer_name + "_"):
-                    continue
-                if name == sublayer_name + "_bias":
-                    continue
-                delattr(layer, name)
-
-            for name, tensor in tensors.items():
-                name = f"{sublayer_name}_{name}"
-                param = torch.nn.Parameter(tensor, requires_grad=False)
-                setattr(layer, name, param)
-
-            del tensors
-
-        # prepare layer config from humming kernel
-        _hm.HummingMethod.prepare_layer_meta(
-            layer=layer,
-            shape_n=configs["shape_n"],
-            shape_k=configs["shape_k"],
-            pad_n_to_multiple=256,
-            pad_k_to_multiple=128,
-            input_schema=input_schema,
-            weight_schema=weight_schema,
-            has_bias=layer.moe_config.has_bias,
-            num_experts=layer.num_experts,
-            torch_dtype=layer.param_dtype,
-            sublayer_name=sublayer_name,
-        )
-
-        # preprocess weight for inference
-        _hm.HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
 
 
 def convert_to_humming_moe_kernel_format(

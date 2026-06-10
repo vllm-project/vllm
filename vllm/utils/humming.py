@@ -22,6 +22,17 @@ _EXPORTS: dict[str, str] = {
     "HummingInputSchema": "humming.schema:HummingInputSchema",
     "HummingWeightSchema": "humming.schema:HummingWeightSchema",
     "quantize_weight": "humming.utils.weight:quantize_weight",
+    "AWQWeightSchema": "humming.schema:AWQWeightSchema",
+    "BitnetWeightSchema": "humming.schema:BitnetWeightSchema",
+    "ModeloptMxfp8WeightSchema": "humming.schema:ModeloptMxfp8WeightSchema",
+    "ModeloptNvfp4InputSchema": "humming.schema:ModeloptNvfp4InputSchema",
+    "ModeloptNvfp4WeightSchema": "humming.schema:ModeloptNvfp4WeightSchema",
+    "CompressedTensorsInputSchema": "humming.schema:CompressedTensorsInputSchema",
+    "CompressedTensorsWeightSchema": "humming.schema:CompressedTensorsWeightSchema",
+    "Fp8InputSchema": "humming.schema:Fp8InputSchema",
+    "Fp8WeightSchema": "humming.schema:Fp8WeightSchema",
+    "GptOssMxfp4WeightSchema": "humming.schema:GptOssMxfp4WeightSchema",
+    "GPTQWeightSchema": "humming.schema:GPTQWeightSchema",
 }
 
 
