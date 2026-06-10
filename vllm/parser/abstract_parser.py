@@ -43,7 +43,6 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -546,14 +545,6 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
-        # When the Mistral grammar factory injected structured outputs,
-        # let the parser handle the output.
-        use_mistral_tool_parser = (
-            is_mistral_tool_parser(type(tool_parser))
-            and isinstance(request, ChatCompletionRequest)
-            and request._grammar_from_tool_parser
-        )
-
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,
@@ -570,11 +561,7 @@ class DelegatingParser(Parser):
         )
 
         tool_calls = list[FunctionCall]()
-        if (
-            is_named_tool_choice
-            and supports_required_and_named
-            and not use_mistral_tool_parser
-        ):
+        if is_named_tool_choice and supports_required_and_named:
             if content is None:
                 return [], None
             tool_calls.append(
@@ -584,11 +571,7 @@ class DelegatingParser(Parser):
                 )
             )
             content = None
-        elif (
-            is_required_tool_choice
-            and supports_required_and_named
-            and not use_mistral_tool_parser
-        ):
+        elif is_required_tool_choice and supports_required_and_named:
             # "required" with standard JSON-based parsing
             parsed_calls = []
             with contextlib.suppress(ValidationError):
@@ -604,7 +587,7 @@ class DelegatingParser(Parser):
                     )
                 )
             content = None
-        elif is_auto_tool_choice or use_mistral_tool_parser:
+        elif is_auto_tool_choice:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
             tool_call_info = tool_parser.extract_tool_calls(
@@ -793,6 +776,28 @@ class DelegatingParser(Parser):
                 last_tc.function.arguments or ""
             ) + self._tool_parser.get_remaining_unstreamed_args()
 
+    def finalize_generation(
+        self,
+        delta_message: DeltaMessage | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        state: StreamState,
+    ) -> DeltaMessage | None:
+        """Finalize generation for cases where generation was incomplete.
+        For example, if streaming terminated before reasoning ended
+        """
+        fallback_fn = getattr(
+            self._reasoning_parser, "get_streaming_fallback_content", None
+        )
+        if fallback_fn is not None and not state.reasoning_ended:
+            promoted = fallback_fn(state.previous_text, request)
+            if promoted:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.content = (delta_message.content or "") + promoted
+
+        self._append_unstreamed_tool_args(delta_message)
+        return delta_message
+
     def parse(
         self,
         model_output: str,
@@ -900,6 +905,6 @@ class DelegatingParser(Parser):
         state.previous_token_ids = current_token_ids
 
         if finished:
-            self._append_unstreamed_tool_args(delta_message)
+            delta_message = self.finalize_generation(delta_message, request, state)
 
         return delta_message
