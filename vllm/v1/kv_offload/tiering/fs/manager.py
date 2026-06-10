@@ -19,7 +19,7 @@ import functools
 import json
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
@@ -27,11 +27,13 @@ from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
+    JobId,
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
     SecondaryTierManager,
 )
+from vllm.v1.kv_offload.tiering.fs.evictor import EvictorBase, make_evictor
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
@@ -68,6 +70,7 @@ class FileSystemTierManager(SecondaryTierManager):
         primary_kv_view: memoryview,
         tier_type: str,
         root_dir: str,
+        evictor_args: dict[str, Any] | None = None,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
     ):
@@ -78,6 +81,8 @@ class FileSystemTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
             root_dir: Root directory for block files.
+            evictor_args: Forwarded to make_evictor().  None → NoOpEvictor
+                (unbounded storage).  See make_evictor() for supported keys.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
         """
@@ -96,6 +101,12 @@ class FileSystemTierManager(SecondaryTierManager):
             gpu_blocks_per_file=offloading_spec.block_size_factor,
         )
 
+        self._evictor: EvictorBase = make_evictor(
+            self.file_mapper,
+            file_size_bytes=self._block_size,
+            evictor_args=evictor_args,
+        )
+
         # Write config file
         config_path = self.file_mapper.get_config_file_path()
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
@@ -110,6 +121,8 @@ class FileSystemTierManager(SecondaryTierManager):
             n_write_threads,
             thread_name_prefix="vllm_kv_py_fs",
         )
+        self._job_meta: dict[JobId, JobMetadata] = {}
+        self._skipped_jobs: list[JobResult] = []
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -119,10 +132,15 @@ class FileSystemTierManager(SecondaryTierManager):
     def lookup(
         self, key: OffloadKey, req_context: ReqContext | None = None
     ) -> bool | None:
-        return os.path.exists(self.file_mapper.get_file_name(key))
+        return self._evictor.lookup(key)
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        if not self._evictor.prepare_store(job_metadata):
+            # Skip store. This is drained in get_finished().
+            self._skipped_jobs.append(JobResult(job_metadata.job_id, success=False))
+            return
+
         tasks = (
             functools.partial(
                 store_block,
@@ -134,9 +152,12 @@ class FileSystemTierManager(SecondaryTierManager):
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
         self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._job_meta[job_metadata.job_id] = job_metadata
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        self._evictor.prepare_load(job_metadata)
+
         tasks = (
             functools.partial(
                 load_block,
@@ -148,16 +169,32 @@ class FileSystemTierManager(SecondaryTierManager):
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._job_meta[job_metadata.job_id] = job_metadata
+
+    def _complete_job(self, job_id: JobId):
+        job_meta = self._job_meta[job_id]
+        if not job_meta.is_promotion:
+            self._evictor.complete_store(job_meta)
+        else:
+            self._evictor.complete_load(job_meta)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
-        return (
-            JobResult(job_id=job_id, success=success)
-            for job_id, success in self._pool.get_finished()
-        )
+        results: list[JobResult] = []
+        for job_id, success in self._pool.get_finished():
+            results.append(JobResult(job_id=job_id, success=success))
+            self._complete_job(job_id)
+            # book-keeping
+            self._job_meta.pop(job_id)
+
+        # Drain skipped jobs
+        results.extend(self._skipped_jobs)
+        self._skipped_jobs = []
+
+        return results
 
     @override
     def shutdown(self) -> None:
