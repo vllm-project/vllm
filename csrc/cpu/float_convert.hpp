@@ -1,12 +1,14 @@
+#pragma once
+
 #include <bit>
 #include <cstdint>
 
-static float bf16_to_float(uint16_t bf16) {
+inline float bf16_to_float(uint16_t bf16) {
   uint32_t bits = static_cast<uint32_t>(bf16) << 16;
   return std::bit_cast<float>(bits);
 }
 
-static uint16_t float_to_bf16(float fp32) {
+inline uint16_t float_to_bf16(float fp32) {
   uint32_t bits = std::bit_cast<uint32_t>(fp32);
   return static_cast<uint16_t>(bits >> 16);
 }
@@ -17,7 +19,7 @@ static uint16_t float_to_bf16(float fp32) {
  * Codes below copied from
  * https://github.com/PrincetonVision/marvin/tree/master/tools/tensorIO_matlab
  *************************************************/
-static uint16_t float_to_fp16(float fp32) {
+inline uint16_t float_to_fp16(float fp32) {
   uint16_t fp16;
 
   unsigned u, remainder, shift, lsb, lsb_s1, lsb_m1;
@@ -75,7 +77,7 @@ static uint16_t float_to_fp16(float fp32) {
   return fp16;
 }
 
-static float fp16_to_float(uint16_t fp16) {
+inline float fp16_to_float(uint16_t fp16) {
   unsigned sign = ((fp16 >> 15) & 1);
   unsigned exponent = ((fp16 >> 10) & 0x1f);
   unsigned mantissa = ((fp16 & 0x3ff) << 13);
