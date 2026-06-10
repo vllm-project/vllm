@@ -412,6 +412,13 @@ class CohereServingChatV2(OpenAIServingChat):
     ) -> None:
         if not request.tools:
             return
+        # Cohere's ``strict_tools`` is the spec-equivalent of OpenAI's
+        # per-function ``strict`` flag: when true the API guarantees tool
+        # call arguments match the declared JSON schema. We surface it in
+        # both places so OpenAI-shaped consumers see it on the function
+        # definition and the cohere renderer can read it back from
+        # ``chat_template_kwargs`` for cmd3/cmd4 preamble selection.
+        strict = bool(request.strict_tools) if request.strict_tools else False
         chat_req.tools = [
             ChatCompletionToolsParam.model_validate(
                 {
@@ -420,6 +427,7 @@ class CohereServingChatV2(OpenAIServingChat):
                         "name": tool.function.name,
                         "description": tool.function.description,
                         "parameters": tool.function.parameters,
+                        **({"strict": True} if strict else {}),
                     },
                 }
             )
@@ -485,6 +493,8 @@ class CohereServingChatV2(OpenAIServingChat):
                 "thinking",
                 request.thinking.model_dump(exclude_none=True),
             )
+        if request.strict_tools is not None:
+            kwargs.setdefault("strict_tools", bool(request.strict_tools))
 
         if kwargs:
             chat_req.chat_template_kwargs = kwargs
