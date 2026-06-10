@@ -710,14 +710,11 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi4FlashForCausalLM": "0.10.2",
     "Phi4MultimodalForCausalLM": "0.12.0",
     "JAISLMHeadModel": "0.22.0",
-<<<<<<< remove-old-qwens
-    "QWenLMHeadModel": "0.23.0",
-    "QwenVLForConditionalGeneration": "0.23.0",
-=======
     "ErnieModel": "0.23.0",
     "ErnieForSequenceClassification": "0.23.0",
     "ErnieForTokenClassification": "0.23.0",
->>>>>>> main
+    "QWenLMHeadModel": "0.23.0",
+    "QwenVLForConditionalGeneration": "0.23.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
