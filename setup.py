@@ -65,19 +65,16 @@ def get_precompiled_rust_extension_paths() -> list[Path]:
     return sorted(paths)
 
 
-def has_precompiled_rust_extension_module(module_name: str) -> bool:
-    return any(
-        (ROOT_DIR / "vllm").glob(f"{module_name}*{suffix}")
-        for suffix in PRECOMPILED_RUST_EXTENSION_SUFFIXES
-    )
-
-
 def get_missing_precompiled_rust_extension_modules() -> list[str]:
-    missing = []
-    for module_name in rust_build.rust_py_extension_module_names():
-        if not has_precompiled_rust_extension_module(module_name):
-            missing.append(module_name)
-    return missing
+    # Artifacts are named `<module>.<ext-suffix>`, e.g. `_rust_foo.abi3.so`.
+    present = {
+        path.name.split(".", 1)[0] for path in get_precompiled_rust_extension_paths()
+    }
+    return [
+        module_name
+        for module_name in rust_build.rust_py_extension_module_names()
+        if module_name not in present
+    ]
 
 
 def has_precompiled_rust_extensions() -> bool:
