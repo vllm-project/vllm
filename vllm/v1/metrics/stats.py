@@ -322,6 +322,19 @@ class PromptTokenStats:
         return source_map[source]
 
 
+@dataclass
+class CpuActiveStats:
+    """Stats on CPU activity.
+
+    System-wide measurement; elapsed_s is wall-clock time.
+    Percent utilization = active_s / elapsed_s * 100, normalized to
+    100% across all cores.
+    """
+
+    active_s: float = 0.0
+    elapsed_s: float = 0.0
+
+
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 

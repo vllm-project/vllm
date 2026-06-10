@@ -29,6 +29,8 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
+- `vllm:cpu_active_seconds_total` (Counter) - Numerator of system-wide CPU utilization.
+- `vllm:cpu_elapsed_seconds_total` (Counter) - Denominator of system-wide CPU utilization.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
@@ -100,6 +102,8 @@ The following metrics are supported by default by `prometheus_client`, but they 
 - `process_max_fds`
 
 Therefore, these metrics are unavailable when `--api-server-count > 1`. It's questionable how relevant these are since they do not aggregate these stats for all processes that make up a vLLM instance.
+
+If system-wide (not just vLLM) CPU utilization is useful to you, see `vllm:cpu_active_seconds` and `vllm:cpu_elapsed_seconds`. Although these metrics are not individually meaningful when `--api-server-count > 1` (due to multiple processes counting the same activity), the ratio active/elapsed is the CPU utilization regardless of the number of API servers.
 
 ## Metrics Design
 

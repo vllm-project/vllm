@@ -190,6 +190,31 @@ def parse_spec_decode_metrics(
     )
 
 
+@dataclass
+class CpuMetrics:
+    """CPU utilization metrics from the server's Prometheus endpoint."""
+
+    cpu_active_seconds: float
+    cpu_elapsed_seconds: float
+
+
+def parse_cpu_metrics(metrics: PrometheusMetrics) -> CpuMetrics | None:
+    """Extract CPU utilization metrics from parsed Prometheus data.
+
+    Returns None if the metrics are not present (e.g. older vLLM build).
+    """
+    samples = metrics.get("vllm:cpu_active_seconds_total")
+    if not samples:
+        return None
+    elapsed_samples = metrics.get("vllm:cpu_elapsed_seconds_total")
+    return CpuMetrics(
+        cpu_active_seconds=sum(float(v) for _, v in samples),
+        cpu_elapsed_seconds=(
+            sum(float(v) for _, v in elapsed_samples) if elapsed_samples else 0.0
+        ),
+    )
+
+
 class TaskType(Enum):
     GENERATION = "generation"
     POOLING = "pooling"
@@ -828,6 +853,7 @@ async def benchmark(
     spec_decode_metrics_before = (
         parse_spec_decode_metrics(prom_before) if prom_before else None
     )
+    cpu_metrics_before = parse_cpu_metrics(prom_before) if prom_before else None
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -917,6 +943,7 @@ async def benchmark(
     spec_decode_metrics_after = (
         parse_spec_decode_metrics(prom_after) if prom_after else None
     )
+    cpu_metrics_after = parse_cpu_metrics(prom_after) if prom_after else None
     spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
         delta_drafts = (
@@ -1076,6 +1103,18 @@ async def benchmark(
             "per_position_acceptance_rates", []
         )
 
+    if cpu_metrics_before is not None and cpu_metrics_after is not None:
+        result["cpu_active_seconds"] = round(
+            cpu_metrics_after.cpu_active_seconds
+            - cpu_metrics_before.cpu_active_seconds,
+            3,
+        )
+        result["cpu_elapsed_seconds"] = round(
+            cpu_metrics_after.cpu_elapsed_seconds
+            - cpu_metrics_before.cpu_elapsed_seconds,
+            3,
+        )
+
     def process_one_metric(
         # E.g., "ttft"
         metric_attribute_name: str,
@@ -1149,6 +1188,31 @@ async def benchmark(
             print("Per-position acceptance (%):")
             for i, rate in enumerate(per_pos):
                 print("{:<40} {:<10.2f}".format(f"  Position {i}:", rate * 100))
+
+    if "cpu_active_seconds" in result:
+        print("{s:{c}^{n}}".format(s="CPU Utilization", n=50, c="-"))
+        print(
+            "{:<40} {:<10.3f}".format(
+                "CPU active time (s):",
+                result["cpu_active_seconds"],
+            )
+        )
+        if "cpu_elapsed_seconds" in result and result["cpu_elapsed_seconds"] > 0:
+            cpu_pct = (
+                result["cpu_active_seconds"] / result["cpu_elapsed_seconds"] * 100.0
+            )
+            print(
+                "{:<40} {:<10.3f}".format(
+                    "CPU elapsed time (s):",
+                    result["cpu_elapsed_seconds"],
+                )
+            )
+            print(
+                "{:<40} {:<10.1f}".format(
+                    "CPU utilization (%):",
+                    cpu_pct,
+                )
+            )
 
     print("=" * 50)
 

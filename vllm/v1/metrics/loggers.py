@@ -22,6 +22,7 @@ from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
+    CpuActiveStats,
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
@@ -58,6 +59,7 @@ class StatLoggerBase(ABC):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int = 0,
     ): ...
 
@@ -163,6 +165,7 @@ class LoggingStatLogger(StatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int = 0,
     ):
         """Log Stats to standard output."""
@@ -316,6 +319,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.engine_indexes:
@@ -326,6 +330,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             scheduler_stats,
             iteration_stats,
             mm_cache_stats=mm_cache_stats,
+            cpu_stats=cpu_stats,
             engine_idx=engine_idx,
         )
         if scheduler_stats is not None:
@@ -380,6 +385,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.per_engine_stat_loggers:
@@ -389,6 +395,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
             scheduler_stats,
             iteration_stats,
             mm_cache_stats=mm_cache_stats,
+            cpu_stats=cpu_stats,
             engine_idx=engine_idx,
         )
 
@@ -443,6 +450,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
+        )
+
+        self.counter_cpu_active_seconds = self._counter_cls(
+            name="vllm:cpu_active_seconds",
+            documentation="Numerator of system-wide CPU utilization.",
+        )
+        self.counter_cpu_elapsed_seconds = self._counter_cls(
+            name="vllm:cpu_elapsed_seconds",
+            documentation="Denominator of system-wide CPU utilization.",
         )
 
         #
@@ -1060,6 +1076,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int = 0,
     ):
         """Log to prometheus."""
@@ -1216,6 +1233,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
+        if cpu_stats is not None:
+            # System-wide measurement; single label-less series.
+            self.counter_cpu_active_seconds.inc(cpu_stats.active_s)
+            self.counter_cpu_elapsed_seconds.inc(cpu_stats.elapsed_s)
+
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
         discard_all = 0
@@ -1335,6 +1357,7 @@ class StatLoggerManager:
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        cpu_stats: CpuActiveStats | None = None,
         engine_idx: int | None = None,
     ):
         if engine_idx is None:
@@ -1344,6 +1367,7 @@ class StatLoggerManager:
                 scheduler_stats,
                 iteration_stats,
                 mm_cache_stats=mm_cache_stats,
+                cpu_stats=cpu_stats,
                 engine_idx=engine_idx,
             )
 

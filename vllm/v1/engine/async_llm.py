@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
 
+import psutil
 import torch
 
 import vllm.envs as envs
@@ -50,7 +51,7 @@ from vllm.v1.metrics.loggers import (
     load_stat_logger_plugin_factories,
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import CpuActiveStats, IterationStats
 
 logger = init_logger(__name__)
 
@@ -658,6 +659,14 @@ class AsyncLLM(EngineClient):
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
+            def sample_cpu_times():
+                times = psutil.cpu_times()
+                t = time.monotonic()
+                return t, times
+
+            prev_cpu_sample_time, prev_cpu_times = sample_cpu_times()
+            ncpu = psutil.cpu_count() or 1
+
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
@@ -698,11 +707,29 @@ class AsyncLLM(EngineClient):
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
                     if logger_ref[0]:
+                        now, cpu_times = sample_cpu_times()
+                        dt = now - prev_cpu_sample_time
+                        # CPU times aren't supposed to go backward, but they can.
+                        # https://github.com/giampaolo/psutil/issues/1210#issuecomment-363046156
+                        # psutil.cpu_percent() might be more convenient, but would
+                        # risk inaccuracy if little time passed between samples.
+                        # User and system times are available on all systems and
+                        # should cover most activity.
+                        duser_s = max(0.0, cpu_times.user - prev_cpu_times.user)
+                        dsystem_s = max(0.0, cpu_times.system - prev_cpu_times.system)
+                        cpu_stats = CpuActiveStats(
+                            active_s=(duser_s + dsystem_s) / ncpu,
+                            elapsed_s=dt,
+                        )
+                        prev_cpu_sample_time = now
+                        prev_cpu_times = cpu_times
+
                         logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
+                            cpu_stats=cpu_stats,
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
