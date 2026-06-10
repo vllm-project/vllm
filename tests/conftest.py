@@ -504,16 +504,19 @@ class HfRunner:
             )
         else:
             if trust_remote_code and hasattr(self.config, "auto_map"):
-                from transformers.dynamic_module_utils import (
-                    get_class_from_dynamic_module,
+                from vllm.transformers_utils.dynamic_module import (
+                    try_get_class_from_dynamic_module,
                 )
 
                 for cls_ref in self.config.auto_map.values():
-                    try:
-                        model_cls = get_class_from_dynamic_module(cls_ref, model_name)
+                    model_cls = try_get_class_from_dynamic_module(
+                        cls_ref,
+                        model_name,
+                        trust_remote_code=trust_remote_code,
+                        warn_on_fail=False,
+                    )
+                    if model_cls is not None:
                         _fix_v4_tied_weights_keys(model_cls)
-                    except Exception:
-                        pass
 
             model = cast(
                 nn.Module,
