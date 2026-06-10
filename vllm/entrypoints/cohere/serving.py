@@ -258,10 +258,13 @@ class CohereServingChatV2(OpenAIServingChat):
             if isinstance(block, CohereTextContent):
                 content_parts.append({"type": "text", "text": block.text})
             else:  # CohereImageContent
+                image_url: dict[str, Any] = {"url": block.image_url.url}
+                if block.image_url.detail is not None:
+                    image_url["detail"] = block.image_url.detail
                 content_parts.append(
                     {
                         "type": "image_url",
-                        "image_url": {"url": block.image_url.url},
+                        "image_url": image_url,
                     }
                 )
         if (
