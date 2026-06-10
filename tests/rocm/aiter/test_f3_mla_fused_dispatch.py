@@ -15,9 +15,7 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
 )
 
-# Helpers
 
-# DeepSeek-V3/R1 MLA dimensions
 KV_LORA_RANK = 512
 QK_ROPE_HEAD_DIM = 64
 NUM_TOKENS = 4
@@ -25,7 +23,6 @@ NUM_Q_HEADS = 128
 
 
 def _make_mock_impl(kv_cache_dtype: str = "auto") -> MagicMock:
-    """Return a MagicMock that mimics AiterMLAImpl attributes needed by F3."""
     impl = MagicMock()
     impl.kv_lora_rank = KV_LORA_RANK
     impl.qk_rope_head_dim = QK_ROPE_HEAD_DIM
@@ -34,7 +31,6 @@ def _make_mock_impl(kv_cache_dtype: str = "auto") -> MagicMock:
 
 
 def _make_tensors(device: str = "cpu"):
-    """Build minimal tensors for do_rope_and_kv_cache_update."""
     query = torch.randn(NUM_TOKENS, NUM_Q_HEADS, QK_ROPE_HEAD_DIM)
     # MLA key: [seq_len, 1, qk_rope_head_dim + kv_lora_rank]
     key = torch.randn(NUM_TOKENS, 1, QK_ROPE_HEAD_DIM + KV_LORA_RANK)
@@ -86,8 +82,6 @@ def test_f3_probe_consistent_with_kernel_import():
 
 
 def test_mla_wrapper_f3_enabled_via_probe():
-    """_f3_fusion_enabled must be True when has_fused_rope_mla_kv_cache() returns
-    True — no env var required. Mirrors what mla.py __init__ computes."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     f3 = bool(
@@ -103,8 +97,6 @@ def test_mla_wrapper_f3_enabled_via_probe():
 
 
 def test_f3_probe_consistent_with_dispatch():
-    """If has_fused_rope_mla_kv_cache() is True, the kernel import used by
-    fused_rope_and_mla_kv_cache_write() must also succeed."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
@@ -121,8 +113,6 @@ def test_f3_probe_consistent_with_dispatch():
 
 
 class TestDoRopeAndKVCacheUpdate:
-    """do_rope_and_kv_cache_update() must call concat_and_cache_mla_rope_fused."""
-
     @pytest.fixture(autouse=True)
     def _import_impl(self):
         from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
@@ -147,7 +137,6 @@ class TestDoRopeAndKVCacheUpdate:
         )
 
     def test_fused_op_is_called(self):
-        """concat_and_cache_mla_rope_fused must be invoked once."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         tensors = _make_tensors()
@@ -157,7 +146,6 @@ class TestDoRopeAndKVCacheUpdate:
             assert mock_fused.call_count == 1
 
     def test_unfused_op_is_not_called(self):
-        """concat_and_cache_mla must NOT be called on the fused path."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         tensors = _make_tensors()
@@ -170,7 +158,6 @@ class TestDoRopeAndKVCacheUpdate:
             mock_unfused.assert_not_called()
 
     def test_positions_passed_correctly(self):
-        """positions tensor must be forwarded to the fused op."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         query, key, value, positions, cos_sin_cache, slot_mapping, kv_cache = (
@@ -200,7 +187,6 @@ class TestDoRopeAndKVCacheUpdate:
             assert passed_positions is positions
 
     def test_kv_cache_passed_correctly(self):
-        """kv_cache tensor must be forwarded to the fused op."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         query, key, value, positions, cos_sin_cache, slot_mapping, kv_cache = (
@@ -227,7 +213,6 @@ class TestDoRopeAndKVCacheUpdate:
             )
 
     def test_k_scale_from_layer_used(self):
-        """The k_scale must come from layer._k_scale."""
         impl = _make_mock_impl()
         expected_scale = torch.tensor([0.5])
         layer = _make_mock_layer(k_scale_value=0.5)
@@ -257,7 +242,6 @@ class TestDoRopeAndKVCacheUpdate:
             ), "layer._k_scale was not passed to concat_and_cache_mla_rope_fused"
 
     def test_kv_cache_dtype_forwarded(self):
-        """kv_cache_dtype string must be forwarded to the fused op."""
         for dtype in ("auto", "fp8"):
             impl = _make_mock_impl(kv_cache_dtype=dtype)
             layer = _make_mock_layer()
@@ -274,7 +258,6 @@ class TestDoRopeAndKVCacheUpdate:
                 )
 
     def test_key_split_into_k_pe_and_kv_c(self):
-        """k_pe and kv_c must be sliced from key using qk_rope_head_dim."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         query, key, value, positions, cos_sin_cache, slot_mapping, kv_cache = (
@@ -329,7 +312,6 @@ class TestDoRopeAndKVCacheUpdate:
 
     @pytest.mark.parametrize("is_neox", [True, False])
     def test_is_neox_forwarded(self, is_neox: bool):
-        """is_neox bool must be passed through to the fused op unchanged."""
         impl = _make_mock_impl()
         layer = _make_mock_layer()
         tensors = _make_tensors()
@@ -358,28 +340,10 @@ class TestDoRopeAndKVCacheUpdate:
             )
 
 
-# Tests: F3 dispatch bypasses rotary_emb (partial fusion — see note below)
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests")
 def test_f3_fused_replaces_two_ops():
-    """F3 fires fused_rope_and_mla_kv_cache_write, bypassing the separate
-    rotary_emb call.
-
-    What this PR does (per decode step, per MLA layer):
-      Before: rotary_emb(q_pe, k_pe, positions)          <- op 1
-              concat_and_cache_mla(kv_c, k_pe, kv_cache) <- op 2 (inside mla_attn)
-
-      After:  fused_qk_rope_concat_and_cache_mla(...)    <- replaces op 1
-              concat_and_cache_mla(...)                  <- still runs once more
-                                                            (redundant duplicate
-                                                            write; removed in the
-                                                            follow-on PR)
-
-    This test verifies that rotary_emb is bypassed when F3 is enabled.
-    Full elimination of the duplicate kv-cache write is tracked in the
-    follow-on PR.
-    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
