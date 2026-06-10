@@ -10,7 +10,7 @@ Run `pytest tests/quantization/test_auto_round.py`.
 
 import pytest
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
@@ -467,7 +467,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     """Early-exit returns UnquantizedFusedMoEMethod for FusedMoE layers
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
-    layer = object.__new__(FusedMoE)
+    layer = object.__new__(RoutedExperts)
     layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config
 
     class DummyUnquantizedFusedMoEMethod:
@@ -506,7 +506,7 @@ def test_inc_get_quant_method_linear_uses_resolved_scheme(monkeypatch) -> None:
 
 def test_inc_get_quant_method_moe_uses_resolved_scheme(monkeypatch) -> None:
     config = make_config()
-    layer = object.__new__(FusedMoE)
+    layer = object.__new__(RoutedExperts)
     sentinel = object()
 
     class DummyScheme:

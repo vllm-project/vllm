@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
@@ -142,8 +145,6 @@ class INCConfig(QuantizationConfig):
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
-        from vllm.model_executor.layers.fused_moe import FusedMoE
-
         from .schemes.factory import resolve_scheme
 
         # Match original: check model.-prefixed names for unquantized layers
@@ -152,7 +153,7 @@ class INCConfig(QuantizationConfig):
                 if (
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
-                    if isinstance(layer, FusedMoE):
+                    if isinstance(layer, RoutedExperts):
                         return UnquantizedFusedMoEMethod(layer.moe_config)
                     return UnquantizedLinearMethod()
 
@@ -160,7 +161,7 @@ class INCConfig(QuantizationConfig):
         if not layer_config.quantized:
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return None
 
@@ -176,7 +177,7 @@ class INCConfig(QuantizationConfig):
         scheme = resolve_scheme(layer_config)
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return scheme.get_linear_method(self, layer, prefix, layer_config)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return scheme.get_moe_method(self, layer, prefix, layer_config)
         return None
 
