@@ -505,14 +505,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
     ),
-    "QWenLMHeadModel": _HfExamplesInfo(
-        "Qwen/Qwen-7B-Chat",
-        max_transformers_version="4.53",
-        transformers_version_reason={
-            "hf": "HF model uses remote code that is not compatible with latest Transformers"  # noqa: E501
-        },
-        trust_remote_code=True,
-    ),
     "Qwen2ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2-0.5B-Instruct",
         extras={
@@ -1296,16 +1288,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
         "baidu/Qianfan-OCR",
         min_transformers_version="5.6.0",
-    ),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen-VL",
-        extras={"chat": "Qwen/Qwen-VL-Chat"},
-        trust_remote_code=True,
-        max_transformers_version="4.53.3",
-        transformers_version_reason={
-            "hf": "HF model uses deprecated imports which have been removed."
-        },  # noqa: E501
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
