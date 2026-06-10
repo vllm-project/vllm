@@ -28,8 +28,6 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     OffloadingSpec,
-)
-from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
     TransferSpec,
 )
@@ -42,7 +40,7 @@ class OffloadingConnectorWorker:
 
     def __init__(self, spec: OffloadingSpec):
         self.spec = spec
-        self.worker = OffloadingWorker()
+        self.worker: OffloadingWorker | None = None
 
         self.kv_connector_stats = OffloadingConnectorStats()
         # job_id -> req_id for in-flight loads.
@@ -50,9 +48,8 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
-    def _register_handlers(self, kv_caches: CanonicalKVCaches):
-        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
-            self.worker.register_handler(src_cls, dst_cls, handler)
+    def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
+        self.worker = self.spec.get_worker(kv_caches)
 
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
@@ -180,7 +177,7 @@ class OffloadingConnectorWorker:
             group_data_refs=group_data_refs,
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
@@ -227,11 +224,12 @@ class OffloadingConnectorWorker:
             tensors=[kv_cache_tensor], group_data_refs=[[kv_cache_data_ref]]
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
+        assert self.worker is not None
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+            success = self.worker.submit_store(job_id, transfer_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
@@ -239,14 +237,15 @@ class OffloadingConnectorWorker:
             self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
+        assert self.worker is not None
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+            success = self.worker.submit_store(job_id, transfer_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
             self._load_jobs[job_id] = entry.req_id
-            success = self.worker.transfer_async(job_id, entry.transfer_spec)
+            success = self.worker.submit_load(job_id, entry.transfer_spec)
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
@@ -266,6 +265,7 @@ class OffloadingConnectorWorker:
             finished_recving so the base scheduler can resume requests
             blocked on remote KV (and free aborted-during-load reqs).
         """
+        assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
@@ -313,4 +313,5 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
-        self.worker.shutdown()
+        if self.worker is not None:
+            self.worker.shutdown()

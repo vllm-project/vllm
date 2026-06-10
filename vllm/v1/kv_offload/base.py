@@ -5,7 +5,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NewType
@@ -20,7 +20,6 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
@@ -375,6 +374,42 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
+TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
+TransferType = tuple[str, str]
+
+
+@dataclass
+class TransferResult:
+    job_id: int
+    success: bool
+    transfer_size: int | None = None
+    transfer_time: float | None = None
+    transfer_type: TransferType | None = None
+
+
+class OffloadingWorker(ABC):
+    """Runs in the worker process. Performs async KV transfers for ONE
+    offloaded medium (e.g. CPU). Direction is explicit via submit_store /
+    submit_load, so there is no (src_medium, dst_medium) routing."""
+
+    @abstractmethod
+    def submit_store(self, job_id: int, spec: TransferSpec) -> bool:
+        """Async GPU -> offloaded medium. spec = (gpu_src, offload_dst)."""
+
+    @abstractmethod
+    def submit_load(self, job_id: int, spec: TransferSpec) -> bool:
+        """Async offloaded medium -> GPU. spec = (offload_src, gpu_dst)."""
+
+    @abstractmethod
+    def get_finished(self) -> list[TransferResult]: ...
+
+    @abstractmethod
+    def wait(self, job_ids: set[int]) -> None: ...
+
+    def shutdown(self) -> None:
+        return
+
+
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
@@ -451,16 +486,14 @@ class OffloadingSpec(ABC):
         pass
 
     @abstractmethod
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         """
-        Get offloading handlers along with their respective src and dst types.
+        Get an OffloadingWorker that handles async KV transfers for this spec.
 
         Args:
             kv_caches: Canonicalized KV caches.
 
-        Yields:
-            Tuples of (src_type, dst_type, offloading_handler).
+        Returns:
+            An OffloadingWorker instance for this medium.
         """
         pass
