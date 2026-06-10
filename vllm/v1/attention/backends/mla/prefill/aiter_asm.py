@@ -6,7 +6,6 @@ Dispatches through aiter.mla_prefill_ps_asm_fwd -> aiter.mla_reduce_v1.
 """
 
 import math
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -292,53 +291,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
-        # TEMPORARY DIAGNOSTIC: the metadata buffers above are sized by
-        # get_ps_metadata_info_v1 (the PREDICTED capacity), then filled by
-        # get_ps_metadata_v1 (the ACTUAL schedule). If the info call ever
-        # under-predicts what the C++ builder writes, get_ps_metadata_v1
-        # overruns work_info / reduce_partial_map / reduce_final_map and
-        # poisons a neighbor allocation (the observed 256-concurrency MAF).
-        # work_indptr[-1] is the count of work_info rows actually written;
-        # reduce_indptr[-1] is the count of reduce_partial_map entries written.
-        # Assert each filled count fits its allocation BEFORE any kernel reads
-        # these buffers. Remove once the root cause is confirmed.
-        actual_works = int(work_indptr[-1].item())
-        actual_partials = int(reduce_indptr[-1].item())
-        num_reduce_tiles = reduce_indptr.numel() - 1
-        logger.info(
-            "PSBUF_DBG causal=%s batch=%d max_qlen=%s max_kvlen=%s | "
-            "work_info alloc_rows=%d filled=%d | reduce_partial_map alloc=%d "
-            "filled=%d | reduce_final_map alloc_rows=%d num_reduce_tiles=%d",
-            is_causal,
-            qo_indptr_cpu.numel() - 1,
-            max_qlen,
-            max_kvlen,
-            work_info.shape[0],
-            actual_works,
-            reduce_partial_map.numel(),
-            actual_partials,
-            reduce_final_map.shape[0],
-            num_reduce_tiles,
-        )
-        assert actual_works <= work_info.shape[0], (
-            f"work_info overrun: get_ps_metadata_v1 wrote {actual_works} rows "
-            f"into an allocation of {work_info.shape[0]} (causal={is_causal}, "
-            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
-            f"max_kvlen={max_kvlen}); info call under-predicted."
-        )
-        assert actual_partials <= reduce_partial_map.numel(), (
-            f"reduce_partial_map overrun: wrote {actual_partials} into an "
-            f"allocation of {reduce_partial_map.numel()} (causal={is_causal}, "
-            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
-            f"max_kvlen={max_kvlen}); info call under-predicted."
-        )
-        assert num_reduce_tiles <= reduce_final_map.shape[0], (
-            f"reduce_final_map overrun: {num_reduce_tiles} reduce tiles vs "
-            f"allocation of {reduce_final_map.shape[0]} (causal={is_causal}, "
-            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
-            f"max_kvlen={max_kvlen}); info call under-predicted."
-        )
-
         # Tight, sync-free upper bound on the per-cluster partial-tile count:
         # QT (sum over sequences of ceil(qlen/qlen_granularity)) plus one
         # carryover per thread group in a cluster. partial_o_loc resets per
@@ -355,60 +307,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         )
         tgs_per_cluster = _GFX950_CU_NUM // math.gcd(num_head_k, _GFX950_CU_NUM)
         num_partial_tiles = qt + tgs_per_cluster
-
-        # Temporary: compare the tight bound against the info call's loose
-        # reduce_partial_map_size to confirm the old sizing was overly
-        # pessimistic. Remove once validated.
-        logger.debug(
-            "ps num_partial_tiles: tight=%d (qt=%d + tgs_per_cluster=%d) "
-            "vs loose reduce_partial_map_size=%d",
-            num_partial_tiles,
-            qt,
-            tgs_per_cluster,
-            int(reduce_partial_map_size),
-        )
-
-        # TEMPORARY DIAGNOSTIC: the 256-concurrency MAF is an OOB write that
-        # poisons a neighbor allocation. The leading suspect is that the host
-        # bound num_partial_tiles under-counts the partial slots the PS
-        # scheduler actually emits (reduce_indptr[-1]), so the prefill ASM
-        # kernel writes partial_o_loc rows past logits/attn_lse. Read the
-        # device-truth partial count (a host sync) and hard-assert
-        # num_partial_tiles covers it BEFORE the corrupting launch, so the
-        # first under-count aborts cleanly with full numbers. Remove once the
-        # root cause is confirmed.
-        actual = int(reduce_indptr[-1].item())
-        max_partial_loc = (
-            int(reduce_partial_map[:actual].max().item()) if actual > 0 else -1
-        )
-        needed = max_partial_loc // _FP8_PREFILL_TILE_Q + 1 if actual > 0 else 0
-        logger.info(
-            "PARTIALS_DBG causal=%s batch=%d max_qlen=%s max_kvlen=%s | "
-            "qt=%d tgs_per_cluster=%d num_partial_tiles=%d | "
-            "actual_reduce_indptr=%d max_partial_loc=%d needed_tiles=%d",
-            is_causal,
-            qo_indptr_cpu.numel() - 1,
-            max_qlen,
-            max_kvlen,
-            qt,
-            tgs_per_cluster,
-            num_partial_tiles,
-            actual,
-            max_partial_loc,
-            needed,
-        )
-        assert num_partial_tiles >= actual, (
-            f"num_partial_tiles={num_partial_tiles} < reduce_indptr[-1]="
-            f"{actual} (causal={is_causal}, batch="
-            f"{qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
-            f"max_kvlen={max_kvlen}): host bound under-counts emitted "
-            f"partial slots; prefill ASM would write OOB."
-        )
-        assert num_partial_tiles >= needed, (
-            f"num_partial_tiles={num_partial_tiles} < needed={needed} "
-            f"(max_partial_loc={max_partial_loc}, causal={is_causal}): "
-            f"highest partial_o_loc row exceeds logits/attn_lse extent."
-        )
 
         return {
             "work_indptr": work_indptr,
@@ -676,46 +574,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             one_scale,
             one_scale,
         )
-
-        # TEMPORARY DIAGNOSTIC: the 256-concurrency page fault is in the reduce
-        # kernel (confirmed via AMD_SERIALIZE_KERNEL). Dump every reduce access
-        # bound vs its buffer size so we can see which one overflows. Gated by
-        # env var; the .item()/.max() readbacks sync, so only enable while
-        # debugging. Runs before the (faulting) launch, so it flushes first.
-        if os.environ.get("AITER_ASM_REDUCE_DEBUG"):
-            ri = ps["reduce_indptr"]
-            rpm = ps["reduce_partial_map"]
-            rfm = ps["reduce_final_map"]
-            num_reduce_tile = ri.numel() - 1
-            total_partials = int(ri[-1].item())
-            max_pidx = (
-                int(rpm[:total_partials].max().item()) if total_partials > 0 else -1
-            )
-            max_qo = (
-                int(rfm[:num_reduce_tile, 1].max().item()) if num_reduce_tile else -1
-            )
-            logger.info(
-                "REDUCE_DBG causal=%s nhead=%d vdim=%d tile_q=%d | "
-                "logits_rows=%d attn_lse_rows=%d | num_reduce_tile=%d "
-                "total_partials=%d rpm_numel=%d | max_partial_loc=%d "
-                "(+tile_q=%d vs logits_rows=%d) | max_qo_end=%d vs out_rows=%d "
-                "final_lse_rows=%d",
-                is_causal,
-                nhead,
-                v_head_dim,
-                tile_q,
-                logits.shape[0],
-                attn_lse.shape[0],
-                num_reduce_tile,
-                total_partials,
-                rpm.numel(),
-                max_pidx,
-                max_pidx + tile_q,
-                logits.shape[0],
-                max_qo,
-                out.shape[0],
-                final_lse.shape[0],
-            )
 
         self._mla_reduce_v1(
             logits,
