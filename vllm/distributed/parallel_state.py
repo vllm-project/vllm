@@ -495,10 +495,16 @@ class GroupCoordinator:
         This is a collective call: every world rank must invoke it. Used where we
         want to issue ops that can run concurrently with ops on `device_group`.
         """
+        from vllm.distributed.utils import get_distributed_timeout_or_none
+
+        device_timeout = get_distributed_timeout_or_none()
         sibling: ProcessGroup | None = None
         for ranks in self.group_ranks:
             pg = torch.distributed.new_group(
-                ranks, backend=self.torch_distributed_backend, group_desc=group_desc
+                ranks,
+                backend=self.torch_distributed_backend,
+                group_desc=group_desc,
+                timeout=device_timeout,
             )
             if self.rank in ranks:
                 sibling = pg
