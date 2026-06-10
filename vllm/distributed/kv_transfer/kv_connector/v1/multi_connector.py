@@ -471,6 +471,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata_pp_aware(metadata)
+
     def _aggregate_request_finished(
         self,
         request: "Request",
