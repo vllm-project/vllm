@@ -87,6 +87,29 @@ The figure below shows how the worker connector works with the attention module 
 
 ![Disaggregated prefilling workflow](../assets/features/disagg_prefill/workflow.png)
 
+## Interpreting KV Transfer Metrics
+
+When a KV connector is configured, vLLM periodically logs transfer
+statistics via the ``observe`` → ``aggregate`` → ``reduce`` → ``log``
+pipeline (see ``KVConnectorLogging`` in
+``vllm/distributed/kv_transfer/kv_connector/v1/metrics.py``).
+
+The connector-specific stats class (e.g. ``NixlKVConnectorStats``)
+determines the exact metrics emitted.  Below is a general guide for
+interpreting the most common metrics:
+
+| Metric | Semantics | TP > 1 note |
+|--------|-----------|-------------|
+| Num successful transfers | Total number of KV transfers completed across **all** TP ranks in the group. | Each rank sends its observations to the logger process; they are merged before ``observe()`` is called, so this number reflects the **group total**, not a per-rank count. |
+| Throughput (MB/s) | Average data throughput per transfer. | For ``NixlConnector``, this is the **per-rank average** (each rank reports its own throughput; the ``reduce`` step averages across ranks).  To get aggregate system throughput, multiply by the number of TP ranks. |
+| Latency (ms) | Time from transfer initiation to completion. | Per-rank observation, averaged across ranks in the ``reduce`` step. |
+
+!!! tip
+    When running with ``TP > 1``, remember that throughput and latency
+    metrics are **per-rank averages**.  Multiply throughput by the TP
+    degree to get total system throughput; latency values are already
+    representative since all ranks transfer concurrently.
+
 ## Third-party contributions
 
 Disaggregated prefilling is highly related to infrastructure, so vLLM relies on third-party connectors for production-level disaggregated prefilling (and vLLM team will actively review and merge new PRs for third-party connectors).
