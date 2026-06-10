@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import single_rht
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 DEVICE_TYPE = current_platform.device_type
@@ -262,10 +263,6 @@ def test_reshape_and_cache_per_token_head(
         off = slot % block_size
 
         if is_int4:
-            from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
-                single_rht,
-            )
-
             for label, data, cache, sc in [
                 ("key", key, key_cache, k_scale_cache),
                 ("val", value, value_cache, v_scale_cache),
@@ -410,10 +407,6 @@ def test_per_token_head_round_trip_accuracy(
                 orig = data[i, h].float()
                 actual_sc = sc[blk, off, h]
                 if is_int4:
-                    from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
-                        single_rht,
-                    )
-
                     sc_bits = actual_sc.view(torch.int32)
                     zp = (sc_bits & 0xF).to(torch.float32)
                     clean_sc = (sc_bits & -16).view(torch.float32)
