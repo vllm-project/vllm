@@ -5,12 +5,16 @@ import json
 from collections.abc import Sequence
 from unittest.mock import MagicMock
 
-from vllm import _rust_tool_parser
+import pytest
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.rust_tool_parser import RustToolParser
+
+# The PyO3 extension is an optional build artifact; skip when absent.
+_rust_tool_parser = pytest.importorskip("vllm._rust_tool_parser")
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
