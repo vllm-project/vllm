@@ -699,7 +699,10 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         def _replacement(
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
+            at = self.FUSED_SILU_MUL_QUANT_OP(
+                x=input,
+                group_size=128,
+            )
             return at[0], at[1]
 
         return _replacement

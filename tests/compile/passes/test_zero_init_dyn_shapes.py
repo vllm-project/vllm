@@ -1,11 +1,12 @@
-"""Focused dynamic-shape compile test to isolate which new producer op
+"""Focused dynamic-shape compile test to isolate which zero-init producer path
 specializes a symbolic batch dim when used under torch.compile.
 
-Each test compiles a tiny module that calls one of the `_with_zero_init`
-producer ops via `auto_functionalized`, on a tensor with `mark_dynamic`
-on the batch dimension. If the op introduces a specialization that
-torch.compile would later raise as a `ConstraintViolationError`, this
-test will surface it in isolation (without needing to boot vLLM).
+Each fused-path test compiles a tiny module that calls one explicit
+``*_with_zero_init`` mutating producer alias via ``auto_functionalized``, on a
+tensor with ``mark_dynamic`` on the batch dimension. If the op introduces a
+specialization that torch.compile would later raise as a
+`ConstraintViolationError`, this test will surface it in isolation (without
+needing to boot vLLM).
 
 Run with `pytest tests/compile/passes/test_zero_init_dyn_shapes.py -s`.
 """

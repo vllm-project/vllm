@@ -369,7 +369,10 @@ class MatcherQuantFP8(MatcherCustomOp):
                 scale=scale,
             )
         else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+            return self.QUANT_OP(  # type: ignore[no-any-return]
+                input,
+                quant_key_group_shape.col,
+            )
 
     def forward_custom(
         self,
