@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
 from transformers import BatchFeature, ProcessorMixin, TensorType
@@ -86,9 +87,9 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
 
         # String tokens match the canonical Pixtral vocabulary names used by
         # HF PixtralProcessor, making this class a drop-in replacement.
-        self.image_token = "[IMG]"
-        self.image_break_token = "[IMG_BREAK]"
-        self.image_end_token = "[IMG_END]"
+        self.image_token = SpecialTokens.img.value
+        self.image_break_token = SpecialTokens.img_break.value
+        self.image_end_token = SpecialTokens.img_end.value
 
         # HF PixtralProcessor-compatible aliases for the integer token IDs.
         self.image_break_token_id = self.image_break_id

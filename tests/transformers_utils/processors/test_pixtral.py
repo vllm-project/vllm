@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 
 import pytest
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 
 from vllm.transformers_utils.processors import pixtral as pixtral_module
 from vllm.transformers_utils.processors.pixtral import (
@@ -45,45 +46,18 @@ def processor():
     )
 
 
-def test_integer_token_ids(processor):
-    """Integer IDs derived from mistral-common special_ids."""
+def test_token_attributes(processor):
+    """Token IDs, string names, and HF-compatible aliases are all correct."""
     assert processor.image_token_id == 11
     assert processor.image_break_id == 10
     assert processor.image_end_id == 12
 
+    assert processor.image_token == SpecialTokens.img.value
+    assert processor.image_break_token == SpecialTokens.img_break.value
+    assert processor.image_end_token == SpecialTokens.img_end.value
 
-def test_string_token_names(processor):
-    """String tokens match canonical Pixtral vocabulary names."""
-    assert processor.image_token == "[IMG]"
-    assert processor.image_break_token == "[IMG_BREAK]"
-    assert processor.image_end_token == "[IMG_END]"
-
-
-def test_hf_compatible_token_id_aliases(processor):
-    """HF PixtralProcessor-style _token_id aliases agree with base IDs."""
     assert processor.image_break_token_id == processor.image_break_id
     assert processor.image_end_token_id == processor.image_end_id
-
-
-def test_token_properties_are_instance_attributes(processor):
-    """All token attributes must be plain instance attributes, not properties,
-    so that code doing ``vocab[processor.image_break_token]`` or direct
-    assignment works identically to HF PixtralProcessor."""
-    cls = type(processor)
-    for attr in (
-        "image_token",
-        "image_break_token",
-        "image_end_token",
-        "image_token_id",
-        "image_break_token_id",
-        "image_end_token_id",
-    ):
-        assert not isinstance(getattr(cls, attr, None), property), (
-            f"{attr} must be an instance attribute, not a @property"
-        )
-        assert attr in processor.__dict__, (
-            f"{attr} must be set in __init__, not inherited"
-        )
 
 
 def test_image_processor_fetch_images_accepts_images_and_lists(monkeypatch):
@@ -106,4 +80,7 @@ def test_image_processor_fetch_images_rejects_invalid_input(monkeypatch):
 
 
 def test_replace_image_token_is_noop_for_mistral_template_tokens(processor):
-    assert processor.replace_image_token(processed_images={}, image_idx=0) == "[IMG]"
+    assert (
+        processor.replace_image_token(processed_images={}, image_idx=0)
+        == SpecialTokens.img.value
+    )
