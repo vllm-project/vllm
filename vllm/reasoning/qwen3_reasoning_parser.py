@@ -50,6 +50,10 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         self._tool_call_end_tag = "</tool_call>"
         self._tool_call_end_token_id = self.vocab.get(self._tool_call_end_tag)
 
+        # Buffer for partial tags across chunk boundaries
+        self._pending_text = ""
+        self._reasoning_ended = False
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
@@ -189,6 +193,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             # End token in this delta: split reasoning from content.
             end_index = delta_text.find(self.end_token)
             if end_index >= 0:
+                self._reasoning_ended = True
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 if not reasoning and not content:
@@ -207,8 +212,13 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         ):
             tool_index = delta_text.find(self._tool_call_tag)
             if tool_index >= 0:
-                reasoning = delta_text[:tool_index]
-                content = delta_text[tool_index:]
+                if not self._reasoning_ended:
+                    self._reasoning_ended = True
+                    reasoning = delta_text[:tool_index]
+                    content = delta_text[tool_index:]
+                else:
+                    reasoning = ""
+                    content = delta_text
                 return DeltaMessage(
                     reasoning=reasoning if reasoning else None,
                     content=content if content else None,
@@ -226,6 +236,60 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             and self._tool_call_token_id in previous_token_ids
         ):
             return DeltaMessage(content=delta_text)
+        elif self._reasoning_ended:
+            # We've already seen the end token in a previous delta: this is all content.
+            return DeltaMessage(content=delta_text)
+
+        # Check if we have partial text for tokens in the test and deal with
+        # it. Also handle previous leftover partial text.
+        # Combine pending text from previous chunk with current delta
+        combined_text = self._pending_text + delta_text
+
+        # Strip <think> from combined text if present (old template / edge case
+        # where the model generates <think> itself).
+        if self.start_token in combined_text:
+            start_idx = combined_text.find(self.start_token)
+            if start_idx >= 0:
+                combined_text = combined_text[start_idx + len(self.start_token) :]
+
+        if self.end_token in combined_text:
+            end_idx = combined_text.find(self.end_token)
+            if end_idx >= 0:
+                reasoning_part = combined_text[:end_idx].rstrip()
+                content_part = combined_text[end_idx + len(self.end_token) :]
+                self._pending_text = ""
+                self._reasoning_ended = True
+                if not reasoning_part and not content_part:
+                    return None
+                return DeltaMessage(
+                    reasoning=reasoning_part if reasoning_part else None,
+                    content=content_part if content_part else None,
+                )
+
+        max_tag_len = max(
+            len(self.end_token),
+            len(self._tool_call_tag) if self._tool_call_tag else 0,
+        )
+
+        partial_match_len = 0
+        for i in range(1, min(max_tag_len, len(combined_text)) + 1):
+            suffix = combined_text[-i:]
+            # Check if this suffix could be the start of any tag
+            if self.end_token.startswith(suffix) or (
+                self._tool_call_tag and self._tool_call_tag.startswith(suffix)
+            ):
+                partial_match_len = i
+
+        if partial_match_len > 0:
+            # Keep the potential partial tag (and any leading whitespace) in the buffer
+            safe_to_emit = combined_text[:-partial_match_len].rstrip()
+            self._pending_text = combined_text[-partial_match_len:]
         else:
-            # No end token yet: still in reasoning phase.
-            return DeltaMessage(reasoning=delta_text)
+            # No partial tag - emit everything
+            safe_to_emit = combined_text
+            self._pending_text = ""
+
+        if not safe_to_emit:
+            return None
+
+        return DeltaMessage(reasoning=safe_to_emit)

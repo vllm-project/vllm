@@ -13,21 +13,16 @@ class StreamingReasoningReconstructor:
         self.other_content = None
 
     def append_delta(self, delta: DeltaMessage):
-        # content and the reasoning content should not be present
-        # at the same time
-        assert delta.content is None or delta.reasoning is None, (
-            "Both content and reasoning content are present in the delta message"
-        )
+        if delta.reasoning is not None:
+            if self.reasoning is None:
+                self.reasoning = delta.reasoning
+            else:
+                self.reasoning += delta.reasoning
         if delta.content is not None:
             if self.other_content is None:
                 self.other_content = delta.content
             else:
                 self.other_content += delta.content
-        else:
-            if self.reasoning is None:
-                self.reasoning = delta.reasoning
-            else:
-                self.reasoning += delta.reasoning
 
 
 def run_reasoning_extraction(
