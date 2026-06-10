@@ -6,6 +6,7 @@ Dispatches through aiter.mla_prefill_ps_asm_fwd -> aiter.mla_reduce_v1.
 """
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -586,6 +587,46 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             one_scale,
             one_scale,
         )
+
+        # TEMPORARY DIAGNOSTIC: the 256-concurrency page fault is in the reduce
+        # kernel (confirmed via AMD_SERIALIZE_KERNEL). Dump every reduce access
+        # bound vs its buffer size so we can see which one overflows. Gated by
+        # env var; the .item()/.max() readbacks sync, so only enable while
+        # debugging. Runs before the (faulting) launch, so it flushes first.
+        if os.environ.get("AITER_ASM_REDUCE_DEBUG"):
+            ri = ps["reduce_indptr"]
+            rpm = ps["reduce_partial_map"]
+            rfm = ps["reduce_final_map"]
+            num_reduce_tile = ri.numel() - 1
+            total_partials = int(ri[-1].item())
+            max_pidx = (
+                int(rpm[:total_partials].max().item()) if total_partials > 0 else -1
+            )
+            max_qo = (
+                int(rfm[:num_reduce_tile, 1].max().item()) if num_reduce_tile else -1
+            )
+            logger.info(
+                "REDUCE_DBG causal=%s nhead=%d vdim=%d tile_q=%d | "
+                "logits_rows=%d attn_lse_rows=%d | num_reduce_tile=%d "
+                "total_partials=%d rpm_numel=%d | max_partial_loc=%d "
+                "(+tile_q=%d vs logits_rows=%d) | max_qo_end=%d vs out_rows=%d "
+                "final_lse_rows=%d",
+                is_causal,
+                nhead,
+                v_head_dim,
+                tile_q,
+                logits.shape[0],
+                attn_lse.shape[0],
+                num_reduce_tile,
+                total_partials,
+                rpm.numel(),
+                max_pidx,
+                max_pidx + tile_q,
+                logits.shape[0],
+                max_qo,
+                out.shape[0],
+                final_lse.shape[0],
+            )
 
         self._mla_reduce_v1(
             logits,
