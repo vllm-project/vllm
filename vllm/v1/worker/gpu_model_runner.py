@@ -2018,7 +2018,21 @@ class GPUModelRunner(
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        if (
+            self.num_accepted_tokens_event is not None
+            and self.use_async_scheduling
+            and self.cache_config.mamba_cache_mode != "align"
+        ):
+            # In async scheduling, the CPU copy of accepted token counts can
+            # race with both the non-blocking D2H copy from the previous model
+            # execution and CPU-side input-batch row moves. Keep the default
+            # accepted count on device authoritative: requests that had drafts
+            # in the previous step are corrected below from the GPU-resident
+            # valid_sampled_token_count, while new/non-draft requests accepted
+            # exactly one token.
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+        elif self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
