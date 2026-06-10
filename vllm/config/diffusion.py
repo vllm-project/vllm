@@ -21,5 +21,6 @@ class DiffusionConfig:
     """Length of the denoising canvas (block).  Also determines the number of
     speculative tokens scheduled per step."""
 
-    max_denoising_steps: int = 48
-    """Maximum number of denoising iterations per canvas block."""
+    max_denoising_steps: int | None = None
+    """Maximum number of denoising iterations per canvas block.
+    If not set, read from the model's generation_config.json."""

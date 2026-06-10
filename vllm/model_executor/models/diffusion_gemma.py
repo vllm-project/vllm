@@ -9,11 +9,9 @@ Single Gemma4 backbone run in two modes (like YOCO):
 Same weights, same layers. The only decoder-unique component is a
 self-conditioning MLP.
 
-Multimodal support: the model always includes a vision tower (shared with
-Gemma4). Images are encoded through the vision tower and projected into
-the LM embedding space via Gemma4MultimodalEmbedder.
-
-Design doc: docs/design/diffusion_gemma_summary.md
+Multimodal support: the model always includes a vision tower (shared with Gemma4).
+Images are encoded through the vision tower and projected into the LM embedding space
+via Gemma4MultimodalEmbedder.
 """
 
 from __future__ import annotations
@@ -818,14 +816,14 @@ class DiffusionGemmaModelState(ModelState):
 
         diffusion_config = vllm_config.diffusion_config
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
-        max_denoising_steps = (
-            diffusion_config.max_denoising_steps if diffusion_config else 48
-        )
 
         text_config = self.model_config.hf_text_config
         # Diffusion sampling params come straight from generation_config.json
         # (RC0.1 flat layout); the checkpoint is the source of truth.
         self.gen_config = self.model_config.try_get_generation_config()
+        max_denoising_steps = (
+            diffusion_config.max_denoising_steps if diffusion_config else None
+        ) or self.gen_config.get("max_denoising_steps", 48)
         self.diffusion_states = DiffusionGemmaRequestStates(
             max_num_reqs=self.max_num_reqs,
             canvas_length=canvas_length,
