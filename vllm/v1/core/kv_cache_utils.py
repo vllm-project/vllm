@@ -1032,8 +1032,10 @@ def unify_kv_cache_spec_page_size(
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
     are the same, return the original KVCacheSpec. If not same, unify the page
-    size by increasing the block size of layers with smaller page size. Raise
-    NotImplementedError if failed to unify the page size.
+    size by increasing the block size of layers with smaller page size, or, for
+    Mamba layers whose page size is independent of block size, by padding the
+    page to the maximum page size. Raise NotImplementedError if failed to unify
+    the page size.
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -1051,17 +1053,33 @@ def unify_kv_cache_spec_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
+        elif isinstance(layer_spec, MambaSpec):
+            # MambaSpec's page size is determined by its state shapes and does
+            # not scale with block_size, so pad the page instead. This is the
+            # same padding mechanism the platform uses to align Mamba pages
+            # with the main model's attention page size; it is needed here
+            # when another layer (e.g. from a draft model) has a larger page
+            # than the already-aligned Mamba page.
+            new_spec: KVCacheSpec = replace(layer_spec, page_size_padded=max_page_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size != 0:
                 raise NotImplementedError(
-                    "The page size of the layer is not divisible by the "
-                    "maximum page size. Cannot unify by adjusting block_size."
+                    f"The page size of layer {layer_name} "
+                    f"({layer_page_size} bytes) is not a divisor of the "
+                    f"maximum page size ({max_page_size} bytes). Cannot "
+                    "unify by adjusting block_size."
                 )
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
             new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
+            assert new_spec.page_size_bytes == max_page_size, (
+                f"layer {layer_name}: page size {new_spec.page_size_bytes} "
+                f"after scaling block_size to {new_block_size} does not "
+                f"match the maximum page size {max_page_size}"
+            )
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
