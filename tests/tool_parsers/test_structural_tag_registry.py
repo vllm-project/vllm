@@ -26,7 +26,6 @@ from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
     get_model_structural_tag,
@@ -102,7 +101,6 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (MinimaxM2ToolParser, "minimax"),
         (OpenAIToolParser, "harmony"),
         (Qwen3CoderToolParser, "qwen_3_coder"),
-        (Qwen3XMLToolParser, "qwen_3_coder"),
     ],
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
@@ -157,7 +155,7 @@ def test_get_structural_tag_disables_reasoning(
         tools=sample_tools,
         tool_choice="auto",
     )
-    parser = Qwen3XMLToolParser(MagicMock(), tools=sample_tools)
+    parser = Qwen3CoderToolParser(MagicMock(), tools=sample_tools)
 
     parser.get_structural_tag(request)
 
