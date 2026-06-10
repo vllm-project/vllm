@@ -184,8 +184,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache = EncoderCache()
 
         # Speculative decoding.
-        kv_xfer = self.vllm_config.kv_transfer_config
-        self._is_kv_producer = kv_xfer is not None and kv_xfer.kv_role == "kv_producer"
         self.speculator = None
         self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
@@ -1422,7 +1420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None and not self._is_kv_producer:
+        if self.speculator is not None:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The

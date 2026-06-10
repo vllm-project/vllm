@@ -538,8 +538,6 @@ class GPUModelRunner(
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
-        kv_xfer = vllm_config.kv_transfer_config
-        self._is_kv_producer = kv_xfer is not None and kv_xfer.kv_role == "kv_producer"
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -4371,8 +4369,6 @@ class GPUModelRunner(
         self, common_attn_metadata: CommonAttentionMetadata | None
     ) -> bool:
         if common_attn_metadata is None:
-            return False
-        if self._is_kv_producer:
             return False
         assert self.speculative_config is not None
         # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
