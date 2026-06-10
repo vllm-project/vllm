@@ -632,7 +632,7 @@ def test_linear_dora_scale_stacked(default_vllm_config, dist_init, device) -> No
     max_loras = 2
     lora_config = LoRAConfig(
         max_loras=max_loras,
-        max_lora_rank=2,
+        max_lora_rank=8,
         lora_dtype=dtype,
     )
 
