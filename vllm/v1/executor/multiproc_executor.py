@@ -66,6 +66,19 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+# CPU needs a longer RPC timeout than the GPU default (issue #44862).
+_CPU_EXECUTE_MODEL_TIMEOUT_SECONDS = 3600
+
+
+def _get_execute_model_timeout() -> int:
+    timeout = envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+    if (
+        os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS") is None
+        and current_platform.is_cpu()
+    ):
+        timeout = max(timeout, _CPU_EXECUTE_MODEL_TIMEOUT_SECONDS)
+    return timeout
+
 
 class FutureWrapper(Future):
     def __init__(
@@ -312,7 +325,7 @@ class MultiprocExecutor(Executor):
             args=(scheduler_output,),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
-            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            timeout=_get_execute_model_timeout(),
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
@@ -324,7 +337,7 @@ class MultiprocExecutor(Executor):
             args=(grammar_output,),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
-            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            timeout=_get_execute_model_timeout(),
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
