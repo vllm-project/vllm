@@ -38,13 +38,17 @@ impl HfChatBackend {
     ) -> Result<Self> {
         let model_config = load_model_config(files.config_path.as_deref())?;
         let model_type = model_config.model_type().unwrap_or_default();
-        let multimodal_model_info = MultimodalModelInfo::from_paths(
-            model_id.clone(),
-            (!model_type.is_empty()).then_some(model_type.to_string()),
-            files.config_path.as_deref(),
-            files.preprocessor_config_path.as_deref(),
-            tokenizer.clone(),
-        )?;
+        let multimodal_model_info = if options.language_model_only {
+            None
+        } else {
+            MultimodalModelInfo::from_paths(
+                model_id.clone(),
+                (!model_type.is_empty()).then_some(model_type.to_string()),
+                files.config_path.as_deref(),
+                files.preprocessor_config_path.as_deref(),
+                tokenizer.clone(),
+            )?
+        };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
 
         let renderer = options.renderer.resolve(model_type);
@@ -225,6 +229,7 @@ mod tests {
             "test-model".to_string(),
             LoadModelBackendsOptions {
                 renderer,
+                language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
@@ -265,6 +270,54 @@ mod tests {
         );
 
         assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn language_model_only_skips_multimodal_preprocessor_config() {
+        let mut files = resolved_files(
+            r#"{"model_type":"deepseek_v0_vl"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+        let preprocessor_config_path = files
+            .config_path
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("preprocessor_config.json");
+        write_json(&preprocessor_config_path, r#"{"size":[672,672]}"#);
+        files.preprocessor_config_path = Some(preprocessor_config_path);
+
+        let backend = HfChatBackend::from_resolved_model_files(
+            files.clone(),
+            "test-model".to_string(),
+            LoadModelBackendsOptions {
+                language_model_only: true,
+                chat_template_content_format: Default::default(),
+                chat_template: None,
+                default_chat_template_kwargs: HashMap::new(),
+                ..Default::default()
+            },
+            test_tokenizer(),
+        )
+        .unwrap();
+
+        assert!(backend.multimodal_model_info().is_none());
+
+        let error = HfChatBackend::from_resolved_model_files(
+            files,
+            "test-model".to_string(),
+            LoadModelBackendsOptions {
+                chat_template_content_format: Default::default(),
+                chat_template: None,
+                default_chat_template_kwargs: HashMap::new(),
+                ..Default::default()
+            },
+            test_tokenizer(),
+        )
+        .err()
+        .expect("invalid preprocessor config should fail without language_model_only");
+        assert!(error.to_string().contains("failed to parse preprocessor_config.json"));
     }
 
     #[test]
