@@ -439,13 +439,12 @@ class BlockPool:
                 else:
                     blocks_with_hash.append(block)
 
-        # Append to LRU queue based on priority passed via parameter
         if prepend:
             self.free_block_queue.prepend_n(blocks_with_hash)
         else:
             self.free_block_queue.append_n(blocks_with_hash)
 
-        # Always allow immediate reallocation of blocks without hash
+        # Blocks without hash always get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
