@@ -238,7 +238,10 @@ def check_moe_marlin_supports_config(
     if current_platform.is_rocm():
         return False
     hidden_size = config.hidden_dim
-    intermediate_size_per_partition = config.intermediate_size_per_partition
+    # Note: The layer has not performed rounding on intermediate_size's at this
+    # point. Use the unpadded size which won't change.
+    intermediate_size_per_partition = config.intermediate_size_per_partition_unpadded
+    assert intermediate_size_per_partition is not None
 
     # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
     # down: (n, k) = (hidden_size, intermediate_size_per_partition)

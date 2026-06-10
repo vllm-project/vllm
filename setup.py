@@ -18,7 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools_rust import Binding, RustExtension
 from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -40,6 +39,9 @@ PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
+rust_build = load_module_from_path(
+    "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
+)
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
@@ -1146,16 +1148,9 @@ if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
 # package directory alongside the Python modules.
 # TODO: we may use `RustBin` to directly install it into `bin` directory, but this
 # requires extra work on using precompiled binaries.
-rust_extensions = [
-    RustExtension(
-        target="vllm.vllm-rs",
-        path="rust/src/cmd/Cargo.toml",
-        args=["--bin", "vllm-rs"],
-        features=["native-tls-vendored"],
-        binding=Binding.Exec,
-        optional=not should_require_rust_frontend(),
-    ),
-]
+rust_extensions = rust_build.rust_extensions(
+    optional=not should_require_rust_frontend()
+)
 
 setup(
     # static metadata should rather go in pyproject.toml
