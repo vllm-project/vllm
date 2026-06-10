@@ -773,6 +773,8 @@ async def test_kv_producer(monkeypatch):
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        prefill_worker.registered_layer_indices = [0]
 
         # Override loop to use current test loop
         origin_sender_loop = prefill_worker.sender_loop
@@ -798,6 +800,8 @@ async def test_kv_producer(monkeypatch):
             req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            registered_layer_names=["model.layers.0.self_attn"],
+            registered_layer_indices=[0],
         )
 
         mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
@@ -1193,6 +1197,8 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [local_block_len]
+        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        prefill_worker.registered_layer_indices = [0]
 
         origin_sender_loop = prefill_worker.sender_loop
         prefill_worker.sender_loop = asyncio.get_event_loop()
@@ -1238,6 +1244,8 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     },
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
+                    registered_layer_names=["model.layers.0.self_attn"],
+                    registered_layer_indices=[0],
                 )
 
                 mock_send_blocks.reset_mock()
