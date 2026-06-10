@@ -97,7 +97,7 @@ class HadamardTransform(torch.nn.Module):
             if self.transforms[part_id].scheme.head_dim is not None:
                 weight_size = self.transforms[part_id].scheme.head_dim
                 value = value.unflatten(-1, (-1, weight_size))
-                value = ops.hadacore_transform(value)
+                value = ops.hadacore_transform(value.clone())
                 value = value.flatten(-2, -1)
 
                 return value
