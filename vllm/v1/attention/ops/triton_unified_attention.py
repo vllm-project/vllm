@@ -215,6 +215,9 @@ def kernel_unified_attention(
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    USE_CAUSAL: tl.constexpr,  # bool
+    USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
+    per_seq_causal_ptr,  # [num_seqs] bool, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
@@ -389,6 +392,8 @@ def kernel_unified_attention(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
     )
@@ -493,10 +498,14 @@ def kernel_unified_attention(
             query_abs_pos,
             seq_offset,
             seq_idx,
+            seq_len,
             mm_prefix_range_ptr,
             SLIDING_WINDOW,
             USE_MM_PREFIX,
             MAX_MM_RANGES,
+            USE_CAUSAL,
+            USE_PER_SEQ_CAUSAL,
+            per_seq_causal_ptr,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
         )
@@ -532,11 +541,19 @@ def kernel_unified_attention(
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
-            V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                V,
-                0.0,
-            )
+            dist = context_len + qpos_lo - seq_offset[:, None]
+            if USE_PER_SEQ_CAUSAL:
+                is_causal_seq = tl.load(per_seq_causal_ptr + seq_idx)
+                sw_mask_v = tl.where(
+                    is_causal_seq,
+                    dist < SLIDING_WINDOW,
+                    (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW),
+                )
+            elif USE_CAUSAL:
+                sw_mask_v = dist < SLIDING_WINDOW
+            else:
+                sw_mask_v = (dist < SLIDING_WINDOW) & (dist > -SLIDING_WINDOW)
+            V = tl.where(sw_mask_v, V, 0.0)
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
@@ -802,7 +819,11 @@ def unified_attention(
     # disabling this flag costs nothing.
     use_td: bool = False,
 ):
-    assert causal, "Only causal attention is supported"
+    # Resolve causal: bool or per-seq tensor.
+    use_per_seq_causal = isinstance(causal, torch.Tensor)
+    use_causal = bool(causal) if not use_per_seq_causal else True
+    per_seq_causal_ptr = causal if use_per_seq_causal else None
+
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
@@ -1002,10 +1023,13 @@ def unified_attention(
         USE_QQ_BIAS=use_qq_bias,
         USE_SOFTCAP=(softcap > 0),
         USE_SINKS=(sinks is not None),
+        SLIDING_WINDOW=(1 + window_size[0]),
+        USE_CAUSAL=use_causal,
+        USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+        per_seq_causal_ptr=per_seq_causal_ptr,
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
         mm_prefix_range_ptr=mm_prefix_range,
-        SLIDING_WINDOW=(1 + window_size[0]),
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
