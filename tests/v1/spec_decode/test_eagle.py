@@ -1034,7 +1034,8 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     proposer.model = model_mock
     proposer._draft_attn_layer_names = {"layer.0"}
 
-    def fake_compute_probs(logits, sampling_metadata):
+    def fake_compute_probs(logits, sampling_metadata, use_fp64_gumbel):
+        assert use_fp64_gumbel == proposer.use_fp64_gumbel
         probs = torch.softmax(logits, dim=-1)
         return probs.argmax(dim=-1), probs
 

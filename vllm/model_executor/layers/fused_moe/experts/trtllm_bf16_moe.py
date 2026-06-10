@@ -80,6 +80,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
         ]
 
     @staticmethod

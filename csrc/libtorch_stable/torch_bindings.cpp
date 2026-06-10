@@ -1,4 +1,5 @@
 #include "ops.h"
+#include "cuda_utils.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/library.h>
@@ -26,9 +27,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+
+  // TODO: Remove this once ROCm upgrade to torch 2.11.
+  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 #endif
 
 #ifndef USE_ROCM
@@ -321,6 +325,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed) -> ()");
 
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -547,9 +561,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
-#ifndef USE_ROCM
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
 
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
@@ -599,6 +611,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_dynamic_per_token_quant",
            TORCH_BOX(&rms_norm_dynamic_per_token_quant));
   ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+  ops.impl("silu_and_mul_per_block_quant",
+           TORCH_BOX(&silu_and_mul_per_block_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
@@ -660,6 +674,28 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
   ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
+
+// TODO: Remove this once ROCm upgrade to torch 2.11.
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
+  ops.impl("get_cuda_view_from_cpu_tensor",
+           TORCH_BOX(&get_cuda_view_from_cpu_tensor));
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
+  cuda_utils.def(
+      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
+                          cuda_utils) {
+  cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
+                  TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
+}
+
+#endif
 
 // These capability-check functions take only primitive args (no tensors), so
 // there is no device to dispatch on. CompositeExplicitAutograd makes them
