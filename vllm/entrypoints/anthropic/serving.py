@@ -270,14 +270,20 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif generator.choices[0].finish_reason == "tool_calls":
             result.stop_reason = "tool_use"
 
-        content: list[AnthropicContentBlock] = [
+        content: list[AnthropicContentBlock] = []
+
+        reasoning = getattr(generator.choices[0].message, "reasoning", None)
+        if reasoning:
+            content.append(AnthropicContentBlock(type="thinking", thinking=reasoning))
+
+        content.append(
             AnthropicContentBlock(
                 type="text",
                 text=generator.choices[0].message.content
                 if generator.choices[0].message.content
                 else "",
             )
-        ]
+        )
 
         for tool_call in generator.choices[0].message.tool_calls:
             anthropic_tool_call = AnthropicContentBlock(
@@ -301,6 +307,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             finish_reason = None
             content_block_index = 0
             content_block_started = False
+            # Track current block type to handle transitions between
+            # thinking / text / tool_use blocks correctly.
+            current_block_type: str | None = None
 
             async for item in generator:
                 if item.startswith("data:"):
@@ -371,8 +380,61 @@ class AnthropicServingMessages(OpenAIServingChat):
                             finish_reason = origin_chunk.choices[0].finish_reason
                             continue
 
+                        delta = origin_chunk.choices[0].delta
+                        reasoning_delta = getattr(delta, "reasoning", None)
+
+                        # reasoning (DeepSeek R1 etc.) -> Anthropic "thinking" block
+                        if reasoning_delta:
+                            if (
+                                content_block_started
+                                and current_block_type != "thinking"
+                            ):
+                                stop_chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_stop",
+                                )
+                                data = stop_chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "content_block_stop")
+                                content_block_started = False
+                                content_block_index += 1
+
+                            if not content_block_started:
+                                chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_start",
+                                    content_block=AnthropicContentBlock(
+                                        type="thinking", thinking=""
+                                    ),
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "content_block_start")
+                                content_block_started = True
+                                current_block_type = "thinking"
+
+                            chunk = AnthropicStreamEvent(
+                                index=content_block_index,
+                                type="content_block_delta",
+                                delta=AnthropicDelta(
+                                    type="thinking_delta",
+                                    thinking=reasoning_delta,
+                                ),
+                            )
+                            data = chunk.model_dump_json(exclude_unset=True)
+                            yield wrap_data_with_event(data, "content_block_delta")
+                            continue
+
                         # content
-                        if origin_chunk.choices[0].delta.content is not None:
+                        if delta.content is not None:
+                            if content_block_started and current_block_type != "text":
+                                stop_chunk = AnthropicStreamEvent(
+                                    index=content_block_index,
+                                    type="content_block_stop",
+                                )
+                                data = stop_chunk.model_dump_json(exclude_unset=True)
+                                yield wrap_data_with_event(data, "content_block_stop")
+                                content_block_started = False
+                                content_block_index += 1
+
                             if not content_block_started:
                                 chunk = AnthropicStreamEvent(
                                     index=content_block_index,
@@ -384,15 +446,16 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
+                                current_block_type = "text"
 
-                            if origin_chunk.choices[0].delta.content == "":
+                            if delta.content == "":
                                 continue
                             chunk = AnthropicStreamEvent(
                                 index=content_block_index,
                                 type="content_block_delta",
                                 delta=AnthropicDelta(
                                     type="text_delta",
-                                    text=origin_chunk.choices[0].delta.content,
+                                    text=delta.content,
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
@@ -400,8 +463,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
 
                         # tool calls
-                        elif len(origin_chunk.choices[0].delta.tool_calls) > 0:
-                            tool_call = origin_chunk.choices[0].delta.tool_calls[0]
+                        elif len(delta.tool_calls) > 0:
+                            tool_call = delta.tool_calls[0]
                             if tool_call.id is not None:
                                 if content_block_started:
                                     stop_chunk = AnthropicStreamEvent(
@@ -432,6 +495,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
+                                current_block_type = "tool_use"
                                 if tool_call.function and tool_call.function.arguments:
                                     chunk = AnthropicStreamEvent(
                                         index=content_block_index,
