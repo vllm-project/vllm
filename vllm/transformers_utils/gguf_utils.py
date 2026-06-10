@@ -5,7 +5,7 @@
 from functools import cache
 from os import PathLike
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import gguf
 import regex as re
@@ -194,6 +194,213 @@ def _gguf_field_value(field: Any) -> Any:
     except Exception as e:
         logger.debug("Failed to read GGUF metadata field: %s", e)
         return None
+
+
+def _gguf_scalar_string(value: Any) -> str | None:
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return value if isinstance(value, str) else None
+
+
+def _gguf_first_int(value: Any) -> int | None:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    if hasattr(value, "item"):
+        value = value.item()
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gguf_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _gguf_int_list(value: Any) -> tuple[int, ...]:
+    values: list[int] = []
+    for item in _gguf_list(value):
+        if hasattr(item, "item"):
+            item = item.item()
+        try:
+            values.append(int(item))
+        except (TypeError, ValueError):
+            return ()
+    return tuple(values)
+
+
+def _gguf_bool_list(value: Any) -> tuple[bool, ...]:
+    values: list[bool] = []
+    for item in _gguf_list(value):
+        if hasattr(item, "item"):
+            item = item.item()
+        if isinstance(item, str):
+            if item.lower() not in {"true", "false", "0", "1"}:
+                return ()
+            values.append(item.lower() in {"true", "1"})
+        else:
+            values.append(bool(item))
+    return tuple(values)
+
+
+class _LocalGgufMtpMetadata(NamedTuple):
+    arch: str
+    nextn_layers: int
+    embedding_length: int | None
+    embedding_length_out: int | None
+    feed_forward_length: int | None
+    head_count: int | None
+    head_count_kv: tuple[int, ...]
+    key_length: int | None
+    key_length_swa: int | None
+    sliding_window: int | None
+    sliding_window_pattern: tuple[bool, ...]
+
+
+@cache
+def _get_local_gguf_mtp_metadata(model: str | Path) -> _LocalGgufMtpMetadata | None:
+    try:
+        reader = gguf.GGUFReader(str(model))
+    except Exception as e:
+        logger.debug("Failed to inspect GGUF MTP metadata for %s: %s", model, e)
+        return None
+
+    arch_field = reader.get_field("general.architecture")
+    arch = _gguf_scalar_string(_gguf_field_value(arch_field)) if arch_field else None
+    if arch is None:
+        return None
+
+    def get_int_field(suffix: str) -> int | None:
+        field = reader.get_field(f"{arch}.{suffix}")
+        return _gguf_first_int(_gguf_field_value(field)) if field else None
+
+    def get_int_list_field(suffix: str) -> tuple[int, ...]:
+        field = reader.get_field(f"{arch}.{suffix}")
+        return _gguf_int_list(_gguf_field_value(field)) if field else ()
+
+    def get_bool_list_field(suffix: str) -> tuple[bool, ...]:
+        field = reader.get_field(f"{arch}.{suffix}")
+        return _gguf_bool_list(_gguf_field_value(field)) if field else ()
+
+    nextn_layers = get_int_field("nextn_predict_layers")
+    if nextn_layers is None:
+        return None
+
+    return _LocalGgufMtpMetadata(
+        arch=arch,
+        nextn_layers=nextn_layers,
+        embedding_length=get_int_field("embedding_length"),
+        embedding_length_out=get_int_field("embedding_length_out"),
+        feed_forward_length=get_int_field("feed_forward_length"),
+        head_count=get_int_field("attention.head_count"),
+        head_count_kv=get_int_list_field("attention.head_count_kv"),
+        key_length=get_int_field("attention.key_length"),
+        key_length_swa=get_int_field("attention.key_length_swa"),
+        sliding_window=get_int_field("attention.sliding_window"),
+        sliding_window_pattern=get_bool_list_field("attention.sliding_window_pattern"),
+    )
+
+
+def _update_config_attrs(config: Any, attrs: dict[str, Any]) -> None:
+    if hasattr(config, "update"):
+        config.update(attrs)
+        return
+    for name, value in attrs.items():
+        setattr(config, name, value)
+
+
+def maybe_patch_mtp_config_from_gguf(
+    model: str | Path,
+    hf_config: PretrainedConfig,
+) -> PretrainedConfig:
+    """Patch MTP hints from GGUF metadata before speculative HF overrides.
+
+    GGUF MTP checkpoints store their MTP layer count in
+    ``<architecture>.nextn_predict_layers``.  vLLM's speculative config path
+    already knows how to turn HF configs into MTP draft configs, so this helper
+    only restores the corresponding HF config hints.
+    """
+    if not check_gguf_file(model):
+        return hf_config
+
+    mtp_metadata = _get_local_gguf_mtp_metadata(model)
+    if mtp_metadata is None:
+        return hf_config
+
+    arch = mtp_metadata.arch
+    if arch in {"qwen35", "qwen35moe"}:
+        hf_config.update({"mtp_num_hidden_layers": mtp_metadata.nextn_layers})
+    elif arch in {"gemma4-assistant", "gemma4-unified-assistant"}:
+        hf_config.model_type = arch.replace("-", "_")
+        text_config = getattr(hf_config, "text_config", hf_config)
+        text_attrs: dict[str, Any] = {
+            "num_hidden_layers": mtp_metadata.nextn_layers,
+        }
+        if mtp_metadata.embedding_length is not None:
+            text_attrs["hidden_size"] = mtp_metadata.embedding_length
+        if mtp_metadata.feed_forward_length is not None:
+            text_attrs["intermediate_size"] = mtp_metadata.feed_forward_length
+        if mtp_metadata.head_count is not None:
+            text_attrs["num_attention_heads"] = mtp_metadata.head_count
+        if mtp_metadata.key_length_swa is not None:
+            text_attrs["head_dim"] = mtp_metadata.key_length_swa
+        if mtp_metadata.key_length is not None:
+            text_attrs["global_head_dim"] = mtp_metadata.key_length
+        if mtp_metadata.sliding_window is not None:
+            text_attrs["sliding_window"] = mtp_metadata.sliding_window
+        pattern = mtp_metadata.sliding_window_pattern[: mtp_metadata.nextn_layers]
+        if len(pattern) == mtp_metadata.nextn_layers:
+            text_attrs["layer_types"] = [
+                "sliding_attention" if is_sliding else "full_attention"
+                for is_sliding in pattern
+            ]
+            kv_heads = mtp_metadata.head_count_kv[: mtp_metadata.nextn_layers]
+            if len(kv_heads) == mtp_metadata.nextn_layers:
+                sliding_kv = next(
+                    (
+                        heads
+                        for is_sliding, heads in zip(pattern, kv_heads)
+                        if is_sliding
+                    ),
+                    None,
+                )
+                full_kv = next(
+                    (
+                        heads
+                        for is_sliding, heads in zip(pattern, kv_heads)
+                        if not is_sliding
+                    ),
+                    None,
+                )
+                if sliding_kv is not None:
+                    text_attrs["num_key_value_heads"] = sliding_kv
+                if full_kv is not None:
+                    text_attrs["num_global_key_value_heads"] = full_kv
+        elif mtp_metadata.head_count_kv:
+            text_attrs["num_key_value_heads"] = mtp_metadata.head_count_kv[0]
+        _update_config_attrs(text_config, text_attrs)
+        if mtp_metadata.embedding_length_out is not None:
+            _update_config_attrs(
+                hf_config,
+                {"backbone_hidden_size": mtp_metadata.embedding_length_out},
+            )
+
+    return hf_config
 
 
 @cache

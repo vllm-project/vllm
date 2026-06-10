@@ -12,6 +12,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -42,6 +43,8 @@ _GGUF_MODEL_TYPE_ALIASES = {
     # gguf-py does not expose a Gemma4 arch enum yet. Gemma4 GGUF uses
     # Gemma-style base tensor names, with Gemma4-specific tensors added below.
     "gemma4": "gemma3",
+    # Qwen3.5 MTP GGUF uses the same base MoE tensor naming as Qwen3.5 MoE.
+    "qwen3_5_mtp": "qwen35moe",
 }
 
 
@@ -51,6 +54,22 @@ def _gguf_name_with_suffix(gguf_name: str, suffix: str) -> str:
 
 def _gguf_arch_model_type(model_type: str) -> str:
     return _GGUF_MODEL_TYPE_ALIASES.get(model_type, model_type)
+
+
+def _is_mtp_draft_config(config) -> bool:
+    model_type = getattr(config, "model_type", "")
+    architectures = getattr(config, "architectures", None) or ()
+    return str(model_type).endswith("_mtp") or any(
+        "MTP" in str(arch) for arch in architectures
+    )
+
+
+def _use_gguf_multimodal_weights(config) -> bool:
+    return (
+        hasattr(config, "vision_config")
+        and config.vision_config is not None
+        and not _is_mtp_draft_config(config)
+    )
 
 
 def _add_gemma4_gguf_mappings(
@@ -154,6 +173,125 @@ def _add_gemma4_gguf_mappings(
         )
 
 
+def _add_qwen3_5_mtp_gguf_mappings(
+    gguf_to_hf_name_map: dict[str, str],
+    text_config,
+) -> None:
+    """Add Qwen3.5 MTP GGUF tensor names following llama.cpp nextn layout."""
+    mtp_gguf_layer_idx = text_config.num_hidden_layers
+    layer_prefix = "mtp.layers.0"
+
+    gguf_to_hf_name_map.update(
+        {
+            "token_embd.weight": "model.embed_tokens.weight",
+            "output.weight": "lm_head.weight",
+            f"blk.{mtp_gguf_layer_idx}.nextn.eh_proj.weight": "mtp.fc.weight",
+            f"blk.{mtp_gguf_layer_idx}.nextn.enorm.weight": (
+                "mtp.pre_fc_norm_embedding.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.nextn.hnorm.weight": (
+                "mtp.pre_fc_norm_hidden.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.nextn.shared_head_norm.weight": (
+                "mtp.norm.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_norm.weight": (
+                f"{layer_prefix}.input_layernorm.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.post_attention_norm.weight": (
+                f"{layer_prefix}.post_attention_layernorm.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_q.weight": (
+                f"{layer_prefix}.self_attn.q_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_k.weight": (
+                f"{layer_prefix}.self_attn.k_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_v.weight": (
+                f"{layer_prefix}.self_attn.v_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_output.weight": (
+                f"{layer_prefix}.self_attn.o_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_q_norm.weight": (
+                f"{layer_prefix}.self_attn.q_norm.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.attn_k_norm.weight": (
+                f"{layer_prefix}.self_attn.k_norm.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_gate_inp.weight": (
+                f"{layer_prefix}.mlp.gate.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_gate_exps.weight": (
+                f"{layer_prefix}.mlp.experts.0.gate_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_up_exps.weight": (
+                f"{layer_prefix}.mlp.experts.0.up_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_down_exps.weight": (
+                f"{layer_prefix}.mlp.experts.0.down_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_gate_inp_shexp.weight": (
+                f"{layer_prefix}.mlp.shared_expert_gate.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_gate_shexp.weight": (
+                f"{layer_prefix}.mlp.shared_expert.gate_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_up_shexp.weight": (
+                f"{layer_prefix}.mlp.shared_expert.up_proj.weight"
+            ),
+            f"blk.{mtp_gguf_layer_idx}.ffn_down_shexp.weight": (
+                f"{layer_prefix}.mlp.shared_expert.down_proj.weight"
+            ),
+        }
+    )
+
+
+def _add_gemma4_mtp_gguf_mappings(
+    gguf_to_hf_name_map: dict[str, str],
+    text_config,
+) -> None:
+    """Add Gemma4 MTP GGUF tensor names following llama.cpp assistant layout."""
+    gguf_to_hf_name_map.update(
+        {
+            "token_embd.weight": "model.embed_tokens.weight",
+            "output_norm.weight": "model.norm.weight",
+            "nextn.pre_projection.weight": "pre_projection.weight",
+            "nextn.post_projection.weight": "post_projection.weight",
+        }
+    )
+
+    for idx in range(text_config.num_hidden_layers):
+        layer_prefix = f"model.layers.{idx}"
+        gguf_to_hf_name_map.update(
+            {
+                f"blk.{idx}.layer_output_scale.weight": f"{layer_prefix}.layer_scalar",
+                f"blk.{idx}.attn_norm.weight": (
+                    f"{layer_prefix}.input_layernorm.weight"
+                ),
+                f"blk.{idx}.attn_q.weight": (f"{layer_prefix}.self_attn.q_proj.weight"),
+                f"blk.{idx}.attn_q_norm.weight": (
+                    f"{layer_prefix}.self_attn.q_norm.weight"
+                ),
+                f"blk.{idx}.attn_output.weight": (
+                    f"{layer_prefix}.self_attn.o_proj.weight"
+                ),
+                f"blk.{idx}.post_attention_norm.weight": (
+                    f"{layer_prefix}.post_attention_layernorm.weight"
+                ),
+                f"blk.{idx}.ffn_norm.weight": (
+                    f"{layer_prefix}.pre_feedforward_layernorm.weight"
+                ),
+                f"blk.{idx}.ffn_gate.weight": f"{layer_prefix}.mlp.gate_proj.weight",
+                f"blk.{idx}.ffn_up.weight": f"{layer_prefix}.mlp.up_proj.weight",
+                f"blk.{idx}.ffn_down.weight": f"{layer_prefix}.mlp.down_proj.weight",
+                f"blk.{idx}.post_ffw_norm.weight": (
+                    f"{layer_prefix}.post_feedforward_layernorm.weight"
+                ),
+            }
+        )
+
+
 class GGUFModelLoader(BaseModelLoader):
     """
     Model loader that can load GGUF files. This is useful for loading models
@@ -241,11 +379,15 @@ class GGUFModelLoader(BaseModelLoader):
         text_config = config.get_text_config()
         model_type = config.model_type
         orig_model_type = model_type
-        is_multimodal = (
-            hasattr(config, "vision_config") and config.vision_config is not None
-        )
-        gguf_to_hf_name_map = {}
+        is_multimodal = _use_gguf_multimodal_weights(config)
+        gguf_to_hf_name_map: dict[str, str] = {}
         sideload_params: list[re.Pattern] = []
+        if orig_model_type == "qwen3_5_mtp":
+            _add_qwen3_5_mtp_gguf_mappings(gguf_to_hf_name_map, text_config)
+            return gguf_to_hf_name_map
+        if orig_model_type == "gemma4_mtp":
+            _add_gemma4_mtp_gguf_mappings(gguf_to_hf_name_map, text_config)
+            return gguf_to_hf_name_map
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
@@ -521,7 +663,7 @@ class GGUFModelLoader(BaseModelLoader):
         weight_type_map = {}
         for f in gguf_files:
             weight_type_map.update(get_gguf_weight_type_map(f, gguf_to_hf_name_map))
-        is_multimodal = hasattr(model_config.hf_config, "vision_config")
+        is_multimodal = _use_gguf_multimodal_weights(model_config.hf_config)
         if is_multimodal:
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
@@ -552,7 +694,7 @@ class GGUFModelLoader(BaseModelLoader):
             Tuples of (parameter_name, tensor) for all model weights
         """
         hf_config = model_config.hf_config
-        is_multimodal = hasattr(hf_config, "vision_config")
+        is_multimodal = _use_gguf_multimodal_weights(hf_config)
 
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
@@ -584,6 +726,7 @@ class GGUFModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
+        vllm_config = replace(vllm_config, model_config=model_config)
         device_config = vllm_config.device_config
         local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
@@ -612,7 +755,11 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
+                model = initialize_model(
+                    vllm_config=vllm_config,
+                    model_config=model_config,
+                    prefix=prefix,
+                )
             self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)

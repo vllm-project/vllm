@@ -11,8 +11,11 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.gguf_loader import (
     GGUFModelLoader,
     _add_gemma4_gguf_mappings,
+    _add_gemma4_mtp_gguf_mappings,
+    _add_qwen3_5_mtp_gguf_mappings,
     _gguf_arch_model_type,
     _gguf_name_with_suffix,
+    _use_gguf_multimodal_weights,
 )
 from vllm.model_executor.model_loader.weight_utils import download_gguf
 from vllm.model_executor.models.gemma4 import (
@@ -244,6 +247,7 @@ class TestGGUFModelLoader:
 
     def test_gemma4_gguf_arch_alias(self):
         assert _gguf_arch_model_type("gemma4") == "gemma3"
+        assert _gguf_arch_model_type("qwen3_5_mtp") == "qwen35moe"
         assert _gguf_arch_model_type("qwen35") == "qwen35"
 
     def test_gemma4_manual_gguf_mappings(self):
@@ -298,6 +302,61 @@ class TestGGUFModelLoader:
         assert gguf_to_hf_name_map["mm.input_projection.weight"] == (
             "model.embed_vision.embedding_projection.weight"
         )
+
+    def test_qwen3_5_mtp_gguf_mappings_use_appended_layer_offset(self):
+        text_config = MagicMock()
+        text_config.num_hidden_layers = 40
+        gguf_to_hf_name_map: dict[str, str] = {}
+
+        _add_qwen3_5_mtp_gguf_mappings(gguf_to_hf_name_map, text_config)
+
+        assert gguf_to_hf_name_map["token_embd.weight"] == ("model.embed_tokens.weight")
+        assert gguf_to_hf_name_map["output.weight"] == "lm_head.weight"
+        assert gguf_to_hf_name_map["blk.40.nextn.eh_proj.weight"] == "mtp.fc.weight"
+        assert gguf_to_hf_name_map["blk.40.nextn.enorm.weight"] == (
+            "mtp.pre_fc_norm_embedding.weight"
+        )
+        assert gguf_to_hf_name_map["blk.40.attn_q.weight"] == (
+            "mtp.layers.0.self_attn.q_proj.weight"
+        )
+        assert gguf_to_hf_name_map["blk.40.ffn_gate_inp_shexp.weight"] == (
+            "mtp.layers.0.mlp.shared_expert_gate.weight"
+        )
+
+    def test_gemma4_mtp_gguf_mappings_are_text_only(self):
+        text_config = MagicMock()
+        text_config.num_hidden_layers = 4
+        gguf_to_hf_name_map: dict[str, str] = {}
+
+        _add_gemma4_mtp_gguf_mappings(gguf_to_hf_name_map, text_config)
+
+        assert gguf_to_hf_name_map["nextn.pre_projection.weight"] == (
+            "pre_projection.weight"
+        )
+        assert gguf_to_hf_name_map["nextn.post_projection.weight"] == (
+            "post_projection.weight"
+        )
+        assert gguf_to_hf_name_map["output_norm.weight"] == "model.norm.weight"
+        assert gguf_to_hf_name_map["blk.3.attn_q.weight"] == (
+            "model.layers.3.self_attn.q_proj.weight"
+        )
+        assert gguf_to_hf_name_map["blk.3.ffn_down.weight"] == (
+            "model.layers.3.mlp.down_proj.weight"
+        )
+
+    def test_gguf_mtp_draft_does_not_load_multimodal_weights(self):
+        mtp_config = MagicMock()
+        mtp_config.model_type = "qwen3_5_mtp"
+        mtp_config.architectures = ["Qwen3_5MoeMTP"]
+        mtp_config.vision_config = object()
+
+        mm_config = MagicMock()
+        mm_config.model_type = "qwen3_5_moe"
+        mm_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
+        mm_config.vision_config = object()
+
+        assert not _use_gguf_multimodal_weights(mtp_config)
+        assert _use_gguf_multimodal_weights(mm_config)
 
     def test_qwen_gguf_shared_expert_gate_weight_is_2d(self):
         loaded_weight = torch.arange(4)

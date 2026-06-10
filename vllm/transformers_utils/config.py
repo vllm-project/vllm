@@ -39,6 +39,7 @@ from .gguf_utils import (
     get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
+    maybe_patch_mtp_config_from_gguf,
     resolve_gguf_config_source,
     split_remote_gguf,
 )
@@ -750,6 +751,7 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
+    original_model = model
     _is_gguf = is_gguf(model)
     _is_remote_gguf = is_remote_gguf(model)
     if _is_gguf:
@@ -767,6 +769,16 @@ def get_config(
                 revision = None
             elif file_or_path_exists(gguf_repo, HF_CONFIG_NAME, revision=revision):
                 model = gguf_repo
+            elif hf_overrides_fn is not None and file_or_path_exists(
+                gguf_repo.parent,
+                HF_CONFIG_NAME,
+                revision=revision,
+            ):
+                # Nested GGUF draft checkpoints can store only the draft
+                # weights under a subdirectory and share the parent config.
+                # Keep the GGUF metadata patch below so the normal speculative
+                # override path still builds the draft config.
+                model = gguf_repo.parent
             else:
                 # Preserve the previous fallback for local GGUF files that rely
                 # on Transformers' GGUF metadata parser for supported arches.
@@ -918,6 +930,9 @@ def get_config(
                     ),
                     scale_fmt,
                 )
+
+    if _is_gguf and hf_overrides_fn is not None:
+        config = maybe_patch_mtp_config_from_gguf(original_model, config)
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
