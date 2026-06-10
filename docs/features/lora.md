@@ -47,7 +47,7 @@ the third parameter is the path to the LoRA adapter.
     )
     ```
 
-Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out [examples/features/lora/multilora_offline.py](../../examples/features/lora/multilora_offline.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 
@@ -247,6 +247,57 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 ```
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
+
+## Mixing 2D and 3D MoE LoRA Adapters
+
+To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
+and declare the layout of each adapter explicitly via the `is_3d_lora_weight` field.
+
+Server startup (static modules):
+
+```bash
+vllm serve Qwen/Qwen3.6-35B-A3B \
+    --enable-lora \
+    --enable-mixed-moe-lora-format \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --lora-modules \
+        '{"name": "lora-2d", "path": "jeeejeee/qwen36-35ba3b-2d-weights-poken-lora", "is_3d_lora_weight": false}' \
+        '{"name": "lora-3d", "path": "jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora", "is_3d_lora_weight": true}'
+```
+
+Dynamic load via `/v1/load_lora_adapter`:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "lora-3d",
+    "lora_path": "/path/to/3d-format-lora",
+    "is_3d_lora_weight": true
+}'
+```
+
+!!! warning "You must know your adapter's layout"
+    Under `--enable-mixed-moe-lora-format`, vLLM trusts whatever
+    `is_3d_lora_weight` the caller declares — it does **not** inspect the
+    checkpoint to verify. A wrong declaration will load weights into the
+    wrong stacked buffers and silently produce garbage outputs, with no
+    error at load time. Confirm the layout before serving:
+
+    - **2D (per-expert, megatron-style)** → set `is_3d_lora_weight: false`.
+      Adapter keys look like `...experts.{idx}.gate_proj.lora_A.weight`,
+      `...experts.{idx}.up_proj.lora_A.weight`,
+      `...experts.{idx}.down_proj.lora_A.weight` — one set per expert.
+    - **3D (fused, peft-style)** → set `is_3d_lora_weight: true`.
+      Adapter keys look like `...experts.gate_up_proj.lora_A.weight`,
+      `...experts.down_proj.lora_A.weight` — a single tensor that stacks
+      all experts on the leading dim.
+
+When `--enable-mixed-moe-lora-format` is **not** set, `is_3d_lora_weight`
+is ignored: vLLM picks the wrapper from the base model's
+`is_3d_moe_weight` and the adapter is required to match. The field is
+also ignored for non-MoE models.
 
 ## LoRA model lineage in model card
 

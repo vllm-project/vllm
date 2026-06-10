@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -45,6 +46,9 @@ def query_marlin_supported_quant_types(
 ):
     if current_platform.is_cpu():
         return _query_cpu_marlin_supported_quant_types(has_zp, include_fp_type)
+
+    if current_platform.is_xpu():
+        return [scalar_types.uint4, scalar_types.uint4b8]
 
     if not current_platform.is_rocm():
         if device_capability is None:
@@ -226,11 +230,16 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
-    intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # Note: The layer has not performed rounding on intermediate_size's at this
+    # point. Use the unpadded size which won't change.
+    intermediate_size_per_partition = (
+        layer.moe_config.intermediate_size_per_partition_unpadded
+    )
+    assert intermediate_size_per_partition is not None
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.apply_router_weight_on_input
 
@@ -425,6 +434,30 @@ def maybe_warn_marlin_atomic_add(device, dtype):
         )
 
 
+def moe_packed_to_marlin_zero_points(
+    q_zp_packed: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+):
+    """Convert compressed-tensors packed zero points to Marlin format.
+
+    Unlike AWQ, compressed-tensors uses standard bit packing without
+    interleaving, so we just unpack and apply Marlin permutation directly.
+    """
+    num_experts = q_zp_packed.shape[0]
+    output = torch.empty(
+        (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
+        device=q_zp_packed.device,
+        dtype=q_zp_packed.dtype,
+    )
+    for e in range(num_experts):
+        q_zp = unpack_cols(q_zp_packed[e], num_bits, size_k, size_n)
+        output[e] = marlin_zero_points(q_zp, size_k, size_n, num_bits, is_a_8bit)
+    return output
+
+
 def maybe_warn_marlin_atomic_add_env():
     if torch.compiler.is_dynamo_compiling():
         return
@@ -479,9 +512,9 @@ def get_marlin_input_dtype(prefix: str | None = None):
     elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "fp8":
         if not current_platform.is_device_capability(
             89
-        ) and not current_platform.is_device_capability(120):
+        ) and not current_platform.is_device_capability_family(120):
             raise ValueError(
-                "Marlin W4A8-FP8 only support SM89 or SM120 device "
+                "Marlin W4A8-FP8 only support SM89 or SM12x device "
                 "(It is slower than Marlin W4A16 on other devices). "
                 "You can consider using W4A8-INT8 instead"
                 "(set VLLM_MARLIN_INPUT_DTYPE=int8)."

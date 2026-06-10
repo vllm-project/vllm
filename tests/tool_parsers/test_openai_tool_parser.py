@@ -217,6 +217,158 @@ def test_extract_tool_calls_multiple_tools(
     assert extracted_info.content is None
 
 
+def test_extract_tool_calls_bare_function_name(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(Role.USER, "What is the weather in Tokyo?"),
+            Message.from_role_and_content(
+                Role.ASSISTANT,
+                "We need to use get_current_weather tool.",
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, '{"location": "Tokyo"}')
+            .with_channel("commentary")
+            .with_recipient("get_current_weather")
+            .with_content_type("json"),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT
+    )
+
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert extracted_info.tools_called
+    expected_tool_calls = [
+        ToolCall(
+            function=FunctionCall(
+                name="get_current_weather",
+                arguments=json.dumps({"location": "Tokyo"}),
+            )
+        )
+    ]
+    assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
+    assert extracted_info.content is None
+
+
+def test_extract_tool_calls_bare_function_name_multiple(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(
+                Role.USER, "What is the weather in Tokyo based on where I'm at?"
+            ),
+            Message.from_role_and_content(
+                Role.ASSISTANT,
+                "We need to use both tools.",
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, '{"location": "Tokyo"}')
+            .with_channel("commentary")
+            .with_recipient("get_current_weather")
+            .with_content_type("json"),
+            Message.from_role_and_content(Role.ASSISTANT, "{}")
+            .with_channel("commentary")
+            .with_recipient("get_user_location")
+            .with_content_type("json"),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT
+    )
+
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert extracted_info.tools_called
+    expected_tool_calls = [
+        ToolCall(
+            function=FunctionCall(
+                name="get_current_weather",
+                arguments=json.dumps({"location": "Tokyo"}),
+            )
+        ),
+        ToolCall(
+            function=FunctionCall(
+                name="get_user_location",
+                arguments=json.dumps({}),
+            )
+        ),
+    ]
+    assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
+
+
+def test_extract_tool_calls_assistant_recipient_ignored(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(Role.USER, "Hello"),
+            Message.from_role_and_content(Role.ASSISTANT, "Some tool response")
+            .with_channel("commentary")
+            .with_recipient("assistant"),
+            Message.from_role_and_content(
+                Role.ASSISTANT, "Here is the answer"
+            ).with_channel("final"),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT
+    )
+
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert not extracted_info.tools_called
+    assert extracted_info.tool_calls == []
+    assert extracted_info.content == "Here is the answer"
+
+
+def test_extract_tool_calls_dotted_function_name(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(Role.USER, "Compute 2+3"),
+            Message.from_role_and_content(Role.ASSISTANT, '{"a": 2, "b": 3}')
+            .with_channel("commentary")
+            .with_recipient("math.sum")
+            .with_content_type("json"),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT
+    )
+
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert extracted_info.tools_called
+    expected_tool_calls = [
+        ToolCall(
+            function=FunctionCall(
+                name="math.sum",
+                arguments=json.dumps({"a": 2, "b": 3}),
+            )
+        )
+    ]
+    assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
+
+
 def test_extract_tool_calls_with_content(
     openai_tool_parser,
     harmony_encoding,

@@ -544,13 +544,15 @@ def native_sample_recovered_tokens(
     target_probs: torch.Tensor,  # [num_tokens, vocab_size]
     sampling_metadata: SamplingMetadata,
     device: torch.device,
+    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
+    q_dtype = torch.float64 if use_fp64_gumbel else torch.float32
 
     q = torch.empty(
         (batch_size, vocab_size),
-        dtype=torch.float32,
+        dtype=q_dtype,
         device=device,
     )
     q.exponential_()
@@ -933,3 +935,125 @@ def test_sample_recovered_tokens(
         device=DEVICE_TYPE,
     )
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
+
+
+def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
+    batch_size = 2
+    vocab_size = 64
+    max_spec_len = 2
+    num_tokens = batch_size * max_spec_len
+
+    draft_probs = torch.rand(
+        num_tokens,
+        vocab_size,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_probs = F.softmax(draft_probs, dim=-1)
+    target_probs = torch.rand(
+        num_tokens,
+        vocab_size,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    target_probs = F.softmax(target_probs, dim=-1)
+    draft_token_ids = torch.multinomial(draft_probs, num_samples=1).to(torch.int32)
+
+    generators = {
+        i: torch.Generator(device=DEVICE_TYPE).manual_seed(i) for i in range(batch_size)
+    }
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE),
+        generators=generators,
+    )
+    spec_decode_metadata = create_spec_decode_metadata(
+        draft_token_ids.reshape(batch_size, max_spec_len).tolist(),
+        target_probs.log(),
+    )
+
+    expected = native_sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=torch.device(DEVICE_TYPE),
+        use_fp64_gumbel=True,
+    )
+    actual = sample_recovered_tokens(
+        max_spec_len,
+        spec_decode_metadata.num_draft_tokens,
+        spec_decode_metadata.cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=torch.device(DEVICE_TYPE),
+        use_fp64_gumbel=True,
+    )
+
+    assert torch.equal(actual, expected)
+
+
+########################### Tests for Synthetic Rejection Sampling #########
+
+
+def _make_synthetic_sampler(rates: list[float]) -> RejectionSampler:
+    mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
+    spec_config = Mock()
+    spec_config.rejection_sample_method = "synthetic"
+    spec_config.synthetic_acceptance_rates = rates
+    return RejectionSampler(mock_sampler, spec_config, torch.device(DEVICE_TYPE))
+
+
+def _make_sampling_metadata(all_greedy: bool) -> SamplingMetadata:
+    temperature = None if all_greedy else torch.tensor([1.0, 1.0], device=DEVICE_TYPE)
+    return create_sampling_metadata(all_greedy=all_greedy, temperature=temperature)
+
+
+@pytest.mark.parametrize("all_greedy", [True, False])
+def test_synthetic_all_accepted(all_greedy: bool):
+    """With all rates=1.0, every draft token is accepted."""
+    sampler = _make_synthetic_sampler([1.0, 1.0])
+    spec_tokens = [[1, 2], [3]]
+    output_tokens = [[10, 20, 50], [30, 40]]
+
+    metadata = _make_sampling_metadata(all_greedy)
+    logits = create_logits_tensor(output_tokens)
+    bonus = torch.tensor([50, 40], device=DEVICE_TYPE)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(sampler, bonus)
+    output = sampler(spec_decode_metadata, None, logits, metadata)
+    expected = torch.tensor(
+        [[1, 2, 50], [3, 40, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=DEVICE_TYPE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+@pytest.mark.parametrize("all_greedy", [True, False])
+def test_synthetic_all_rejected(all_greedy: bool):
+    """With all rates=0.0, the first token is always rejected."""
+    sampler = _make_synthetic_sampler([0.0, 0.0])
+    spec_tokens = [[1, 2], [3]]
+    output_tokens = [[10, 20, 50], [30, 40]]
+
+    metadata = _make_sampling_metadata(all_greedy)
+    logits = create_logits_tensor(output_tokens)
+    bonus = torch.tensor([50, 40], device=DEVICE_TYPE)
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(sampler, bonus)
+    output = sampler(spec_decode_metadata, None, logits, metadata)
+    result = output.sampled_token_ids
+    # Exactly one token emitted per sequence (the rejection fallback),
+    # followed by placeholders.
+    for row in result:
+        assert row[0] != PLACEHOLDER_TOKEN_ID
+        assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
