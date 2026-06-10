@@ -776,6 +776,28 @@ class DelegatingParser(Parser):
                 last_tc.function.arguments or ""
             ) + self._tool_parser.get_remaining_unstreamed_args()
 
+    def finalize_generation(
+        self,
+        delta_message: DeltaMessage | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        state: StreamState,
+    ) -> DeltaMessage | None:
+        """Finalize generation for cases where generation was incomplete.
+        For example, if streaming terminated before reasoning ended
+        """
+        fallback_fn = getattr(
+            self._reasoning_parser, "get_streaming_fallback_content", None
+        )
+        if fallback_fn is not None and not state.reasoning_ended:
+            promoted = fallback_fn(state.previous_text, request)
+            if promoted:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.content = (delta_message.content or "") + promoted
+
+        self._append_unstreamed_tool_args(delta_message)
+        return delta_message
+
     def parse(
         self,
         model_output: str,
@@ -883,6 +905,6 @@ class DelegatingParser(Parser):
         state.previous_token_ids = current_token_ids
 
         if finished:
-            self._append_unstreamed_tool_args(delta_message)
+            delta_message = self.finalize_generation(delta_message, request, state)
 
         return delta_message
