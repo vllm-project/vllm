@@ -2030,6 +2030,9 @@ class VllmConfig:
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
+        if self.parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
+
         if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
             unsupported.append("routed experts capture")
