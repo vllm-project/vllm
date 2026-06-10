@@ -62,6 +62,7 @@ from vllm.v1.attention.backend import AttentionType
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
     EagleModelMixin,
+    LocalArgmaxMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -487,7 +488,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
