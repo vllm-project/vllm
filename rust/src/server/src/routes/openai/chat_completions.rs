@@ -1,4 +1,4 @@
-mod convert;
+pub(crate) mod convert;
 mod types;
 mod validate;
 
