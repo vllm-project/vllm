@@ -79,18 +79,44 @@ class Hermes2ProToolParser(ToolParser):
 
         else:
             try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                # Decode each tool call by JSON-parsing from just after the
+                # <tool_call> token instead of slicing to the first literal
+                # </tool_call>. JSONDecoder.raw_decode respects string escaping,
+                # so a literal </tool_call> inside a JSON string argument no
+                # longer truncates the call. The loop walks each <tool_call>
+                # block in turn.
+                decoder = json.JSONDecoder()
+                raw_function_calls = []
+                search_idx = 0
+                while (
+                    start := model_output.find(self.tool_call_start_token, search_idx)
+                ) != -1:
+                    json_start = start + len(self.tool_call_start_token)
+                    while (
+                        json_start < len(model_output)
+                        and model_output[json_start].isspace()
+                    ):
+                        json_start += 1
+                    # raw_decode raises on invalid/incomplete JSON; the outer
+                    # except then falls back to returning the raw text as
+                    # content, matching the previous behavior.
+                    obj, end = decoder.raw_decode(model_output, json_start)
+                    # The object must be followed by the end tag or
+                    # end-of-string. Anything else (concatenated objects,
+                    # trailing junk, a missing end tag between calls) was also
+                    # rejected by the old json.loads, so raise to keep that
+                    # behavior.
+                    tail = end
+                    while tail < len(model_output) and model_output[tail].isspace():
+                        tail += 1
+                    if not (
+                        tail == len(model_output)
+                        or model_output.startswith(self.tool_call_end_token, tail)
+                    ):
+                        raise ValueError("unexpected trailing data in tool call")
+                    raw_function_calls.append(obj)
+                    search_idx = end
 
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
-                ]
                 tool_calls = [
                     ToolCall(
                         type="function",
