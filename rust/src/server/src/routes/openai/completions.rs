@@ -18,13 +18,13 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStreamExt as _};
 
+use self::convert::{ResponseOptions, prepare_completion_request};
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
     text_len,
 };
 use super::utils::types::Usage;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::completions::convert::prepare_completion_request;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -42,14 +42,13 @@ pub async fn completions(
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Response {
     let stream = body.stream;
-    let logprobs = body.logprobs;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let prepared =
-        match prepare_completion_request(body, state.served_model_names(), request_context) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+    let prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
     let request_span = tracing::info_span!(
         "completions",
         request_id = %prepared.request_id,
@@ -57,9 +56,7 @@ pub async fn completions(
     );
 
     let created = unix_timestamp();
-    let include_prompt_logprobs = prepared.text_request.sampling_params.prompt_logprobs.is_some();
     let log_request = state.enable_log_requests;
-
     let text_stream = match state
         .chat
         .text()
@@ -84,11 +81,7 @@ pub async fn completions(
             prepared.response_model,
             created,
             log_request,
-            prepared.include_usage,
-            prepared.echo,
-            logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            prepared.options,
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -99,11 +92,8 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.echo,
-            logprobs,
-            include_prompt_logprobs,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            log_request,
+            prepared.options,
         )
         .instrument(request_span.clone())
         .await
@@ -111,18 +101,6 @@ pub async fn completions(
             Ok(response) => response,
             Err(error) => return error.into_response(),
         };
-
-        if log_request {
-            let usage = response.usage.as_ref();
-            info!(
-                parent: &request_span,
-                model = %response.model,
-                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
-                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
-                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
-                "completion finished"
-            );
-        }
 
         Json(response).into_response()
     }
@@ -133,11 +111,16 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
-    echo: Option<String>,
-    requested_logprobs: Option<u32>,
-    include_prompt_logprobs: bool,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    log_request: bool,
+    ResponseOptions {
+        // Ignored: non-streaming responses always include usage.
+        include_usage: _,
+        echo,
+        requested_logprobs,
+        include_prompt_logprobs,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let collected = stream
         .collect_output()
@@ -175,6 +158,21 @@ async fn collect_completion(
         None => collected.text,
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
+    let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
+    let usage = Usage::from_counts(
+        collected.prompt_token_ids.len() as u32,
+        collected.token_ids.len() as u32,
+    );
+
+    if log_request {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            %finish_reason,
+            "completion finished"
+        );
+    }
 
     Ok(CompletionResponse {
         id: request_id,
@@ -185,16 +183,13 @@ async fn collect_completion(
             index: 0,
             text,
             logprobs,
-            finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
+            finish_reason: Some(finish_reason),
             stop_reason,
             prompt_logprobs,
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
         }],
-        usage: Some(Usage::from_counts(
-            collected.prompt_token_ids.len() as u32,
-            collected.token_ids.len() as u32,
-        )),
+        usage: Some(usage),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
     })
@@ -208,11 +203,15 @@ async fn completion_chunk_stream(
     response_model: String,
     created: u64,
     log_request: bool,
-    include_usage: bool,
-    echo: Option<String>,
-    requested_logprobs: Option<u32>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    ResponseOptions {
+        include_usage,
+        echo,
+        requested_logprobs,
+        // Ignored: streaming prompt logprobs are rejected for Python parity.
+        include_prompt_logprobs: _,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
@@ -432,7 +431,7 @@ mod tests {
         FinishReason, Finished,
     };
 
-    use super::{CompletionSseChunk, completion_chunk_stream, final_chunk};
+    use super::{CompletionSseChunk, ResponseOptions, completion_chunk_stream, final_chunk};
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
@@ -527,11 +526,10 @@ mod tests {
             "model".to_string(),
             1,
             false,
-            false,
-            None,
-            Some(1),
-            false,
-            false,
+            ResponseOptions {
+                requested_logprobs: Some(1),
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await;

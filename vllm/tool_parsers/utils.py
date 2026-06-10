@@ -3,6 +3,7 @@
 
 import ast
 import json
+import warnings
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
@@ -29,6 +30,12 @@ from vllm.logger import init_logger
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+
+def safe_literal_eval(text: str):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.literal_eval(text)
 
 
 def partial_tag_overlap(text: str, tag: str) -> int:
