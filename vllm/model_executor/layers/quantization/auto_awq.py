@@ -198,9 +198,12 @@ class AutoAWQConfig(QuantizationConfig):
         self.full_config = full_config or {}
 
         if self.weight_bits not in self.TYPE_MAP:
+            supported = ", ".join(str(k) for k in self.TYPE_MAP)
             raise ValueError(
                 f"Unsupported num_bits = {self.weight_bits}. "
-                f"Supported num_bits = {self.TYPE_MAP.keys()}"
+                f"Supported: {supported}. "
+                f"For 8-bit AWQ, use Marlin backend by setting "
+                f"backend='awq:marlin' or backend='marlin'."
             )
 
         self.quant_type = self.TYPE_MAP[self.weight_bits]
@@ -788,12 +791,8 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         )
 
 
-class AutoAWQLinearMethod(LinearMethodBase):
-    """Linear method for AWQ using Triton kernels.
-
-    Args:
-        quant_config: The AWQ quantization config.
-    """
+class BaseAWQLinearMethod(LinearMethodBase):
+    """Base class for AWQ linear methods with shared weight creation logic."""
 
     def __init__(self, quant_config: AutoAWQConfig):
         self.quant_config = quant_config
@@ -872,6 +871,14 @@ class AutoAWQLinearMethod(LinearMethodBase):
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)
         layer.register_parameter("scales", scales)
+
+
+class AutoAWQLinearMethod(BaseAWQLinearMethod):
+    """Linear method for AWQ using Triton kernels.
+
+    Args:
+        quant_config: The AWQ quantization config.
+    """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
@@ -905,100 +912,28 @@ class AutoAWQLinearMethod(LinearMethodBase):
         return out.reshape(out_shape)
 
 
-class AutoAWQXPULinearMethod(LinearMethodBase):
+class AutoAWQXPULinearMethod(BaseAWQLinearMethod):
     """Linear method for AWQ on XPU using int4 GEMM kernel.
 
     Args:
         quant_config: The AWQ quantization config.
     """
 
-    def __init__(self, quant_config: AutoAWQConfig):
-        self.quant_config = quant_config
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        # Normalize group_size
-        if self.quant_config.group_size != -1:
-            group_size = self.quant_config.group_size
-        else:
-            group_size = input_size
-
-        if input_size_per_partition % group_size != 0:
-            raise ValueError(
-                "The input size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size."
-            )
-
-        output_size_per_partition = sum(output_partition_sizes)
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
-            raise ValueError(
-                "The output size is not aligned with the quantized "
-                "weight shape. This can be caused by too large "
-                "tensor parallel size."
-            )
-
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
-
-        num_groups = input_size_per_partition // group_size
-
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
-
-        scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            input_dim=0,
-            output_dim=1,
-            weight_loader=weight_loader,
-        )
-
-        layer.register_parameter("qweight", qweight)
-        layer.register_parameter("qzeros", qzeros)
-        layer.register_parameter("scales", scales)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
         layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
 
-        from vllm_xpu_kernels.quantization._quantize_convert import (
-            AWQUtils,
-            transpose_onednn_woq_format,
-        )
+        try:
+            from vllm_xpu_kernels.quantization._quantize_convert import (
+                AWQUtils,
+                transpose_onednn_woq_format,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "XPU AWQ requires vllm-xpu-kernels. "
+                "Please install it with: pip install vllm-xpu-kernels"
+            ) from e
 
         layer.xpu_output_size = layer.qweight.size(1) * self.quant_config.pack_factor
         qweight_new, qzeros_new = AWQUtils.repack(layer.qweight, layer.qzeros)
@@ -1010,6 +945,12 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
         layer.qzeros.data.copy_(qzeros_new)
         transpose_onednn_woq_format(layer, "awq", False)
 
+    def _get_group_size(self, layer: torch.nn.Module) -> int:
+        """Get the effective group size for kernel computation."""
+        if self.quant_config.group_size != -1:
+            return self.quant_config.group_size
+        return layer.qweight.shape[0]  # input_size_per_partition
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -1017,11 +958,7 @@ class AutoAWQXPULinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
-        # Normalize group_size to match create_weights logic
-        if self.quant_config.group_size != -1:
-            group_size = self.quant_config.group_size
-        else:
-            group_size = layer.qweight.shape[0]  # input_size_per_partition
+        group_size = self._get_group_size(layer)
 
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
