@@ -246,56 +246,85 @@ def _triton_w4a16_skinny_fmt_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
-# Explicit gfx11 prefill tile selection, tuned for the *packed-dequant* kernel
-# across the full M range under do_bench_cudagraph (the production path) over the
-# F.2 GEMM catalog. Four M tiers; BLOCK_K=128 dominates the small/mid tiers
-# (long per-block K work, occupancy-friendly narrow BLOCK_N), the distilled wide
-# BLOCK_N=256 tile takes over only at deep M:
+# Explicit gfx11 prefill tile selection -- DTYPE-AWARE. The kernel takes the
+# packed v_and_or/v_pk_fma dequant for fp16 and the scalar dequant for bf16, and
+# the two paths want different tiles (most visibly BLOCK_N at deep M: 256 for
+# packed fp16 vs 64 for scalar bf16). Both were validated under do_bench_cudagraph
+# with rotating cold weights over the F.2 catalog.
 #
-#   * M <= 64: small tile BLOCK_M=32, BLOCK_K=128. A wide BLOCK_N here leaves
-#     only ceil(N/BN) workgroups -- e.g. 8 for N=2048/BN=256 -- starving the 40
-#     CUs (the M-blind BLOCK_N=256 was a 1.6-3x regression at M<=32). BLOCK_N=64
-#     for tall K (down_proj) gives more B-reuse; 32 otherwise.
-#   * 65 <= M <= 256: very wide N (>=16384) saturates with BLOCK_M=128/BN=64;
-#     tall K likes BLOCK_M=32/BN=64; else BLOCK_M=64/BN=32. BLOCK_K=128/64.
-#   * 257 <= M < 2048: the wide distilled tile (BN=256) wins for tall, narrow-N,
-#     non-cliff K (e.g. Qwen3-4B down 2560x9728); BLOCK_M=128/BN=64 elsewhere.
-#     The K%2048==0 cliff collapses BN=256 at these M (down 4096x12288 lost ~28%
-#     at M=1024), so it is excluded from the distilled branch.
-#   * M >= 2048 (deep prefill): the distilled BLOCK_N=256 / BLOCK_M=128 tile
-#     maximizes B-reuse and ds_read_b128 LDS readback; +13-50% over gfx11.
+# fp16 (packed) -- tuned table:
+#   * M <= 64: small BLOCK_M=32, BLOCK_K=128. A wide BLOCK_N leaves only
+#     ceil(N/BN) workgroups (e.g. 8 for N=2048/BN=256), starving the 40 CUs (the
+#     M-blind BLOCK_N=256 was a 1.6-3x regression at M<=32). BLOCK_N=64 for tall
+#     K, else 32.
+#   * 65 <= M <= 256: very wide N (>=16384) -> BLOCK_M=128/BN=64; tall K ->
+#     BLOCK_M=32/BN=64; else BLOCK_M=64/BN=32.
+#   * 257 <= M < 2048: wide distilled BN=256 for tall narrow non-cliff K; else
+#     BLOCK_M=128/BN=64. (K%2048==0 collapses BN=256 here, so excluded.)
+#   * M >= 2048: distilled BN=256/BLOCK_M=128; +13-50% over gfx11.
 #
-# (The earlier distilled table was M-blind, autotuned only at M in {2048,3968},
-# so it regressed every M<512 shape.) BLOCK_K is capped to group_size so a
-# K-block never straddles a quant group (scale aliasing); gs128 layers -- the
-# bulk -- pass the table BLOCK_K through unchanged, gs64/gs32 clamp to 64/32.
+# bf16 (scalar) -- reuse the pre-packed-kernel ("gfx11") scalar-tuned table. The
+# bf16 kernel body is byte-identical to that kernel, so this keeps bf16 at gfx11
+# parity (the packed fp16 table regresses bf16 by up to ~40% at deep M, where
+# scalar bf16 wants BLOCK_N=64, not 256).
+#
+# BLOCK_K is capped to group_size so a K-block never straddles a quant group
+# (scale aliasing); gs128 -- the bulk -- passes the table BLOCK_K through.
 def _select_skinny_gfx11_config(
-    M: int, N: int, K: int, group_size: int
+    M: int, N: int, K: int, group_size: int, dtype: torch.dtype
 ) -> tuple[int, int, int, int]:
     """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for the gfx11 skinny GEMM."""
-    tall = K >= 2 * N  # tall-K (down_proj-like)
-    if M <= 64:
-        block_m, block_n, block_k, num_warps = 32, (64 if tall else 32), 128, 4
-    elif M <= 256:
-        if N >= 16384:  # very wide N (gate_up / lm_head)
-            block_m, block_n, block_k, num_warps = 128, 64, 64, 8
-        elif tall:  # tall K (down_proj)
-            block_m, block_n, block_k, num_warps = 32, 64, 128, 4
-        else:  # N ~= K (o_proj / qkv)
-            block_m, block_n, block_k, num_warps = 64, 32, 128, 4
-    elif M < 2048:
-        if tall and N < 4096 and K % 2048 != 0:  # narrow tall non-cliff K
+    if dtype == torch.float16:
+        # Packed-dequant path (fp16 on gfx1x).
+        tall = K >= 2 * N  # tall-K (down_proj-like)
+        if M <= 64:
+            block_m, block_n, block_k, num_warps = 32, (64 if tall else 32), 128, 4
+        elif M <= 256:
+            if N >= 16384:  # very wide N (gate_up / lm_head)
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            elif tall:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # N ~= K (o_proj / qkv)
+                block_m, block_n, block_k, num_warps = 64, 32, 128, 4
+        elif M < 2048:
+            if tall and N < 4096 and K % 2048 != 0:  # narrow tall non-cliff K
+                block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+            else:
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+        else:  # M >= 2048 (deep prefill)
             block_m, block_n, block_k, num_warps = 128, 256, 32, 8
-        else:
-            block_m, block_n, block_k, num_warps = 128, 64, 64, 8
-    else:  # M >= 2048 (deep prefill)
-        block_m, block_n, block_k, num_warps = 128, 256, 32, 8
-    # Very narrow N (e.g. the L2 N=512 microbench shapes) at small/mid M: a wide
-    # BLOCK_N leaves too few N-tiles (ceil(512/256)=2) to fill the CUs, so clamp
-    # it -- BLOCK_N=32 restores ~16 N-tiles. At M>=1024 the M-tiles already
-    # saturate the CUs, so the wide tile is kept (clamping there costs ~5x).
-    if N <= 1024 and M <= 512:
-        block_n = min(block_n, 32)
+        # Very narrow N (e.g. L2 N=512 microbench shapes) at small/mid M: a wide
+        # BLOCK_N leaves too few N-tiles to fill the CUs, so clamp it. At M>=1024
+        # the M-tiles already saturate, so the wide tile is kept.
+        if N <= 1024 and M <= 512:
+            block_n = min(block_n, 32)
+    else:
+        # Scalar-dequant path (bf16): pre-packed-kernel scalar-tuned table.
+        if M <= 32:
+            block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+        elif M <= 64:
+            block_m, block_n, block_k, num_warps = 64, 64, 32, 4
+        elif M <= 128:
+            if K >= 4096 and N >= 4096:
+                block_m, block_n, block_k, num_warps = 64, 32, 128, 4
+            elif K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 16, 64, 1
+            elif N > K:  # wide N (qkv / gate_up)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            else:  # N ~= K (o_proj)
+                block_m, block_n, block_k, num_warps = 64, 32, 64, 4
+        elif M <= 1024:
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            elif N >= 4 * K:  # very wide N (gate_up)
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            else:
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        else:  # M > 1024
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 128, 512, 32, 16
+            else:
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
     return block_m, block_n, min(block_k, group_size), num_warps
 
 
@@ -372,7 +401,7 @@ def triton_w4a16_skinny_fmt_gemm(
     # so a K-block never straddles a quant group (no scale aliasing).
     if on_gfx1x():
         block_m, block_n, block_k, num_warps = _select_skinny_gfx11_config(
-            M, N, K, group_size
+            M, N, K, group_size, a.dtype
         )
         grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
         # The kernel picks the packed (fp16/gfx1x) vs scalar unpack itself.
