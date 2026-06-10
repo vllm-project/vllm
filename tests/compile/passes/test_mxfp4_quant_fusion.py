@@ -24,7 +24,10 @@ _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
     reason="Requires aiter.ops.triton.fused_mxfp4_quant (fused_rms_mxfp4_quant)",
 )
 
-
+_NEEDS_NO_AITER = pytest.mark.skipif(
+    is_aiter_found_and_supported(),
+    reason="AITER is present — this test only validates the absent-AITER path",
+)
 
 
 def test_unit_probe_rmsnorm_mxfp4_returns_bool():
@@ -34,9 +37,8 @@ def test_unit_probe_rmsnorm_mxfp4_returns_bool():
     )
 
 
+@_NEEDS_NO_AITER
 def test_unit_probe_rmsnorm_false_without_aiter():
-    if is_aiter_found_and_supported():
-        pytest.skip("AITER is present — probe may return True or False")
     assert rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant() is False
 
 
