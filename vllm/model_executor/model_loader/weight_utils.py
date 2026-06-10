@@ -1648,8 +1648,10 @@ def maybe_remap_moe_expert_param_name(
 
     Checkpoint weights have names like:
         layers.0.mlp.experts.w13_weight
+        layers.0.feed_forward.experts.w2_input_scale
     But actual parameters are now:
         layers.0.mlp.experts.routed_experts.w13_weight
+        layers.0.feed_forward.experts.routed_experts.w2_input_scale
 
     This function inserts 'routed_experts.' into the path when needed.
 
@@ -1662,11 +1664,11 @@ def maybe_remap_moe_expert_param_name(
         otherwise the original name
     """
     # Only remap if this looks like an expert parameter
-    if ".mlp.experts." not in name:
+    if ".experts." not in name:
         return name
 
     # Skip if already has routed_experts
-    if ".mlp.experts.routed_experts." in name:
+    if ".experts.routed_experts." in name:
         return name
 
     # Expert parameter patterns to check
@@ -1700,8 +1702,8 @@ def maybe_remap_moe_expert_param_name(
     if not is_expert_param:
         return name
 
-    # Try inserting routed_experts
-    new_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+    # Try inserting routed_experts after .experts.
+    new_name = name.replace(".experts.", ".experts.routed_experts.", 1)
 
     # Only use the new name if it exists in the model
     if new_name in params_dict:
