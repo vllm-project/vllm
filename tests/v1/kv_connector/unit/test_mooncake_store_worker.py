@@ -1268,6 +1268,90 @@ def test_requester_worker_group_semantics_falls_back_without_group_ids(
     )
 
 
+def test_requester_worker_group_semantics_string_false_does_not_enable(
+    tmp_path,
+    monkeypatch,
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    warning = MagicMock()
+    monkeypatch.setattr(worker.logger, "warning", warning)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            extra_config={
+                "enable_group_semantics": "false",
+            }
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.enable_group_semantics is False
+    assert not any(
+        "does not support ReplicateConfig.group_ids" in call.args[0]
+        for call in warning.call_args_list
+    )
+
+
+def test_requester_worker_group_semantics_string_true_enables(
+    tmp_path,
+    monkeypatch,
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+
+    class FakeReplicateConfig:
+        def __init__(self) -> None:
+            self.group_ids = None
+
+    fake_store_module = types.ModuleType("mooncake.store")
+    fake_store_module.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
+    fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_mooncake_module = types.ModuleType("mooncake")
+    fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
+    monkeypatch.setitem(sys.modules, "mooncake.store", fake_store_module)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            extra_config={
+                "enable_group_semantics": "true",
+            }
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.enable_group_semantics is True
+    assert w._supports_group_ids is True
+
+
 # ---------------------------------------------------------------------------
 # Helpers for register_kv_caches tests
 # ---------------------------------------------------------------------------

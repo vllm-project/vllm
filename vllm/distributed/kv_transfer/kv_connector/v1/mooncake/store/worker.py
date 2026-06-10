@@ -1052,8 +1052,9 @@ class MooncakeStoreWorker:
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = ReplicateConfig()
-        self.enable_group_semantics = bool(
-            extra_config.get("enable_group_semantics", False)
+        self.enable_group_semantics = (
+            str(extra_config.get("enable_group_semantics", "False")).strip().lower()
+            == "true"
         )
         self._supports_group_ids = _replicate_config_supports_group_ids(
             ReplicateConfig, self.store_replicate_config
