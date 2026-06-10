@@ -23,7 +23,6 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
-    deepseek_v4_request_prep_warmup,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
@@ -78,7 +77,6 @@ def kernel_warmup(worker: "Worker"):
     # Run next so input-prep kernels JIT against pristine runner state.
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
-    deepseek_v4_request_prep_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
