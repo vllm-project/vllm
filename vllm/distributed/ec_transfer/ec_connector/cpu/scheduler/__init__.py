@@ -152,10 +152,12 @@ class ECCPUScheduler:
         return self._consumer.ensure_cache_available(request, num_computed_tokens)
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
-        if not self._is_producer:
-            return
-        assert self._producer is not None
-        self._producer.update_state_after_alloc(request, index)
+        if self._is_producer:
+            assert self._producer is not None
+            self._producer.update_state_after_alloc(request, index)
+        if self._is_consumer:
+            assert self._consumer is not None
+            self._consumer.update_state_after_alloc(request, index)
 
     def request_finished(
         self, request: "Request"

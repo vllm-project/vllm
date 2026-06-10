@@ -95,6 +95,23 @@ class ECCPUConsumer:
         """
         return identifier in self._loaded or identifier in self._ready
 
+    def update_state_after_alloc(self, request: "Request", index: int) -> None:
+        """Ensure the mm_hash will be (re-)loaded into encoder_cache this step.
+
+        Called by the scheduler after routing an EC-cached mm_hash to
+        ``external_load_encoder_input``. The encoding is in the local mmap
+        (``_loaded``), but ``encoder_cache`` may have been evicted by
+        ``free_encoder_mm_hashes`` since it was last copied. Adding the
+        mm_hash to ``_pending_reload`` makes ``build_loads`` include it in
+        ``meta.loads`` so ``start_load_caches`` reloads mmap→GPU this step.
+        If ``encoder_cache`` already holds it, ``start_load_caches`` skips it.
+        """
+        mm_hash = (
+            request.mm_features[index].mm_hash or request.mm_features[index].identifier
+        )
+        if mm_hash in self._loaded:
+            self._pending_reload.add(mm_hash)
+
     def ensure_cache_available(
         self, request: "Request", num_computed_tokens: int
     ) -> bool:
