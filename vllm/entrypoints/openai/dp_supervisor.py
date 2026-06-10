@@ -137,15 +137,15 @@ def _build_vllm_dp_server_env(
     return {}
 
 
-def _build_device_ids(args: argparse.Namespace, local_rank: int) -> str:
+def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int]:
     """Build the --device-ids value for a DP child process."""
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
-    return ",".join(
-        str(current_platform.device_id_to_physical_device_id(idx))
+    return [
+        current_platform.device_id_to_physical_device_id(idx)
         for idx in range(start, stop)
-    )
+    ]
 
 
 def _child_base_url(args: argparse.Namespace, port: int) -> str:

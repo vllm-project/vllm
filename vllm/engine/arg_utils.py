@@ -463,7 +463,7 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
-    device_ids: str | None = None
+    device_ids: list[int] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -975,7 +975,7 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--device-ids",
-            type=str,
+            type=lambda s: [int(x) for x in s.split(",")],
             default=None,
             help="Comma-separated physical GPU device IDs to use "
             '(e.g. --device-ids "2,3,5,7"). Avoids setting '
@@ -1713,7 +1713,7 @@ class EngineArgs:
     def _resolve_device_ids(self) -> list[int] | None:
         if not self.device_ids:
             return None
-        ids = [int(x) for x in self.device_ids.split(",")]
+        ids = self.device_ids
         # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
         # --device-ids values as indices into the CVD-visible set.
         cvd = os.environ.get(current_platform.device_control_env_var)

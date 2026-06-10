@@ -646,7 +646,7 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 class TestDeviceIds:
     def test_device_ids_no_cvd(self):
         """--device-ids without CVD uses absolute physical IDs."""
-        args = EngineArgs(model="m", device_ids="2,3")
+        args = EngineArgs(model="m", device_ids=[2, 3])
         assert args._resolve_device_ids() == [2, 3]
 
     def test_device_ids_with_cvd(self, monkeypatch):
@@ -655,7 +655,7 @@ class TestDeviceIds:
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5,6,7")
-        args = EngineArgs(model="m", device_ids="0,1")
+        args = EngineArgs(model="m", device_ids=[0, 1])
         assert args._resolve_device_ids() == [4, 5]
 
     def test_device_ids_with_cvd_noncontiguous(self, monkeypatch):
@@ -664,7 +664,7 @@ class TestDeviceIds:
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "2,5,7,9")
-        args = EngineArgs(model="m", device_ids="1,3")
+        args = EngineArgs(model="m", device_ids=[1, 3])
         assert args._resolve_device_ids() == [5, 9]
 
     def test_no_device_ids(self):
@@ -677,4 +677,4 @@ class TestDeviceIds:
         parser = FlexibleArgumentParser()
         EngineArgs.add_cli_args(parser)
         parsed = parser.parse_args(["--model", "m", "--device-ids", "0,2,4"])
-        assert parsed.device_ids == "0,2,4"
+        assert parsed.device_ids == [0, 2, 4]

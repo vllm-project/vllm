@@ -483,6 +483,7 @@ def _init_lmcache_engine(
 
     # Change current device.
     from vllm.distributed.parallel_state import get_world_group
+
     device_index = get_world_group().device_index
     torch.accelerator.set_device_index(device_index)
     device = torch.device(f"cuda:{device_index}")
