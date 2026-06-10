@@ -253,6 +253,7 @@ class KVCacheManager:
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
+        has_scheduled_reqs: bool = True,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -283,6 +284,8 @@ class KVCacheManager:
                 made if it fits within (free blocks - reserved_blocks). Used to gate
                 async KV-connector loads so their initial allocation cannot consume
                 blocks an already in-flight (prefilling) sequence is relying on.
+            has_scheduled_reqs: Whether any requests are already scheduled to run
+                this step, controls whether watermark is applied.
 
         Blocks layout:
         ```
@@ -358,8 +361,12 @@ class KVCacheManager:
         )
 
         watermark_blocks = 0
-        # The watermark is applied to waiting/preempted requests only.
-        if request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
+        # The watermark is applied to waiting/preempted requests only, and only
+        # when there's at least one request already scheduled.
+        if has_scheduled_reqs and request.status in (
+            RequestStatus.WAITING,
+            RequestStatus.PREEMPTED,
+        ):
             watermark_blocks = self.watermark_blocks
 
         if full_sequence_must_fit:

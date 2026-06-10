@@ -770,6 +770,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    has_scheduled_reqs=bool(self.running),
                 )
 
                 if new_blocks is None:
