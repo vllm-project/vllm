@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import torch
 from torch import nn
@@ -434,6 +435,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 delattr(self.in_proj.weight, "weight_loader")
                 set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
 
+            # MAMBA_INPROJ_SCALE_PATCH: For quantized layers (e.g. FP8
+            # channel-wise), in_proj has additional dim-0-sharded
+            # parameters (weight_scale, etc.) that also need the custom
+            # mamba loader so that the BC segment is replicated when
+            # n_groups < tp_size.
+            from vllm.model_executor.parameter import (
+                PerTensorScaleParameter as _PerTensorScaleParameter,
+            )
+            for _pname, _pparam in self.in_proj.named_parameters():
+                if _pname == "weight":
+                    continue
+                if not isinstance(_pparam, BasevLLMParameter):
+                    continue
+                if isinstance(_pparam, _PerTensorScaleParameter):
+                    continue
+                if getattr(_pparam, "output_dim", None) != 0:
+                    continue
+                _pparam.weight_loader = mamba_loader
+
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
         # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
@@ -572,6 +592,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         """Run a minimal SSD forward pass to trigger Triton autotuning
         while GPU memory is still plentiful (before SSM cache allocation).
         """
+        if os.environ.get("VLLM_XPU_SKIP_MAMBA_SSD_WARMUP"):
+            logger.info_once("Skipping Mamba2 SSD Triton warmup (VLLM_XPU_SKIP_MAMBA_SSD_WARMUP set)")
+            self._ssd_kernels_warmed_up = True
+            return
         if self._ssd_kernels_warmed_up:
             return
         self._ssd_kernels_warmed_up = True
