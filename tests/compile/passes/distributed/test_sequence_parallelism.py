@@ -217,7 +217,9 @@ def test_sequence_parallelism_pass(
 def test_sequence_parallelism_pass_requires_full_graph_compilation():
     vllm_config = VllmConfig()
     vllm_config.compilation_config.use_inductor_graph_partition = False
-    vllm_config.compilation_config.splitting_ops = ["vllm::unified_attention"]
+    vllm_config.compilation_config.splitting_ops = [
+        "vllm::unified_attention_with_output"
+    ]
 
     sequence_parallelism_pass = object.__new__(SequenceParallelismPass)
     sequence_parallelism_pass.compilation_config = vllm_config.compilation_config
