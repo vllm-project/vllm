@@ -38,24 +38,28 @@ MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
 TP=${TP:-1}
 PORT=${PORT:-8000}
 URL="http://127.0.0.1:${PORT}"
-# Force a small KV cache so decode-time growth triggers preemption thrashing.
-# (Independent of GPU size, so the demo is reproducible across hardware.)
-KV_CACHE_MEMORY_GB=${KV_CACHE_MEMORY_GB:-6}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-5120}
+# Constrain the KV cache to a *near-critical* size: large enough that the engine
+# can run stably, but small enough that greedy over-admission tips it into
+# preemption thrashing. (Independent of GPU size, so the demo is reproducible.)
+# At the default workload this fits ~1.5x the mean concurrent KV demand.
+KV_CACHE_MEMORY_GB=${KV_CACHE_MEMORY_GB:-16}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
 # Optional weight loader (e.g. fastsafetensors on the GCP cluster).
 LOAD_FORMAT=${LOAD_FORMAT:-auto}
-# Decode-heavy workload: short input, long output, with a little length variance.
-INPUT_LEN=${INPUT_LEN:-300}
-OUTPUT_LEN=${OUTPUT_LEN:-4000}
+# Decode-heavy workload: moderate input, long output, with length variance. The
+# long output means preempted requests have generated a lot before eviction, so
+# resuming them re-prefills a long sequence (high recomputation cost).
+INPUT_LEN=${INPUT_LEN:-1000}
+OUTPUT_LEN=${OUTPUT_LEN:-5000}
 RANGE_RATIO=${RANGE_RATIO:-0.2}
-CONCURRENCY=${CONCURRENCY:-200}
-# Enough prompts to keep each config saturated for ~5 minutes.
-NUM_PROMPTS=${NUM_PROMPTS:-600}
+CONCURRENCY=${CONCURRENCY:-128}
+# Enough prompts to keep each config saturated for ~5+ minutes.
+NUM_PROMPTS=${NUM_PROMPTS:-450}
 OUTDIR=${OUTDIR:-./watermark_bench_results}
 # Watermark fractions compared. "label value" per line; value=0 disables it.
 CONFIGS=${CONFIGS:-"off    0
-w0.01  0.01
+w0.02  0.02
 w0.05  0.05
 w0.10  0.10
 w0.15  0.15"}
