@@ -26,7 +26,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
-from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
@@ -67,6 +66,11 @@ class ToolParser:
     # `--reasoning-parser` is active for the request.
     chat_template_kwargs: dict[str, Any] = {}
     reasoning_parser_enabled: bool = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.structural_tag_model is not None:
+            cls.supports_required_and_named = False
 
     def __init__(
         self,
@@ -130,7 +134,7 @@ class ToolParser:
         # vLLM-owned structural tag support for model-specific tool formats.
         if (
             isinstance(request, ChatCompletionRequest)
-            and VLLM_ENFORCE_STRICT_TOOL_CALLING
+            and self.structural_tag_model is not None
         ):
             need_tool_calling = (
                 request.tool_choice == "auto"

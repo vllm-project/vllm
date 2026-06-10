@@ -107,6 +107,33 @@ def test_get_model_structural_tag_supports_named_tool_choice(
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
     assert parser_cls.structural_tag_model == model
+    assert not parser_cls.supports_required_and_named
+
+
+def test_tool_parsers_without_structural_tag_support_required_and_named():
+    class NonStructuralTagToolParser(ToolParser):
+        pass
+
+    assert NonStructuralTagToolParser.structural_tag_model is None
+    assert NonStructuralTagToolParser.supports_required_and_named
+
+
+def test_non_structural_tag_parser_uses_schema_constraints(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    parser = ToolParser(MagicMock())
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.json is not None
+    assert out.structured_outputs.structural_tag is None
 
 
 def test_structural_tag_reasoning_uses_reasoning_parser_and_enable_thinking():

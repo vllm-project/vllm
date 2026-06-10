@@ -1456,15 +1456,10 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
 def test_adjust_request_auto_uses_vllm_registry_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,
 ) -> None:
-    monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
-    )
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
@@ -1482,14 +1477,9 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
 
 
 def test_adjust_request_required_prefers_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
     qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
-    monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
-    )
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
