@@ -292,6 +292,53 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
+        # TEMPORARY DIAGNOSTIC: the metadata buffers above are sized by
+        # get_ps_metadata_info_v1 (the PREDICTED capacity), then filled by
+        # get_ps_metadata_v1 (the ACTUAL schedule). If the info call ever
+        # under-predicts what the C++ builder writes, get_ps_metadata_v1
+        # overruns work_info / reduce_partial_map / reduce_final_map and
+        # poisons a neighbor allocation (the observed 256-concurrency MAF).
+        # work_indptr[-1] is the count of work_info rows actually written;
+        # reduce_indptr[-1] is the count of reduce_partial_map entries written.
+        # Assert each filled count fits its allocation BEFORE any kernel reads
+        # these buffers. Remove once the root cause is confirmed.
+        actual_works = int(work_indptr[-1].item())
+        actual_partials = int(reduce_indptr[-1].item())
+        num_reduce_tiles = reduce_indptr.numel() - 1
+        logger.info(
+            "PSBUF_DBG causal=%s batch=%d max_qlen=%s max_kvlen=%s | "
+            "work_info alloc_rows=%d filled=%d | reduce_partial_map alloc=%d "
+            "filled=%d | reduce_final_map alloc_rows=%d num_reduce_tiles=%d",
+            is_causal,
+            qo_indptr_cpu.numel() - 1,
+            max_qlen,
+            max_kvlen,
+            work_info.shape[0],
+            actual_works,
+            reduce_partial_map.numel(),
+            actual_partials,
+            reduce_final_map.shape[0],
+            num_reduce_tiles,
+        )
+        assert actual_works <= work_info.shape[0], (
+            f"work_info overrun: get_ps_metadata_v1 wrote {actual_works} rows "
+            f"into an allocation of {work_info.shape[0]} (causal={is_causal}, "
+            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
+            f"max_kvlen={max_kvlen}); info call under-predicted."
+        )
+        assert actual_partials <= reduce_partial_map.numel(), (
+            f"reduce_partial_map overrun: wrote {actual_partials} into an "
+            f"allocation of {reduce_partial_map.numel()} (causal={is_causal}, "
+            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
+            f"max_kvlen={max_kvlen}); info call under-predicted."
+        )
+        assert num_reduce_tiles <= reduce_final_map.shape[0], (
+            f"reduce_final_map overrun: {num_reduce_tiles} reduce tiles vs "
+            f"allocation of {reduce_final_map.shape[0]} (causal={is_causal}, "
+            f"batch={qo_indptr_cpu.numel() - 1}, max_qlen={max_qlen}, "
+            f"max_kvlen={max_kvlen}); info call under-predicted."
+        )
+
         # Tight, sync-free upper bound on the per-cluster partial-tile count:
         # QT (sum over sequences of ceil(qlen/qlen_granularity)) plus one
         # carryover per thread group in a cluster. partial_o_loc resets per
