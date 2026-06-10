@@ -7,16 +7,11 @@ from unittest.mock import patch
 from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    LOAD_BYTES,
-    LOAD_SIZE,
-    LOAD_TIME,
-    STORE_BYTES,
-    STORE_SIZE,
-    STORE_TIME,
     OffloadingConnectorStats,
     OffloadPromMetrics,
     _MetricType,
     _StatsKey,
+    _TransferMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -28,6 +23,12 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
+LOAD_BYTES = _TransferMetricName.LOAD_BYTES
+LOAD_TIME = _TransferMetricName.LOAD_TIME
+LOAD_SIZE = _TransferMetricName.LOAD_SIZE
+STORE_BYTES = _TransferMetricName.STORE_BYTES
+STORE_TIME = _TransferMetricName.STORE_TIME
+STORE_SIZE = _TransferMetricName.STORE_SIZE
 STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 PENDING_STORES = "vllm:kv_offload_pending_stores"
 LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"

@@ -15,13 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    LOAD_BYTES,
-    LOAD_SIZE,
-    LOAD_TIME,
-    STORE_BYTES,
-    STORE_SIZE,
-    STORE_TIME,
     OffloadingConnectorStats,
+    _TransferMetricName,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -969,22 +964,30 @@ class OffloadingConnectorScheduler:
             transfer_stats = OffloadingConnectorStats()
             if not meta.transfer_stats.load.is_empty():
                 transfer_stats.increase_counter(
-                    LOAD_BYTES, meta.transfer_stats.load.bytes
+                    _TransferMetricName.LOAD_BYTES,
+                    meta.transfer_stats.load.bytes,
                 )
                 transfer_stats.increase_counter(
-                    LOAD_TIME, meta.transfer_stats.load.time
+                    _TransferMetricName.LOAD_TIME,
+                    meta.transfer_stats.load.time,
                 )
                 for size in meta.transfer_stats.load.sizes:
-                    transfer_stats.observe_histogram(LOAD_SIZE, size)
+                    transfer_stats.observe_histogram(
+                        _TransferMetricName.LOAD_SIZE, size
+                    )
             if not meta.transfer_stats.store.is_empty():
                 transfer_stats.increase_counter(
-                    STORE_BYTES, meta.transfer_stats.store.bytes
+                    _TransferMetricName.STORE_BYTES,
+                    meta.transfer_stats.store.bytes,
                 )
                 transfer_stats.increase_counter(
-                    STORE_TIME, meta.transfer_stats.store.time
+                    _TransferMetricName.STORE_TIME,
+                    meta.transfer_stats.store.time,
                 )
                 for size in meta.transfer_stats.store.sizes:
-                    transfer_stats.observe_histogram(STORE_SIZE, size)
+                    transfer_stats.observe_histogram(
+                        _TransferMetricName.STORE_SIZE, size
+                    )
             if self._connector_stats is None:
                 self._connector_stats = transfer_stats
             else:
