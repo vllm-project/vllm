@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.11.0-rocm7.14.0a20260605-7.14.0a20260605-nightly-ubuntu24.04-gfx1250 
 ARG ROCM_WHEEL_INDEX=https://rocm.genesis.amd.com/whl/gfx1250
 ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260605
 ARG TORCHVISION_VERSION=0.28.0a0+rocm7.14.0a20260605
@@ -86,21 +86,21 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
 ###
 ### Install PyTorch w/ Triton + ROCM_SDK from ROCM wheel index
 ###
-ARG ROCM_WHEEL_INDEX
-ARG TORCH_VERSION
-ARG TORCHVISION_VERSION
-ARG TORCHAUDIO_VERSION
-ARG ROCM_SDK_VERSION
-# torch/torchvision/torchaudio must be pinned to mutually-consistent builds
-# (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
-# sdk version is derived from torch's own dependency pin unless overridden,
-# which keeps the set consistent and avoids pip backtracking.
-RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
-        "torch==${TORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" \
-        "torchaudio==${TORCHAUDIO_VERSION}" \
-        "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
-    rocm-sdk init
+#ARG ROCM_WHEEL_INDEX
+#ARG TORCH_VERSION
+#ARG TORCHVISION_VERSION
+#ARG TORCHAUDIO_VERSION
+#ARG ROCM_SDK_VERSION
+## torch/torchvision/torchaudio must be pinned to mutually-consistent builds
+## (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
+## sdk version is derived from torch's own dependency pin unless overridden,
+## which keeps the set consistent and avoids pip backtracking.
+#RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
+#        "torch==${TORCH_VERSION}" \
+#        "torchvision==${TORCHVISION_VERSION}" \
+#        "torchaudio==${TORCHAUDIO_VERSION}" \
+#        "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
+#    rocm-sdk init
 
 # Torch runtime deps that may not be published on the ROCm wheel index;
 # install them from PyPI afterwards.
