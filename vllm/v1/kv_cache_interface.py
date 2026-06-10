@@ -966,9 +966,37 @@ class MambaSpec(KVCacheSpec):
         mamba_view: bool = False,
     ) -> list[torch.Tensor]:
         if not mamba_view:
-            # FA path: mamba descriptors are structural placeholders.
-            # No C-narrowing — the payload must match local FA descriptors.
-            return [tensor]
+            # FA view: MambaSpec page is padded to match attention page size,
+            # so the head-overlap logic gives the correct C narrowing.
+            total_kv = model_config.get_total_num_kv_heads()
+
+            if total_kv >= my_tp:
+                my_start = my_rank * total_kv // my_tp
+                my_end = (my_rank + 1) * total_kv // my_tp
+            else:
+                my_head = my_rank * total_kv // my_tp
+                my_start, my_end = my_head, my_head + 1
+
+            if total_kv >= other_tp:
+                other_start = other_rank * total_kv // other_tp
+                other_end = (other_rank + 1) * total_kv // other_tp
+            else:
+                other_head = other_rank * total_kv // other_tp
+                other_start, other_end = other_head, other_head + 1
+
+            overlap_start = max(my_start, other_start)
+            overlap_end = min(my_end, other_end)
+            if overlap_start >= overlap_end:
+                return [tensor]
+
+            h_start = overlap_start - other_start
+            h_len = overlap_end - overlap_start
+            other_heads = other_end - other_start
+            C = tensor.shape[_DIM4_C]
+            c_per_head = C // other_heads
+            return [tensor.narrow(_DIM4_C, h_start * c_per_head, h_len * c_per_head)]
+
+        # Mamba view: content scales linearly with 1/TP.
         assert my_tp != other_tp or my_tp > 1, (
             "Mamba state is always TP-sharded (never replicated)."
         )
