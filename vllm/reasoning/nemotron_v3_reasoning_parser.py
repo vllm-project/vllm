@@ -14,6 +14,24 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
     Reasoning parser for Nemotron V3 models.
     """
 
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # Translate the OpenAI-standard reasoning_effort field into the
+        # Nemotron chat template's native kwargs (low_effort, enable_thinking)
+        # so the template can actually adjust generation behavior.
+        reasoning_effort = getattr(request, "reasoning_effort", None)
+        if reasoning_effort is not None:
+            chat_kwargs = request.chat_template_kwargs
+            if chat_kwargs is None:
+                chat_kwargs = {}
+                request.chat_template_kwargs = chat_kwargs
+            if reasoning_effort == "low" and "low_effort" not in chat_kwargs:
+                chat_kwargs["low_effort"] = True
+            if reasoning_effort == "none" and "enable_thinking" not in chat_kwargs:
+                chat_kwargs["enable_thinking"] = False
+        return request
+
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
