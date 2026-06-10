@@ -43,8 +43,6 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    is_global_first_rank,
-    is_local_first_rank,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -1992,14 +1990,20 @@ def _async_loop(loop: asyncio.AbstractEventLoop):
 
 def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     assert (parallel_config := vllm_config.parallel_config)
+    # Only the TP=0, PP=0 worker of the designated engine should launch it.
+    if get_tensor_model_parallel_rank() != 0:
+        return False
+    if get_pp_group().rank_in_group != 0:
+        return False
+
     # In hybrid or external LB mode,
     # each instance should have its own bootstrap server.
     if parallel_config.local_engines_only:
-        return is_local_first_rank()
+        return parallel_config.data_parallel_rank_local == 0
 
-    # In internal LB mode, all PP ranks in one engine register to the bootstrap
-    # server owned by the real global first rank.
-    return is_global_first_rank() and parallel_config.data_parallel_index == 0
+    # In internal LB mode,
+    # only the first data-parallel engine should launch the bootstrap server.
+    return parallel_config.data_parallel_index == 0
 
 
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
