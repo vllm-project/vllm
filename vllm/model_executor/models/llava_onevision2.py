@@ -138,6 +138,7 @@ def _validate_video_source(path: str, model_config) -> None:
     """
     from pathlib import Path
     from urllib.parse import urlsplit
+    from urllib.request import url2pathname
 
     allowed_local = getattr(model_config, "allowed_local_media_path", "") or ""
     allowed_domains = getattr(model_config, "allowed_media_domains", None) or []
@@ -162,7 +163,16 @@ def _validate_video_source(path: str, model_config) -> None:
                 "Local video file access is disabled. Set "
                 "--allowed-local-media-path to enable reading local videos."
             )
-        local = Path(parsed.path if scheme == "file" else str(path))
+        # Decode percent-encoding before the confinement check so traversal
+        # sequences hidden as %2e%2e are resolved to ``..`` first; otherwise a
+        # URL like file:///allowed/%2e%2e/etc/passwd stays literally under the
+        # allowed root here while the codec module URL-decodes it downstream and
+        # escapes. Mirrors MediaConnector._load_file_url (connector.py:266),
+        # including the netloc so file://host/path is handled identically.
+        if scheme == "file":
+            local = Path(url2pathname(parsed.netloc + parsed.path))
+        else:
+            local = Path(str(path))
         allowed_root = Path(allowed_local).resolve()
         resolved = local.resolve()
         if resolved != allowed_root and allowed_root not in resolved.parents:
