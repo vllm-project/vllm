@@ -892,8 +892,6 @@ class MooncakeConnectorWorker:
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
-        self.start_layer = 0
-        self.end_layer = 0
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -1516,22 +1514,11 @@ class MooncakeConnectorWorker:
         self.block_len_per_layer = []
         self.registered_layer_names = []
         self.registered_layer_indices = []
-        (
-            self.start_layer,
-            self.end_layer,
-        ) = self.model_config.get_layers_start_end_indices(
-            self.vllm_config.parallel_config
-        )
 
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
-            assert self.start_layer <= layer_index < self.end_layer, (
-                "Mooncake registered layer is outside this PP shard: "
-                f"layer={layer_name}, index={layer_index}, "
-                f"range=[{self.start_layer}, {self.end_layer})."
-            )
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
