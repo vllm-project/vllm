@@ -4,29 +4,29 @@
 
 set -euo pipefail
 
+# do-not-merge: integration-test the NIXL 1.3.0rc0 RC published to TestPyPI.
+#
+# 1.3.0 reworks NIXL packaging: the per-CUDA wheels now install into separate
+# namespaces (nixl_cu12/, nixl_cu13/ and nixl_ep_cu12/, nixl_ep_cu13/) instead of
+# a shared nixl/, and the `nixl` / `nixl_ep` meta-packages are dispatchers that
+# import the variant matching torch's CUDA major at runtime. Both CUDA variants
+# can therefore coexist, so the old "uninstall every variant, reinstall the
+# matching one" workaround is no longer required. This PR drops it to verify the
+# packaging fix end-to-end.
+#
+# uv must be told pre-releases are allowed (the `nixl` meta requests
+# nixl-cu1{2,3}==1.3.0rc0 transitively, which uv otherwise rejects) and pointed
+# at TestPyPI where the RC lives.
+export UV_PRERELEASE=allow
+export UV_INDEX_STRATEGY="${UV_INDEX_STRATEGY:-unsafe-best-match}"
+export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:+${UV_EXTRA_INDEX_URL} }https://test.pypi.org/simple/"
+
 REQUIREMENTS_FILE="${KV_CONNECTORS_REQUIREMENTS:-/vllm-workspace/requirements/kv_connectors.txt}"
 
 uv pip install --system -r "${REQUIREMENTS_FILE}"
 
-NIXL_METADATA=$(python3 - <<'PY'
-import importlib.metadata as metadata
-
-import torch
-
-cuda_version = torch.version.cuda
-if cuda_version is None:
-    raise SystemExit("torch.version.cuda is not set")
-
-print(cuda_version.split(".", 1)[0], metadata.version("nixl"))
-PY
-)
-read -r CUDA_MAJOR NIXL_VERSION <<<"${NIXL_METADATA}"
-
-# nixl>=1.1.0 can install multiple CUDA wheel variants. Keep only the variant
-# matching this CI image so nixl_ep_cpp links against the available libcudart.
-uv pip uninstall --system nixl-cu12 nixl-cu13 2>/dev/null || true
-uv pip install --system --no-deps "nixl-cu${CUDA_MAJOR}==${NIXL_VERSION}"
-
+# Report what got installed. With the 1.3.0 dispatcher both CUDA variants remain
+# installed and `import nixl` / `import nixl_ep` select the torch-matching one.
 python3 - <<'PY'
 import importlib.metadata as metadata
 
