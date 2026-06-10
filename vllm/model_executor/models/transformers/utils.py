@@ -101,8 +101,6 @@ Style = Literal[
     "replicate",
     "colwise_gather_output",
     "rowwise_split_input",
-    "colwise_rep",
-    "rowwise_rep",
 ]
 
 
