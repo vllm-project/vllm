@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -83,6 +84,18 @@ def _get_priority_backends(
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
+
+    # With DeepEP v2 contiguous layout (do_expand=False), tensors are
+    # worst-case allocated with padding. TrtLLM's tile-level skipping
+    # avoids wasted compute on padding rows; other backends process all rows.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and moe_config.moe_parallel_config.use_deepep_v2_kernels
+        and activation_key == kFp8Dynamic128Sym
+        and weight_key == kFp8Static128BlockSym
+    ):
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_TRTLLM)
 
     # On Hopper for Block Fp8, prefer Triton for TP and FI CUTLASS for EP.
     if (
@@ -186,10 +199,10 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsBlockFp8,
             XPUExpertsFp8,
-            XPUExpertsMxfp8,
+            XPUExpertsMxFp8,
         )
 
-        return [XPUExpertsFp8, XPUExpertsMxfp8, XPUExpertsBlockFp8]
+        return [XPUExpertsFp8, XPUExpertsMxFp8, XPUExpertsBlockFp8]
 
     elif backend == Fp8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
@@ -423,7 +436,7 @@ def select_fp8_moe_backend(
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     # TODO(bnell): replace layer with weight_block_size
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
