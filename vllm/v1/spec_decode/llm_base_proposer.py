@@ -453,13 +453,16 @@ class SpecDecodeBaseProposer:
             draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
                 draft_token_ids
             )
-            # draft_probs is in draft-vocab space; passing it to the rejection
-            # sampler (which indexes by target vocab IDs) would cause wrong
-            # probability lookups or out-of-bounds access. Drop it here to
-            # fall back to greedy rejection sampling.
+            # Config validation ensures draft_sample_method == "greedy" when
+            # use_heterogeneous_vocab is True, so this branch should never be
+            # reached. Kept as a safety fallback until probabilistic rejection
+            # sampling with heterogeneous vocabularies is implemented.
             # TODO: remap draft_probs to target-vocab space for lossless
             # probabilistic rejection sampling with heterogeneous vocabularies.
-            draft_probs = None
+            assert draft_probs is None, (
+                "probabilistic draft sampling is not supported with "
+                "use_heterogeneous_vocab"
+            )
         return draft_token_ids, draft_probs
 
     def take_last_draft_probs(self) -> torch.Tensor | None:

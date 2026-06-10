@@ -1030,6 +1030,13 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab only works with method='draft_model'"
             )
 
+        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
+            raise ValueError(
+                "use_heterogeneous_vocab currently only supports greedy draft "
+                "sampling. Set draft_sample_method='greedy' (the default) or "
+                "omit it."
+            )
+
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
