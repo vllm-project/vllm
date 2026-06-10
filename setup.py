@@ -35,8 +35,9 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
-PRECOMPILED_RUST_EXTENSION_SUFFIXES = (".so", ".dylib")
-PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.(?:so|dylib)$")
+# setuptools-rust installs PyO3 artifacts as `<module>.<ext-suffix>`, where the
+# suffix ends with `.so` on Linux and macOS alike (e.g. `_rust_foo.abi3.so`).
+PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -59,14 +60,10 @@ def should_require_rust_frontend() -> bool:
 
 
 def get_precompiled_rust_extension_paths() -> list[Path]:
-    paths = []
-    for suffix in PRECOMPILED_RUST_EXTENSION_SUFFIXES:
-        paths.extend((ROOT_DIR / "vllm").glob(f"_rust_*{suffix}"))
-    return sorted(paths)
+    return sorted((ROOT_DIR / "vllm").glob("_rust_*.so"))
 
 
 def get_missing_precompiled_rust_extension_modules() -> list[str]:
-    # Artifacts are named `<module>.<ext-suffix>`, e.g. `_rust_foo.abi3.so`.
     present = {
         path.name.split(".", 1)[0] for path in get_precompiled_rust_extension_paths()
     }
@@ -457,7 +454,7 @@ class precompiled_build_rust(build_rust):
         missing_rust_extensions = get_missing_precompiled_rust_extension_modules()
         if missing_rust_extensions:
             missing.extend(
-                str(ROOT_DIR / "vllm" / f"{module_name}*(.so|.dylib)")
+                str(ROOT_DIR / "vllm" / f"{module_name}*.so")
                 for module_name in missing_rust_extensions
             )
 
