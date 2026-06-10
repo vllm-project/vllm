@@ -12,7 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
-from vllm.entrypoints.scale_out.elastic_ep.middleware import (
+from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
     set_scaling_elastic_ep,
 )

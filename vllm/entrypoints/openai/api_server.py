@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.scale_out.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.elastic_ep import ScalingMiddleware
 from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
@@ -211,7 +211,7 @@ def build_app(
 
         attach_disagg_router(app)
 
-        from vllm.entrypoints.scale_out.elastic_ep import (
+        from vllm.entrypoints.serve.elastic_ep import (
             attach_router as elastic_ep_attach_router,
         )
 
