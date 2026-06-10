@@ -352,28 +352,13 @@ _R = TypeVar("_R")
 def _fix_v4_tied_weights_keys(model_cls: type) -> None:
     """Convert a v4 list-format _tied_weights_keys to the transformers v5 dict form."""
     tied = getattr(model_cls, "_tied_weights_keys", None)
-    if not isinstance(tied, list) or len(tied) == 0:
+    if not isinstance(tied, list) or not tied:
         return
-
-    result: dict[str, str] = {}
-    skipped: list[str] = []
-    for key in tied:
-        # Standard decoder-only LLM: lm_head.weight tied to embed_tokens.weight.
-        if "lm_head" in key and key.endswith(".weight"):
-            result[key] = "model.embed_tokens.weight"
-        else:
-            skipped.append(key)
-
-    if skipped:
-        logger.warning(
-            "HfRunner: %s has v4-format _tied_weights_keys entries that "
-            "could not be automatically converted to the v5 dict format: %s. "
-            "These keys will not be tied; add an explicit mapping in "
-            "_fix_v4_tied_weights_keys if needed.",
-            model_cls.__name__,
-            skipped,
-        )
-
+    result = {
+        k: "model.embed_tokens.weight"
+        for k in tied
+        if "lm_head" in k and k.endswith(".weight")
+    }
     if result:
         setattr(model_cls, "_tied_weights_keys", result)
 
