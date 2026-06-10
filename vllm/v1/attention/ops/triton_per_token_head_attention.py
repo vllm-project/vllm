@@ -2,18 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention kernels for per-token-head quantized KV cache.
 
-Two launch shapes live here:
-
-* ``_pth_attn_stage1`` + ``_fwd_kernel_stage2`` — split-KV decode shape:
-  grid ``(total_q, Hq, NUM_KV_SPLITS)`` with per-query causal ``k_len``.
-  Best for q_len=1 (pure decode) and very small continuation prefill.
-
-* ``_pth_prefill_kernel`` — flash-attention prefill shape:
-  grid ``(num_reqs, Hq, cdiv(max_q_len, BLOCK_M))`` with BLOCK_M×BLOCK_N
-  tiles and ``tl.dot`` reuse of K across the query tile. Reads paged KV
-  cache with inline per-token-head dequant (scales applied at tile level
-  after the Q·Kᵀ and before the P·V matmul). Used for long prefill with
-  cached context — replaces the decode-shaped path when q_len is large.
+Two launch shapes: ``_pth_attn_stage1`` + ``_fwd_kernel_stage2`` is the
+split-KV decode shape (per-query causal ``k_len``), best for q_len=1 and
+tiny continuation prefill; ``_pth_prefill_kernel`` is the flash-attention
+prefill shape (BLOCK_M×BLOCK_N tiles, ``tl.dot`` K reuse, inline
+per-token-head dequant), used for long prefill with cached context.
 """
 
 from __future__ import annotations
@@ -215,25 +208,16 @@ def _pth_attn_stage1_packed(
     PACKED_HEAD_PADDED: tl.constexpr,
     PACKING_FACTOR: tl.constexpr,
 ):
-    """Per-(query, head) split-KV decode for the sub-byte packed INT4 mode.
+    """Per-(query, head) split-KV decode for the packed INT4 mode.
 
-    INT4 (``PACKING_FACTOR=2``).  Q arrives pre-rotated (RHT) so the dot is
-    computed in the same rotated space the cache was written in.
-
-    Per tile:
-      1. Load one byte per (kv_slot, packed_offs) and unpack to
-         ``PACKING_FACTOR`` fp32 streams via the shared helpers.
-      2. Compute ``S = Σ_s (Q_s · K_s) * scale`` with the per-(token, head)
-         k_scale fused in.  INT4 also subtracts the asymmetric
-         ``Q_sum * k_zp`` correction; the zp is steganographed in the low
-         4 bits of the fp32 scale's mantissa.
-      3. Accumulate ``Σ_s (P · v_scale) · V_s`` into ``PACKING_FACTOR``
-         output streams; subtract the analogous ``Pv·v_zp`` term once per
-         stream.
-
-    Output streams are interleaved back into the head-size layout when
-    they are written into ``mid_o``; ``_fwd_kernel_stage2`` then reduces
-    across the ``NUM_KV_SPLITS`` partials in head-size space.
+    Q arrives pre-rotated (RHT). Per tile: unpack one byte per
+    (kv_slot, packed_offs) into PACKING_FACTOR fp32 streams; compute
+    ``S = Σ_s (Q_s · K_s) * scale`` with the per-(token,head) k_scale fused
+    and the asymmetric ``Q_sum * k_zp`` correction subtracted (zp lives in
+    the low 4 mantissa bits of the scale); accumulate the analogous PV term
+    into PACKING_FACTOR output streams. Streams interleave back into the
+    head-size ``mid_o``; ``_fwd_kernel_stage2`` reduces the NUM_KV_SPLITS
+    partials.
     """
     q_id = tl.program_id(0)
     h_id = tl.program_id(1)
@@ -646,21 +630,12 @@ def triton_per_token_head_attention(
 ) -> torch.Tensor:
     """Per-token-head split-KV attention.
 
-    ``q_to_req`` and ``q_to_klen`` are precomputed int32 GPU tensors of
-    shape ``(total_q,)`` — typically slices of persistent buffers owned by
-    the metadata builder so their pointers stay stable under CUDA graph
-    capture/replay.
-
-    Dispatch by ``kv_quant_mode``:
-
-    * INT8 / FP8 per-token-head — flat head slot, per-query elementwise
-      kernel.
-    * INT4 per-token-head — sub-byte packed cache.  Q is rotated
-      (RHT) before the kernel; the
-      packed kernel reads one byte per (slot, packed_offs) and runs the
-      QK / PV dots split across PACKING_FACTOR streams; output is
-      un-rotated in place after stage 2.  The dot lives in fp32 after the
-      unpack/dequant.
+    ``q_to_req`` / ``q_to_klen`` are precomputed int32 ``(total_q,)`` tensors
+    (usually slices of the builder's persistent buffers, so pointers stay
+    stable under CUDA graph capture/replay). INT8/FP8 use the flat per-query
+    elementwise kernel; INT4 uses the packed kernel (Q rotated by RHT, QK/PV
+    dots split across PACKING_FACTOR streams in fp32, output un-rotated in
+    place after stage 2).
     """
     packing_factor = _packing_factor_for(kv_quant_mode)
     if packing_factor > 1:
@@ -1274,7 +1249,7 @@ def _packing_factor_for(kv_quant_mode: KVQuantMode) -> int:
 
 
 def _maybe_rotate_q(q: torch.Tensor, kv_quant_mode: KVQuantMode) -> torch.Tensor:
-    """RHT for INT4 — same as the factory does."""
+    """RHT pre-rotation for INT4 (matches the rotation applied on write)."""
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
         return single_rht(q.float()).to(q.dtype)
     return q
@@ -1317,24 +1292,13 @@ def triton_per_token_head_prefill(
 ) -> torch.Tensor:
     """Flash-attention prefill with paged per-token-head dequant.
 
-    ``query_start_loc`` (shape ``[num_reqs+1]``) and ``seq_lens`` (shape
-    ``[num_reqs]``) describe the prefill portion only; when called on the
-    tail of a mixed batch the caller slices/offsets them accordingly.
-
-    ``seq_lens[i] = cached_len_i + q_len_i``, so causal attention covers
-    both the cached prefix and the queries within the current chunk. The
-    KV cache must already include the new tokens (i.e. the reshape-and-
-    cache step has run before this kernel).
-
-    Dispatch by ``kv_quant_mode``:
-
-    * INT8 / FP8 per-token-head — flat head slot; QKᵀ dot in bf16.
-    * INT4 per-token-head — sub-byte packed cache.  Q is rotated
-      (RHT) before the kernel; the
-      packed kernel reads one byte per (slot, packed_offs) and runs the
-      QK / PV dots split across PACKING_FACTOR streams; output is
-      un-rotated in place after the kernel.  The dot lives in fp32 after
-      the unpack/dequant.
+    ``query_start_loc`` ``[num_reqs+1]`` and ``seq_lens`` ``[num_reqs]``
+    describe the prefill portion only (the caller slices/offsets them for
+    the tail of a mixed batch). ``seq_lens[i] = cached_len_i + q_len_i``, so
+    causal attention covers both the cached prefix and the chunk's queries;
+    the reshape-and-cache step must have run first. INT8/FP8 use the flat
+    head slot (QKᵀ in bf16); INT4 uses the packed kernel (Q rotated by RHT,
+    QK/PV dots split across PACKING_FACTOR streams in fp32, un-rotated after).
     """
     if query.shape[0] == 0:
         return output

@@ -1,23 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""INT8 and FP8 per-token-head KV cache quantization (write side).
+"""INT8 / FP8 per-token-head KV quantization (write side only).
 
-The attention read path for these modes lives in the core kernel
-(:mod:`vllm.v1.attention.ops.triton_unified_attention`) — the only thing
-that differs from the unquantized path is loading per-(token, head)
-scales and fusing them into S/P, both gated by a constexpr branch.
-
-This module owns the write side: a small reshape kernel that does
-per-(token, head) absmax + symmetric quantization and writes both the
-quantized cache values and the float32 scale buffer.  INT8 and FP8 share
-the same kernel and only differ in (QUANT_MAX, QUANT_MIN) and the cache
-storage dtype (which Triton infers from the cache pointer).
-
-Symmetric quantization::
-
-    scale = absmax / QUANT_MAX
-    q = clamp(round(x / scale), QUANT_MIN, QUANT_MAX)
-    x_hat = q * scale
+The read path is the core kernel, which just loads the per-(token,head)
+scales and fuses them into S/P via a constexpr branch. This module owns the
+write side: a reshape kernel that does per-(token,head) absmax symmetric
+quantization (``scale = absmax / QUANT_MAX``) and writes the quantized cache
+plus the float32 scale. INT8 and FP8 share the kernel, differing only in
+(QUANT_MAX, QUANT_MIN) and the cache dtype (inferred from the pointer).
 """
 
 from __future__ import annotations

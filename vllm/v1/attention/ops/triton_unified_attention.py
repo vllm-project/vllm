@@ -256,8 +256,8 @@ def kernel_unified_attention(
     stride_vs_head: tl.int64 = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4=4 uses the triton_quant_kv
-    # factory, not this kernel.
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+    # triton_quant_kv.int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
