@@ -272,45 +272,17 @@ def _align_transfer_regions(
 
     def keyed_regions(
         regions: list[TransferRegion],
-    ) -> tuple[
-        list[tuple[tuple[str, int], TransferRegion]],
-        dict[str, int],
-    ]:
+    ) -> list[tuple[tuple[str, int], TransferRegion]]:
         counts: dict[str, int] = defaultdict(int)
         keyed: list[tuple[tuple[str, int], TransferRegion]] = []
         for region in regions:
             occurrence = counts[region.layer_name]
             counts[region.layer_name] += 1
             keyed.append(((region.layer_name, occurrence), region))
-        return keyed, counts
+        return keyed
 
-    local_keyed, local_counts = keyed_regions(local_regions)
-    remote_keyed, remote_counts = keyed_regions(remote_regions)
-    common_layers = local_counts.keys() & remote_counts.keys()
-    if not common_layers:
-        return (
-            [],
-            [],
-            (
-                "Mooncake found no common registered layers between producer "
-                f"{sorted(local_counts)} and consumer {sorted(remote_counts)}."
-            ),
-        )
-
-    for layer_name in sorted(common_layers):
-        local_count = local_counts[layer_name]
-        remote_count = remote_counts[layer_name]
-        if local_count != remote_count:
-            return (
-                [],
-                [],
-                (
-                    "Mooncake registered layer occurrence mismatch for "
-                    f"{layer_name}: producer has {local_count}, "
-                    f"consumer has {remote_count}."
-                ),
-            )
-
+    local_keyed = keyed_regions(local_regions)
+    remote_keyed = keyed_regions(remote_regions)
     remote_by_key = dict(remote_keyed)
     aligned_local: list[TransferRegion] = []
     aligned_remote: list[TransferRegion] = []
