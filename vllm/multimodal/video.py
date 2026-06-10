@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import math
 import os
 import tempfile
@@ -197,6 +196,24 @@ class PyNvVideoCodecDecoderSlot:
         self.stream = stream
         self.decoder = None
         self.source_path: str | None = None
+
+    def get_decoder(self, file_path: str, nvc, device_index: int):
+        if self.decoder is None:
+            self.decoder = nvc.SimpleDecoder(
+                file_path,
+                output_color_type=nvc.OutputColorType.RGB,
+                use_device_memory=True,
+                need_scanned_stream_metadata=False,
+                gpu_id=device_index,
+                cuda_stream=self.stream.cuda_stream,
+                decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+            )
+            self.source_path = file_path
+        elif self.source_path != file_path:
+            self.decoder.reconfigure_decoder(file_path)
+            self.source_path = file_path
+
+        return self.decoder
 
 
 class OpenCVVideoBackendMixin:
@@ -554,20 +571,6 @@ class PyNvVideoCodecVideoBackendMixin:
         finally:
             torch.accelerator.set_stream(previous_stream)
 
-    @staticmethod
-    def _drop_decoder_slot_decoder(decoder_slot: PyNvVideoCodecDecoderSlot) -> None:
-        decoder = decoder_slot.decoder
-        decoder_slot.decoder = None
-        decoder_slot.source_path = None
-        if decoder is None:
-            return
-        try:
-            decoder.stop()
-        except Exception:
-            logger.debug("Stopping PyNvVideoCodec decoder", exc_info=True)
-        del decoder
-        gc.collect()
-
     @classmethod
     @contextmanager
     def _borrow_decoder_slot(cls):
@@ -663,33 +666,10 @@ class PyNvVideoCodecVideoBackendMixin:
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
             with cls._torch_stream_context(stream):
-                decoder = decoder_slot.decoder
-                if decoder is not None and decoder_slot.source_path != file_path:
-                    try:
-                        decoder.reconfigure_decoder(file_path)
-                        decoder_slot.source_path = file_path
-                    except Exception:
-                        logger.debug("Recreating PyNvVideoCodec decoder", exc_info=True)
-                        cls._drop_decoder_slot_decoder(decoder_slot)
-                        decoder = None
-                if decoder is None:
-                    decoder = nvc.SimpleDecoder(
-                        file_path,
-                        output_color_type=nvc.OutputColorType.RGB,
-                        use_device_memory=True,
-                        need_scanned_stream_metadata=False,
-                        gpu_id=cls._DEVICE_INDEX,
-                        cuda_stream=stream.cuda_stream,
-                        decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
-                    )
-                    decoder_slot.decoder = decoder
-                    decoder_slot.source_path = file_path
-
-                try:
-                    decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
-                except Exception:
-                    cls._drop_decoder_slot_decoder(decoder_slot)
-                    raise
+                decoder = decoder_slot.get_decoder(
+                    file_path, nvc, device_index=cls._DEVICE_INDEX
+                )
+                decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
                 if len(decoded_frames) < len(frame_idx):
                     logger.warning(
                         "pynvvideocodec video loading: expected %d frames but got %d.",
