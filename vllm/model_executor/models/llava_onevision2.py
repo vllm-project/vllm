@@ -192,16 +192,21 @@ def _validate_video_sources(paths, model_config) -> None:
         _validate_video_source(path, model_config)
 
 
-# Design note: codec and frame backends both need the *raw video path string*
-# to survive untouched into ``_call_hf_processor``, where the HF processor runs
-# OV2's codec canvas+patchify (producing pixel_values/image_grid_thw/
-# patch_positions) or qwen_vl_utils frame sampling. vLLM's VIDEO_LOADER_REGISTRY
-# is intentionally NOT used here: loaders run at the decode stage and must emit
-# decoded RGB ``(frames, metadata)``, whereas OV2 needs path-level dispatch at
-# the processor stage (canvas + smart_resize + patchify are inseparable and
-# cannot be reconstructed from pre-decoded frames). Folding this into a loader
-# was evaluated and deferred (see PR description); the small marker/parser
-# machinery below is what keeps the path alive given that decision.
+# Design note: the two video backends take deliberately different paths.
+#
+# * frame backend: a normal vLLM VIDEO_LOADER_REGISTRY loader
+#   (``LlavaOnevision2VideoBackend`` below). Decoding to RGB
+#   ``(frames, metadata)`` is exactly what loaders are for, so frame sampling
+#   participates in the standard decode-stage pipeline.
+#
+# * codec backend: NOT a loader. OV2's codec path needs the *raw video path
+#   string* to survive untouched into ``_call_hf_processor``, where the HF
+#   processor builds the codec canvas + smart_resize + patchify
+#   (pixel_values/image_grid_thw/patch_positions). That transform is
+#   path-level and inseparable; it cannot be reconstructed from pre-decoded
+#   RGB frames, so it must run at the processor stage rather than the decode
+#   stage. The small marker/parser machinery below is what keeps the path
+#   alive for codec given that constraint.
 _CODEC_VIDEO_MARKER = "ov2_codec_video"
 
 
