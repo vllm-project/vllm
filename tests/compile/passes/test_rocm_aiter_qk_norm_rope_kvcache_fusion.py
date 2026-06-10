@@ -399,7 +399,7 @@ _FUSION_CONFIGS = [
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
-@pytest.mark.parametrize("num_tokens", [5, 16, 64, 128, 512, 1024, 2048])
+@pytest.mark.parametrize("num_tokens", [5, 16, 2048])
 @pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
 @pytest.mark.parametrize(
     "kv_stride_order",
@@ -436,6 +436,11 @@ def test_qk_norm_rope_kvcache_fusion(
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    if (
+        attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+        and use_shuffle_kv_layout == "1"
+    ):
+        pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,

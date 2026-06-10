@@ -313,7 +313,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         num_heads_k = self.num_kv_heads
         num_heads_v = self.num_kv_heads
         head_dim = self.head_size
-        use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        # unified_attention reads NHD only; never write the shuffle layout here.
+        use_shuffle_layout = False
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
         # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a
