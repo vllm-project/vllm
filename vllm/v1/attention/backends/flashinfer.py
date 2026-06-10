@@ -85,6 +85,35 @@ logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
 
+_NVFP4_KV_QUANT_STORE_DTYPES = {
+    "default": "nvfp4",
+    "fast": "nvfp4",
+    "max6": "nvfp4",
+    "static_6": "nvfp4",
+    "four_over_six": "nvfp4_4over6",
+    "4over6": "nvfp4_4over6",
+    "4_over_6": "nvfp4_4over6",
+    "4/6": "nvfp4_4over6",
+    "four_over_six_k_only": "nvfp4_4over6_k_only",
+    "4over6_k_only": "nvfp4_4over6_k_only",
+    "4_over_6_k_only": "nvfp4_4over6_k_only",
+    "4/6_k_only": "nvfp4_4over6_k_only",
+    "k_only": "nvfp4_4over6_k_only",
+}
+
+
+def _nvfp4_kv_quant_store_dtype() -> str:
+    algo = envs.VLLM_NVFP4_KV_QUANT_ALGO
+    normalized = algo.strip().lower().replace("-", "_").replace(" ", "_")
+    store_dtype = _NVFP4_KV_QUANT_STORE_DTYPES.get(normalized)
+    if store_dtype is None:
+        raise ValueError(
+            "Unsupported NVFP4 KV quantization algorithm "
+            f"{algo!r}; expected one of default, four_over_six, or "
+            "four_over_six_k_only."
+        )
+    return store_dtype
+
 
 def _get_trtllm_gen_workspace_buffer():
     global trtllm_gen_workspace_buffer
@@ -1848,13 +1877,18 @@ class FlashInferImpl(AttentionImpl):
             # actual tokens.
             k_cache = kv_cache[:, 0]
             v_cache = kv_cache[:, 1]
+            kv_cache_dtype = (
+                _nvfp4_kv_quant_store_dtype()
+                if self.is_kvcache_nvfp4
+                else self.kv_cache_dtype
+            )
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
                 k_cache,
                 v_cache,
                 slot_mapping,
-                self.kv_cache_dtype,
+                kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )
