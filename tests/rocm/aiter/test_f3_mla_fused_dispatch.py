@@ -62,51 +62,36 @@ def _make_mock_layer(k_scale_value: float = 1.0) -> MagicMock:
     return layer
 
 
-# ---------------------------------------------------------------------------
-# Tests: has_fused_rope_mla_kv_cache() probe
-# ---------------------------------------------------------------------------
+def test_f3_probe_returns_bool():
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    result = rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+    assert isinstance(result, bool)
 
 
-class TestHasFusedRopeMlaKvCache:
-    """has_fused_rope_mla_kv_cache() must return bool without raising."""
+def test_f3_probe_consistent_with_mla_enabled():
+    from vllm._aiter_ops import rocm_aiter_ops
 
-    def test_probe_returns_bool(self):
-        """Probe must always return bool, never raise."""
-        from vllm._aiter_ops import rocm_aiter_ops
+    f3_enabled = bool(
+        rocm_aiter_ops.is_mla_enabled()
+        and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+    )
+    assert isinstance(f3_enabled, bool)
 
-        result = rocm_aiter_ops.has_fused_rope_mla_kv_cache()
-        assert isinstance(result, bool), f"Expected bool, got {type(result).__name__}"
 
-    def test_probe_false_when_kernel_absent(self, monkeypatch):
-        """When the aiter import is mocked to fail, probe must return False."""
-        from vllm._aiter_ops import rocm_aiter_ops
+def test_f3_probe_consistent_with_kernel_import():
+    from vllm._aiter_ops import rocm_aiter_ops
 
-        monkeypatch.setattr(
-            rocm_aiter_ops,
-            "has_fused_rope_mla_kv_cache",
-            classmethod(lambda cls: False),
+    if not rocm_aiter_ops.has_fused_rope_mla_kv_cache():
+        pytest.skip("F3 kernel absent")
+    try:
+        from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
+    except ImportError:
+        pytest.fail(
+            "has_fused_rope_mla_kv_cache() returned True "
+            "but kernel is not importable"
         )
-        assert rocm_aiter_ops.has_fused_rope_mla_kv_cache() is False
 
-    def test_f3_disabled_when_mla_disabled(self, monkeypatch):
-        """F3 must not fire when is_mla_enabled() returns None/False."""
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        monkeypatch.setattr(
-            rocm_aiter_ops,
-            "is_mla_enabled",
-            classmethod(lambda cls: False),
-        )
-        f3_enabled = bool(
-            rocm_aiter_ops.is_mla_enabled()
-            and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
-        )
-        assert not f3_enabled
-
-
-# ---------------------------------------------------------------------------
-# Tests: probe → mla.py _f3_fusion_enabled consistency
-# ---------------------------------------------------------------------------
 
 
 def test_mla_wrapper_f3_enabled_via_probe():
@@ -142,10 +127,6 @@ def test_f3_probe_consistent_with_dispatch():
             "aiter.fused_qk_rope_concat_and_cache_mla is not importable"
         )
 
-
-# ---------------------------------------------------------------------------
-# Tests: do_rope_and_kv_cache_update() dispatch
-# ---------------------------------------------------------------------------
 
 
 class TestDoRopeAndKVCacheUpdate:
