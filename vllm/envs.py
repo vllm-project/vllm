@@ -226,6 +226,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_NVFP4_KV_QUANT_ALGO: str = "default"
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
@@ -1704,6 +1705,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
+    ),
+    # Select the NVFP4 KV cache store scale search algorithm. The default
+    # matches the existing max/6 path; four_over_six tries max/6 and max/4
+    # per 16-element group and stores the lower reconstruction-error scale.
+    "VLLM_NVFP4_KV_QUANT_ALGO": lambda: os.getenv(
+        "VLLM_NVFP4_KV_QUANT_ALGO", "default"
     ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
