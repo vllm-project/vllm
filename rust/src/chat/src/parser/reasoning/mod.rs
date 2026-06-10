@@ -15,6 +15,8 @@ use crate::parser::ParserFactory;
 /// Canonical public names for registered reasoning parsers.
 pub mod names {
     pub const COHERE_CMD: &str = "cohere_cmd";
+    pub const COHERE_COMMAND3: &str = "cohere_command3";
+    pub const COHERE_COMMAND4: &str = "cohere_command4";
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
@@ -51,6 +53,8 @@ impl ReasoningParserFactory {
 
         factory
             .register_parser::<CohereCmdReasoningParser>(names::COHERE_CMD)
+            .register_parser::<CohereCmdReasoningParser>(names::COHERE_COMMAND3)
+            .register_parser::<CohereCmdReasoningParser>(names::COHERE_COMMAND4)
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
