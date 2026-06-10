@@ -9,7 +9,7 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -18,8 +18,8 @@ use itertools::izip;
 use llm_multimodal::{
     AsyncMultiModalTracker, FieldLayout, ImagePreProcessor, ImageProcessorRegistry, MediaConnector,
     MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry, PreProcessorConfig, PreprocessedImages, PromptReplacement, TokenResolver,
-    TrackedMedia,
+    ModelRegistry, PreProcessorConfig, PreprocessedImages, PreprocessedVideos, PromptReplacement,
+    TokenResolver, TrackedMedia, VideoPreProcessor, VideoProcessorRegistry,
 };
 use tracing::warn;
 use vllm_engine_core_client::protocol::ModelDtype;
@@ -43,6 +43,7 @@ pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
     spec: ResolvedMultimodalSpec,
     image_processor: ResolvedImageProcessor,
+    video_processor: Option<ResolvedVideoProcessor>,
     media_connector: Arc<MediaConnector>,
 }
 
@@ -80,15 +81,29 @@ impl MultimodalModelContext {
             LazyLock::new(ImageProcessorRegistry::with_defaults);
         REGISTRY.find(&self.model_id, self.model_type.as_deref())
     }
+
+    /// Resolve a static video preprocessor for one loaded model.
+    fn resolve_video_processor(&self) -> Option<&'static dyn VideoPreProcessor> {
+        static REGISTRY: LazyLock<VideoProcessorRegistry> =
+            LazyLock::new(VideoProcessorRegistry::with_defaults);
+        REGISTRY.find(&self.model_id, self.model_type.as_deref())
+    }
+}
+
+/// Token identity for one media-type placeholder.
+#[derive(Clone)]
+struct PlaceholderSpec {
+    token: String,
+    marker_token_id: u32,
+    embed_token_id: u32,
 }
 
 /// Static model-specific prompt and tensor-layout behavior.
 #[derive(Clone)]
 struct ResolvedMultimodalSpec {
     raw: &'static dyn ModelProcessorSpec,
-    placeholder_token: String,
-    placeholder_marker_token_id: u32,
-    placeholder_embed_token_id: u32,
+    image_placeholder: PlaceholderSpec,
+    video_placeholder: PlaceholderSpec,
     field_layouts: HashMap<String, FieldLayout>,
     keep_on_cpu_keys: HashSet<String>,
 }
@@ -96,40 +111,136 @@ struct ResolvedMultimodalSpec {
 impl ResolvedMultimodalSpec {
     fn new(raw: &'static dyn ModelProcessorSpec, context: &MultimodalModelContext) -> Result<Self> {
         let metadata = context.metadata();
-        let placeholder_token =
+        let tokenizer = context.tokenizer();
+        // image
+        let image_token =
             raw.placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
-        // This is the rendered prompt marker, so resolve it from the token
-        // string itself. Do not use `ModelProcessorSpec::placeholder_token_id()`:
-        // for some specs that ID is the replacement vision/patch token,
-        // not necessarily the token ID of `placeholder_token`.
-        let placeholder_marker_token_id =
-            context.tokenizer().token_to_id(&placeholder_token).ok_or_else(|| {
-                multimodal!(
-                    "placeholder token `{placeholder_token}` is not in the tokenizer vocabulary"
-                )
-            })?;
-        let placeholder_embed_token_id =
+        let image_marker_token_id = tokenizer.token_to_id(&image_token).ok_or_else(|| {
+            multimodal!("placeholder token `{image_token}` is not in the tokenizer vocabulary")
+        })?;
+        let image_embed_token_id =
             raw.placeholder_token_id(&metadata).map_err(|error| multimodal!("{error}"))? as u32;
+        // video
+        let video_token =
+            raw.video_placeholder_token(&metadata).map_err(|error| multimodal!("{error}"))?;
+        let video_marker_token_id = tokenizer.token_to_id(&video_token).ok_or_else(|| {
+            multimodal!("placeholder token `{video_token}` is not in the tokenizer vocabulary")
+        })?;
+        let video_embed_token_id = raw
+            .video_placeholder_token_id(&metadata)
+            .map_err(|error| multimodal!("{error}"))? as u32;
 
         Ok(Self {
             raw,
-            placeholder_token,
-            placeholder_marker_token_id,
-            placeholder_embed_token_id,
+            image_placeholder: PlaceholderSpec {
+                token: image_token,
+                marker_token_id: image_marker_token_id,
+                embed_token_id: image_embed_token_id,
+            },
+            video_placeholder: PlaceholderSpec {
+                token: video_token,
+                marker_token_id: video_marker_token_id,
+                embed_token_id: video_embed_token_id,
+            },
             field_layouts: raw.field_layouts(),
             keep_on_cpu_keys: raw.keep_on_cpu_keys().into_iter().collect(),
         })
     }
 
-    fn prompt_replacements(
+    fn image_prompt_replacements(
         &self,
         context: &MultimodalModelContext,
         preprocessed: &PreprocessedImages,
-    ) -> Result<Vec<PromptReplacement>> {
-        self.raw
+    ) -> Result<Vec<ResolvedPromptReplacement>> {
+        let replacements = self
+            .raw
             .prompt_replacements(&context.metadata(), preprocessed)
-            .map_err(|error| multimodal!("{error}"))
+            .map_err(|error| multimodal!("{error}"))?;
+        Ok(replacements
+            .into_iter()
+            .map(|replacement| ResolvedPromptReplacement {
+                replacement,
+                placeholder_marker_token_id: self.image_placeholder.marker_token_id,
+                placeholder_embed_token_id: self.image_placeholder.embed_token_id,
+            })
+            .collect())
     }
+
+    fn video_prompt_replacements(
+        &self,
+        context: &MultimodalModelContext,
+        preprocessed: &PreprocessedVideos,
+    ) -> Result<Vec<ResolvedPromptReplacement>> {
+        let replacements = self
+            .raw
+            .video_prompt_replacements(&context.metadata(), preprocessed)
+            .map_err(|error| multimodal!("{error}"))?;
+        Ok(replacements
+            .into_iter()
+            .map(|replacement| ResolvedPromptReplacement {
+                replacement,
+                placeholder_marker_token_id: self.video_placeholder.marker_token_id,
+                placeholder_embed_token_id: self.video_placeholder.embed_token_id,
+            })
+            .collect())
+    }
+}
+
+/// Static video preprocessor plus its loaded config.
+#[derive(Clone)]
+struct ResolvedVideoProcessor {
+    raw: &'static dyn VideoPreProcessor,
+    config: PreProcessorConfig,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPromptReplacement {
+    replacement: PromptReplacement,
+    placeholder_marker_token_id: u32,
+    placeholder_embed_token_id: u32,
+}
+
+#[derive(Clone)]
+enum FetchedMediaItem {
+    Image {
+        frame: Arc<llm_multimodal::ImageFrame>,
+        uuid: Option<String>,
+    },
+    Video {
+        frame: Arc<llm_multimodal::VideoFrame>,
+        uuid: Option<String>,
+    },
+}
+
+impl FetchedMediaItem {
+    fn modality(&self) -> Modality {
+        match self {
+            Self::Image { .. } => Modality::Image,
+            Self::Video { .. } => Modality::Video,
+        }
+    }
+
+    fn identifier(&self) -> String {
+        match self {
+            Self::Image { frame, uuid } => uuid.clone().unwrap_or_else(|| frame.hash.clone()),
+            Self::Video { frame, uuid } => {
+                uuid.clone().unwrap_or_else(|| frame.container_hash.clone())
+            }
+        }
+    }
+
+    fn media_hash(&self) -> String {
+        match self {
+            Self::Image { frame, .. } => frame.hash.clone(),
+            Self::Video { frame, .. } => frame.container_hash.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedFeatureItem {
+    data: MmKwargsItem,
+    modality: String,
 }
 
 /// Static image preprocessor plus its loaded config.
@@ -139,10 +250,67 @@ struct ResolvedImageProcessor {
     config: PreProcessorConfig,
 }
 
-/// Request-scoped fetched media, kept together with tracker UUID metadata.
-struct FetchedImageMedia {
-    frames: Vec<Arc<llm_multimodal::ImageFrame>>,
-    uuids: Vec<Option<String>>,
+fn media_part_modality(part: &MediaContentPart) -> Option<Modality> {
+    match part {
+        MediaContentPart::Text { .. } => None,
+        MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageData { .. }
+        | MediaContentPart::ImageEmbeds { .. } => Some(Modality::Image),
+        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
+            Some(Modality::Video)
+        }
+    }
+}
+
+fn pop_tracked_media(
+    items: &mut VecDeque<TrackedMedia>,
+    uuids: &mut VecDeque<Option<String>>,
+    modality: Modality,
+) -> Result<FetchedMediaItem> {
+    let media = items
+        .pop_front()
+        .ok_or_else(|| multimodal!("missing fetched {modality} item"))?;
+    let uuid = uuids
+        .pop_front()
+        .ok_or_else(|| multimodal!("missing fetched {modality} UUID"))?;
+
+    match (modality, media) {
+        (Modality::Image, TrackedMedia::Image(frame)) => {
+            Ok(FetchedMediaItem::Image { frame, uuid })
+        }
+        (Modality::Video, TrackedMedia::Video(frame)) => {
+            Ok(FetchedMediaItem::Video { frame, uuid })
+        }
+        (Modality::Image, _) => Err(Error::UnsupportedMultimodalContent("non-image")),
+        (Modality::Video, _) => Err(Error::UnsupportedMultimodalContent("non-video")),
+        _ => Err(multimodal!(
+            "unsupported fetched media modality `{modality}`"
+        )),
+    }
+}
+
+fn ensure_queue_drained<T>(queue: &VecDeque<T>, modality: Modality, label: &str) -> Result<()> {
+    if queue.is_empty() {
+        return Ok(());
+    }
+    bail_multimodal!("unconsumed {modality} {label} remaining after request-order rebuild")
+}
+
+fn media_parts_by_modality(
+    fetched: &[FetchedMediaItem],
+) -> (
+    Vec<Arc<llm_multimodal::ImageFrame>>,
+    Vec<Arc<llm_multimodal::VideoFrame>>,
+) {
+    let mut images = Vec::new();
+    let mut videos = Vec::new();
+    for item in fetched {
+        match item {
+            FetchedMediaItem::Image { frame, .. } => images.push(Arc::clone(frame)),
+            FetchedMediaItem::Video { frame, .. } => videos.push(Arc::clone(frame)),
+        }
+    }
+    (images, videos)
 }
 
 impl MultimodalModelInfo {
@@ -204,6 +372,10 @@ impl MultimodalModelInfo {
             );
             return Ok(None);
         };
+        let video_processor = context.resolve_video_processor().map(|raw| ResolvedVideoProcessor {
+            raw,
+            config: preprocessor_config.clone(),
+        });
 
         let media_connector = Arc::new(
             MediaConnector::new(reqwest::Client::new(), MediaConnectorConfig::default())
@@ -217,6 +389,7 @@ impl MultimodalModelInfo {
                 raw: image_processor,
                 config: preprocessor_config,
             },
+            video_processor,
             media_connector,
         }))
     }
@@ -225,79 +398,19 @@ impl MultimodalModelInfo {
     ///
     /// The HF renderer uses this token while flattening image content in string
     /// content format.
-    pub(crate) fn placeholder_token(&self) -> &str {
-        &self.spec.placeholder_token
+    pub fn placeholder_token(&self) -> &str {
+        &self.spec.image_placeholder.token
     }
-}
 
-/// Finalize a rendered chat prompt into text-generation input.
-///
-/// Text-only requests pass through unchanged as `Prompt::Text`. Multimodal
-/// requests are tokenized in chat, their image placeholders are expanded, and
-/// preprocessed image features are attached for engine-core transport.
-pub(crate) async fn finalize_rendered_prompt(
-    request: &ChatRequest,
-    rendered: RenderedPrompt,
-    info: Option<&MultimodalModelInfo>,
-    model_dtype: ModelDtype,
-) -> Result<(Prompt, Option<MmFeatures>)> {
-    if !request.has_multimodal() {
-        return Ok((rendered.prompt, None));
+    /// Return the template-visible video placeholder token for this model.
+    ///
+    /// The HF renderer uses this token while flattening video content in string
+    /// content format.
+    pub fn video_placeholder_token(&self) -> &str {
+        &self.spec.video_placeholder.token
     }
-    let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
-    let Prompt::Text(prompt) = rendered.prompt else {
-        bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
-    };
-    let media_parts = extract_media_parts(request)?;
 
-    let mut prompt_token_ids = info
-        .context
-        .tokenizer()
-        .encode(&prompt, request.add_special_tokens)
-        .map_err(|error| multimodal!("{error}"))?;
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
-
-    Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
-}
-
-/// Extract image media parts from chat messages in message/content order.
-///
-/// Assistant history is skipped because generated assistant blocks are already
-/// represented as text for prompt rendering in this crate.
-fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
-    let mut all_parts = Vec::new();
-    for message in &request.messages {
-        let content = match message {
-            ChatMessage::System { content }
-            | ChatMessage::Developer { content, .. }
-            | ChatMessage::User { content }
-            | ChatMessage::ToolResponse { content, .. } => content,
-            ChatMessage::Assistant { .. } => continue,
-        };
-        let ChatContent::Parts(parts) = content else {
-            continue;
-        };
-        for part in parts {
-            match part {
-                ChatContentPart::Text { .. } => {}
-                ChatContentPart::ImageUrl {
-                    image_url,
-                    detail,
-                    uuid,
-                } => all_parts.push(MediaContentPart::ImageUrl {
-                    url: image_url.clone(),
-                    detail: *detail,
-                    uuid: uuid.clone(),
-                }),
-            }
-        }
-    }
-    Ok(all_parts)
-}
-
-impl MultimodalModelInfo {
-    /// Run media fetch, image preprocessing, prompt expansion, and feature
-    /// build.
+    /// Run media fetch, preprocessing, prompt expansion, and feature build.
     ///
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
@@ -312,13 +425,62 @@ impl MultimodalModelInfo {
             return Ok(Vec::new());
         }
         let media_parts_len = media_parts.len();
+        let fetched = self.fetch_media(media_parts).await?;
+        let (image_frames, video_frames) = media_parts_by_modality(&fetched);
 
-        let fetched = self.fetch_images(media_parts).await?;
-        let preprocessed = self.preprocess_images(&fetched.frames).await?;
-        let replacements = self.spec.prompt_replacements(&self.context, &preprocessed)?;
-        let ranges = self.expand_prompt_tokens(prompt_token_ids, replacements)?;
+        let image_preprocessed = if image_frames.is_empty() {
+            None
+        } else {
+            Some(self.preprocess_images(&image_frames).await?)
+        };
+        let video_preprocessed = if video_frames.is_empty() {
+            None
+        } else {
+            Some(self.preprocess_videos(&video_frames).await?)
+        };
 
-        let features = self.build_features(preprocessed, fetched, ranges, model_dtype)?;
+        let mut image_replacements: VecDeque<_> =
+            if let Some(preprocessed) = image_preprocessed.as_ref() {
+                self.spec.image_prompt_replacements(&self.context, preprocessed)?
+            } else {
+                Vec::new()
+            }
+            .into();
+        let mut video_replacements: VecDeque<_> =
+            if let Some(preprocessed) = video_preprocessed.as_ref() {
+                self.spec.video_prompt_replacements(&self.context, preprocessed)?
+            } else {
+                Vec::new()
+            }
+            .into();
+        let mut ordered_replacements = Vec::with_capacity(fetched.len());
+        for item in &fetched {
+            let replacement = match item.modality() {
+                Modality::Image => image_replacements
+                    .pop_front()
+                    .ok_or_else(|| multimodal!("missing image prompt replacement"))?,
+                Modality::Video => video_replacements
+                    .pop_front()
+                    .ok_or_else(|| multimodal!("missing video prompt replacement"))?,
+                other => bail_multimodal!("unsupported prompt replacement modality `{other}`"),
+            };
+            ordered_replacements.push(replacement);
+        }
+        ensure_queue_drained(&image_replacements, Modality::Image, "prompt replacements")?;
+        ensure_queue_drained(&video_replacements, Modality::Video, "prompt replacements")?;
+
+        let ranges = self.expand_prompt_tokens(prompt_token_ids, ordered_replacements)?;
+        let image_features = if let Some(preprocessed) = image_preprocessed {
+            self.build_image_feature_items(preprocessed, image_frames.len(), model_dtype)?
+        } else {
+            VecDeque::new()
+        };
+        let video_features = if let Some(preprocessed) = video_preprocessed {
+            self.build_video_feature_items(preprocessed, video_frames.len(), model_dtype)?
+        } else {
+            VecDeque::new()
+        };
+        let features = self.build_features(fetched, image_features, video_features, ranges)?;
         if features.len() != media_parts_len {
             bail_multimodal!(
                 "number of built multimodal features {} does not match number of media parts {}",
@@ -329,34 +491,62 @@ impl MultimodalModelInfo {
         Ok(features)
     }
 
-    /// Fetch all image parts and preserve their request-order UUID metadata.
-    async fn fetch_images(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedImageMedia> {
-        let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
-        for part in media_parts {
-            tracker.push_part(part).map_err(|error| multimodal!("{error}"))?;
+    /// Fetch all media parts and rebuild them in original request order.
+    async fn fetch_media(
+        &self,
+        media_parts: Vec<MediaContentPart>,
+    ) -> Result<Vec<FetchedMediaItem>> {
+        let preprocessor_config = self
+            .video_processor
+            .as_ref()
+            .map(|vp| &vp.config)
+            .unwrap_or(&self.image_processor.config);
+        let mut tracker = AsyncMultiModalTracker::for_model(
+            Arc::clone(&self.media_connector),
+            &self.context.metadata(),
+            preprocessor_config,
+        )
+        .map_err(|error| multimodal!("{error}"))?;
+        for part in &media_parts {
+            tracker.push_part(part.clone()).map_err(|error| multimodal!("{error}"))?;
         }
 
         let tracker_output = tracker.finalize().await.map_err(|error| multimodal!("{error}"))?;
-        let images = tracker_output.data.get(&Modality::Image).cloned().unwrap_or_default();
-        let uuids = tracker_output.uuids.get(&Modality::Image).cloned().unwrap_or_default();
+        let mut images: VecDeque<_> =
+            tracker_output.data.get(&Modality::Image).cloned().unwrap_or_default().into();
+        let mut image_uuids: VecDeque<_> =
+            tracker_output.uuids.get(&Modality::Image).cloned().unwrap_or_default().into();
+        let mut videos: VecDeque<_> =
+            tracker_output.data.get(&Modality::Video).cloned().unwrap_or_default().into();
+        let mut video_uuids: VecDeque<_> =
+            tracker_output.uuids.get(&Modality::Video).cloned().unwrap_or_default().into();
 
-        let frames = images
-            .into_iter()
-            .map(|media| match media {
-                TrackedMedia::Image(frame) => Ok(frame),
-                _ => Err(Error::UnsupportedMultimodalContent("non-image")),
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut fetched = Vec::with_capacity(media_parts.len());
+        for part in media_parts {
+            let Some(modality) = media_part_modality(&part) else {
+                continue;
+            };
+            let item = match modality {
+                Modality::Image => {
+                    pop_tracked_media(&mut images, &mut image_uuids, Modality::Image)?
+                }
+                Modality::Video => {
+                    pop_tracked_media(&mut videos, &mut video_uuids, Modality::Video)?
+                }
+                other => bail_multimodal!("unsupported fetched media modality `{other}`"),
+            };
+            fetched.push(item);
+        }
 
-        Ok(FetchedImageMedia { frames, uuids })
+        ensure_queue_drained(&images, Modality::Image, "media items")?;
+        ensure_queue_drained(&videos, Modality::Video, "media items")?;
+        ensure_queue_drained(&image_uuids, Modality::Image, "UUIDs")?;
+        ensure_queue_drained(&video_uuids, Modality::Video, "UUIDs")?;
+        Ok(fetched)
     }
 
     /// Preprocess fetched image frames with the model's resolved image
     /// processor.
-    ///
-    /// The processor work is CPU-heavy relative to request wiring, so it runs
-    /// in a blocking task and returns owned tensors ready for wire
-    /// conversion.
     async fn preprocess_images(
         &self,
         image_frames: &[Arc<llm_multimodal::ImageFrame>],
@@ -372,42 +562,65 @@ impl MultimodalModelInfo {
         .map_err(|error| multimodal!("image preprocessing task failed: {error}"))?
     }
 
+    /// Preprocess fetched video frames with the model's resolved video
+    /// processor.
+    async fn preprocess_videos(
+        &self,
+        video_frames: &[Arc<llm_multimodal::VideoFrame>],
+    ) -> Result<PreprocessedVideos> {
+        let video_processor = self
+            .video_processor
+            .as_ref()
+            .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+        let config = video_processor.config.clone();
+        let processor = video_processor.raw;
+        let videos = video_frames.iter().map(|frame| frame.frames().to_vec()).collect::<Vec<_>>();
+
+        tokio::task::spawn_blocking(move || {
+            processor.preprocess(&videos, &config).map_err(|error| multimodal!("{error}"))
+        })
+        .await
+        .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
+    }
+
     /// Replace rendered placeholder markers with model-specific replacement
     /// tokens.
-    ///
-    /// Replacements are consumed in order, matching the original media-part
-    /// order. The returned ranges point into the already-expanded prompt.
     fn expand_prompt_tokens(
         &self,
         prompt_token_ids: &mut Vec<u32>,
-        replacements: Vec<PromptReplacement>,
+        replacements: Vec<ResolvedPromptReplacement>,
     ) -> Result<Vec<PlaceholderRange>> {
-        expand_prompt_token_ids(
-            prompt_token_ids,
-            replacements,
-            self.spec.placeholder_marker_token_id,
-            self.spec.placeholder_embed_token_id,
-            &self.spec.placeholder_token,
-        )
+        expand_prompt_token_ids(prompt_token_ids, replacements)
     }
 
-    /// Convert preprocessed image tensors into engine-core multimodal features.
-    ///
-    /// One `MmFeatureSpec` is produced per image. Tensor fields are
-    /// sliced according to the model spec's field layout declarations.
-    fn build_features(
+    fn build_image_feature_items(
         &self,
         preprocessed: PreprocessedImages,
-        images: FetchedImageMedia,
-        ranges: Vec<PlaceholderRange>,
+        item_count: usize,
         model_dtype: ModelDtype,
-    ) -> Result<MmFeatures> {
-        let len = images.frames.len();
-        let tensors = tensor::collect_tensors(preprocessed, model_dtype)?;
+    ) -> Result<VecDeque<PreparedFeatureItem>> {
+        let tensors = tensor::collect_image_tensors(preprocessed, model_dtype)?;
+        self.build_feature_items_from_tensors("image", tensors, item_count)
+    }
 
-        let mut features = Vec::with_capacity(images.frames.len());
-        for (index, (frame, uuid, range)) in izip!(images.frames, images.uuids, ranges).enumerate()
-        {
+    fn build_video_feature_items(
+        &self,
+        preprocessed: PreprocessedVideos,
+        item_count: usize,
+        model_dtype: ModelDtype,
+    ) -> Result<VecDeque<PreparedFeatureItem>> {
+        let tensors = tensor::collect_video_tensors(preprocessed, model_dtype)?;
+        self.build_feature_items_from_tensors("video", tensors, item_count)
+    }
+
+    fn build_feature_items_from_tensors(
+        &self,
+        modality: &str,
+        tensors: HashMap<String, tensor::KwargValue>,
+        item_count: usize,
+    ) -> Result<VecDeque<PreparedFeatureItem>> {
+        let mut items = VecDeque::with_capacity(item_count);
+        for index in 0..item_count {
             let mut data = MmKwargsItem::new();
             for (key, tensor) in &tensors {
                 let keep_on_cpu = self.spec.keep_on_cpu_keys.contains(key);
@@ -437,7 +650,7 @@ impl MultimodalModelInfo {
                     None => (
                         tensor.clone(),
                         MmField::Shared(MmSharedField {
-                            batch_size: len,
+                            batch_size: item_count,
                             keep_on_cpu,
                         }),
                     ),
@@ -452,33 +665,139 @@ impl MultimodalModelInfo {
                 );
             }
 
-            let hash = frame.hash.clone();
-            features.push(MmFeatureSpec {
-                data: Some(data),
-                modality: "image".to_string(),
-                identifier: uuid.unwrap_or_else(|| hash.clone()),
-                mm_position: range,
-                mm_hash: Some(hash),
+            items.push_back(PreparedFeatureItem {
+                data,
+                modality: modality.to_string(),
             });
         }
 
+        Ok(items)
+    }
+
+    fn build_features(
+        &self,
+        fetched: Vec<FetchedMediaItem>,
+        image_features: VecDeque<PreparedFeatureItem>,
+        video_features: VecDeque<PreparedFeatureItem>,
+        ranges: Vec<PlaceholderRange>,
+    ) -> Result<MmFeatures> {
+        if ranges.len() != fetched.len() {
+            bail_multimodal!(
+                "number of placeholder ranges {} does not match number of fetched media items {}",
+                ranges.len(),
+                fetched.len()
+            );
+        }
+
+        let mut image_features = image_features;
+        let mut video_features = video_features;
+        let mut features = Vec::with_capacity(fetched.len());
+        for (item, range) in izip!(fetched, ranges) {
+            let feature = match item.modality() {
+                Modality::Image => image_features
+                    .pop_front()
+                    .ok_or_else(|| multimodal!("missing prepared image feature"))?,
+                Modality::Video => video_features
+                    .pop_front()
+                    .ok_or_else(|| multimodal!("missing prepared video feature"))?,
+                other => bail_multimodal!("unsupported feature modality `{other}`"),
+            };
+            features.push(MmFeatureSpec {
+                data: Some(feature.data),
+                modality: feature.modality,
+                identifier: item.identifier(),
+                mm_position: range,
+                mm_hash: Some(item.media_hash()),
+            });
+        }
+
+        ensure_queue_drained(&image_features, Modality::Image, "feature items")?;
+        ensure_queue_drained(&video_features, Modality::Video, "feature items")?;
         Ok(features)
     }
 }
 
+/// Finalize a rendered chat prompt into text-generation input.
+///
+/// Text-only requests pass through unchanged as `Prompt::Text`. Multimodal
+/// requests are tokenized in chat, their media placeholders are expanded, and
+/// preprocessed media features are attached for engine-core transport.
+pub(crate) async fn finalize_rendered_prompt(
+    request: &ChatRequest,
+    rendered: RenderedPrompt,
+    info: Option<&MultimodalModelInfo>,
+    model_dtype: ModelDtype,
+) -> Result<(Prompt, Option<MmFeatures>)> {
+    if !request.has_multimodal() {
+        return Ok((rendered.prompt, None));
+    }
+    let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
+    let Prompt::Text(prompt) = rendered.prompt else {
+        bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
+    };
+    let media_parts = extract_media_parts(request)?;
+
+    let mut prompt_token_ids = info
+        .context
+        .tokenizer()
+        .encode(&prompt, request.add_special_tokens)
+        .map_err(|error| multimodal!("{error}"))?;
+    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+
+    Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
+}
+
+/// Extract media parts from chat messages in message/content order.
+///
+/// Assistant history is skipped because generated assistant blocks are already
+/// represented as text for prompt rendering in this crate.
+fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
+    let mut all_parts = Vec::new();
+    for message in &request.messages {
+        let content = match message {
+            ChatMessage::System { content }
+            | ChatMessage::Developer { content, .. }
+            | ChatMessage::User { content }
+            | ChatMessage::ToolResponse { content, .. } => content,
+            ChatMessage::Assistant { .. } => continue,
+        };
+        let ChatContent::Parts(parts) = content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                ChatContentPart::Text { .. } => {}
+                ChatContentPart::ImageUrl {
+                    image_url,
+                    detail,
+                    uuid,
+                } => all_parts.push(MediaContentPart::ImageUrl {
+                    url: image_url.clone(),
+                    detail: *detail,
+                    uuid: uuid.clone(),
+                }),
+                ChatContentPart::VideoUrl { video_url, uuid } => {
+                    all_parts.push(MediaContentPart::VideoUrl {
+                        url: video_url.clone(),
+                        uuid: uuid.clone(),
+                    })
+                }
+            }
+        }
+    }
+    Ok(all_parts)
+}
+
 fn expand_prompt_token_ids(
     prompt_token_ids: &mut Vec<u32>,
-    replacements: Vec<PromptReplacement>,
-    placeholder_marker_token_id: u32,
-    placeholder_embed_token_id: u32,
-    placeholder_token: &str,
+    replacements: Vec<ResolvedPromptReplacement>,
 ) -> Result<Vec<PlaceholderRange>> {
     if replacements.is_empty() {
         return Ok(Vec::new());
     }
 
     let replacement_growth = replacements.iter().fold(0usize, |total, replacement| {
-        total.saturating_add(replacement.tokens.len().saturating_sub(1))
+        total.saturating_add(replacement.replacement.tokens.len().saturating_sub(1))
     });
     let mut expanded =
         Vec::with_capacity(prompt_token_ids.len().saturating_add(replacement_growth));
@@ -486,37 +805,39 @@ fn expand_prompt_token_ids(
     let mut cursor = 0usize;
 
     for replacement in replacements {
-        if replacement.modality != Modality::Image {
+        let offset = find_next_token(
+            prompt_token_ids,
+            replacement.placeholder_marker_token_id,
+            cursor,
+        )
+        .ok_or_else(|| {
+            multimodal!(
+                "placeholder token `{}` was not found in tokenized prompt",
+                replacement.replacement.placeholder_token
+            )
+        })?;
+
+        if replacement.replacement.tokens.is_empty() {
             bail_multimodal!(
-                "unsupported prompt replacement modality `{}`",
-                replacement.modality
+                "placeholder token `{}` expanded to no tokens",
+                replacement.replacement.placeholder_token
             );
         }
 
-        let offset = find_next_token(prompt_token_ids, placeholder_marker_token_id, cursor)
-            .ok_or_else(|| {
-                multimodal!(
-                    "placeholder token `{placeholder_token}` was not found in tokenized prompt"
-                )
-            })?;
-
-        if replacement.tokens.is_empty() {
-            bail_multimodal!("placeholder token `{placeholder_token}` expanded to no tokens");
-        }
-
-        let replacement_len = replacement.tokens.len();
+        let replacement_len = replacement.replacement.tokens.len();
         let is_embed = {
             let mask = replacement
+                .replacement
                 .tokens
                 .iter()
-                .map(|&token| token as u32 == placeholder_embed_token_id)
+                .map(|&token| token as u32 == replacement.placeholder_embed_token_id)
                 .collect::<Vec<_>>();
             WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
         };
 
         expanded.extend_from_slice(&prompt_token_ids[cursor..offset]);
         let expanded_offset = expanded.len();
-        expanded.extend(replacement.tokens.into_iter().map(|token| token as u32));
+        expanded.extend(replacement.replacement.tokens.into_iter().map(|token| token as u32));
         ranges.push(PlaceholderRange {
             offset: expanded_offset,
             length: replacement_len,
@@ -527,14 +848,13 @@ fn expand_prompt_token_ids(
 
     expanded.extend_from_slice(&prompt_token_ids[cursor..]);
     *prompt_token_ids = expanded;
-
     Ok(ranges)
 }
 
 /// Find `needle` in `haystack`, starting at `start`.
 ///
 /// This is intentionally order-preserving rather than a global replace: each
-/// image consumes the next placeholder occurrence.
+/// media item consumes the next placeholder occurrence.
 fn find_next_token(haystack: &[u32], needle: u32, start: usize) -> Option<usize> {
     haystack
         .get(start..)?
@@ -573,6 +893,8 @@ mod tests {
     const LLAMA4_PATCH_ID: u32 = 200092;
     const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
+    const TEST_VIDEO_MARKER_ID: u32 = 200095;
+    const TEST_VIDEO_EMBED_ID: u32 = 200096;
 
     struct TestTokenizer;
 
@@ -655,6 +977,7 @@ mod tests {
                 raw: raw_image_processor,
                 config: PreProcessorConfig::default(),
             },
+            video_processor: None,
             media_connector,
         }
     }
@@ -709,11 +1032,24 @@ mod tests {
         );
     }
 
+    fn resolve_image_replacements(
+        replacements: Vec<PromptReplacement>,
+    ) -> Vec<ResolvedPromptReplacement> {
+        replacements
+            .into_iter()
+            .map(|replacement| ResolvedPromptReplacement {
+                replacement,
+                placeholder_marker_token_id: LLAMA4_IMAGE_ID,
+                placeholder_embed_token_id: LLAMA4_PATCH_ID,
+            })
+            .collect()
+    }
+
     #[test]
     fn expand_prompt_tokens_marks_only_llama4_patch_tokens_as_embed() {
         let info = llama4_info();
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
-        let replacements = vec![llama4_multi_tile_replacement()];
+        let replacements = resolve_image_replacements(vec![llama4_multi_tile_replacement()]);
 
         let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap();
 
@@ -744,7 +1080,7 @@ mod tests {
     fn expand_prompt_tokens_errors_when_placeholder_missing() {
         let info = llama4_info();
         let mut prompt_token_ids = vec![1, 2, 3];
-        let replacements = vec![llama4_single_tile_replacement()];
+        let replacements = resolve_image_replacements(vec![llama4_single_tile_replacement()]);
 
         let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
 
@@ -772,6 +1108,7 @@ mod tests {
             llama4_single_tile_replacement(),
             llama4_single_tile_replacement(),
         ];
+        let replacements = resolve_image_replacements(replacements);
 
         let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
 
@@ -784,11 +1121,11 @@ mod tests {
         let info = llama4_info();
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
         let original_prompt_token_ids = prompt_token_ids.clone();
-        let replacements = vec![PromptReplacement::sequence(
+        let replacements = resolve_image_replacements(vec![PromptReplacement::sequence(
             Modality::Image,
             "<|image|>",
             Vec::new(),
-        )];
+        )]);
 
         let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
 
@@ -806,6 +1143,7 @@ mod tests {
             llama4_single_tile_replacement(),
             llama4_single_tile_replacement(),
         ];
+        let replacements = resolve_image_replacements(replacements);
 
         let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap();
 
@@ -833,5 +1171,56 @@ mod tests {
         assert_eq!(ranges[1].offset, 7);
         assert_eq!(ranges[1].length, 5);
         assert_bool_mask(&ranges[1], &[false, false, true, true, false]);
+    }
+
+    #[test]
+    fn expand_prompt_token_ids_supports_mixed_image_and_video_placeholders() {
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2, TEST_VIDEO_MARKER_ID, 3];
+        let replacements = vec![
+            ResolvedPromptReplacement {
+                replacement: PromptReplacement::sequence(
+                    Modality::Image,
+                    "<|image|>",
+                    vec![LLAMA4_IMAGE_START_ID as TokenId, LLAMA4_PATCH_ID as TokenId],
+                ),
+                placeholder_marker_token_id: LLAMA4_IMAGE_ID,
+                placeholder_embed_token_id: LLAMA4_PATCH_ID,
+            },
+            ResolvedPromptReplacement {
+                replacement: PromptReplacement::sequence(
+                    Modality::Video,
+                    "<|video_pad|>",
+                    vec![
+                        TEST_VIDEO_MARKER_ID as TokenId,
+                        TEST_VIDEO_EMBED_ID as TokenId,
+                        TEST_VIDEO_MARKER_ID as TokenId,
+                    ],
+                ),
+                placeholder_marker_token_id: TEST_VIDEO_MARKER_ID,
+                placeholder_embed_token_id: TEST_VIDEO_EMBED_ID,
+            },
+        ];
+
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, replacements).unwrap();
+
+        assert_eq!(
+            prompt_token_ids,
+            vec![
+                1,
+                LLAMA4_IMAGE_START_ID,
+                LLAMA4_PATCH_ID,
+                2,
+                TEST_VIDEO_MARKER_ID,
+                TEST_VIDEO_EMBED_ID,
+                TEST_VIDEO_MARKER_ID,
+                3,
+            ]
+        );
+        assert_eq!(ranges[0].offset, 1);
+        assert_eq!(ranges[0].length, 2);
+        assert_bool_mask(&ranges[0], &[false, true]);
+        assert_eq!(ranges[1].offset, 4);
+        assert_eq!(ranges[1].length, 3);
+        assert_bool_mask(&ranges[1], &[false, true, false]);
     }
 }

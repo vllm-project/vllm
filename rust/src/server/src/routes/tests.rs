@@ -427,6 +427,16 @@ impl Tokenizer for FakeChatTokenizer {
                 rest = stripped;
                 continue;
             }
+            if let Some(stripped) = rest.strip_prefix("<|image_pad|>") {
+                token_ids.push(151655);
+                rest = stripped;
+                continue;
+            }
+            if let Some(stripped) = rest.strip_prefix("<|video_pad|>") {
+                token_ids.push(151657);
+                rest = stripped;
+                continue;
+            }
 
             let ch = rest.chars().next().expect("rest is not empty");
             let mut buf = [0; 4];
@@ -451,6 +461,7 @@ impl Tokenizer for FakeChatTokenizer {
         match token {
             "<image>" => Some(999),
             "<|image_pad|>" => Some(151655),
+            "<|video_pad|>" => Some(151657),
             "<think>" => Some(0xF001),
             "</think>" => Some(0xF002),
             "<|START_THINKING|>" => Some(0xF003),
@@ -466,6 +477,7 @@ impl Tokenizer for FakeChatTokenizer {
             FAKE_BOS_TOKEN_ID => Some("<bos>".to_string()),
             999 => Some("<image>".to_string()),
             151655 => Some("<|image_pad|>".to_string()),
+            151657 => Some("<|video_pad|>".to_string()),
             0xF001 => Some("<think>".to_string()),
             0xF002 => Some("</think>".to_string()),
             0xF003 => Some("<|START_THINKING|>".to_string()),
@@ -547,11 +559,25 @@ impl ChatBackend for FakeChatBackend {
 
 impl ChatRenderer for FakeChatBackend {
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+        let image_placeholder = self
+            .multimodal_model_info
+            .as_ref()
+            .map(|info| info.placeholder_token())
+            .unwrap_or("<image>");
+        let video_placeholder = self
+            .multimodal_model_info
+            .as_ref()
+            .map(|info| info.video_placeholder_token())
+            .unwrap_or("<video>");
         let mut prompt = String::new();
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&render_fake_message_content(message)?);
+            prompt.push_str(&render_fake_message_content(
+                message,
+                image_placeholder,
+                video_placeholder,
+            )?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {
@@ -563,17 +589,27 @@ impl ChatRenderer for FakeChatBackend {
     }
 }
 
-fn render_fake_message_content(message: &ChatMessage) -> vllm_chat::Result<String> {
+fn render_fake_message_content(
+    message: &ChatMessage,
+    image_placeholder: &str,
+    video_placeholder: &str,
+) -> vllm_chat::Result<String> {
     match message {
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content),
+        | ChatMessage::ToolResponse { content, .. } => {
+            render_fake_content(content, image_placeholder, video_placeholder)
+        }
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
 
-fn render_fake_content(content: &ChatContent) -> vllm_chat::Result<String> {
+fn render_fake_content(
+    content: &ChatContent,
+    image_placeholder: &str,
+    video_placeholder: &str,
+) -> vllm_chat::Result<String> {
     Ok(match content {
         ChatContent::Text(text) => text.clone(),
         ChatContent::Parts(parts) => {
@@ -581,7 +617,8 @@ fn render_fake_content(content: &ChatContent) -> vllm_chat::Result<String> {
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => out.push_str("<image>"),
+                    ChatContentPart::ImageUrl { .. } => out.push_str(image_placeholder),
+                    ChatContentPart::VideoUrl { .. } => out.push_str(video_placeholder),
                 }
             }
             out
@@ -596,7 +633,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
     ));
     fs::write(
         &config_path,
-        r#"{"model_type":"qwen2_vl","vision_token_id":151655}"#,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655,"video_token_id":151656}"#,
     )
     .expect("write qwen test config");
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
