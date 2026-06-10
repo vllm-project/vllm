@@ -234,7 +234,12 @@ def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bo
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
-    intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # Note: The layer has not performed rounding on intermediate_size's at this
+    # point. Use the unpadded size which won't change.
+    intermediate_size_per_partition = (
+        layer.moe_config.intermediate_size_per_partition_unpadded
+    )
+    assert intermediate_size_per_partition is not None
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.apply_router_weight_on_input
 
