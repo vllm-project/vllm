@@ -58,6 +58,32 @@ def compress_norm_rope_store_triton(
     ``use_fp4_cache``. Identical launch signature for all three.
     """
     if head_dim == 512:
+        if state_cache.device.type == "xpu":
+            from vllm.models.deepseek_v4.xpu.compress_insert_fp8mix import (
+                _fused_kv_compress_norm_rope_insert_sparse_attn_xpu,
+            )
+
+            if _fused_kv_compress_norm_rope_insert_sparse_attn_xpu(
+                state_cache=state_cache,
+                token_to_req_indices=token_to_req_indices,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=block_table,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                k_cache_metadata=k_cache_metadata,
+                compress_ratio=compress_ratio,
+                overlap=overlap,
+                rope_head_dim=rope_head_dim,
+                rms_norm_weight=rms_norm_weight,
+                rms_norm_eps=rms_norm_eps,
+                token_stride=token_stride,
+                scale_dim=scale_dim,
+                head_dim=head_dim,
+                use_fp4_cache=use_fp4_cache,
+            ):
+                return
+
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
         num_warps = 4
     elif use_fp4_cache:
