@@ -220,3 +220,174 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+def _make_decode_request(running: int, last_token_age: float | None) -> Mock:
+    """Build a mock Request whose engine_client.get_decode_liveness()
+    returns ``(running, last_token_age)``."""
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.get_decode_liveness.return_value = (running, last_token_age)
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+    return mock_request
+
+
+@pytest.mark.asyncio
+async def test_health_decode_ok_when_progressing():
+    """Running > 0 + recent token => 200 ok."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(_make_decode_request(running=3, last_token_age=0.5))
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "ok"
+    assert body["running"] == 3
+    assert body["last_token_age_seconds"] == 0.5
+    assert body["stall_threshold_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_idle_when_no_running():
+    """running == 0 is idle, not stalled, even if last_token_age is huge."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(_make_decode_request(running=0, last_token_age=9999.0))
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "idle"
+    assert body["running"] == 0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_idle_when_never_decoded():
+    """No token ever emitted (cold start) => idle, 200."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(_make_decode_request(running=0, last_token_age=None))
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "idle"
+    assert body["last_token_age_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_decode_idle_when_long_prefill_in_flight():
+    """Running > 0 but no token EVER emitted (e.g. long prefill on the first
+    request the engine has ever seen) is reported as idle, not stalled —
+    we have no reference point to call it stalled."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(_make_decode_request(running=1, last_token_age=None))
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "idle"
+    assert body["running"] == 1
+
+
+@pytest.mark.asyncio
+async def test_health_decode_stalled_when_running_and_old_token(monkeypatch):
+    """Running > 0 + last token older than threshold => 503 stalled."""
+    import vllm.envs as envs
+
+    # Tighten the threshold for the test so we don't need to mock 60+ seconds.
+    monkeypatch.setattr(envs, "VLLM_DECODE_LIVENESS_STALL_SECONDS", 1.0)
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(_make_decode_request(running=2, last_token_age=5.0))
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+    assert body["running"] == 2
+    assert body["last_token_age_seconds"] == 5.0
+    assert body["stall_threshold_seconds"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_handles_client_failure():
+    """If get_decode_liveness() raises, the endpoint returns 503 (treating
+    "engine can't tell us its liveness" as stalled) rather than 500."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.get_decode_liveness.side_effect = RuntimeError("kaboom")
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await health_decode(mock_request)
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+    assert "kaboom" in body["error"]
+
+
+def test_stat_logger_manager_tracks_decode_liveness():
+    """Direct unit test of the StatLoggerManager bookkeeping — exercises
+    record() updates and the get_decode_liveness() snapshot without
+    needing to spin up a full engine."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.metrics.loggers import StatLoggerManager
+    from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+    # Build a manager with no default loggers (skip Prometheus) so we don't
+    # need a real VllmConfig — record() will just no-op on the loggers list.
+    vllm_config = MagicMock()
+    manager = StatLoggerManager.__new__(StatLoggerManager)
+    manager.engine_indexes = [0]
+    manager.stat_loggers = []
+    manager._last_token_emit_time = None
+    manager._last_num_running_reqs = 0
+    del vllm_config
+
+    # Fresh manager: no decode observed, no running.
+    running, age = manager.get_decode_liveness()
+    assert running == 0
+    assert age is None
+
+    # Record a step with running=3 but 0 tokens (e.g. all-prefill step).
+    sched = SchedulerStats()
+    sched.num_running_reqs = 3
+    iter_stats = IterationStats()
+    iter_stats.num_generation_tokens = 0
+    manager.record(scheduler_stats=sched, iteration_stats=iter_stats)
+    running, age = manager.get_decode_liveness()
+    assert running == 3
+    assert age is None  # still no token ever observed
+
+    # Record a step with a decoded token.
+    iter_stats2 = IterationStats()
+    iter_stats2.num_generation_tokens = 1
+    manager.record(scheduler_stats=sched, iteration_stats=iter_stats2)
+    running, age = manager.get_decode_liveness()
+    assert running == 3
+    assert age is not None
+    assert age >= 0.0
+    assert age < 1.0  # the token was "just now"
+
+    # Drain: next step reports running=0. The counter should decay (we
+    # overwrite, not max), otherwise /health/decode would forever think
+    # there's work in flight.
+    sched_drained = SchedulerStats()
+    sched_drained.num_running_reqs = 0
+    iter_stats3 = IterationStats()
+    iter_stats3.num_generation_tokens = 0
+    manager.record(scheduler_stats=sched_drained, iteration_stats=iter_stats3)
+    running, _ = manager.get_decode_liveness()
+    assert running == 0
+
