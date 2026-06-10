@@ -18,9 +18,10 @@ def init_model_state(
         cls = model.get_model_state_cls()
         return cls(vllm_config, model, encoder_cache, device)
 
-    architectures = vllm_config.model_config.architectures
-
-    if "WhisperForConditionalGeneration" in architectures:
+    if (
+        "WhisperForConditionalGeneration" in vllm_config.model_config.architectures
+        or "CohereAsrForConditionalGeneration" in vllm_config.model_config.architectures
+    ):
         from vllm.v1.worker.gpu.model_states.whisper import WhisperModelState
 
         return WhisperModelState(vllm_config, model, encoder_cache, device)
