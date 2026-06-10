@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -271,7 +272,10 @@ class XPUExpertsWNA16(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kInt4Static, None)
+        return (weight_key, activation_key) in (
+            (kInt4Static, None),
+            (kInt4Static32, None),
+        )
 
 
 class XPUExpertsMXFp4(XPUExperts):
