@@ -34,11 +34,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-
-# Reuse Gemma4 components directly
-from vllm.model_executor.models.gemma4 import (
-    Gemma4Model,
-)
+from vllm.model_executor.models.gemma4 import Gemma4Model
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4DummyInputsBuilder,
     Gemma4ForConditionalGeneration,
