@@ -1538,6 +1538,9 @@ def test_rocm_mxfp4_moe_oracle(
 # Emulation needs each per-partition dim rounded up to OCP_MX_BLOCK_SIZE (32);
 # a non-block-aligned shard (e.g. GPT-OSS 2880 // 4 = 720) otherwise truncates
 # the scale buffer and fails weight loading.
+# NOTE: gated to ROCm since it is the emulation backend's current target;
+# remove this skip if the backend is enabled on non-ROCm platforms.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
 @pytest.mark.parametrize(
     "hidden_size,intermediate_size,expected_hidden,expected_intermediate",
     [
