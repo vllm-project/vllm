@@ -316,6 +316,14 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             "reduce_partial_map": reduce_partial_map,
             "num_partial_tiles": num_partial_tiles,
             "max_q_len": max_qlen,
+            # TEMPORARY DIAGNOSTIC: host-side K/Q extents this metadata was built
+            # for. The ASM kernel indexes the runtime k/v tensors via kv_indices
+            # (=arange(total_k)) and kv_indptr; if the runtime k/v handed to
+            # _run_kernel disagree with these, the kernel reads/writes K/V out of
+            # bounds. Stashed here (free; already computed on host) so _run_kernel
+            # can assert the match without a GPU sync. Remove once confirmed.
+            "total_k": int(kv_indptr_cpu[-1].item()),
+            "total_q": int(qo_indptr_cpu[-1].item()),
         }
 
     def _warmup_noncausal(self, device: torch.device) -> None:
@@ -514,6 +522,45 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         v_head_dim = self.v_head_dim
         tile_q = _FP8_PREFILL_TILE_Q
         num_partial_tiles = ps["num_partial_tiles"]
+
+        # TEMPORARY DIAGNOSTIC: the upfront-built PS metadata encodes total_k /
+        # total_q (and kv_indices = arange(total_k)); the kernel uses them to
+        # index the runtime k/v/q tensors. If those tensors don't match the
+        # metadata built for this chunk_idx, the ASM kernel scatters partials
+        # out of bounds (a write -> the moving 256-concurrency MAF). These are
+        # pure shape checks (no GPU sync). Remove once confirmed.
+        logger.info(
+            "KVEXTENT_DBG is_causal=%s | q=%d (meta_total_q=%d) "
+            "k=%d v=%d (meta_total_k=%d) kv_indices=%d kv_indptr_last=%s",
+            is_causal,
+            total_q,
+            ps["total_q"],
+            k.shape[0],
+            v.shape[0],
+            ps["total_k"],
+            ps["kv_indices"].numel(),
+            ps["kv_indptr"].shape,
+        )
+        assert q.shape[0] == ps["total_q"], (
+            f"Q extent mismatch: runtime q.shape[0]={q.shape[0]} != metadata "
+            f"total_q={ps['total_q']} (is_causal={is_causal}); kernel would "
+            f"index Q out of bounds."
+        )
+        assert k.shape[0] == ps["total_k"], (
+            f"K extent mismatch: runtime k.shape[0]={k.shape[0]} != metadata "
+            f"total_k={ps['total_k']} (is_causal={is_causal}); kernel would "
+            f"index K out of bounds via kv_indices/kv_indptr."
+        )
+        assert v.shape[0] == ps["total_k"], (
+            f"V extent mismatch: runtime v.shape[0]={v.shape[0]} != metadata "
+            f"total_k={ps['total_k']} (is_causal={is_causal}); kernel would "
+            f"index V out of bounds."
+        )
+        assert ps["kv_indices"].numel() == ps["total_k"], (
+            f"kv_indices length={ps['kv_indices'].numel()} != total_k="
+            f"{ps['total_k']} (is_causal={is_causal}); identity map does not "
+            f"span the K tensor."
+        )
 
         out_dtype = self._prefill_metadata.output_dtype
         assert out_dtype is not None
