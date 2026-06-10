@@ -384,6 +384,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.use_marlin:
+            if not self.block_quant:
+                # Canonicalize to (K, N) for the kernel.
+                replace_parameter(layer, "weight", layer.weight.t())
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
             if hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -537,20 +540,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
 
-        # Update layer with new values.
-        replace_parameter(layer, "weight", qweight.data)
+        # Update layer with new values. Canonicalize to (K, N) for the kernel.
+        replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin:
+        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
-            self.fp8_linear.process_weights_after_loading(layer)
-        else:
-            weight = qweight.t()
-            replace_parameter(layer, "weight", weight.data)
-            self.fp8_linear.process_weights_after_loading(layer)
+            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
