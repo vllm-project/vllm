@@ -56,6 +56,14 @@ def tanh(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
 
+def _page_stride(buf, page_size):
+    # Page-dim stride of a (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM) KV buffer.
+    # 3D buffers have no explicit page dim (pages are packed token-major);
+    # 4D buffers may have a page stride larger than PAGE_SIZE * token stride
+    # (e.g. per-layer views into a cross-layer block-major cache).
+    return buf.stride(-4) if buf.dim() >= 4 else page_size * buf.stride(-3)
+
+
 @triton.jit
 def _fwd_kernel_stage1(
     Q,
@@ -68,8 +76,10 @@ def _fwd_kernel_stage1(
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
+    stride_buf_kpbs,
     stride_buf_kbs,
     stride_buf_kh,
+    stride_buf_vpbs,
     stride_buf_vbs,
     stride_buf_vh,
     stride_mid_ob,
@@ -123,9 +133,11 @@ def _fwd_kernel_stage1(
                 mask=offs_n < split_kv_end,
                 other=0,
             )
-            kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
+            kv_in_page = offs_n % PAGE_SIZE
             offs_buf_k = (
-                kv_loc[:, None] * stride_buf_kbs
+                (kv_page_number * stride_buf_kpbs + kv_in_page * stride_buf_kbs)[
+                    :, None
+                ]
                 + cur_kv_head * stride_buf_kh
                 + offs_d[None, :]
             )
@@ -145,7 +157,9 @@ def _fwd_kernel_stage1(
             qk = tl.where(offs_n < split_kv_end, qk, float("-inf"))
 
             offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
+                (kv_page_number * stride_buf_vpbs + kv_in_page * stride_buf_vbs)[
+                    :, None
+                ]
                 + cur_kv_head * stride_buf_vh
                 + offs_dv[None, :]
             )
@@ -235,8 +249,10 @@ def _decode_att_m_fwd(
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
+        _page_stride(k_buffer, page_size),
         k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        _page_stride(v_buffer, page_size),
         v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         att_out.stride(0),
@@ -270,8 +286,10 @@ def _fwd_grouped_kernel_stage1(
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
+    stride_buf_kpbs,
     stride_buf_kbs,
     stride_buf_kh,
+    stride_buf_vpbs,
     stride_buf_vbs,
     stride_buf_vh,
     stride_mid_ob,
@@ -357,10 +375,12 @@ def _fwd_grouped_kernel_stage1(
                 other=0,
                 cache_modifier=".ca",
             )
-            kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
+            kv_off_k = (
+                kv_page_number * stride_buf_kpbs + (offs_n % PAGE_SIZE) * stride_buf_kbs
+            )
 
             # explicitly facilitate overlapping load/compute
-            offs_buf_k = kv_loc[None, :] * stride_buf_kbs + base_offs_k
+            offs_buf_k = kv_off_k[None, :] + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
@@ -372,7 +392,7 @@ def _fwd_grouped_kernel_stage1(
                 k = (k.to(tl.float32) * ks).to(q.dtype)
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
+                offs_buf_kpe = kv_off_k[None, :] + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
                     mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
@@ -392,7 +412,11 @@ def _fwd_grouped_kernel_stage1(
             )
 
             if not IS_MLA:
-                offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+                kv_off_v = (
+                    kv_page_number * stride_buf_vpbs
+                    + (offs_n % PAGE_SIZE) * stride_buf_vbs
+                )
+                offs_buf_v = kv_off_v[:, None] + base_offs_v
                 v = tl.load(
                     V_Buffer + offs_buf_v,
                     mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
@@ -517,8 +541,10 @@ def _decode_grouped_att_m_fwd(
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
+        _page_stride(k_buffer, page_size),
         k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        _page_stride(v_buffer, page_size),
         v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         att_out.stride(0),
