@@ -10,12 +10,13 @@ import builtins
 import struct
 import time
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 import pybase64 as base64
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 
@@ -42,12 +43,68 @@ class EmbeddingCompletionRequest(
         )
 
 
+def _is_chat_message(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("role"), str)
+
+
+def _is_chat_messages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_is_chat_message(item) for item in value)
+    )
+
+
+def _is_batched_chat_messages(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_is_chat_messages(item) for item in value)
+    )
+
+
 class EmbeddingChatRequest(
     PoolingBasicRequestMixin,
     ChatRequestMixin,
     EmbedRequestMixin,
     EmbeddingTokenizeParamsMixin,
 ):
+    messages_batch: list[list[ChatCompletionMessageParam]] | None = Field(
+        default=None,
+        exclude=True,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_messages(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        messages_data = data.get("messages")
+        if _is_batched_chat_messages(messages_data):
+            messages_batch = cast(list[list[ChatCompletionMessageParam]], messages_data)
+            normalized = dict(data)
+            normalized["messages"] = messages_batch[0]
+            normalized["messages_batch"] = messages_batch
+            return normalized
+
+        if "messages" in data or "input" not in data:
+            return data
+
+        normalized = dict(data)
+        input_data = data["input"]
+        if _is_chat_messages(input_data):
+            normalized["messages"] = input_data
+        elif _is_batched_chat_messages(input_data):
+            messages_batch = cast(list[list[ChatCompletionMessageParam]], input_data)
+            normalized["messages"] = messages_batch[0]
+            normalized["messages_batch"] = messages_batch
+        else:
+            return data
+
+        normalized.pop("input")
+        return normalized
+
     def to_pooling_params(self):
         return PoolingParams(
             task="embed",
