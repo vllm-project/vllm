@@ -209,7 +209,7 @@ class TestEaglePrefixCachePrefillPhase:
         assert num_computed1 == 0
         
         # Allocate blocks for first request
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=100,
             num_new_computed_tokens=0,
@@ -229,11 +229,6 @@ class TestEaglePrefixCachePrefillPhase:
         
         # Check that we got cache hit
         assert num_computed2 > 0, "Prefix cache should hit during prefill"
-        
-        # For short input < block_size, we expect 0 full blocks
-        # but the fix ensures we don't incorrectly drop blocks
-        expected_blocks = 0  # Less than block_size, so no full block
-        actual_blocks = len(blocks2.blocks[0])
         
         # The key assertion: num_computed2 should be > 0 if there's any cache
         # This test verifies that eagle doesn't prevent cache usage
@@ -272,7 +267,7 @@ class TestEaglePrefixCachePrefillPhase:
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
         # Allocate and cache
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=32,
             num_new_computed_tokens=0,
@@ -334,7 +329,7 @@ class TestEaglePrefixCachePrefillPhase:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=16000,
             num_new_computed_tokens=0,
@@ -389,7 +384,7 @@ class TestEaglePrefixCachePrefillPhase:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=32,
             num_new_computed_tokens=0,
@@ -448,7 +443,7 @@ class TestHybridModelsWithEagle:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=100,
             num_new_computed_tokens=0,
@@ -503,7 +498,7 @@ class TestHybridModelsWithEagle:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=16000,
             num_new_computed_tokens=0,
@@ -594,7 +589,7 @@ class TestEaglePrefixCacheEdgeCases:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=1,
             num_new_computed_tokens=0,
@@ -641,7 +636,7 @@ class TestEaglePrefixCacheEdgeCases:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=32,
             num_new_computed_tokens=0,
@@ -697,7 +692,7 @@ class TestEaglePrefixCacheEdgeCases:
         req1 = make_request("req1", prompt_tokens, block_size, num_output_tokens=0)
         blocks1, num_computed1 = kv_cache_manager.get_computed_blocks(req1)
         
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=32,
             num_new_computed_tokens=0,
@@ -786,7 +781,7 @@ class TestMultipleRequestsEaglePrefixCache:
         # Request 1
         req1 = make_request("req1", prompt1, block_size, num_output_tokens=0)
         blocks1, _ = kv_cache_manager.get_computed_blocks(req1)
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=32,
             num_new_computed_tokens=0,
@@ -797,7 +792,7 @@ class TestMultipleRequestsEaglePrefixCache:
         # Request 2
         req2 = make_request("req2", prompt2, block_size, num_output_tokens=0)
         blocks2, _ = kv_cache_manager.get_computed_blocks(req2)
-        allocated2 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req2,
             num_new_tokens=64,
             num_new_computed_tokens=0,
@@ -848,7 +843,7 @@ class TestMultipleRequestsEaglePrefixCache:
         # Request 1
         req1 = make_request("req1", prompt1, block_size, num_output_tokens=0)
         blocks1, _ = kv_cache_manager.get_computed_blocks(req1)
-        allocated1 = kv_cache_manager.allocate_slots(
+        kv_cache_manager.allocate_slots(
             req1,
             num_new_tokens=48,
             num_new_computed_tokens=0,
