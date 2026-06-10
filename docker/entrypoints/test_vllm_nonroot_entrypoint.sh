@@ -183,8 +183,17 @@ case8_cwd="$WORKDIR/case8-cwd"
 mkdir -p "$case8_cwd"
 out="$WORKDIR/case8.out"
 (cd "$case8_cwd" && run_wrapper "$out" "HOME=$case8_home" "USER=alice" "LOGNAME=alice" -- --model ./relpath)
-grep -q "^PWD=$case8_cwd\$" "$out" \
-    || fail "$out" "case8: writable cwd not preserved (got $(grep '^PWD=' "$out"))"
+# On macOS, /tmp is a symlink to /private/tmp, so pwd may resolve it.
+# Compare inodes instead of paths to verify cwd is preserved.
+actual_pwd="$(grep '^PWD=' "$out" | cut -d= -f2-)"
+if [ -d "$actual_pwd" ]; then
+    actual_inode="$(ls -id "$actual_pwd" | awk '{print $1}')"
+    expected_inode="$(ls -id "$case8_cwd" | awk '{print $1}')"
+    [ "$actual_inode" = "$expected_inode" ] \
+        || fail "$out" "case8: cwd inode mismatch (expected $expected_inode, got $actual_inode)"
+else
+    fail "$out" "case8: cwd not accessible ($actual_pwd)"
+fi
 grep -q "^ARGV=serve --model \\./relpath\$" "$out" \
     || fail "$out" "case8: relative argv not preserved"
 echo "PASS: case8 (writable cwd preserved; relative argv still resolves from caller's cwd)"
@@ -204,8 +213,16 @@ mkdir -p "$case9_ro"
 chmod 0555 "$case9_ro"
 out="$WORKDIR/case9.out"
 (cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model ./foo)
-grep -q "^PWD=$case9_ro\$" "$out" \
-    || fail "$out" "case9: read-only cwd was rewritten (got $(grep '^PWD=' "$out"))"
+# Compare inodes to handle macOS /tmp -> /private/tmp symlinks
+actual_pwd="$(grep '^PWD=' "$out" | cut -d= -f2-)"
+if [ -d "$actual_pwd" ]; then
+    actual_inode="$(ls -id "$actual_pwd" | awk '{print $1}')"
+    expected_inode="$(ls -id "$case9_ro" | awk '{print $1}')"
+    [ "$actual_inode" = "$expected_inode" ] \
+        || fail "$out" "case9: read-only cwd was rewritten (expected inode $expected_inode, got $actual_inode for $actual_pwd)"
+else
+    fail "$out" "case9: cwd not accessible ($actual_pwd)"
+fi
 grep -q "^ARGV=serve --model \\./foo\$" "$out" \
     || fail "$out" "case9: relative argv not preserved"
 chmod 0700 "$case9_ro"
@@ -232,8 +249,16 @@ else
         run_wrapper "$out" "HOME=$case10_home" "USER=alice" "LOGNAME=alice" -- --model foo
     )
     chmod 0700 "$case10_cwd"
-    grep -q "^PWD=$case10_home\$" "$out" \
-        || fail "$out" "case10: inaccessible cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
+    # Compare inodes to handle macOS /tmp -> /private/tmp symlinks
+    actual_pwd="$(grep '^PWD=' "$out" | cut -d= -f2-)"
+    if [ -d "$actual_pwd" ]; then
+        actual_inode="$(ls -id "$actual_pwd" | awk '{print $1}')"
+        expected_inode="$(ls -id "$case10_home" | awk '{print $1}')"
+        [ "$actual_inode" = "$expected_inode" ] \
+            || fail "$out" "case10: inaccessible cwd not overridden to HOME (expected inode $expected_inode, got $actual_inode for $actual_pwd)"
+    else
+        fail "$out" "case10: cwd not accessible ($actual_pwd)"
+    fi
     echo "PASS: case10 (inaccessible cwd falls back to \$HOME)"
 fi
 

@@ -1526,7 +1526,6 @@ def _init_elastic_ep_world(
         coord_store=coord_store,
         global_rank=global_rank,
         global_world_size=global_world_size,
-        device_index=device_index,
     )
     assert parallel_config.nnodes_within_dp == 1, (
         "Elastic EP is not supported with multi-node TP/PP"

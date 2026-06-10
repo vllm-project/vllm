@@ -152,9 +152,9 @@ class RayWorkerProc(WorkerProc):
             os.environ[key] = value
 
         if assigned_gpu_ids is not None:
-            self._init_kwargs[
-                "vllm_config"
-            ].parallel_config.assigned_gpu_ids = assigned_gpu_ids
+            vllm_config = self._init_kwargs["vllm_config"]
+            assert isinstance(vllm_config, VllmConfig)
+            vllm_config.parallel_config.assigned_gpu_ids = assigned_gpu_ids
 
         self.local_rank = local_rank
         super().__init__(
