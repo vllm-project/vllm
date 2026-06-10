@@ -242,6 +242,58 @@ def test_moe_align_block_size(
     ).all(), "expert_ids should contain valid expert indices"
 
 
+@pytest.mark.parametrize(
+    ("m", "topk", "num_experts"),
+    [
+        (1, 1, 96),
+        (16, 2, 160),
+        (64, 8, 256),
+        (128, 8, 256),
+        (64, 16, 512),
+        (129, 8, 256),
+    ],
+)
+@pytest.mark.parametrize("block_size", [16, 32, 64])
+@pytest.mark.parametrize("pad_sorted_ids", [False, True])
+def test_moe_align_block_size_small_batch_many_expert(
+    m: int,
+    topk: int,
+    num_experts: int,
+    block_size: int,
+    pad_sorted_ids: bool,
+):
+    """Test the many-expert small-batch fast-path plus fallback boundary."""
+    topk_ids = torch.empty((m, topk), device="cuda", dtype=torch.int32)
+    for i in range(m):
+        topk_ids[i] = torch.randperm(num_experts, device="cuda")[:topk]
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = moe_align_block_size(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+        pad_sorted_ids=pad_sorted_ids,
+    )
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            pad_sorted_ids=pad_sorted_ids,
+        )
+    )
+
+    torch.testing.assert_close(actual_num_tokens, golden_num_tokens, atol=0, rtol=0)
+    torch.testing.assert_close(actual_expert_ids, golden_expert_ids, atol=0, rtol=0)
+    _verify_expert_level_sorting(
+        actual_sorted_ids,
+        golden_sorted_ids,
+        actual_expert_ids,
+        block_size,
+        actual_num_tokens.item(),
+        m * topk,
+    )
+
+
 @pytest.mark.parametrize("m", [16, 32, 2048])
 @pytest.mark.parametrize("topk", [2, 4])
 @pytest.mark.parametrize("num_experts", [8, 64])
