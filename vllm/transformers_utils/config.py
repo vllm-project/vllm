@@ -16,7 +16,7 @@ from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -150,7 +150,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
 
 
 @contextmanager
