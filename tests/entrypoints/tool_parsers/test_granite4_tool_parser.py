@@ -5,7 +5,7 @@ import json
 import openai
 import pytest
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL = "ibm-granite/granite-4.0-h-tiny"
 
