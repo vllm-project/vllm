@@ -6,7 +6,7 @@ numpy
 requests >= 2.26.0
 tqdm
 blake3
-py-cpuinfo
+py-cpuinfo2 ~= 10.1
 transformers >= 4.56.0, != 5.0.*, != 5.1.*, != 5.2.*, != 5.3.*, != 5.4.*, != 5.5.0
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 safetensors >= 0.6.2  # MXFP4/MXFP6 dtype support (F8_E8M0, F4) added in 0.6.0: https://github.com/huggingface/safetensors/pull/611
