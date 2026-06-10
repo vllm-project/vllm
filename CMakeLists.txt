@@ -613,20 +613,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
 
     if (MARLIN_OTHER_ARCHS)
-      set(MARLIN_STABLE_SRCS
-         "csrc/libtorch_stable/quantization/marlin/marlin_int4_fp8_preprocess.cu"
-         "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
-         "csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu"
-         "csrc/libtorch_stable/quantization/marlin/marlin.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_STABLE_SRCS}"
-        CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_STABLE_SRCS}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_STABLE_SRCS}")
-
       if (MARLIN_ARCHS)
         file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/libtorch_stable/quantization/marlin/sm80_kernel_*_float16.cu")
         set_gencode_flags_for_srcs(
@@ -672,6 +658,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         endif()
         list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
       endif()
+
+      set(MARLIN_SRCS
+         "csrc/libtorch_stable/quantization/marlin/marlin.cu"
+         "csrc/libtorch_stable/quantization/marlin/marlin_int4_fp8_preprocess.cu"
+         "csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu"
+         "csrc/libtorch_stable/quantization/marlin/awq_marlin_repack.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${MARLIN_SRCS}"
+        CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
+      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+        set_source_files_properties(${MARLIN_SRCS}
+          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
+      endif()
+      list(APPEND VLLM_STABLE_EXT_SRC "${MARLIN_SRCS}")
     endif()
 
     set_gencode_flags_for_srcs(

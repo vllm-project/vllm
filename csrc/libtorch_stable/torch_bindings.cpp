@@ -30,23 +30,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
+
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-
-  // preprocess W-int4A-fp8 weight for marlin kernel
-  ops.def(
-      "marlin_int4_fp8_preprocess(Tensor qweight, "
-      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
-
-  // gptq_marlin repack from GPTQ.
-  ops.def(
-      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-
-  // awq_marlin repack from AWQ.
-  ops.def(
-      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
 
   // Marlin GEMM
   ops.def(
@@ -57,6 +43,25 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // gptq_marlin repack from GPTQ.
+  ops.def(
+      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // awq_marlin repack from AWQ.
+  ops.def(
+      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
+      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // preprocess W-int4A-fp8 weight for marlin kernel
+  ops.def(
+      "marlin_int4_fp8_preprocess(Tensor qweight, "
+      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
 #endif
 
 #ifndef USE_ROCM

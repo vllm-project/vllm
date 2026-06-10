@@ -28,19 +28,6 @@ torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
                                    torch::stable::Tensor const& perm);
 
 #ifndef USE_ROCM
-torch::stable::Tensor marlin_int4_fp8_preprocess(
-    torch::stable::Tensor& qweight,
-    std::optional<torch::stable::Tensor> qzeros_or_none, bool inplace);
-
-torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
-                                         torch::stable::Tensor& perm,
-                                         int64_t size_k, int64_t size_n,
-                                         int64_t num_bits, bool is_a_8bit);
-
-torch::stable::Tensor awq_marlin_repack(torch::stable::Tensor& b_q_weight,
-                                        int64_t size_k, int64_t size_n,
-                                        int64_t num_bits, bool is_a_8bit);
-
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);

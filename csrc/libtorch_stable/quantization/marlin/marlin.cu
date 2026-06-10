@@ -867,7 +867,7 @@ torch::stable::Tensor marlin_gemm(
                   "workspace.numel = ", workspace.numel(),
                   " is below min_workspace_size = ", min_workspace_size);
 
-  const int dev = device_index;
+  int dev = device_index;
 
   STD_TORCH_CHECK(
       a_scales.scalar_type() == torch::headeronly::ScalarType::Float,
@@ -881,7 +881,6 @@ torch::stable::Tensor marlin_gemm(
         "scalar type of a must be the same with c for 16 bit activation");
   }
 
-  const cudaStream_t stream = get_current_cuda_stream(device_index);
   marlin::marlin_mm(
       a.const_data_ptr(), b_q_weight.const_data_ptr(), c.mutable_data_ptr(),
       c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
@@ -890,8 +889,9 @@ torch::stable::Tensor marlin_gemm(
       g_idx.mutable_data_ptr(), perm.mutable_data_ptr(),
       a_tmp.mutable_data_ptr(), size_m, size_n, size_k, a.stride(0),
       workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
-      has_act_order, is_k_full, has_zp, num_groups, group_size, dev, stream,
-      thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+      has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
+      get_current_cuda_stream(device_index), thread_k, thread_n, sms,
+      use_atomic_add, use_fp32_reduce, is_zp_float);
 
   return c;
 }

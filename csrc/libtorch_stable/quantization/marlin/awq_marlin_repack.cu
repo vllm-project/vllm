@@ -257,6 +257,7 @@ torch::stable::Tensor awq_marlin_repack(torch::stable::Tensor& b_q_weight,
   torch::stable::accelerator::DeviceGuard device_guard(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
 
+  // Alloc buffers
   torch::stable::Tensor out = torch::stable::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       b_q_weight.scalar_type(), std::nullopt, b_q_weight.device());
