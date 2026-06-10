@@ -313,6 +313,10 @@ _TOKEN_CLASSIFICATION_MODELS = {
 
 _SEQUENCE_CLASSIFICATION_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "DebertaV2ForSequenceClassification": (
+        "deberta_v2",
+        "DebertaV2ForSequenceClassification",
+    ),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "ErnieForSequenceClassification": ("ernie", "ErnieForSequenceClassification"),
     "GteNewForSequenceClassification": (

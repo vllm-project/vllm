@@ -19,6 +19,10 @@ from vllm.platforms import current_platform
             ],
         ),
         pytest.param("Forrest20231206/ernie-3.0-base-zh-cls"),
+        pytest.param(
+            "cross-encoder/nli-deberta-v3-small",
+            marks=[pytest.mark.core_model],
+        ),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"] if current_platform.is_rocm() else ["float"])
