@@ -450,6 +450,25 @@ class AiterFlashAttentionMetadataBuilder(
         )
         self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
 
+    def _maybe_allocate_shuffle_scale(self) -> None:
+        # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled.
+        if (
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and self.scale.numel() == 1
+            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
+        ):
+            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+            first_layer_name = [k for k in layers][0]
+            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
+                first_layer_name
+            ].kv_cache.shape
+            num_blocks = kv_cache_shape[1]
+            self.scale = torch.ones(
+                [num_blocks, self.num_heads_kv, self.block_size],
+                dtype=torch.float32,
+                device=self.device,
+            )
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
@@ -468,23 +487,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
         )
-        # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled
-        if (
-            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-            and self.scale.numel() == 1
-            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
-        ):
-            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-            first_layer_name = [k for k in layers][0]
-            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
-                first_layer_name
-            ].kv_cache.shape
-            num_blocks = kv_cache_shape[0]
-            self.scale = torch.ones(
-                [num_blocks, self.num_heads_kv, self.block_size],
-                dtype=torch.float32,
-                device=self.device,
-            )
+        self._maybe_allocate_shuffle_scale()
         (
             num_decodes,
             num_extends,
@@ -675,6 +678,8 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
+        self._maybe_allocate_shuffle_scale()
+
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
 
