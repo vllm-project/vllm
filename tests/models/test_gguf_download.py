@@ -16,6 +16,7 @@ from vllm.model_executor.model_loader.gguf_loader import (
 )
 from vllm.model_executor.model_loader.weight_utils import download_gguf
 from vllm.model_executor.models.gemma4 import (
+    _load_gemma4_gguf_fused_moe_qweight,
     _load_gemma4_gguf_fused_moe_qweight_type,
 )
 from vllm.model_executor.models.gemma4_mm import (
@@ -271,10 +272,10 @@ class TestGGUFModelLoader:
             "model.language_model.layers.1.router.per_expert_scale"
         )
         assert gguf_to_hf_name_map["blk.1.ffn_gate_up_exps.weight"] == (
-            "model.language_model.layers.1.experts.gate_up_proj"
+            "model.language_model.layers.1.experts.gate_up_proj.weight"
         )
         assert gguf_to_hf_name_map["blk.1.ffn_down_exps.weight"] == (
-            "model.language_model.layers.1.experts.down_proj"
+            "model.language_model.layers.1.experts.down_proj.weight"
         )
         assert gguf_to_hf_name_map["blk.1.post_ffw_norm_1.weight"] == (
             "model.language_model.layers.1.post_feedforward_layernorm_1.weight"
@@ -372,8 +373,8 @@ class TestGGUFModelLoader:
         w2_type.is_gguf_weight_type = True
         w2_type.weight_type = 0
         params_dict = {
-            "layers.0.moe.experts.w13_qweight_type": w13_type,
-            "layers.0.moe.experts.w2_qweight_type": w2_type,
+            "layers.0.moe.experts.routed_experts.w13_qweight_type": w13_type,
+            "layers.0.moe.experts.routed_experts.w2_qweight_type": w2_type,
         }
 
         remapped = _load_gemma4_gguf_fused_moe_qweight_type(
@@ -382,7 +383,7 @@ class TestGGUFModelLoader:
             params_dict,
         )
 
-        assert remapped == "layers.0.moe.experts.w13_qweight_type"
+        assert remapped == "layers.0.moe.experts.routed_experts.w13_qweight_type"
         assert w13_type.weight_type == 12
         assert w13_type.item() == 12
 
@@ -392,6 +393,38 @@ class TestGGUFModelLoader:
             params_dict,
         )
 
-        assert remapped == "layers.0.moe.experts.w2_qweight_type"
+        assert remapped == "layers.0.moe.experts.routed_experts.w2_qweight_type"
         assert w2_type.weight_type == 13
         assert w2_type.item() == 13
+
+    def test_gemma4_fused_moe_gguf_qweight_remap(self):
+        w13_qweight = torch.nn.parameter.UninitializedParameter(requires_grad=False)
+        w13_qweight.is_gguf_weight = True
+        w2_qweight = torch.nn.parameter.UninitializedParameter(requires_grad=False)
+        w2_qweight.is_gguf_weight = True
+        params_dict = {
+            "layers.0.moe.experts.routed_experts.w13_qweight": w13_qweight,
+            "layers.0.moe.experts.routed_experts.w2_qweight": w2_qweight,
+        }
+
+        w13_loaded = torch.arange(2 * 3 * 4, dtype=torch.uint8).reshape(2, 3, 4)
+        remapped = _load_gemma4_gguf_fused_moe_qweight(
+            "layers.0.moe.gate_up_proj.qweight",
+            w13_loaded,
+            params_dict,
+        )
+
+        assert remapped == "layers.0.moe.experts.routed_experts.w13_qweight"
+        assert tuple(w13_qweight.shape) == (2, 3, 4)
+        assert torch.equal(w13_qweight, w13_loaded)
+
+        w2_loaded = torch.arange(2 * 5 * 6, dtype=torch.uint8).reshape(2, 5, 6)
+        remapped = _load_gemma4_gguf_fused_moe_qweight(
+            "layers.0.moe.down_proj.qweight",
+            w2_loaded,
+            params_dict,
+        )
+
+        assert remapped == "layers.0.moe.experts.routed_experts.w2_qweight"
+        assert tuple(w2_qweight.shape) == (2, 5, 6)
+        assert torch.equal(w2_qweight, w2_loaded)

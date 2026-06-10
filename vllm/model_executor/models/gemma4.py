@@ -25,6 +25,7 @@ from itertools import islice
 import regex as re
 import torch
 from torch import nn
+from torch.nn.parameter import UninitializedParameter
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -89,31 +90,85 @@ def _remap_gemma4_expert_weight_name(name: str) -> str:
     return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
 
+def _gemma4_gguf_fused_moe_param_names(
+    name: str,
+    gguf_suffix: str,
+    fused_suffix: str,
+) -> tuple[str, str]:
+    # FusedMoE stores expert parameters under routed_experts by default.
+    # Keep the suffix without routed_experts as a fallback for custom wrappers.
+    return (
+        name.replace(
+            gguf_suffix,
+            f".moe.experts.routed_experts.{fused_suffix}",
+        ),
+        name.replace(gguf_suffix, f".moe.experts.{fused_suffix}"),
+    )
+
+
 def _load_gemma4_gguf_fused_moe_qweight_type(
     name: str,
     loaded_weight: torch.Tensor,
     params_dict: dict[str, torch.Tensor],
 ) -> str | None:
     if name.endswith(".moe.gate_up_proj.qweight_type"):
-        param_name = name.replace(
+        param_names = _gemma4_gguf_fused_moe_param_names(
+            name,
             ".moe.gate_up_proj.qweight_type",
-            ".moe.experts.w13_qweight_type",
+            "w13_qweight_type",
         )
     elif name.endswith(".moe.down_proj.qweight_type"):
-        param_name = name.replace(
+        param_names = _gemma4_gguf_fused_moe_param_names(
+            name,
             ".moe.down_proj.qweight_type",
-            ".moe.experts.w2_qweight_type",
+            "w2_qweight_type",
         )
     else:
         return None
 
-    param = params_dict.get(param_name)
-    if param is None or not getattr(param, "is_gguf_weight_type", False):
+    for param_name in param_names:
+        param = params_dict.get(param_name)
+        if param is None or not getattr(param, "is_gguf_weight_type", False):
+            continue
+
+        param.weight_type = loaded_weight.item()
+        param.data.copy_(loaded_weight.view(param.shape))
+        return param_name
+
+    return None
+
+
+def _load_gemma4_gguf_fused_moe_qweight(
+    name: str,
+    loaded_weight: torch.Tensor,
+    params_dict: dict[str, torch.Tensor],
+) -> str | None:
+    if name.endswith(".moe.gate_up_proj.qweight"):
+        param_names = _gemma4_gguf_fused_moe_param_names(
+            name,
+            ".moe.gate_up_proj.qweight",
+            "w13_qweight",
+        )
+    elif name.endswith(".moe.down_proj.qweight"):
+        param_names = _gemma4_gguf_fused_moe_param_names(
+            name,
+            ".moe.down_proj.qweight",
+            "w2_qweight",
+        )
+    else:
         return None
 
-    param.weight_type = loaded_weight.item()
-    param.data.copy_(loaded_weight.view(param.shape))
-    return param_name
+    for param_name in param_names:
+        param = params_dict.get(param_name)
+        if param is None or not getattr(param, "is_gguf_weight", False):
+            continue
+
+        if isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+        param.data.copy_(loaded_weight)
+        return param_name
+
+    return None
 
 
 @triton.jit
@@ -1506,6 +1561,15 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     loaded_params.add(moe_name)
                     break
                 else:
+                    remapped_name = _load_gemma4_gguf_fused_moe_qweight(
+                        name,
+                        loaded_weight,
+                        params_dict,
+                    )
+                    if remapped_name is not None:
+                        loaded_params.add(remapped_name)
+                        continue
+
                     remapped_name = _load_gemma4_gguf_fused_moe_qweight_type(
                         name,
                         loaded_weight,
@@ -1707,7 +1771,14 @@ class Gemma4ForCausalLM(
                 #
                 # No transpose needed: checkpoint orientation already
                 # matches FusedMoE's expected layout.
-                if "moe.gate_up_proj" in name and weight.dim() == 3:
+                is_gguf_moe_qweight = name.endswith(
+                    (".moe.gate_up_proj.qweight", ".moe.down_proj.qweight")
+                )
+                if (
+                    "moe.gate_up_proj" in name
+                    and weight.dim() == 3
+                    and not is_gguf_moe_qweight
+                ):
                     num_experts = weight.size(0)
                     intermediate_size = weight.size(1) // 2
                     for expert_id in range(num_experts):
@@ -1718,7 +1789,11 @@ class Gemma4ForCausalLM(
                         yield base.replace("gate_up_proj", "up_proj"), up_weight
                     continue
 
-                if "moe.down_proj" in name and weight.dim() == 3:
+                if (
+                    "moe.down_proj" in name
+                    and weight.dim() == 3
+                    and not is_gguf_moe_qweight
+                ):
                     num_experts = weight.size(0)
                     for expert_id in range(num_experts):
                         expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")

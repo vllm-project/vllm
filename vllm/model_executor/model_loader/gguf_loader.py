@@ -74,10 +74,10 @@ def _add_gemma4_gguf_mappings(
                     f"{layer_prefix}.router.per_expert_scale"
                 ),
                 f"blk.{idx}.ffn_gate_up_exps.weight": (
-                    f"{layer_prefix}.experts.gate_up_proj"
+                    f"{layer_prefix}.experts.gate_up_proj.weight"
                 ),
                 f"blk.{idx}.ffn_down_exps.weight": (
-                    f"{layer_prefix}.experts.down_proj"
+                    f"{layer_prefix}.experts.down_proj.weight"
                 ),
                 f"blk.{idx}.post_ffw_norm_1.weight": (
                     f"{layer_prefix}.post_feedforward_layernorm_1.weight"
@@ -331,6 +331,15 @@ class GGUFModelLoader(BaseModelLoader):
                 text_config,
                 config.vision_config,
             )
+            # Gemma4 GGUF stores fused 3D expert tensors, while the HF
+            # module exposes suffixless expert placeholders.
+            for idx in range(text_config.num_hidden_layers):
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.language_model\\.layers\\.{idx}"
+                        r"\.experts\.(gate_up_proj|down_proj)"
+                    )
+                )
         model_type = _gguf_arch_model_type(model_type)
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
