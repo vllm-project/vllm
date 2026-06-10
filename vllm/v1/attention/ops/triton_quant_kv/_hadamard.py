@@ -13,9 +13,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-# ---------------------------------------------------------------------------
 # Hadacore (CUDA tensor core kernel) availability check
-# ---------------------------------------------------------------------------
 # Hadacore's CUDA impl is only registered when built for sm_80+, but the
 # schema def is unconditional — on ROCm ``hasattr`` is True yet dispatch
 # would crash, so we also gate on ``is_cuda()`` and the sm_80 capability.
@@ -33,9 +31,7 @@ def _hadacore_available() -> bool:
     return _HADACORE_AVAILABLE
 
 
-# ---------------------------------------------------------------------------
 # Cached Hadamard matrices (one per (size, dtype, device) tuple)
-# ---------------------------------------------------------------------------
 _HADAMARD_MATRIX_CACHE: dict[tuple[int, torch.dtype, str], torch.Tensor] = {}
 
 
@@ -59,9 +55,7 @@ def _get_hadamard_matrix(
     return cached
 
 
-# ---------------------------------------------------------------------------
 # Triton MMA Hadamard kernel (Tier 2)
-# ---------------------------------------------------------------------------
 @triton.jit
 def _hadamard_mma_kernel(
     x_ptr,
@@ -134,9 +128,7 @@ def _triton_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
     return out2d.reshape(orig_shape).to(orig_dtype)
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
     """Unnormalized Walsh-Hadamard Transform along the last dimension.
 
@@ -187,9 +179,7 @@ def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-# ---------------------------------------------------------------------------
 # Randomized Hadamard Transform (used by INT4)
-# ---------------------------------------------------------------------------
 # Deterministic ±1 signs for Randomized Hadamard Transform.
 # RHT = H × D × x  (sign flip + Hadamard).  Breaks residual structure
 # in KV vectors, improving quantization quality.

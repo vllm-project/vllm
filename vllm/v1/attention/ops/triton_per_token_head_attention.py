@@ -172,9 +172,7 @@ def _pth_attn_stage1(
     tl.store(Mid_o_ptr + out_base + HEAD_DIM, lse)
 
 
-# ------------------------------------------------------------------ #
-#  Stage 1 — sub-byte packed (INT4) per-token-head decode             #
-# ------------------------------------------------------------------ #
+# Stage 1 — sub-byte packed (INT4) per-token-head decode
 
 
 @triton.jit
@@ -373,9 +371,7 @@ def _pth_attn_stage1_packed(
     tl.store(Mid_o_ptr + out_base + HEAD_DIM, lse)
 
 
-# ------------------------------------------------------------------ #
-#  Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4)               #
-# ------------------------------------------------------------------ #
+# Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4)
 
 
 @triton.jit
@@ -593,9 +589,7 @@ def _pth_attn_stage1_packed_gqa(
     tl.store(Mid_o_ptr + lse_addrs, lse, mask=h_mask)
 
 
-# ------------------------------------------------------------------ #
-#  CPU-side query maps (vectorized, no per-request Python loop)       #
-# ------------------------------------------------------------------ #
+# CPU-side query maps (vectorized, no per-request Python loop)
 
 
 def _build_q_maps(
@@ -626,9 +620,7 @@ def _build_q_maps(
     )
 
 
-# ------------------------------------------------------------------ #
-#  Launcher (TQ-style pre-allocated buffers + constant splits)        #
-# ------------------------------------------------------------------ #
+# Launcher (TQ-style pre-allocated buffers + constant splits)
 
 
 def triton_per_token_head_attention(
@@ -879,9 +871,7 @@ def triton_per_token_head_attention(
     return out
 
 
-# ------------------------------------------------------------------ #
-#  Prefill kernel: flash-attention shape with per-token-head dequant  #
-# ------------------------------------------------------------------ #
+# Prefill kernel: flash-attention shape with per-token-head dequant
 
 
 @triton.jit
@@ -1271,9 +1261,7 @@ def _pth_prefill_kernel_packed(
     )
 
 
-# ------------------------------------------------------------------ #
-#  Pre-/post-rotation helpers (Python-side; mode-aware)                #
-# ------------------------------------------------------------------ #
+# Pre-/post-rotation helpers (Python-side; mode-aware)
 
 
 def _packing_factor_for(kv_quant_mode: KVQuantMode) -> int:

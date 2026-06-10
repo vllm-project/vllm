@@ -107,9 +107,7 @@ def _attn_packed(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    # -----------------------------------------------------------------
     # Shared prologue: sequence lookup, q-block bounds, early returns.
-    # -----------------------------------------------------------------
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2) if IS_3D else 0
@@ -144,11 +142,9 @@ def _attn_packed(
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
-    # -----------------------------------------------------------------
     # Split-Q prologue: PACKING_FACTOR interleaved streams of Q.
     # INT4 uses 2 streams (even / odd).  The packed KV cache stores one
     # byte per ``packed_offs``, which holds PACKING_FACTOR values.
-    # -----------------------------------------------------------------
     packed_offs = tl.arange(0, PACKED_HEAD_PADDED)
     offs_s0 = packed_offs * PACKING_FACTOR
     offs_s1 = packed_offs * PACKING_FACTOR + 1
@@ -178,9 +174,7 @@ def _attn_packed(
 
     block_table_offset = seq_idx * block_table_stride
 
-    # -----------------------------------------------------------------
     # Online-softmax state + optional feature loads.
-    # -----------------------------------------------------------------
     M = init_softmax_M(
         sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
     )
@@ -214,11 +208,9 @@ def _attn_packed(
         IS_3D,
     )
 
-    # -----------------------------------------------------------------
     # Tile loop.  Per-tile: load packed KV + scales, dequantize into
     # PACKING_FACTOR streams, compute the split dot, run the shared
     # softmax step, accumulate per stream.
-    # -----------------------------------------------------------------
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
@@ -335,12 +327,10 @@ def _attn_packed(
         acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
         acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
 
-    # -----------------------------------------------------------------
     # Epilogue.  2D writes the final output with optional FP8 clamp;
     # 3D writes the per-segment partials (output / max / expsum) for
     # ``reduce_segments`` to finalize.  Each stream writes its own
     # stripe in the output layout.
-    # -----------------------------------------------------------------
     out_mask = query_mask_0[:, None] & query_mask_1[:, None]
     if IS_3D:
         segm_base = (

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""INT8 and FP8 per-token-head KV cache quantization factories.
+"""INT8 and FP8 per-token-head KV cache quantization (write side).
 
 The attention read path for these modes lives in the core kernel
 (:mod:`vllm.v1.attention.ops.triton_unified_attention`) — the only thing
@@ -29,21 +29,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_quant_kv import register
-from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVFactory
 from vllm.v1.kv_cache_interface import KVQuantMode
 
-# ---------------------------------------------------------------------------
 # Per-mode quantization range
-# ---------------------------------------------------------------------------
 _INT8_QUANT_MAX = 127.0
 _INT8_QUANT_MIN = -128.0
 _FP8_QUANT_MIN, _FP8_QUANT_MAX = get_fp8_min_max()
 
 
-# ---------------------------------------------------------------------------
 # Reshape kernel: per-(token, head) absmax → scale, store quantized + scale
-# ---------------------------------------------------------------------------
 @triton.jit
 def _reshape_cache_per_token_head_kernel(
     key_ptr,
@@ -207,62 +201,39 @@ def _run_reshape_and_cache(
     )
 
 
-class _PerTokenHeadFactory(QuantKVFactory):
-    """Common implementation for INT8 / FP8 per-token-head modes.
+def reshape_and_cache_int8_fp8(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    *,
+    k_scale_cache: torch.Tensor,
+    v_scale_cache: torch.Tensor,
+    kv_quant_mode: KVQuantMode,
+) -> None:
+    """Per-(token, head) symmetric quantize + write into the paged cache.
 
-    Subclasses set ``mode``, ``_quant_max`` and ``_quant_min``.  The
-    attention read path lives in the core kernel; this factory only
-    owns the write path and the scale-cache allocation.
+    INT8 and FP8 share the kernel and only differ in the (QUANT_MAX,
+    QUANT_MIN) range; the cache storage dtype is inferred from the cache
+    pointer.
     """
-
-    packing_factor = 1
-    needs_scale_caches = True
-
-    _quant_max: float
-    _quant_min: float
-
-    def reshape_and_cache(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        *,
-        k_scale_cache: torch.Tensor | None = None,
-        v_scale_cache: torch.Tensor | None = None,
-    ) -> None:
-        assert k_scale_cache is not None and v_scale_cache is not None, (
-            f"{self.mode.name} requires k_scale_cache / v_scale_cache"
+    if kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD:
+        quant_max, quant_min = _INT8_QUANT_MAX, _INT8_QUANT_MIN
+    elif kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
+        quant_max, quant_min = _FP8_QUANT_MAX, _FP8_QUANT_MIN
+    else:
+        raise ValueError(
+            f"reshape_and_cache_int8_fp8 does not support {kv_quant_mode.name}"
         )
-        _run_reshape_and_cache(
-            key=key,
-            value=value,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            slot_mapping=slot_mapping,
-            quant_max=self._quant_max,
-            quant_min=self._quant_min,
-        )
-
-
-class Int8PerTokenHeadFactory(_PerTokenHeadFactory):
-    """KV cache factory for ``KVQuantMode.INT8_PER_TOKEN_HEAD``."""
-
-    mode = KVQuantMode.INT8_PER_TOKEN_HEAD
-    _quant_max = _INT8_QUANT_MAX
-    _quant_min = _INT8_QUANT_MIN
-
-
-class Fp8PerTokenHeadFactory(_PerTokenHeadFactory):
-    """KV cache factory for ``KVQuantMode.FP8_PER_TOKEN_HEAD``."""
-
-    mode = KVQuantMode.FP8_PER_TOKEN_HEAD
-    _quant_max = _FP8_QUANT_MAX
-    _quant_min = _FP8_QUANT_MIN
-
-
-register(Int8PerTokenHeadFactory())
-register(Fp8PerTokenHeadFactory())
+    _run_reshape_and_cache(
+        key=key,
+        value=value,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+        slot_mapping=slot_mapping,
+        quant_max=quant_max,
+        quant_min=quant_min,
+    )

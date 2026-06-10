@@ -806,18 +806,16 @@ def unified_attention(
 ):
     assert causal, "Only causal attention is supported"
 
-    # Sub-byte packed mode (INT4) needs a bespoke kernel — it splits the
-    # dot, dequantizes from packed bytes, and lives in its own factory
-    # module under ``vllm.v1.attention.ops.triton_quant_kv``.  Everything
-    # else (NONE, FP8 per-tensor, INT8 / FP8 per-token-head) goes through
-    # the core kernel below via constexpr branches.
+    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # sub-byte unpack); everything else goes through the core kernel below.
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        from vllm.v1.attention.ops.triton_quant_kv import get_quant_kv_factory
+        from vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head import (
+            unified_attention_int4,
+        )
 
-        factory = get_quant_kv_factory(kv_quant_mode)
         if sinks is not None:
             assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
-        factory.unified_attention(
+        unified_attention_int4(
             q=q,
             k_cache=k,
             v_cache=v,

@@ -10,8 +10,6 @@ and the diff-kv variant.  All per-token-head and packed-int modes
 routes to them.
 """
 
-import warnings
-
 import torch
 
 from vllm.platforms import current_platform
@@ -426,10 +424,6 @@ def triton_reshape_and_cache_flash_diffkv(
 # ---------------------------------------------------------------------------
 # Per-token-head quantization (INT8 / FP8 / INT4)
 # ---------------------------------------------------------------------------
-# Public dispatcher kept for backwards compatibility.  All actual reshape
-# kernels live in :mod:`vllm.v1.attention.ops.triton_quant_kv` — one file per
-# mode — and self-register on import.  This wrapper looks up the backend
-# lazily so unused modes pay zero compile cost.
 def triton_reshape_and_cache_flash_per_token_head_quant(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
@@ -438,41 +432,47 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
-    kv_quant_mode: KVQuantMode | None = None,
+    kv_quant_mode: KVQuantMode,
 ):
     """Quantize key/value per (token, head) and write to the paged cache.
 
-    Dispatches to the appropriate backend in
-    :mod:`vllm.v1.attention.ops.triton_quant_kv`.  When *kv_quant_mode* is
-    ``None`` (legacy callers) the mode is inferred from the cache dtype,
-    which is deprecated; pass ``kv_quant_mode`` explicitly.
+    INT4 needs a bespoke packed reshape (sub-byte packing + RHT
+    pre-rotation); INT8 and FP8 share the per-(token, head) absmax kernel.
     """
-    if kv_quant_mode is None:
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            FP8_DTYPE,
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        from vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head import (
+            reshape_and_cache_int4,
         )
 
-        warnings.warn(
-            "triton_reshape_and_cache_flash_per_token_head_quant: calling "
-            "without `kv_quant_mode` is deprecated and will be removed in a "
-            "future release.  Pass the KVQuantMode explicitly.",
-            DeprecationWarning,
-            stacklevel=2,
+        reshape_and_cache_int4(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
         )
-        if key_cache.dtype == FP8_DTYPE:
-            kv_quant_mode = KVQuantMode.FP8_PER_TOKEN_HEAD
-        else:
-            kv_quant_mode = KVQuantMode.INT8_PER_TOKEN_HEAD
+    elif kv_quant_mode in (
+        KVQuantMode.INT8_PER_TOKEN_HEAD,
+        KVQuantMode.FP8_PER_TOKEN_HEAD,
+    ):
+        from vllm.v1.attention.ops.triton_quant_kv.int8_fp8_per_token_head import (
+            reshape_and_cache_int8_fp8,
+        )
 
-    from vllm.v1.attention.ops.triton_quant_kv import get_quant_kv_factory
-
-    factory = get_quant_kv_factory(kv_quant_mode)
-    factory.reshape_and_cache(
-        key=key,
-        value=value,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        slot_mapping=slot_mapping,
-        k_scale_cache=k_scale_cache,
-        v_scale_cache=v_scale_cache,
-    )
+        reshape_and_cache_int8_fp8(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            kv_quant_mode=kv_quant_mode,
+        )
+    else:
+        raise ValueError(
+            f"triton_reshape_and_cache_flash_per_token_head_quant does not "
+            f"support {kv_quant_mode.name}"
+        )

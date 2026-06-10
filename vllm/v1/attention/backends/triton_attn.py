@@ -677,12 +677,9 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Dedicated prefill kernel (with packed variant for INT4).
-        # Decode is gated separately below: only INT8 / FP8 use the
-        # dedicated split-KV decode kernel — INT4 falls through to
-        # ``unified_attention`` / ``_attn_packed``, which gets tensor cores
-        # via ``tl.dot`` whereas the split-KV decode kernel uses vector
-        # mul-reduce.
+        # Per-token-head prefill fast paths. Decode is gated separately
+        # below; INT4 falls through to unified_attention (tl.dot tensor
+        # cores) rather than the vector mul-reduce split-KV decode kernel.
         if (
             self._is_per_token_head_quant
             and self.alibi_slopes is None
@@ -772,11 +769,9 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 return output
 
-            # Pure prefill with at least one continuation chunk.
-            # Reads paged cache with inline per-token-head dequant via the
-            # dedicated prefill kernel — avoids falling through to the
-            # decode-shaped unified_attention which wastes K loads across
-            # query tiles.
+            # Pure prefill with at least one continuation chunk: dedicated
+            # prefill kernel dequants the paged cache inline, avoiding the
+            # decode-shaped unified_attention that re-loads K per query tile.
             if (
                 num_dec == 0
                 and num_actual_tokens > 0
@@ -807,10 +802,8 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 return output
 
-            # Mixed decode + prefill where the prefill portion includes
-            # at least one continuation chunk. Decode portion goes through
-            # unified_attention (decode-tuned); prefill portion uses the
-            # dedicated prefill kernel.
+            # Mixed decode + continuation prefill: decode portion through
+            # unified_attention, prefill portion through the prefill kernel.
             if (
                 num_dec > 0
                 and num_dec_tok < num_actual_tokens
@@ -875,10 +868,9 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 return output
 
-        # Per-token-head: dedicated split-KV kernel for decode and small
-        # continuation prefill (q_len ≤ threshold). Same trick as TQ: each
-        # query gets its own causal K length via q_to_klen. For large
-        # continuation (q_len > threshold), fall through to unified_attention.
+        # Per-token-head: split-KV kernel for decode and small continuation
+        # prefill (q_len ≤ threshold), each query getting its own causal K
+        # length via q_to_klen. Larger shapes fall through to unified_attention.
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
@@ -891,9 +883,6 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale = None
             v_descale = None
 
-            # Dedicated split-KV kernel for decode + small continuation
-            # prefill. Gated on max_query_len ≤ threshold; larger shapes
-            # fall through to unified_attention (better BLOCK_Q sharing).
             if (
                 attn_metadata.max_query_len <= _CONTINUATION_DECODE_THRESHOLD
                 and attn_metadata.q_to_req is not None
