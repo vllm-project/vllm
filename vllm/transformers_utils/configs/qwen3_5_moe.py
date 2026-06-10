@@ -102,10 +102,10 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
             ]
         if hasattr(self, "validate_layer_type"):
             # Transformers v5
-            kwargs["ignore_keys_at_rope_validation"] = {
+            kwargs["ignore_keys_at_rope_validation"] = [
                 "mrope_section",
                 "mrope_interleaved",
-            }
+            ]
             self.validate_layer_type()
         else:
             # Transformers v4
