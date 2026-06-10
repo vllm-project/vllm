@@ -180,7 +180,7 @@ class SchedulerConfig:
         logger.warning_once(
             "Using custom scheduler class %s. This scheduler interface is not public "
             "and compatibility may not be maintained. If you have subclassed Scheduler "
-            "instead of AsyncScheduler, you may see degraded performance due to async "
+            "instead of AsyncScheduler, you will see degraded performance due to async "
             "scheduling being disabled.",
             self.scheduler_cls,  # type: ignore[arg-type]
         )
