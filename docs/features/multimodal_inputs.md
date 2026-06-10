@@ -841,6 +841,29 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### Keyframe-Only Video Sampling (Lossy)
+
+Video frames are sampled by a pluggable loader selected with the `VLLM_VIDEO_LOADER_BACKEND` environment variable (default: `opencv`, uniform sampling). The `pyav_keyframes` loader trades temporal accuracy for decode speed: it samples only bitstream keyframes, so decode cost is bounded by the frame budget regardless of clip length — P/B-frames are never decoded.
+
+```bash
+VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"video": {"num_frames": 16}}'
+```
+
+`num_frames` is the regular frame budget from `--media-io-kwargs` (default 32, also settable per request via the `media_io_kwargs` API field); the env variable applies to offline `LLM` use as well. In our measurements decode time is near-constant (tens of milliseconds for 16 frames, whether the clip is 30 seconds or 10 minutes), roughly 4–40× faster than the lossless PyAV decode path, with the gap growing with clip length.
+
+This fits prefill-heavy workloads — video classification, tagging, and content-level understanding — which generate few tokens, so the GPU spends little time per request and CPU-side video decoding dominates the pipeline. Such tasks rarely need dense temporal sampling: a handful of keyframes carries the signal, and their positions are already indexed in the container, enumerable without decoding anything.
+
+**Behavior:**
+
+- Returned frames sit on GOP boundaries rather than a uniform stride, so temporal coverage follows the source encoding (typically one frame per 2–10 seconds of video).
+- If a clip has fewer keyframes than `num_frames`, keyframes are duplicated (balanced) to fill the request; `frames_indices` always reports true source indices.
+- It is never selected automatically for any model; the `opencv` codec and `frame_recovery` are rejected.
+
+!!! warning
+    This is a lossy trade-off. In a Qwen2.5-VL-7B evaluation (NExTQA + MVBench, 16 frames), NExTQA accuracy was unchanged (79.6% → 79.5%) while MVBench dropped 11.3 points overall, concentrated in motion- and temporal-order subtasks (`action_antonym`: −52.7 points). Avoid it for motion counting, temporal ordering, or action recognition; the accuracy impact varies with model, task, and source GOP structure.
+
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.

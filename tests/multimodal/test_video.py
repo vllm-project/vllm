@@ -420,6 +420,12 @@ def test_pyav_dynamic_backend_loads_frames(
         assert metadata["video_backend"] == "pyav_dynamic"
 
 
+def _green_markers(frames: npt.NDArray) -> list[int]:
+    """Recover per-frame index markers encoded on the green channel."""
+    h, w = frames.shape[1], frames.shape[2]
+    return [int(f[h // 2, w // 2, 1]) for f in frames]
+
+
 def test_pyav_backend_returns_target_frames_not_keyframes():
     """Regression test: PyAV must decode forward past the seek keyframe.
 
@@ -446,7 +452,7 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
     requested = list(metadata["frames_indices"])
     assert len(requested) == num_sampled
 
-    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
+    actual = _green_markers(frames)
 
     assert len(set(actual)) == num_sampled, (
         f"PyAV returned only {len(set(actual))} distinct frames for "
@@ -461,6 +467,59 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             f"Frame mismatch: requested index {want_idx}, "
             f"got marker {marker} (tolerance ±10)"
         )
+
+
+# ============================================================================
+# PyAV Keyframe-Only Loader Tests
+# ============================================================================
+
+
+def test_pyav_keyframes_samples_only_keyframes():
+    """Core contract — the inverse of the uniform pyav codec test above:
+    returned frames must sit on GOP boundaries, labeled with their true
+    source index."""
+    # 120 frames with a keyframe every 10 → keyframes at 0, 10, ..., 110
+    video_bytes = create_long_gop_video(num_frames=120, gop_size=10)
+
+    loader = VIDEO_LOADER_REGISTRY.load("pyav_keyframes")
+    frames, metadata = loader.load_bytes(video_bytes, num_frames=6)
+
+    assert frames.shape == (6, 64, 64, 3)
+    assert metadata["video_backend"] == "pyav_keyframes"
+    assert metadata["do_sample_frames"] is False
+
+    indices = metadata["frames_indices"]
+    assert indices == sorted(indices)
+    assert len(set(indices)) == 6, "12 keyframes available; no dups expected"
+    assert all(idx % 10 == 0 for idx in indices), (
+        f"Keyframes were encoded every 10 frames; got indices={indices}"
+    )
+
+    # Pixels must agree with the metadata labels.
+    for marker, idx in zip(_green_markers(frames), indices):
+        assert abs(marker - idx) <= 10, (
+            f"Pixel marker {marker} disagrees with metadata index {idx}"
+        )
+
+
+def test_pyav_keyframes_oversamples_instead_of_decoding_non_keyframes():
+    """Hard contract: with fewer keyframes than num_frames, duplicate
+    keyframes (balanced) — never fall back to P/B-frame decode."""
+    # 60 frames with a keyframe every 30 → only 2 keyframes (0 and 30)
+    video_bytes = create_long_gop_video(num_frames=60, gop_size=30)
+
+    loader = VIDEO_LOADER_REGISTRY.load("pyav_keyframes")
+    frames, metadata = loader.load_bytes(video_bytes, num_frames=8)
+
+    assert frames.shape[0] == 8
+    indices = metadata["frames_indices"]
+    assert set(indices) == {0, 30}, f"Expected only the 2 keyframes: {indices}"
+    assert indices.count(0) == 4 and indices.count(30) == 4, (
+        f"Duplication should be balanced, got {indices}"
+    )
+
+    for marker, idx in zip(_green_markers(frames), indices):
+        assert abs(marker - idx) <= 10
 
 
 @pytest.mark.parametrize(

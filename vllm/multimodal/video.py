@@ -1343,3 +1343,110 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             valid_frame_indices=valid_frame_indices,
         )
         return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("pyav_keyframes")
+class PyAVKeyframeVideoBackend(VideoLoader, PyAVVideoBackendMixin):
+    """Keyframe-only sampling video backend (lossy, opt-in).
+
+    Samples exclusively from the bitstream's keyframes: one demux pass
+    enumerates keyframe PTS values (packet headers only, no decode), then
+    each kept keyframe is seek-decoded directly. Decode work is bounded by
+    ``num_frames`` I-frame decodes per clip regardless of clip length — no
+    P/B-frame is ever decoded.
+
+    This is an explicit accuracy/throughput trade-off: returned frames sit
+    on GOP boundaries rather than a uniform temporal stride, so temporal
+    coverage follows the source encoding. Scene/object/identity-centric
+    workloads are typically preserved; motion- and temporal-order-sensitive
+    tasks degrade. Opt in deliberately via
+    ``VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes``.
+
+    When the clip has fewer keyframes than ``num_frames``, the available
+    keyframes are oversampled (balanced duplication) so downstream
+    processors still receive exactly ``num_frames`` frames.
+    ``frames_indices`` reports the true source index of every returned
+    (possibly duplicated) keyframe, keeping temporal positional encodings
+    consistent with the pixels.
+    """
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["pyav"] = "pyav",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        assert not frame_recovery, (
+            "frame_recovery is only available for `opencv` backend"
+        )
+        assert backend == "pyav", (
+            f"pyav_keyframes decodes keyframes via PyAV only; got {backend!r}"
+        )
+
+        with av.open(BytesIO(data)) as container:
+            source = cls.get_metadata(container)
+            stream = container.streams.video[0]
+            time_base = stream.time_base
+            # Containers may omit average_rate; assume 30 fps so the
+            # frames_indices labels stay finite.
+            src_fps = source.original_fps if source.original_fps > 0 else 30.0
+
+            kf_pts = [
+                packet.pts
+                for packet in container.demux(stream)
+                if packet.is_keyframe and packet.pts is not None
+            ]
+            n_kf = len(kf_pts)
+            if n_kf == 0:
+                raise ValueError("pyav_keyframes: no keyframes found in bitstream")
+
+            num_frames_to_sample = num_frames if num_frames > 0 else n_kf
+            if fps > 0 and source.duration > 0:
+                num_frames_to_sample = min(
+                    num_frames_to_sample, math.floor(source.duration * fps)
+                )
+            num_frames_to_sample = max(1, num_frames_to_sample)
+
+            # Round-not-truncate so e.g. n_kf=2 / num_frames=16 duplicates
+            # each keyframe 8x (balanced) instead of 15x+1x (the
+            # linspace+int-truncate skew).
+            picks = (
+                np.round(np.linspace(0, n_kf - 1, num_frames_to_sample))
+                .astype(int)
+                .tolist()
+            )
+            target_pts = [kf_pts[i] for i in picks]
+
+            # SLICE threading only affects decode, not the demux pass above.
+            stream.thread_type = "SLICE"
+            unique_pts = list(dict.fromkeys(target_pts))
+            pts_to_frame: dict[int, npt.NDArray] = {}
+            for tpts in unique_pts:
+                # seek() lands on the keyframe at-or-before tpts; tpts came
+                # from the keyframe PTS list, so the next decoded frame is
+                # exactly that keyframe.
+                container.seek(tpts, stream=stream)
+                frame = next(container.decode(stream), None)
+                if frame is None:
+                    raise ValueError(
+                        f"pyav_keyframes: keyframe pts={tpts} demuxed but "
+                        "no frame decoded; bitstream may be corrupt"
+                    )
+                pts_to_frame[tpts] = frame.to_ndarray(format="rgb24")
+
+            frames_list = [pts_to_frame[tpts] for tpts in target_pts]
+            valid_indices = [
+                int(round(float(tpts * time_base) * src_fps)) for tpts in target_pts
+            ]
+
+        return np.stack(frames_list), cls.create_hf_metadata(
+            source=source,
+            video_backend="pyav_keyframes",
+            valid_frame_indices=valid_indices,
+        )
