@@ -13,6 +13,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -206,9 +207,9 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
 
-        return [XPUExpertsMXFp4]
+        return [XPUExpertsMxFp4]
 
     elif backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
@@ -1632,12 +1633,11 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(
             layer,
             gemm1_alpha=gemm1_alpha,
@@ -1663,7 +1663,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: "RoutedExperts | None" = None,
+    layer: RoutedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)

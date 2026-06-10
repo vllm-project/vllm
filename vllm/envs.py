@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
+    VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -157,6 +158,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
+    VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -245,6 +247,9 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
+    VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
+    VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
+    VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
@@ -951,6 +956,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
+    # Maximum decoded audio duration in seconds.  Compressed audio files
+    # (e.g. OPUS at very low bitrate) can expand into gigabytes of float32
+    # PCM.  This limit is enforced *during* decoding so the memory is never
+    # allocated.  Default is 600s (10 minutes).
+    "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
+        os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
+    ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1323,6 +1335,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This environment variable is ignored if data-parallel-backend is not Ray.
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
+    ),
+    # Optional comma-separated list of node IPs that Ray data-parallel
+    # placement groups may use. When set, create_dp_placement_groups only
+    # considers these nodes (the DP master node is always included).
+    # This environment variable is ignored if data-parallel-backend is not Ray.
+    "VLLM_RAY_DP_PLACEMENT_NODE_IPS": lambda: os.getenv(
+        "VLLM_RAY_DP_PLACEMENT_NODE_IPS", ""
     ),
     # Comma-separated *additional* prefixes of env vars to copy from the
     # driver to Ray workers.  These are merged with the built-in defaults
@@ -1832,6 +1851,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
+    # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
+    "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0"))
+    ),
+    # DeepEP v2: use fewer SMs at slight throughput cost
+    "VLLM_DEEPEP_V2_PREFER_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_PREFER_OVERLAP", "0"))
+    ),
+    # DeepEP v2: trade precision for transfer size in combine
+    "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
+    ),
     # The number of SMs/CUs to allocate for communication kernels when
     # running DBO; the rest will be allocated to compute.
     # Default: 20 on CUDA (SMs), 64 on ROCm (CUs).
@@ -2133,6 +2164,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
