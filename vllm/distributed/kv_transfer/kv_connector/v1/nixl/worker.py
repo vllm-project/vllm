@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -394,6 +394,12 @@ class NixlConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+
+        # Reads whose NIXL transfer must not start until in-flight GPU work
+        # enqueued before the read request has completed. See
+        # _read_blocks_or_defer for why this is needed for mamba/SSM state.
+        # Only accessed from the worker thread.
+        self._deferred_reads: deque[tuple[ReqId, ReqMeta, torch.cuda.Event]] = deque()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1698,6 +1704,7 @@ class NixlConnectorWorker:
         to track which workers are done.
         """
         assert self.transfer_topo is not None
+        self._start_ready_deferred_reads()
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
@@ -1767,22 +1774,6 @@ class NixlConnectorWorker:
 
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
-
-        # See https://github.com/vllm-project/vllm/issues/37285.
-        # The NIXL READ that lands remote KV -- including the mamba/SSM recurrent
-        # and conv state -- into device memory completes on the NIC, and the
-        # receive-side post-processing above is not ordered against the
-        # consumer's *next* forward. With async scheduling the decoder schedules
-        # this request's first decode on the very next step, whose forward reads
-        # ssm_state/conv_state, so the read can race the not-yet-visible received
-        # state and consume corrupted bytes (accuracy collapses under load, worse
-        # at higher TP). Synchronous scheduling masks this via its per-step
-        # drain. Drain the device before reporting the request as done-recving --
-        # which is what gates decode scheduling -- so the received state is
-        # visible to that decode. Gated on real receives so steady-state decode
-        # is untouched.
-        if (done_recving - failed_recv_reqs) and self.device_type == "cuda":
-            torch.accelerator.synchronize()
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -1951,6 +1942,7 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        defer_event: torch.cuda.Event | None = None
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
@@ -1977,11 +1969,16 @@ class NixlConnectorWorker:
                         continue
 
             # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            defer_event = self._read_blocks_or_defer(req_id, meta, defer_event)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+            req_id, meta = self._ready_requests.get_nowait()
+            defer_event = self._read_blocks_or_defer(req_id, meta, defer_event)
+
+        # Start deferred reads whose gating event has already completed
+        # (e.g. the GPU is idle), so they are not delayed by a step.
+        self._start_ready_deferred_reads()
 
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
@@ -2033,6 +2030,63 @@ class NixlConnectorWorker:
                         engine_id,
                         exc_info=True,
                     )
+
+    def _read_blocks_or_defer(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+        event: "torch.cuda.Event | None",
+    ) -> "torch.cuda.Event | None":
+        """Start the NIXL read for a request, deferring it if needed.
+
+        See https://github.com/vllm-project/vllm/issues/37285. With async
+        scheduling, the scheduler frees a finished request's blocks while a
+        speculatively-scheduled forward step for that request may still be
+        in flight on the GPU; for mamba/SSM layers that step rewrites the
+        request's *entire* state block. If such a block is reallocated to a
+        request arriving via PD disaggregation, the NIXL READ lands the
+        received state via the NIC/DMA -- unordered with the compute stream
+        -- and the in-flight step then overwrites it with stale state,
+        destroying accuracy under load. (Regular allocation is safe because
+        the new owner's writes are stream-ordered after the stale write;
+        only NIC writes break that ordering.)
+
+        To close the race without blocking the host, defer the READ until a
+        CUDA event recorded now -- i.e. after every GPU step that could
+        still write these blocks has been enqueued -- has completed.
+        Deferred reads are started from start_load_kv/get_finished, which
+        are polled every engine step while loads are pending.
+
+        Args:
+            req_id: Request to read blocks for.
+            meta: Transfer metadata for the request.
+            event: Event recorded earlier in this call batch, if any.
+
+        Returns:
+            The gating event, recorded lazily on the first deferral so it
+            can be reused for subsequent requests in the same batch.
+        """
+        if not (self._has_mamba and self.device_type == "cuda"):
+            self._read_blocks_for_req(req_id, meta)
+            return event
+        if event is None:
+            event = torch.cuda.Event()
+            event.record()
+        self._deferred_reads.append((req_id, meta, event))
+        return event
+
+    def _start_ready_deferred_reads(self):
+        """Start deferred reads whose gating event has completed.
+
+        Events are recorded on the same stream in FIFO order, so stop at
+        the first incomplete one.
+        """
+        while self._deferred_reads:
+            req_id, meta, event = self._deferred_reads[0]
+            if not event.query():
+                break
+            self._deferred_reads.popleft()
+            self._read_blocks_for_req(req_id, meta)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
