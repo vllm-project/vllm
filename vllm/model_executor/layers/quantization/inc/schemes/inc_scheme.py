@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch
 
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoEMethodBase
+    from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
     from vllm.model_executor.layers.linear import LinearMethodBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
