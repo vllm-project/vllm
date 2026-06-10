@@ -137,6 +137,28 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
     ),
+    "glm4_1v": VitCudagraphTestConfig(
+        model="zai-org/GLM-4.1V-9B-Thinking",
+        image_prompt=(
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            "<|begin_of_image|><|image|><|end_of_image|>"
+            "What is in this image?<|assistant|>assistant\n"
+        ),
+        video_prompt=(
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            "<|begin_of_video|><|video|><|end_of_video|>"
+            "Describe this video in one sentence<|assistant|>assistant\n"
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Glm4vForConditionalGeneration",
+            ),
+        },
+    ),
 }
 
 
