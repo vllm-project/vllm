@@ -9,6 +9,7 @@ pub(crate) mod openai;
 mod pause;
 mod server_info;
 mod sleep;
+mod tokenize;
 mod version;
 
 use std::sync::Arc;
@@ -72,7 +73,9 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
-        // vLLM specific inference endpoints
+        // vLLM specific endpoints
+        .route("/tokenize", post(tokenize::tokenize))
+        .route("/detokenize", post(tokenize::detokenize))
         .route("/inference/v1/generate", post(inference::generate));
 
     if runtime_lora_updating_enabled {
