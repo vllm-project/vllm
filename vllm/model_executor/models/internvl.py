@@ -599,7 +599,6 @@ class InternVLChatModel(
         self.img_context_token_id = None
         self.video_context_token_id = None
 
-        self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
@@ -796,9 +795,6 @@ class InternVLChatModel(
 
         return modalities
 
-    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        self.visual_token_mask = None
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -829,9 +825,6 @@ class InternVLChatModel(
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-            self._set_visual_token_mask(input_ids)
-
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
@@ -859,11 +852,6 @@ class InternVLChatModel(
             "intermediate_tensors": intermediate_tensors,
             "inputs_embeds": inputs_embeds,
         }
-
-        # Only required if the model is mono-architecture
-        if self.visual_token_mask is not None:
-            forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
-            self.visual_token_mask = None
 
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
