@@ -1,14 +1,62 @@
 use std::any::type_name;
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror_ext::AsReport;
 
 use super::{OpaqueValue, default_opaque_value_nil};
 use crate::error::{Error, Result};
+
+/// How pause/sleep utility calls handle in-flight requests.
+///
+/// Use display/from-str serde so MessagePack utility args stay as Python
+/// literal strings instead of serde enum variant tuples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, SerializeDisplay, DeserializeFromStr)]
+pub enum PauseMode {
+    /// Abort all in-flight requests immediately.
+    #[default]
+    Abort,
+    /// Wait for in-flight requests to complete.
+    Wait,
+    /// Freeze queued requests so they can resume later.
+    Keep,
+}
+
+impl PauseMode {
+    /// Return the Python literal used on the utility-call wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Abort => "abort",
+            Self::Wait => "wait",
+            Self::Keep => "keep",
+        }
+    }
+}
+
+impl fmt::Display for PauseMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PauseMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "abort" => Ok(Self::Abort),
+            "wait" => Ok(Self::Wait),
+            "keep" => Ok(Self::Keep),
+            other => Err(format!(
+                "invalid pause mode `{other}`; expected one of: abort, wait, keep"
+            )),
+        }
+    }
+}
 
 /// Utility call id as carried on the engine-core MessagePack wire.
 ///
@@ -212,7 +260,7 @@ mod tests {
     use rmpv::Value;
     use serde::Serialize;
 
-    use super::{EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope};
+    use super::{EngineCoreUtilityRequest, PauseMode, UtilityOutput, UtilityResultEnvelope};
     use crate::Error;
     use crate::protocol::{decode_msgpack, decode_value, encode_msgpack};
 
@@ -239,6 +287,26 @@ mod tests {
         assert_eq!(array[1], Value::from(42));
         assert_eq!(array[2], Value::from("is_sleeping"));
         assert_eq!(array[3], Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn pause_mode_serializes_as_python_literal() {
+        let request =
+            EngineCoreUtilityRequest::new(7, 42, "pause_scheduler", (PauseMode::Abort, true))
+                .unwrap();
+
+        let encoded = encode_msgpack(&request).unwrap();
+        let value = decode_value(&encoded).unwrap();
+        let array = match value {
+            Value::Array(array) => array,
+            other => panic!("expected utility request array, got {other:?}"),
+        };
+
+        assert_eq!(array[2], Value::from("pause_scheduler"));
+        assert_eq!(
+            array[3],
+            Value::Array(vec![Value::from("abort"), Value::from(true)])
+        );
     }
 
     #[test]
