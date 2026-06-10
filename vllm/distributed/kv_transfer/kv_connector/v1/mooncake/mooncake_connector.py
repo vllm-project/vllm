@@ -957,7 +957,6 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._pp_size: dict[EngineId, int] = {self.engine_id: self.pp_size}
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1768,13 +1767,6 @@ class MooncakeConnectorWorker:
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
-                    self._pp_size[remote_engine_id] = max(
-                        (
-                            len(tp_entry)
-                            for tp_entry in dp_entry["worker_addr"].values()
-                        ),
-                        default=1,
-                    )
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s: %s",
@@ -1794,12 +1786,11 @@ class MooncakeConnectorWorker:
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
             self._tp_size[remote_engine_id]
         )
-        remote_pp_size = self._pp_size.get(remote_engine_id, 1)
         worker_addrs: list[str] = []
         selected_remote_pp: dict[int, list[int]] = {}
         for remote_tp_rank in remote_tp_ranks:
             pp_to_addr = self._remote_agents[remote_engine_id][remote_tp_rank]
-            if self.pp_size == remote_pp_size and self.pp_rank in pp_to_addr:
+            if self.pp_size == len(pp_to_addr) and self.pp_rank in pp_to_addr:
                 pp_ranks = [self.pp_rank]
             else:
                 pp_ranks = sorted(pp_to_addr)
