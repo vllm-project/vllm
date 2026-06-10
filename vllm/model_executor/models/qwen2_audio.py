@@ -439,9 +439,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         num_audios, max_audio_tokens, embed_dim = audio_features.shape
         audio_output_lengths = audio_output_lengths.unsqueeze(1)
         audio_features_mask = (
-            torch.arange(max_audio_tokens)
-            .expand(num_audios, max_audio_tokens)
-            .to(audio_output_lengths.device)
+            torch.arange(max_audio_tokens, device=audio_output_lengths.device).expand(
+                num_audios, max_audio_tokens
+            )
             < audio_output_lengths
         )
         masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)

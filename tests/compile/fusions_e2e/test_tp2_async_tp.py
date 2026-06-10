@@ -13,11 +13,13 @@ from .common import (
     AttentionBackendCase,
     Matches,
     custom_ops_combos,
+    is_blackwell,
 )
 from .models import (
     FLASHINFER_ATTN,
     TRITON_ATTN,
     llama3_8b,
+    llama3_8b_fp4,
     llama3_8b_fp8,
     llama4_scout_fp8,
     qwen3_a3b,
@@ -74,6 +76,69 @@ def test_tp2_async_tp_fp8_fusions(
         "rms_quant_fusion",
         "act_quant_fusion",
         "norm_rope_fusion",
+        "attn_quant_fusion",
+        "sequence_parallel",
+        "async_tp",
+    ]
+
+    run_e2e_fusion_test(
+        model_name,
+        matches,
+        model_kwargs,
+        attn_backend,
+        compilation_config,
+        matches_check,
+        tp_size=2,
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model_name, matches_fn, model_kwargs, hf_overrides",
+    [llama3_8b_fp4],
+)
+@pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
+@pytest.mark.parametrize("n_layers", [4])
+@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+def test_tp2_async_tp_nvfp4_fusions(
+    model_name: str,
+    matches_fn: Callable[[int], Matches],
+    model_kwargs: dict,
+    hf_overrides: Callable[[int], dict],
+    attn_backend: AttentionBackendCase,
+    n_layers: int,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    run_e2e_fusion_test,
+):
+    # NVFP4 currently wires the all-gather + GEMM path only.
+    matches = matches_fn(n_layers)._replace(async_tp=n_layers * 2)
+
+    # Reduce size of model and skip weight loading time
+    model_kwargs["hf_overrides"] = hf_overrides(n_layers)
+    model_kwargs["load_format"] = "dummy"
+    model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+
+    compilation_config = dict(
+        use_inductor_graph_partition=inductor_graph_partition,
+        custom_ops=custom_ops.split(","),
+        pass_config=PassConfig(
+            fuse_act_quant=True,
+            fuse_attn_quant=True,
+            enable_sp=True,
+            fuse_gemm_comms=True,
+            fuse_allreduce_rms=False,
+            # Override threshold for testing (models have small hidden_size)
+            sp_min_token_num=512,
+        ),
+    )
+
+    matches_check = [
+        "act_quant_fusion",
         "attn_quant_fusion",
         "sequence_parallel",
         "async_tp",

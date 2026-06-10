@@ -162,7 +162,13 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_cache_scale(self, name: str) -> str | None:
+    def get_cache_scale_mapper(self) -> "WeightsMapper | None":
+        """Mapping from checkpoint KV-cache scale names to vLLM scale names.
+
+        Returning a mapper here causes `AutoWeightsLoader` to apply it to the
+        weight stream automatically; individual model `load_weights` methods
+        do not need to know about KV-cache scales.
+        """
         return None
 
     def apply_vllm_mapper(  # noqa: B027
@@ -172,8 +178,9 @@ class QuantizationConfig(ABC):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass

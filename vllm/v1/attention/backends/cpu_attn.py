@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -24,6 +25,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -34,11 +36,14 @@ _CPU_ARCH_PREFER_MIXED_BATCH = (
     CpuArchEnum.X86,
     CpuArchEnum.ARM,
     CpuArchEnum.S390X,
+    CpuArchEnum.RISCV,
     CpuArchEnum.POWERPC,
 )
 
 
 class CPUAttentionBackend(AttentionBackend):
+    forward_includes_kv_cache_update: bool = False
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -90,7 +95,11 @@ class CPUAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return 2, num_blocks, num_kv_heads, block_size, head_size
+        return num_blocks, num_kv_heads, block_size, 2 * head_size
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -99,7 +108,6 @@ class CPUAttentionBackend(AttentionBackend):
 
 @dataclass
 class CPUAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -210,7 +218,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
 
         attn_metadata = CPUAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -301,7 +308,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, num_kv_heads, block_size, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -331,28 +338,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         # For decoder and cross-attention, use KV cache, size are
-        # [num_blocks, num_kv_heads, block_size, head_size]
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            ops.cpu_attn_reshape_and_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                attn_metadata.isa,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                kv_cache_dtype=self.kv_cache_dtype,
-            )
+        # [num_blocks, num_kv_heads, block_size, 2 * head_size]
+        # Make a view [num_blocks, num_kv_heads, block_size * 2, head_size]
+        # Then slice KV at dim 2
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
         if attn_metadata.use_sdpa_prefill:
             assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
@@ -389,6 +380,35 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
+        isa = _get_attn_isa(
+            key.dtype, key_cache.shape[2], self.head_size, self.kv_cache_dtype
+        )
+        ops.cpu_attn_reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            isa,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
     def _run_sdpa_forward(
         self,
@@ -506,6 +526,26 @@ def _make_sliding_window_bias(
     return attn_biases
 
 
+@functools.lru_cache(maxsize=1)
+def _riscv_supports_rvv() -> bool:
+    """Whether the C++ RVV attention path is usable.
+
+    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses VLEN-agnostic RVVI()
+    macros and supports VLEN=128 and VLEN=256.  CMake auto-detects the
+    largest zvl<N>b from /proc/cpuinfo and passes it via -mrvv-vector-bits.
+    The RVV path is compiled whenever __riscv_v_min_vlen is defined, so
+    we check that at least one supported zvl<N>b is advertised.
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            cpuinfo = f.read()
+    except OSError:
+        return False
+    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(
+        f"zvl{n}b" not in cpuinfo for n in (512, 1024)
+    )
+
+
 def _get_attn_isa(
     dtype: torch.dtype,
     block_size: int,
@@ -523,6 +563,7 @@ def _get_attn_isa(
     arch = current_platform.get_cpu_architecture()
     supports_arm = arch == CpuArchEnum.ARM
     supports_vxe = arch == CpuArchEnum.S390X
+    supports_riscv = arch == CpuArchEnum.RISCV
     supports_vsx = arch == CpuArchEnum.POWERPC
     supports_avx512 = torch.cpu._is_avx512_supported()
     if fp8_kv and not supports_amx and not supports_avx512:
@@ -535,6 +576,8 @@ def _get_attn_isa(
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
+        elif supports_riscv and _riscv_supports_rvv():
+            return "rvv"
         elif supports_vxe:
             return "vxe"
         elif supports_vsx:

@@ -141,6 +141,10 @@ class AlwaysHitShapeEnv:
 
     def __init__(self) -> None:
         self.guards: list[Any] = []
+        # Read by torch._inductor.codecache.FxGraphHashDetails (torch>=2.11)
+        # to incorporate user-provided dynamic-shape hint overrides into the
+        # cache key. We never override hints, so an empty dict is correct.
+        self.var_to_hint_override: dict[Any, int] = {}
 
     def evaluate_guards_expression(self, *args: Any, **kwargs: Any) -> Literal[True]:
         return True

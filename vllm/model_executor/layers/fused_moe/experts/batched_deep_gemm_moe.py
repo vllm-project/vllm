@@ -316,9 +316,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         DeepGemm supports packed ue8m0 activation scales format in devices == sm100

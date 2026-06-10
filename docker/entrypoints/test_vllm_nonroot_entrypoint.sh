@@ -1,0 +1,266 @@
+#!/bin/sh
+# Shell-level unit test for vllm-nonroot-entrypoint.sh.
+#
+# Runs on the host (no Docker, no GPU) by stubbing `vllm` with a shim that
+# dumps its env + argv instead of actually serving. Exercises the wrapper's
+# HOME/USER fallback behavior that can't be easily tested from buildkite
+# (which would need a GPU to run `vllm serve --help`).
+#
+# Usage:
+#   bash docker/entrypoints/test_vllm_nonroot_entrypoint.sh
+# Exits non-zero on the first failed assertion.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WRAPPER="${SCRIPT_DIR}/vllm-nonroot-entrypoint.sh"
+
+if [ ! -x "$WRAPPER" ]; then
+    echo "FAIL: wrapper not found or not executable: $WRAPPER" >&2
+    exit 1
+fi
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+# Stub `vllm` on PATH. It dumps env + argv + cwd to stdout so we can assert.
+mkdir -p "$WORKDIR/bin"
+cat > "$WORKDIR/bin/vllm" <<'EOF'
+#!/bin/sh
+echo "ARGV=$*"
+echo "HOME=${HOME-__unset__}"
+echo "USER=${USER-__unset__}"
+echo "LOGNAME=${LOGNAME-__unset__}"
+echo "PWD=$(pwd)"
+EOF
+chmod +x "$WORKDIR/bin/vllm"
+
+run_wrapper() {
+    # Usage: run_wrapper <output_file> <env_kv>... -- <wrapper_arg>...
+    _out="$1"; shift
+    _env=""
+    while [ "${1:-}" != "--" ]; do
+        _env="$_env $1"; shift
+    done
+    shift
+    env -i PATH="$WORKDIR/bin:/usr/bin:/bin" $_env "$WRAPPER" "$@" > "$_out"
+}
+
+fail() { echo "FAIL: $*" >&2; echo "--- stdout ---" >&2; cat "$1" >&2; exit 1; }
+
+expect_default_home() {
+    _out="$1"
+    _case="$2"
+    if [ -w /home/vllm ]; then
+        expected_home="/home/vllm"
+        grep -q "^HOME=$expected_home\$" "$_out" \
+            || fail "$_out" "$_case: HOME not set to $expected_home"
+    else
+        expected_home="/tmp/vllm-home.XXXXXX"
+        grep -Eq '^HOME=/tmp/vllm-home\.[^/]+$' "$_out" \
+            || fail "$_out" "$_case: HOME not set to $expected_home"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Case 1: writable HOME and USER both set -> wrapper must leave them alone.
+# -----------------------------------------------------------------------------
+case1_home="$WORKDIR/case1-home"
+mkdir -p "$case1_home"
+out="$WORKDIR/case1.out"
+run_wrapper "$out" "HOME=$case1_home" "USER=alice" "LOGNAME=alice" -- --model foo
+grep -q "^HOME=$case1_home\$" "$out" || fail "$out" "case1: HOME not preserved"
+grep -q "^USER=alice\$" "$out" || fail "$out" "case1: USER not preserved"
+grep -q "^LOGNAME=alice\$" "$out" || fail "$out" "case1: LOGNAME not preserved"
+grep -q "^ARGV=serve --model foo\$" "$out" || fail "$out" "case1: ARGV wrong"
+echo "PASS: case1 (writable HOME + USER preserved)"
+
+# -----------------------------------------------------------------------------
+# Case 2: HOME unset -> falls back to /home/vllm if writable, else
+# /tmp/vllm-home.XXXXXX.
+# -----------------------------------------------------------------------------
+# The wrapper checks whether the real /home/vllm exists and is writable. On
+# dev machines /home/vllm typically does NOT exist, so the
+# wrapper should fall to /tmp/vllm-home.XXXXXX.
+out="$WORKDIR/case2.out"
+run_wrapper "$out" -- --model bar
+expect_default_home "$out" "case2"
+grep -q "^USER=vllm\$" "$out" || fail "$out" "case2: USER not defaulted to vllm"
+grep -q "^LOGNAME=vllm\$" "$out" || fail "$out" "case2: LOGNAME not defaulted to vllm"
+grep -q "^ARGV=serve --model bar\$" "$out" || fail "$out" "case2: ARGV wrong"
+echo "PASS: case2 (unset HOME falls back to $expected_home, USER defaulted)"
+
+# -----------------------------------------------------------------------------
+# Case 3: HOME set but unwritable -> must also fall back.
+# -----------------------------------------------------------------------------
+ro_home="$WORKDIR/ro-home"
+mkdir -p "$ro_home"
+chmod 0500 "$ro_home"
+out="$WORKDIR/case3.out"
+run_wrapper "$out" "HOME=$ro_home" -- --model baz
+expect_default_home "$out" "case3"
+grep -q "^USER=vllm\$" "$out" || fail "$out" "case3: USER not defaulted"
+chmod 0700 "$ro_home"
+echo "PASS: case3 (unwritable HOME overridden)"
+
+# -----------------------------------------------------------------------------
+# Case 4: USER set but LOGNAME unset -> LOGNAME mirrors USER.
+# -----------------------------------------------------------------------------
+case4_home="$WORKDIR/case4-home"
+mkdir -p "$case4_home"
+out="$WORKDIR/case4.out"
+run_wrapper "$out" "HOME=$case4_home" "USER=carol" -- --model qux
+grep -q "^USER=carol\$" "$out" || fail "$out" "case4: USER not preserved"
+grep -q "^LOGNAME=carol\$" "$out" || fail "$out" "case4: LOGNAME not mirrored from USER"
+echo "PASS: case4 (LOGNAME mirrors USER when unset)"
+
+# -----------------------------------------------------------------------------
+# Case 5: /etc/passwd is writable AND the current UID is not in it -> wrapper
+# appends a synthetic entry. Uses the VLLM_PASSWD_FILE test hook so we don't
+# touch the real /etc/passwd.
+# -----------------------------------------------------------------------------
+fake_passwd="$WORKDIR/fake-passwd"
+: > "$fake_passwd"  # empty file, current UID definitely not present
+case5_home="$WORKDIR/case5-home"
+mkdir -p "$case5_home"
+out="$WORKDIR/case5.out"
+run_wrapper "$out" "HOME=$case5_home" "VLLM_PASSWD_FILE=$fake_passwd" -- --model foo
+current_uid="$(id -u)"
+current_gid="$(id -g)"
+expected_line="vllm:x:${current_uid}:${current_gid}:vllm:${case5_home}:/bin/bash"
+grep -Fx "$expected_line" "$fake_passwd" > /dev/null \
+    || { echo "FAIL: case5: expected line not found in fake passwd:"; echo "  expected: $expected_line"; echo "  file contents:"; cat "$fake_passwd"; exit 1; }
+echo "PASS: case5 (passwd entry appended for arbitrary UID)"
+
+# -----------------------------------------------------------------------------
+# Case 6: /etc/passwd is writable but current UID already has an entry ->
+# wrapper must NOT duplicate the entry.
+# -----------------------------------------------------------------------------
+fake_passwd="$WORKDIR/fake-passwd-prepopulated"
+printf 'vllm:x:%s:%s:vllm:/home/vllm:/bin/bash\n' "$current_uid" "$current_gid" > "$fake_passwd"
+out="$WORKDIR/case6.out"
+run_wrapper "$out" "HOME=$case5_home" "VLLM_PASSWD_FILE=$fake_passwd" -- --model foo
+line_count="$(wc -l < "$fake_passwd")"
+# NOTE: wc may count 0 or 1 depending on trailing newline; accept 1.
+# More robust: count lines matching our UID.
+uid_lines="$(grep -c ":${current_uid}:" "$fake_passwd" || true)"
+[ "$uid_lines" = "1" ] \
+    || { echo "FAIL: case6: expected exactly one entry for UID $current_uid, got $uid_lines"; cat "$fake_passwd"; exit 1; }
+echo "PASS: case6 (existing passwd entry not duplicated)"
+
+# -----------------------------------------------------------------------------
+# Case 7: /etc/passwd is NOT writable -> wrapper must NOT crash, just skip.
+# Skipped when running as root, because root's DAC override means [ -w ... ]
+# is always true regardless of mode bits -- the case can't be simulated.
+# In the real deployment (non-root UID inside the container) this IS the
+# relevant behavior and is what `_passwd_file is not writable` encodes.
+# -----------------------------------------------------------------------------
+if [ "$(id -u)" = "0" ]; then
+    echo "SKIP: case7 (running as root; DAC override makes unwritable check meaningless)"
+else
+    fake_passwd="$WORKDIR/ro-passwd"
+    : > "$fake_passwd"
+    chmod 0444 "$fake_passwd"
+    out="$WORKDIR/case7.out"
+    run_wrapper "$out" "HOME=$case5_home" "VLLM_PASSWD_FILE=$fake_passwd" -- --model foo
+    # File must remain empty (no write happened) and the wrapper exec'd
+    # `vllm serve` successfully (stdout contains ARGV line).
+    [ ! -s "$fake_passwd" ] \
+        || { echo "FAIL: case7: RO passwd file was modified"; cat "$fake_passwd"; exit 1; }
+    grep -q "^ARGV=serve --model foo\$" "$out" || fail "$out" "case7: wrapper didn't exec vllm"
+    chmod 0600 "$fake_passwd"
+    echo "PASS: case7 (unwritable passwd file tolerated)"
+fi
+
+# -----------------------------------------------------------------------------
+# Case 8: caller's writable CWD is preserved — wrapper must NOT chdir to HOME
+# when cwd is usable. Protects relative-path workflows like
+# `docker run -w /models ... --model ./llama.gguf`.
+# -----------------------------------------------------------------------------
+case8_home="$WORKDIR/case8-home"
+mkdir -p "$case8_home"
+case8_cwd="$WORKDIR/case8-cwd"
+mkdir -p "$case8_cwd"
+out="$WORKDIR/case8.out"
+(cd "$case8_cwd" && run_wrapper "$out" "HOME=$case8_home" "USER=alice" "LOGNAME=alice" -- --model ./relpath)
+grep -q "^PWD=$case8_cwd\$" "$out" \
+    || fail "$out" "case8: writable cwd not preserved (got $(grep '^PWD=' "$out"))"
+grep -q "^ARGV=serve --model \\./relpath\$" "$out" \
+    || fail "$out" "case8: relative argv not preserved"
+echo "PASS: case8 (writable cwd preserved; relative argv still resolves from caller's cwd)"
+
+# -----------------------------------------------------------------------------
+# Case 9: read-only cwd is ALSO preserved. A caller who mounts a read-only
+# model directory at the container's cwd (e.g. `docker run -w /models` with
+# /models bind-mounted ro) expects relative argv like `--model ./foo.gguf`
+# to resolve against /models. An earlier version of this wrapper rewrote
+# read-only cwd to $HOME and broke that workflow; this case guards against
+# the regression returning.
+# -----------------------------------------------------------------------------
+case9_home="$WORKDIR/case9-home"
+mkdir -p "$case9_home"
+case9_ro="$WORKDIR/case9-ro"
+mkdir -p "$case9_ro"
+chmod 0555 "$case9_ro"
+out="$WORKDIR/case9.out"
+(cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model ./foo)
+grep -q "^PWD=$case9_ro\$" "$out" \
+    || fail "$out" "case9: read-only cwd was rewritten (got $(grep '^PWD=' "$out"))"
+grep -q "^ARGV=serve --model \\./foo\$" "$out" \
+    || fail "$out" "case9: relative argv not preserved"
+chmod 0700 "$case9_ro"
+echo "PASS: case9 (read-only cwd preserved; relative argv still resolves from caller's cwd)"
+
+# -----------------------------------------------------------------------------
+# Case 10: truly inaccessible cwd (no search bit) DOES fall back to $HOME.
+# Skipped as root because DAC override lets root cd into 0000 directories.
+# -----------------------------------------------------------------------------
+if [ "$(id -u)" = "0" ]; then
+    echo "SKIP: case10 (running as root; DAC override makes inaccessible cwd untestable)"
+else
+    case10_home="$WORKDIR/case10-home"
+    mkdir -p "$case10_home"
+    case10_cwd="$WORKDIR/case10-cwd"
+    mkdir -p "$case10_cwd"
+    out="$WORKDIR/case10.out"
+    # Make cwd genuinely inaccessible (mode 0000 = no search bit -> cd .
+    # fails with EACCES). Use absolute paths for chmod so our own test
+    # cleanup still works without needing search perm on the dir.
+    (
+        cd "$case10_cwd"
+        chmod 0000 "$case10_cwd"
+        run_wrapper "$out" "HOME=$case10_home" "USER=alice" "LOGNAME=alice" -- --model foo
+    )
+    chmod 0700 "$case10_cwd"
+    grep -q "^PWD=$case10_home\$" "$out" \
+        || fail "$out" "case10: inaccessible cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
+    echo "PASS: case10 (inaccessible cwd falls back to \$HOME)"
+fi
+
+# -----------------------------------------------------------------------------
+# Case 11: if /tmp cannot create a private fallback dir, wrapper uses /tmp as
+# the last-resort HOME instead of leaving HOME empty under set -eu.
+# -----------------------------------------------------------------------------
+if [ -w /home/vllm ]; then
+    echo "SKIP: case11 (/home/vllm is writable; mktemp fallback path is not used)"
+else
+    cat > "$WORKDIR/bin/mktemp" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+    chmod +x "$WORKDIR/bin/mktemp"
+
+    out="$WORKDIR/case11.out"
+    run_wrapper "$out" -- --model no-mktemp
+    rm -f "$WORKDIR/bin/mktemp"
+
+    grep -q "^HOME=/tmp\$" "$out" \
+        || fail "$out" "case11: mktemp failure did not fall back to /tmp"
+    grep -q "^USER=vllm\$" "$out" || fail "$out" "case11: USER not defaulted"
+    grep -q "^LOGNAME=vllm\$" "$out" || fail "$out" "case11: LOGNAME not defaulted"
+    grep -q "^ARGV=serve --model no-mktemp\$" "$out" || fail "$out" "case11: ARGV wrong"
+    echo "PASS: case11 (mktemp failure falls back to /tmp)"
+fi
+
+echo ""
+echo "ALL CASES PASSED."

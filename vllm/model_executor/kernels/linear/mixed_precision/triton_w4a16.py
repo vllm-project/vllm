@@ -288,8 +288,8 @@ class TritonW4A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_rocm():
-            return False, "TritonW4A16LinearKernel only targets ROCm"
+        if not (current_platform.is_rocm() or current_platform.is_cuda()):
+            return False, "TritonW4A16LinearKernel requires CUDA or ROCm"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (

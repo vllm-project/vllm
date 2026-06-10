@@ -32,7 +32,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
-        # FusedMoE was made by combining multiple Linears so need to
+        # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
@@ -98,10 +98,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
             ):
-                from .compressed_tensors_moe_wna16 import (
-                    CompressedTensorsWNA16MoEMethod,
-                )
-
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
@@ -110,6 +106,20 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
+
+                # Native ROCm HIP kernels (RDNA3, etc.)
+                if current_platform.is_rocm():
+                    from . import rocm_moe
+
+                    if rocm_moe.is_supported(weight_quant):
+                        return rocm_moe.make_method(
+                            weight_quant, input_quant, layer.moe_config
+                        )
+
+                from .compressed_tensors_moe_wna16 import (
+                    CompressedTensorsWNA16MoEMethod,
+                )
+
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(
                     weight_quant, input_quant, layer.moe_config

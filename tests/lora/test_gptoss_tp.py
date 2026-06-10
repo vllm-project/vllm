@@ -129,7 +129,8 @@ def test_gpt_oss_lora_tp2(
             tensor_parallel_size=2,
             gpu_memory_utilization=0.8,
             fully_sharded_loras=fully_sharded_loras,
-            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            enable_expert_parallel=not fully_sharded_loras,
+            compilation_config=vllm.config.CompilationConfig(
                 cudagraph_specialize_lora=False,
             ),
         )

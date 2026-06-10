@@ -13,6 +13,15 @@ from vllm.utils.torch_utils import (
     get_accelerator_view_from_cpu_tensor,
 )
 
+# Default round-robin depth for the UVA buffer pools. Must be >= the number of
+# concurrent in-flight steps (engine batch_queue_size).
+_DEFAULT_MAX_CONCURRENCY = 2
+
+
+def set_default_max_concurrency(n: int) -> None:
+    global _DEFAULT_MAX_CONCURRENCY
+    _DEFAULT_MAX_CONCURRENCY = max(2, n)
+
 
 def async_copy_to_gpu(
     x: torch.Tensor | np.ndarray,
@@ -47,8 +56,10 @@ class UvaBufferPool:
         self,
         size: int | Sequence[int],
         dtype: torch.dtype,
-        max_concurrency: int = 2,
+        max_concurrency: int | None = None,
     ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
         self.size = size
         self.dtype = dtype
         self.max_concurrency = max_concurrency
@@ -80,7 +91,10 @@ class UvaBufferPool:
 
 class UvaBackedTensor:
     def __init__(
-        self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        max_concurrency: int | None = None,
     ):
         self.dtype = dtype
 
@@ -104,9 +118,11 @@ class StagedWriteTensor:
         size: int | Sequence[int],
         dtype: torch.dtype,
         device: torch.device,
-        max_concurrency: int = 2,
+        max_concurrency: int | None = None,
         uva_instead_of_gpu: bool = False,
     ):
+        if max_concurrency is None:
+            max_concurrency = _DEFAULT_MAX_CONCURRENCY
         supported_dtypes = [torch.int32, torch.int64, torch.float32]
         if dtype not in supported_dtypes:
             raise ValueError(
@@ -167,7 +183,7 @@ class StagedWriteTensor:
 
         # Special handling for write_contents
         write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device, pin_memory=True
+            self._staged_write_contents, self.dtype, self.device
         )
 
         # Write diffs to the GPU buffer

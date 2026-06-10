@@ -334,7 +334,13 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image)).
+                # PIL images are always channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)
@@ -378,7 +384,14 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image) via
+                # _get_video_with_metadata).  PIL images are always
+                # channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)

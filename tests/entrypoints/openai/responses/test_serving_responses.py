@@ -1124,3 +1124,66 @@ class TestAutoToolStreaming:
             if event.type == "response.function_call_arguments.delta"
         ]
         assert "".join(argument_deltas) == '{"location":"Berlin"}'
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_compound_content_and_tool_name_args_same_delta(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        tool_args = '{"location":"Berlin"}'
+
+        delta_sequence = [
+            DeltaMessage(
+                content="Let me check.",
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_weather",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(name="get_weather"),
+                    ),
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(arguments=tool_args),
+                    ),
+                ],
+            )
+        ]
+
+        events = await self._collect_events(delta_sequence)
+
+        text_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.output_text.delta"
+        ]
+        assert text_deltas == ["Let me check."]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [tool_args]
+
+        types = [event.type for event in events]
+        assert types.index("response.output_text.delta") < types.index(
+            "response.function_call_arguments.delta"
+        )
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [tool_args]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_done) == 1
+        assert function_done[0].item.name == "get_weather"
+        assert function_done[0].item.arguments == tool_args

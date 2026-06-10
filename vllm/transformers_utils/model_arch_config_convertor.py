@@ -50,7 +50,7 @@ class ModelArchConfigConvertorBase:
             # special case for deepseek_v4
             if hasattr(self.hf_text_config, "compress_ratios"):
                 return self.hf_text_config.head_dim
-            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
+            qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
                 return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
             else:
@@ -70,6 +70,38 @@ class ModelArchConfigConvertorBase:
             return 0
         # FIXME(woosuk): This may not be true for all models.
         return self.get_hidden_size() // total_num_attention_heads
+
+    def _get_qk_rope_head_dim(self) -> int:
+        """Get qk_rope_head_dim, fixing the transformers v5.4+ attribute_map bug."""
+        cfg = self.hf_text_config
+        qk_rope_head_dim = getattr(cfg, "qk_rope_head_dim", 0)
+        qk_nope_head_dim = getattr(cfg, "qk_nope_head_dim", 0)
+
+        # In valid MLA configs, qk_rope_head_dim != qk_nope_head_dim.
+        if qk_rope_head_dim == 0 or qk_rope_head_dim != qk_nope_head_dim:
+            return qk_rope_head_dim  # not corrupted
+
+        # Read the correct value from raw config.json.
+        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+        model_path = self.hf_config.name_or_path
+        if not model_path:
+            return qk_rope_head_dim
+        raw = get_hf_file_to_dict("config.json", model_path)
+        if raw and "qk_rope_head_dim" in raw:
+            correct = raw["qk_rope_head_dim"]
+            if correct != qk_rope_head_dim:
+                logger.info(
+                    "Fixing qk_rope_head_dim: %d -> %d "
+                    "(transformers v5.4+ attribute_map bug)",
+                    qk_rope_head_dim,
+                    correct,
+                )
+                # Patch the config so downstream model layers also get
+                # the correct value.
+                cfg.qk_rope_head_dim = correct
+                return correct
+        return qk_rope_head_dim
 
     def get_total_num_kv_heads(self) -> int:
         attributes = [
@@ -502,6 +534,11 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
 
 
+class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -543,31 +580,34 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
-    "mamba": MambaModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
-    "timm_wrapper": TerratorchModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
-    "zamba2": Zamba2ModelArchConfigConvertor,
-    "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
-    "falcon": FalconModelArchConfigConvertor,
-    "gemma4": Gemma4ModelArchConfigConvertor,
-    "gemma4_text": Gemma4ModelArchConfigConvertor,
-    "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
-    "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
-    "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
-    "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "ernie_mtp": ErnieMTPModelArchConfigConvertor,
+    "falcon": FalconModelArchConfigConvertor,
+    "falcon_mamba": MambaModelArchConfigConvertor,
+    "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
+    "gemma4_text": Gemma4ModelArchConfigConvertor,
+    "gemma4_unified": Gemma4ModelArchConfigConvertor,
+    "gemma4_unified_text": Gemma4ModelArchConfigConvertor,
+    "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "mamba": MambaModelArchConfigConvertor,
+    "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
-    "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
-    "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
-    "ernie_mtp": ErnieMTPModelArchConfigConvertor,
+    "mpt": MPTModelArchConfigConvertor,
+    "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
-    "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
+    "RefinedWeb": FalconModelArchConfigConvertor,
+    "RefinedWebModel": FalconModelArchConfigConvertor,
+    "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
+    "timm_wrapper": TerratorchModelArchConfigConvertor,
+    "zamba2": Zamba2ModelArchConfigConvertor,
 }

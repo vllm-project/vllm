@@ -771,15 +771,6 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             # processed with quantization, LoRA, fine-tuning, etc.
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache scales for compressed-tensors quantization
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                continue
 
             is_found = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -930,7 +921,10 @@ class HunyuanV1ModelBase(
         self.config = config
         self.quant_config = quant_config
 
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
+        self.model = HunYuanModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

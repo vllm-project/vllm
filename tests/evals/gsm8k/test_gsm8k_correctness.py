@@ -39,11 +39,18 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host = f"http://{host}"
 
     # Run GSM8K evaluation
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
         host=host,
         port=port,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     return results
@@ -90,6 +97,12 @@ def test_gsm8k_correctness(config_filename):
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+    print(f"Request timeout: {request_timeout_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 

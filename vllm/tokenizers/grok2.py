@@ -8,7 +8,6 @@ from collections.abc import Collection, Sequence, Set
 from pathlib import Path
 from typing import Any, Literal, overload
 
-from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -20,6 +19,7 @@ from transformers.utils import chat_template_utils as hf_chat_utils
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import hf_api
 
 from .protocol import TokenizerLike
 
@@ -70,7 +70,7 @@ def _maybe_load_tokenizer_config(
         return {}
 
     try:
-        config_file = hf_hub_download(
+        config_file = hf_api().hf_hub_download(
             repo_id=repo_id,
             filename="tokenizer_config.json",
             revision=revision,
@@ -208,7 +208,7 @@ class Grok2Tokenizer(TokenizerLike):
             repo_id = None
         else:
             vocab_file = Path(
-                hf_hub_download(
+                hf_api().hf_hub_download(
                     repo_id=str(path_or_repo_id),
                     filename="tokenizer.tok.json",
                     revision=revision,

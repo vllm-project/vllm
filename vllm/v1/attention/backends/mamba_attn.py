@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -55,6 +56,7 @@ class BaseMambaAttentionMetadata:
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
+    block_idx_last_scheduled_token_prev_step: torch.Tensor | None
 
     # The following tensor is only used for prefix caching in align mode
     seq_lens: torch.Tensor
@@ -107,12 +109,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            max_num_blocks = cdiv(
-                self.vllm_config.model_config.max_model_len,
-                self.kv_cache_spec.block_size,
+            max_num_blocks = (
+                cdiv(
+                    self.vllm_config.model_config.max_model_len,
+                    kv_cache_spec.block_size,
+                )
+                + kv_cache_spec.num_speculative_blocks
             )
-            # Speculative decoding not supported with prefix caching,
-            # so keep shape consistent with prefill buffer
             # TODO: reduce this size as needed for decode-only cudagraph capture
             self.state_indices_tensor_d: torch.Tensor = torch.empty(
                 (
@@ -132,6 +135,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+            if self.use_spec_decode:
+                self.block_idx_last_scheduled_token_prev_step: torch.Tensor = (
+                    torch.empty(
+                        (self.decode_cudagraph_max_bs,),
+                        dtype=torch.int32,
+                        device=device,
+                    )
+                )
         else:
             self.state_indices_tensor_d = torch.empty(
                 (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
@@ -175,7 +186,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
-        return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
+        prev_last_scheduled_idx = None
+        if (
+            self.use_spec_decode
+            and self.vllm_config.cache_config.mamba_cache_mode == "all"
+        ):
+            prev_last_scheduled_idx = torch.zeros(
+                (m.num_reqs,),
+                dtype=torch.int32,
+                device=m.query_start_loc.device,
+            )
+
+        return self.build(
+            0,
+            m,
+            num_accepted_tokens=num_accepted_tokens,
+            prev_last_scheduled_idx=prev_last_scheduled_idx,
+        )
 
     def build(
         self,
@@ -184,6 +211,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         fast_build: bool = False,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        prev_last_scheduled_idx: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
         """
@@ -191,7 +219,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
         return self._compute_common_metadata(
-            common_attn_metadata, num_accepted_tokens=num_accepted_tokens
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            prev_last_scheduled_idx=prev_last_scheduled_idx,
         )
 
     def _compute_chunk_metadata(
@@ -270,15 +300,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
         num_decode_tokens = common.num_decode_tokens
 
-        num_computed_tokens_cpu = (
-            common_attn_metadata.compute_num_computed_tokens().cpu()
-        )
-        num_computed_tokens_p_cpu = num_computed_tokens_cpu[
-            num_reqs - num_prefills : num_reqs
-        ]
+        # Derive prefill context lengths from CPU data only.
+        # `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
+        # (including async spec decode), so this avoids the D2H sync that
+        # `compute_num_computed_tokens().cpu()` would force.
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
             - num_decode_tokens
+        )
+        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+        num_computed_tokens_p_cpu = (
+            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -289,20 +323,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         device = common_attn_metadata.query_start_loc.device
-        cu_chunk_seqlen_p = torch.as_tensor(
-            cu_chunk_seqlen,
-            device=device,
-            dtype=torch.int32,
+        # Build on pinned CPU and upload non-blocking to avoid the synchronous
+        # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
+        cu_chunk_seqlen_p = async_tensor_h2d(
+            cu_chunk_seqlen, dtype=torch.int32, device=device
         )
-        seq_idx_p = torch.as_tensor(
-            seq_idx,
-            device=device,
-            dtype=torch.int32,
-        )
-        last_chunk_indices_p = torch.as_tensor(
-            last_chunk_indices,
-            device=device,
-            dtype=torch.int32,
+        seq_idx_p = async_tensor_h2d(seq_idx, dtype=torch.int32, device=device)
+        last_chunk_indices_p = async_tensor_h2d(
+            last_chunk_indices, dtype=torch.int32, device=device
         )
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 
@@ -342,6 +370,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common_attn_metadata: CommonAttentionMetadata,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        prev_last_scheduled_idx: torch.Tensor | None = None,
     ) -> M:
         """
         Compute metadata common to both Mamba1 and Mamba2.
@@ -355,6 +384,28 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         decode_threshold = (
             self.reorder_batch_threshold if num_accepted_tokens is not None else 1
         )
+
+        # FULL-CG dispatch is shape-based, so one-token prefills with
+        # prior Mamba state can replay a decode graph while `is_prefilling`
+        # is still true. Treat them as decode/update rows. This is required
+        # for NIXL disagg's h(N-1)->N recompute path and for sporadic
+        # final single-token prefill chunks that land in a `uniform` FULL-CG
+        # batch. Relies on `reorder` putting short extends before pure prefills.
+        is_prefilling = common_attn_metadata.is_prefilling
+        assert is_prefilling is not None
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
+        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
+        single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
+        # First-token prefills have no prior Mamba state and must stay prefills.
+        has_prior_state = seq_lens_cpu > 1
+        prefill_to_decode = single_token_prefill_rows & has_prior_state
+        if torch.any(prefill_to_decode).item():
+            is_prefilling = is_prefilling.clone()
+            is_prefilling[prefill_to_decode] = False
+            common_attn_metadata = common_attn_metadata.replace(
+                is_prefilling=is_prefilling
+            )
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -376,6 +427,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_first_scheduled_token_p = None
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token = None
+        block_idx_last_scheduled_token_prev_step = None
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -394,6 +446,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ) = self._compute_prefix_caching_block_indices(
                 common_attn_metadata, mamba_block_size
             )
+            if self.use_spec_decode and prev_last_scheduled_idx is not None:
+                fallback = torch.clamp(
+                    (num_computed_tokens - 1) // mamba_block_size, min=0
+                )
+                block_idx_last_scheduled_token_prev_step = torch.where(
+                    prev_last_scheduled_idx >= 0,
+                    prev_last_scheduled_idx,
+                    fallback,
+                )
         else:
             state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata.block_table_tensor,
@@ -471,6 +532,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
+            block_idx_last_scheduled_token_prev_step=(
+                block_idx_last_scheduled_token_prev_step
+            ),
             num_computed_tokens_p=num_computed_tokens_p,
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
@@ -494,6 +558,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
         block_idx_last_computed_token = metadata.block_idx_last_computed_token
+        block_idx_last_scheduled_token_prev_step = (
+            metadata.block_idx_last_scheduled_token_prev_step
+        )
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -525,16 +592,35 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     non_blocking=True,
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
+                block_idx_last_scheduled_token[metadata.num_decodes :] = 0
 
                 self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
                     block_idx_last_computed_token[: metadata.num_decodes],
                     non_blocking=True,
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    : metadata.num_decode_tokens
+                    :padded_bs
                 ]
+                block_idx_last_computed_token[metadata.num_decodes :] = 0
+
+                if (
+                    self.use_spec_decode
+                    and block_idx_last_scheduled_token_prev_step is not None
+                ):
+                    self.block_idx_last_scheduled_token_prev_step[
+                        : metadata.num_decodes
+                    ].copy_(
+                        block_idx_last_scheduled_token_prev_step[
+                            : metadata.num_decodes
+                        ],
+                        non_blocking=True,
+                    )
+                    block_idx_last_scheduled_token_prev_step = (
+                        self.block_idx_last_scheduled_token_prev_step[:padded_bs]
+                    )
+                    block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
         return replace(
             metadata,
@@ -543,6 +629,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
+            block_idx_last_scheduled_token_prev_step=(
+                block_idx_last_scheduled_token_prev_step
+            ),
         )
 
     def update_block_table(

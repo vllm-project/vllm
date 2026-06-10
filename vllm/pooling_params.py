@@ -110,7 +110,8 @@ class PoolingParams(
         if pooler_config is None:
             return
 
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before merging parameters")
         valid_parameters = self.valid_parameters[self.task]
 
         for k in valid_parameters:
@@ -189,7 +190,8 @@ class PoolingParams(
             raise ValueError(f"Unknown pooling task: {self.task!r}")
 
     def _verify_valid_parameters(self):
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before verifying parameters")
         valid_parameters = self.valid_parameters[self.task]
         invalid_parameters = []
         for k in self.all_parameters:
@@ -221,6 +223,8 @@ class PoolingParams(
         )
 
     def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
-            "For pooling output_kind has to be FINAL_ONLY"
-        )
+        if self.output_kind != RequestOutputKind.FINAL_ONLY:
+            raise ValueError(
+                "For pooling output_kind has to be FINAL_ONLY, "
+                f"got {self.output_kind!r}"
+            )

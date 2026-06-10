@@ -4,7 +4,7 @@
 
 #include "libtorch_stable/torch_utils.h"
 
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 
 void cutlass_scaled_mm_sm75(torch::stable::Tensor& c,
                             torch::stable::Tensor const& a,

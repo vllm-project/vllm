@@ -5,7 +5,6 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats,
 )
@@ -18,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -59,25 +57,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
     ):
-        layer_names = list(kv_caches.keys())
-        layers = get_layers_from_vllm_config(
-            self.spec.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-            layer_names,
-        )
-        attn_backends = {
-            layer_name: layers[layer_name].get_attn_backend()
-            for layer_name in layer_names
-            if layer_name in layers
-        }
-
         num_blocks = self.spec.kv_cache_config.num_blocks
 
-        # layer_name -> list of matching KV cache tensors
-        # such that each tensor starts with the num_blocks dimension.
-        # FlashAttention layers which use the (2, num_blocks, ...) layout
-        # will possibly map to 2 tensors, one per K and one per V.
-        # All other layers will probably map to a single tensor.
+        # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
@@ -99,66 +81,21 @@ class OffloadingConnectorWorker:
                     assert isinstance(layer_kv_cache, torch.Tensor)
                     assert layer_kv_cache.storage_offset() == 0
 
-                    # get the logical dimension for num_blocks
-                    test_shape = attn_backends[layer_name].get_kv_cache_shape(
-                        num_blocks=1234,
-                        block_size=16,
-                        num_kv_heads=1,
-                        head_size=256,
-                    )
-                    num_blocks_logical_dim = test_shape.index(1234)
-
-                    # sort the logical dimensions by stride (high to low)
-                    # to get a physical-to-logical mapping:
-                    # physical_to_logical[physical_pos] = logical_dim
-                    logical_strides = layer_kv_cache.stride()
-                    physical_to_logical = sorted(
-                        range(len(logical_strides)),
-                        key=lambda idx: logical_strides[idx],
-                        reverse=True,
-                    )
-
-                    num_blocks_physical_dim = physical_to_logical.index(
-                        num_blocks_logical_dim
-                    )
-                    if num_blocks_physical_dim == 0:
-                        storage = layer_kv_cache.untyped_storage()
-                        page = layer_kv_cache_spec.page_size_bytes
-                        tensors_per_block[layer_name] = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(num_blocks, page),
+                    storage = layer_kv_cache.untyped_storage()
+                    page = layer_kv_cache_spec.page_size_bytes
+                    tensors_per_block[layer_name] = (
+                        torch.tensor(
+                            [],
+                            dtype=torch.int8,
+                            device=layer_kv_cache.device,
                         )
-                        page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.page_size_bytes
-                        )
-                    else:
-                        # Flash Attention case: (2, num_blocks, ...)
-                        assert test_shape[0] == 2
-                        assert physical_to_logical[0] == 0
-                        assert num_blocks_physical_dim == 1
-
-                        # unbind the tensor to separate K and V tensors
-                        half_page_size = layer_kv_cache_spec.page_size_bytes // 2
-                        storage = layer_kv_cache.untyped_storage()
-                        raw = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(2, num_blocks, half_page_size)
-                        )
-                        tensors_per_block[layer_name] = tuple(raw.unbind(0))
-
-                        page_size_bytes[layer_name] = half_page_size
-
-                    unpadded_page_size_bytes[layer_name] = page_size_bytes[layer_name]
+                        .set_(storage)
+                        .view(num_blocks, page),
+                    )
+                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                    unpadded_page_size_bytes[layer_name] = (
+                        layer_kv_cache_spec.real_page_size_bytes
+                    )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -191,7 +128,16 @@ class OffloadingConnectorWorker:
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
         for kv_cache_tensor in self.spec.kv_cache_config.kv_cache_tensors:
-            tensor_layer_names = kv_cache_tensor.shared_by
+            # Filter to layers that were actually processed above.
+            # _get_kv_cache_config_deepseek_v4 emits KVCacheTensor entries for
+            # every (tuple_idx, page_size) slot; slots where no group has a
+            # layer at that index produce an empty shared_by (reserved memory
+            # with no corresponding model layer).
+            tensor_layer_names = [
+                n for n in kv_cache_tensor.shared_by if n in tensors_per_block
+            ]
+            if not tensor_layer_names:
+                continue
 
             # verify all layers in the group reference the exact same tensors
             assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1

@@ -17,12 +17,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
@@ -47,10 +49,12 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
 
 def make_dummy_moe_config(
     num_experts: int = 1,
+    num_local_experts: int | None = None,
     experts_per_token: int = 1,
     hidden_dim: int = 1,
-    intermediate_size_per_partition: int = 1,
+    intermediate_size: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
+    max_num_tokens: int = 512,
 ) -> FusedMoEConfig:
     """
     This is a dummy config for the mk constructor interface
@@ -63,15 +67,17 @@ def make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size_per_partition,
-        num_local_experts=num_experts,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_local_experts
+        if num_local_experts is not None
+        else num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
-        max_num_tokens=512,
+        max_num_tokens=max_num_tokens,
     )
 
 
@@ -140,7 +146,6 @@ def batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -193,7 +198,6 @@ def naive_batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -402,7 +406,7 @@ def make_test_quant_config(
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
     make_gate: bool = True,
-    is_nvfp4_scale_swizzled: bool = True,
+    is_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, FusedMoEQuantConfig]:
     (_, w1, w1_s, w1_gs), (_, w2, w2_s, w2_gs) = make_test_weights(
         e,
@@ -443,7 +447,7 @@ def make_test_quant_config(
             # TODO: make sure this is handled properly
             g1_alphas=(1 / w1_gs) if w1_gs is not None else None,
             g2_alphas=(1 / w2_gs) if w2_gs is not None else None,
-            is_nvfp4_scale_swizzled=is_nvfp4_scale_swizzled,
+            is_scale_swizzled=is_scale_swizzled,
         ),
     )
 
@@ -629,7 +633,6 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-        inplace=False,
     )
 
 

@@ -13,6 +13,14 @@ from vllm.utils.torch_utils import is_quantized_kv_cache
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
+_NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
+
+
+def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES or is_quantized_kv_cache(
+        kv_cache_dtype
+    )
+
 
 @triton.jit
 def reshape_and_cache_kernel_flash(
@@ -350,7 +358,7 @@ def triton_reshape_and_cache_flash(
     block_stride = key_cache.stride()[0]
     page_stride = key_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or is_quantized_kv_cache(kv_cache_dtype), (
+    assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (
@@ -529,7 +537,7 @@ def triton_reshape_and_cache_flash_diffkv(
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
-    assert kv_cache_dtype == "auto" or is_quantized_kv_cache(kv_cache_dtype), (
+    assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"unsupported kv_cache_dtype (str), got {kv_cache_dtype}."
     )
     kv_cache_torch_dtype = (

@@ -241,7 +241,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
-                    is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+                    is_scale_swizzled=quant_config.is_scale_swizzled,
                 )
 
         return (
@@ -383,7 +383,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
-                # Respect inplace outputs.
                 output.copy_(combined_x, non_blocking=True)
 
                 # TODO(lucas): refactor the modular kernel so this will be
@@ -394,7 +393,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             # TODO(lucas): support this case with the refactored modular kernel
             assert not dbo_enabled()
-            # Respect inplace outputs.
             output.copy_(combined_x, non_blocking=True)
             return None
 

@@ -326,7 +326,7 @@ class NomicMoE(nn.Module):
             hidden_states, router_logits, self.top_k, renormalize=False
         )
 
-        final_hidden_states = torch.ops.vllm.outplace_fused_experts(
+        final_hidden_states = torch.ops.vllm.fused_experts(
             hidden_states=hidden_states,
             w1=self.w1,
             w2=self.w2,

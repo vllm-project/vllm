@@ -23,7 +23,7 @@
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
 #include "core/math.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
 using namespace cute;

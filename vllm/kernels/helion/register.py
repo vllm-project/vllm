@@ -36,12 +36,15 @@ Key Classes
 - PresetConfigSearch: Custom autotuner that returns pre-tuned configs
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import torch
 from torch.library import Library
 
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.logger import init_logger
 from vllm.utils.import_utils import has_helion
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -76,9 +79,11 @@ logger = init_logger(__name__)
 
 vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 
+ConfigPicker = Callable[[tuple[Any, ...], list[CaseKey]], CaseKey | None]
+
 
 def validate_helion_settings(
-    helion_settings: "helion.Settings | None", op_name: str
+    helion_settings: helion.Settings | None, op_name: str
 ) -> None:
     if helion_settings is None:
         return
@@ -107,7 +112,7 @@ def validate_helion_settings(
 
 def create_helion_decorated_kernel(
     raw_kernel_func: Callable,
-    helion_settings: "helion.Settings | None" = None,
+    helion_settings: helion.Settings | None = None,
     extra_kwargs: dict[str, Any] | None = None,
 ) -> Any:
     kernel_kwargs: dict[str, Any] = {}
@@ -144,9 +149,9 @@ class ConfiguredHelionKernel:
     def __init__(
         self,
         op_name: str,
-        config_picker: Callable[[tuple[Any, ...], list[str]], str | None] | None,
+        config_picker: ConfigPicker | None,
         raw_kernel_func: Callable,
-        helion_settings: "helion.Settings | None" = None,
+        helion_settings: helion.Settings | None = None,
     ):
         self.op_name = op_name
         self.config_picker = config_picker
@@ -170,41 +175,44 @@ class ConfiguredHelionKernel:
                 f"A config_picker must be provided to register_kernel()."
             )
 
-        # After None check, config_picker is guaranteed to be non-None
-        assert self.config_picker is not None
+        picker = self.config_picker
+        all_keys = list(self.configs.keys())
+        default = CaseKey.default()
+        has_default = default in self.configs
 
         def key_computer(*args):
-            config_keys = list(self.configs.keys())
-            # Cast is safe because we checked for None above
-            config_picker = cast(
-                Callable[[tuple[Any, ...], list[str]], str | None], self.config_picker
-            )
-            selected_key = config_picker(args, config_keys)
-            if selected_key:
-                return selected_key
-            return "default" if "default" in self.configs else None
+            selected = picker(args, all_keys)
+            if selected is not None:
+                return str(selected)
+            if has_default:
+                return str(default)
+            return None
 
         return key_computer
 
     def _create_config_selector(self, key_computer):
-        def config_selector(args):
-            # args is a tuple; key_computer expects unpacked args
-            selected_config_key = key_computer(*args)
+        str_to_key = {str(k): k for k in self.configs}
 
-            if selected_config_key is None:
+        def config_selector(args):
+            selected_str = key_computer(*args)
+
+            if selected_str is None:
                 raise ValueError(
-                    f"Config picker returned None for kernel '{self.op_name}' "
-                    f"with available config keys: {list(self.configs.keys())}"
+                    f"Config picker returned None for kernel "
+                    f"'{self.op_name}' with available config keys: "
+                    f"{list(self.configs.keys())}"
                 )
 
-            if selected_config_key not in self.configs:
+            config_key = str_to_key.get(selected_str)
+            if config_key is None:
                 raise ValueError(
                     f"Config picker returned invalid config key "
-                    f"'{selected_config_key}' for kernel '{self.op_name}'. "
+                    f"'{selected_str}' for kernel "
+                    f"'{self.op_name}'. "
                     f"Available keys: {list(self.configs.keys())}"
                 )
 
-            return self.configs[selected_config_key]
+            return self.configs[config_key]
 
         return config_selector
 
@@ -251,9 +259,9 @@ class HelionKernelWrapper:
         raw_kernel_func: Callable,
         op_name: str,
         fake_impl: Callable,
-        config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
-        helion_settings: "helion.Settings | None" = None,
-        input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
+        config_picker: ConfigPicker,
+        helion_settings: helion.Settings | None = None,
+        input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -302,7 +310,7 @@ class HelionKernelWrapper:
         # During eager execution, call the kernel directly.
         return self._configured_kernel(*args, **kwargs)
 
-    def get_inputs(self) -> dict[str, tuple[Any, ...]]:
+    def get_inputs(self) -> dict[CaseKey, tuple[Any, ...]]:
         if self._input_generator is None:
             raise NotImplementedError(
                 f"No input generator registered for kernel '{self.op_name}'. "
@@ -370,7 +378,7 @@ def get_kernel_by_name(kernel_name: str) -> HelionKernelWrapper | None:
 
 def infer_fake_impl(
     kernel_func: Callable,
-    helion_settings: "helion.Settings | None" = None,
+    helion_settings: helion.Settings | None = None,
 ) -> Callable:
     def helion_fake_kernel(*args, **kwargs):
         kernel_kwargs = {}
@@ -392,37 +400,29 @@ def infer_fake_impl(
 def register_kernel(
     op_name: str | None = None,
     *,
-    config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
+    config_picker: ConfigPicker,
     fake_impl: Callable | None = None,
-    helion_settings: "helion.Settings | None" = None,
-    input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
+    helion_settings: helion.Settings | None = None,
+    input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
-    Wraps the kernel function in a HelionKernelWrapper that eagerly builds
-    the configured kernel and (on older PyTorch) registers a custom op.
-
     Args:
-        config_picker: Required. Function with signature
-            ``(args: tuple, config_keys: list[str]) -> str | None``
-            that picks the best config key from available options.
-            Return ``None`` to fall back to ``"default"``.
+        config_picker: Required. Receives ``(args, config_keys)``
+            where each config key is a ``dict[str, Any]`` mapping
+            parameter names to values.  Return the best-matching
+            dict, or ``None`` to fall back to the default config.
 
             Example::
 
                 def pick_config(args, config_keys):
                     x = args[0]
-                    hidden_size = x.shape[-1]
-                    batch_size = x.shape[0]
-                    for key in config_keys:
-                        if key == f"hiddensize_{hidden_size}_batchsize_{batch_size}":
-                            return key
-                    return "default" if "default" in config_keys else None
+                    best = min(config_keys, key=lambda k: abs(k["size"] - x.shape[0]))
+                    return best
 
-        input_generator: Optional. Function that returns
-            ``dict[str, tuple]`` where each key is a configuration
-            identifier (e.g. ``"4096"``, ``"hidden_4096"``) and each
-            value is a tuple of arguments to pass to the kernel.
+        input_generator: Optional. Returns ``dict[str, tuple]`` where
+            each key is a serialized config key and each value is a
+            tuple of arguments to pass to the kernel.
 
             Example::
 

@@ -9,7 +9,6 @@ from vllm._custom_ops import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
-    pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
@@ -52,16 +51,14 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
+        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="cutlass",
-        )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
         out = cutlass_scaled_fp4_mm(

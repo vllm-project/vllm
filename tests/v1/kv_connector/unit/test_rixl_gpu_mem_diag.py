@@ -75,7 +75,7 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
         "gpu_memory_utilization": 0.5,
         "kv_transfer_config": KVTransferConfig(
             kv_connector="NixlConnector",
-            kv_role="kv_both",
+            kv_role="kv_consumer",
         ),
         "max_model_len": 2048,
         "disable_hybrid_kv_cache_manager": False,

@@ -182,7 +182,7 @@ void invokeRouterGemmBf16Output(__nv_bfloat16* output, T const* mat_a,
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = getEnvEnablePDL();
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
   config.numAttrs = 1;
   config.attrs = attrs;
   cudaLaunchKernelEx(

@@ -64,7 +64,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, WeightsMapper, make_layers
+from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -1717,7 +1717,8 @@ class CohereASRModel(nn.Module):
         self.encoder = ConformerEncoder(vllm_config=vllm_config)
 
         self.decoder = CohereASRDecoder(
-            vllm_config=vllm_config, prefix=f"{prefix}.decoder"
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "decoder"),
         )
 
         if self.encoder.d_model != self.decoder.hidden_size:

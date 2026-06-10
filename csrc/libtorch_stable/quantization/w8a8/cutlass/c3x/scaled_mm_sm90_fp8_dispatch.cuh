@@ -349,6 +349,35 @@ inline void cutlass_gemm_sm90_fp8_dispatch(
   }
 }
 
+template <typename InType, typename OutType, bool EnableBias,
+          typename... EpilogueArgs>
+inline void cutlass_gemm_sm90_fp8_batch_invariant_dispatch(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales, EpilogueArgs&&... args) {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  using Cutlass3xGemmM64_N1280 =
+      typename sm90_fp8_config_M64_N1280<InType, OutType,
+                                         EnableBias>::Cutlass3xGemm;
+  using Cutlass3xGemmM64_N8192 =
+      typename sm90_fp8_config_M64_N8192<InType, OutType,
+                                         EnableBias>::Cutlass3xGemm;
+
+  // keep the CUTLASS config independent of M for batch invariance
+  uint32_t const n = b.size(1);
+  if (n <= 1280) {
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N1280>(
+        out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
+  }
+  return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N8192>(
+      out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
+}
+
 template <bool EnableBias, typename... EpilogueArgs>
 void cutlass_scaled_mm_sm90_fp8_epilogue(torch::stable::Tensor& out,
                                          torch::stable::Tensor const& a,
@@ -370,6 +399,30 @@ void cutlass_scaled_mm_sm90_fp8_epilogue(torch::stable::Tensor& out,
     STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
     return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
                                           cutlass::half_t, EnableBias>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(epilogue_args)...);
+  }
+}
+
+template <bool EnableBias, typename... EpilogueArgs>
+void cutlass_scaled_mm_sm90_fp8_batch_invariant_epilogue(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales, EpilogueArgs&&... epilogue_args) {
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
+    return cutlass_gemm_sm90_fp8_batch_invariant_dispatch<
+        cutlass::float_e4m3_t, cutlass::bfloat16_t, EnableBias>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(epilogue_args)...);
+  } else {
+    STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
+    return cutlass_gemm_sm90_fp8_batch_invariant_dispatch<
+        cutlass::float_e4m3_t, cutlass::half_t, EnableBias>(
         out, a, b, a_scales, b_scales,
         std::forward<EpilogueArgs>(epilogue_args)...);
   }

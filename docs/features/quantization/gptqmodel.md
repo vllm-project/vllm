@@ -58,7 +58,7 @@ Here is an example of how to quantize `meta-llama/Llama-3.2-1B-Instruct`:
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
 
 ```bash
-python examples/offline_inference/llm_engine_example.py \
+python examples/deployment/llm_engine_example.py \
     --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
 ```
 

@@ -1,0 +1,30 @@
+[package]
+name = "vllm-mock-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vllm-mock-engine"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+asynk-strim-attr.workspace = true
+clap.workspace = true
+futures.workspace = true
+rand.workspace = true
+rmpv.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+vllm-engine-core-client.workspace = true
+zeromq.workspace = true
+
+[dev-dependencies]
+vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

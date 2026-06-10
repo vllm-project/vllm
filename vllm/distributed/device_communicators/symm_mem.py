@@ -121,7 +121,7 @@ class SymmMemCommunicator:
         inp_size = inp.numel() * inp.element_size()
         if inp_size % 4 != 0:
             return False
-        return inp_size < self.max_size
+        return inp_size <= self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor | None = None

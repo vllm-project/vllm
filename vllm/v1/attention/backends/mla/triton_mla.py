@@ -12,12 +12,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
@@ -25,6 +27,10 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
+
+
+class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
 
 class TritonMLABackend(MLACommonBackend):
@@ -62,6 +68,10 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["TritonMLAMetadataBuilder"]:
+        return TritonMLAMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

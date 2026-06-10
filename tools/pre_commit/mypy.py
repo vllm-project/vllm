@@ -8,11 +8,9 @@ on files that have been changed. It groups files into different mypy calls
 based on their directory to avoid import following issues.
 
 Usage:
-    python tools/pre_commit/mypy.py <ci> <python_version> <changed_files...>
+    python tools/pre_commit/mypy.py <python_version> <changed_files...>
 
 Args:
-    ci: "1" if running in CI, "0" otherwise. In CI, follow_imports is set to
-        "silent" for the main group of files.
     python_version: Python version to use (e.g., "3.10") or "local" to use
         the local Python version.
     changed_files: List of changed files to check.
@@ -98,16 +96,15 @@ def mypy(
 
 
 def main():
-    ci = sys.argv[1] == "1"
-    python_version = sys.argv[2]
-    file_groups = group_files(sys.argv[3:])
+    python_version = sys.argv[1]
+    file_groups = group_files(sys.argv[2:])
 
     if python_version == "local":
         python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
     returncode = 0
     for file_group, changed_files in file_groups.items():
-        follow_imports = None if ci and file_group == "" else "skip"
+        follow_imports = None if file_group == "" else "skip"
         if changed_files:
             returncode |= mypy(
                 changed_files, python_version, follow_imports, file_group

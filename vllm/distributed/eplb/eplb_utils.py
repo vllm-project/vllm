@@ -61,25 +61,31 @@ class CpuGpuEvent:
         self._recorded.set()
 
 
-def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
+def override_envs_for_eplb(
+    parallel_config: ParallelConfig,
+    moe_backend: str | None = None,
+) -> None:
     """
     Override environment variables for EPLB when specific conditions are met.
 
     Args:
         parallel_config: The parallel configuration object.
+        moe_backend: The configured MoE backend (e.g. ``deep_gemm_mega_moe``).
     """
     is_data_parallel = parallel_config.data_parallel_size > 1
     is_eplb_enabled = parallel_config.enable_eplb
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
+    is_mega_moe = moe_backend == "deep_gemm_mega_moe"
     is_nccl_based_eplb_communicator = parallel_config.eplb_config.communicator in (
         "torch_nccl",
         "pynccl",
     )
 
-    # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
-    # DeepEP low-latency backend.
+    # Override NCCL_MAX_CTAS to avoid hangs when EPLB's NCCL weight exchange
+    # contends with MoE backend's cooperative-launch on GPU SMs.
     #
+    # DeepEP low-latency:
     # The hang happens when two ranks interleave kernel launches differently
     # between NCCL collectives (used by async EPLB weight exchange) and DeepEP
     # low-latency (LL) kernels. DeepEP LL uses a cooperative launch and tries
@@ -94,12 +100,14 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     # Limiting NCCL occupancy via NCCL_MAX_CTAS leaves space for the DeepEP
     # cooperative kernel to launch and complete, breaking the deadlock.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
+    #
+    # DeepGEMM Mega MoE also uses cooperative launch and will cause hang even
+    # with sync EPLB.
     if (
         is_data_parallel
         and is_eplb_enabled
-        and is_deepep_ll
-        and async_eplb
         and is_nccl_based_eplb_communicator
+        and ((is_deepep_ll and async_eplb) or is_mega_moe)
     ):
         current_value_str = os.getenv("NCCL_MAX_CTAS")
 
@@ -108,9 +116,10 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
 
         override_value = 8
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
+        backend = "deepep_low_latency" if is_deepep_ll else "deep_gemm_mega_moe"
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
-            "for expert parallel with NCCL-based EPLB communicator and "
-            "deepep_low_latency backend",
+            f"for expert parallel with NCCL-based EPLB communicator and "
+            f"cooperative MoE backend ({backend})",
             scope="global",
         )

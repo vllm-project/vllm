@@ -25,6 +25,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .utils import maybe_prefix
 from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
@@ -472,7 +473,7 @@ class Siglip2Model(torch.nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
 
     def forward(

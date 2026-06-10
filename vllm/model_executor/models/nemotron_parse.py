@@ -281,6 +281,9 @@ class MBartDecoderNoPos(nn.Module):
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layer_norm = nn.LayerNorm(config.d_model)
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         decoder_input_ids: torch.Tensor | None,

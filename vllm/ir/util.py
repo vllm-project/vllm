@@ -12,9 +12,9 @@ from typing import Any
 def hash_source(*srcs: str | Any) -> str:
     """
     Utility method to hash the sources of functions or objects.
-    :param srcs: strings or objects to add to the hash.
-    Objects and functions have their source inspected.
-    :return:
+    Args:
+        srcs: strings or objects to add to the hash.
+            Objects and functions have their source inspected.
     """
     hasher = hashlib.sha256()
     for src in srcs:

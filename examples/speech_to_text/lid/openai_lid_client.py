@@ -15,14 +15,14 @@ Start the vLLM server:
 Then run this script:
 
     # Use the built-in sample audio
-    python examples/online_serving/openai_lid_client.py
+    python examples/speech_to_text/lid/openai_lid_client.py
 
     # Use your own audio file(s)
-    python examples/online_serving/openai_lid_client.py \
+    python examples/speech_to_text/lid/openai_lid_client.py \
         --audio_paths audio_en.wav audio_zh.wav audio_fr.wav
 
     # Batch-identify multiple files in one run
-    python examples/online_serving/openai_lid_client.py \
+    python examples/speech_to_text/lid/openai_lid_client.py \
         --audio_paths /path/to/dir/*.wav
 
 Requirements:

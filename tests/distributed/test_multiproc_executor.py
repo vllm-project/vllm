@@ -284,7 +284,7 @@ def test_multiproc_executor_pipeline_parallel():
         assert output_rank == 2, "Output rank should be 2 (first rank of last PP stage)"
 
         # Verify max_concurrent_batches for pipeline parallel
-        assert executor.max_concurrent_batches == 2, (
+        assert vllm_config.max_concurrent_batches == 2, (
             "Max concurrent batches should equal PP size"
         )
 

@@ -5,8 +5,10 @@ Weight transfer engines for syncing model weights from trainers
 to inference workers.
 """
 
+from vllm.distributed.weight_transfer.base import WeightTransferEngine
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
 __all__ = [
+    "WeightTransferEngine",
     "WeightTransferEngineFactory",
 ]

@@ -10,10 +10,13 @@ import torch
 
 from tests.kernels.moe.utils import make_test_quant_config
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_dp_group,
+    get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -58,7 +61,6 @@ def make_fused_moe_layer(
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
     )
@@ -74,6 +76,7 @@ def make_fused_moe_layer(
     )
 
     fml = fml.to(device)
+    re = fml.routed_experts
     w1_q, w2_q, quant_config = make_test_quant_config(
         test_config.num_local_experts,
         test_config.intermediate_size,
@@ -84,21 +87,21 @@ def make_fused_moe_layer(
         per_act_token_quant=False,
     )
 
-    fml.w13_weight.data = w1_q
-    fml.w2_weight.data = w2_q
+    re.w13_weight.data = w1_q
+    re.w2_weight.data = w2_q
 
-    fml.w2_input_scale.data = torch.randn_like(fml.w2_input_scale.data) / 5
-    fml.w13_input_scale.data = torch.randn_like(fml.w13_input_scale.data) / 5
-    fml.w2_weight_scale_2.data = torch.randn_like(fml.w2_weight_scale_2.data) / 5
-    fml.w13_weight_scale_2.data = torch.randn_like(fml.w13_weight_scale_2.data) / 5
-    fml.w2_weight_scale.data = (
-        torch.randn(fml.w2_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w2_weight_scale.data.dtype)
-    fml.w13_weight_scale.data = (
-        torch.randn(fml.w13_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w13_weight_scale.data.dtype)
+    re.w2_input_scale.data = torch.randn_like(re.w2_input_scale.data) / 5
+    re.w13_input_scale.data = torch.randn_like(re.w13_input_scale.data) / 5
+    re.w2_weight_scale_2.data = torch.randn_like(re.w2_weight_scale_2.data) / 5
+    re.w13_weight_scale_2.data = torch.randn_like(re.w13_weight_scale_2.data) / 5
+    re.w2_weight_scale.data = (
+        torch.randn(re.w2_weight_scale.data.shape, device=device) / 5
+    ).to(re.w2_weight_scale.data.dtype)
+    re.w13_weight_scale.data = (
+        torch.randn(re.w13_weight_scale.data.shape, device=device) / 5
+    ).to(re.w13_weight_scale.data.dtype)
 
-    nvfp4_fused_moe.process_weights_after_loading(fml)
+    nvfp4_fused_moe.process_weights_after_loading(re)
 
     fml.maybe_init_modular_kernel()
 
@@ -170,12 +173,20 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend="torch_nccl",
+            expert_weights=rank_expert_weights,
+            expert_buffer=expert_buffer,
+        )
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
+            communicator,
         )
 
         num_global_experts = test_config.num_experts
@@ -201,7 +212,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 dtype=torch.int32,
                 device=device,
             )
-            fml.enable_eplb = True
+            fml.eplb_state = EplbLayerState()
             fml.set_eplb_state(
                 lidx,
                 torch.zeros(

@@ -157,7 +157,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
                 if (v := getattr(request, k, None)) is not None
             },
         )
@@ -384,7 +384,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             max_tokens_per_doc=max_tokens_per_doc,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
                 if (v := getattr(request, k, None)) is not None
             },
         )
@@ -407,6 +407,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             pooling_params=ctx.pooling_params
         )
 
+        prompt_extras = ctx.pooling_params.extra_kwargs if ctx.pooling_params else None
         engine_inputs, pooling_params_list = self._pre_process(
             ctx.prompts,
             tok_params,
@@ -414,6 +415,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             ctx.chat_template,
             max_tokens_per_query=max_tokens_per_query,
             max_tokens_per_doc=max_tokens_per_doc,
+            prompt_extras=prompt_extras,
         )
         ctx.pooling_params = pooling_params_list
         return engine_inputs
@@ -453,6 +455,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 chat_template=chat_template,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
+                chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
+                if prompt_extras
+                else None,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -477,6 +482,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_template: str | None = None,
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
+        chat_template_kwargs: dict[str, Any] | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -556,6 +562,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             # If that fails because there is no such template,
             # fall back to the default implementation.
             try:
+                _safe_kwargs = chat_template_kwargs or {}
+                _reserved = {"chat_template", "tools", "tokenize"}
+                _unexpected = _reserved & _safe_kwargs.keys()
+                if _unexpected:
+                    raise ValueError(
+                        "chat_template_kwargs contains reserved keys that "
+                        f"conflict with fixed scorer arguments: {_unexpected}"
+                    )
                 full_prompt = safe_apply_chat_template(
                     model_config,
                     tokenizer,
@@ -566,6 +580,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     chat_template=chat_template,
                     tools=None,
                     tokenize=False,
+                    **_safe_kwargs,
                 )
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:

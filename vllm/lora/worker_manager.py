@@ -140,7 +140,12 @@ class WorkerLoRAManager:
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
+                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
             )
+            # Stamp the on-disk MoE layout onto the loaded model so the
+            # adapter manager can route 3D-format checkpoints through the
+            # 3D->2D conversion when running under the universal 2D wrapper.
+            lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

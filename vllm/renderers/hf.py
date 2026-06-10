@@ -402,6 +402,7 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
     ]
 
     # Search for {%- for content in message['content'] -%} loops
+    # or {%- for item in content -%} loops
     for loop_ast in root.find_all(jinja2.nodes.For):
         loop_iter = loop_ast.iter
         loop_target = loop_ast.target
@@ -411,6 +412,10 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 assert isinstance(loop_target, jinja2.nodes.Name)
                 yield loop_ast, loop_target.name
                 break
+
+        if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
+            assert isinstance(loop_target, jinja2.nodes.Name)
+            yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
@@ -443,6 +448,66 @@ def _detect_content_format(
         return default
     else:
         return "openai"
+
+
+@lru_cache(maxsize=32)
+def _detect_developer_role_support(chat_template: str) -> bool:
+    return '"developer"' in chat_template or "'developer'" in chat_template
+
+
+def _convert_developer_to_system(
+    conversation: list[ConversationMessage],
+) -> list[ConversationMessage]:
+    converted: list[ConversationMessage] = []
+    for msg in conversation:
+        if msg["role"] == "developer":
+            new_msg = dict(msg)
+            new_msg["role"] = "system"
+            new_msg.pop("tools", None)
+            converted.append(new_msg)  # type: ignore[arg-type]
+        else:
+            converted.append(msg)
+    return converted
+
+
+def _consolidate_system_messages(
+    conversation: list[ConversationMessage],
+) -> list[ConversationMessage]:
+    """Merge all system messages into one at position 0.
+
+    Some chat templates (e.g. Qwen 3.6) require the system message to be the
+    very first message.  After developer-to-system conversion, system messages
+    may appear at non-first positions; this merges them into a single message.
+    """
+    system_contents: list[str] = []
+    non_system: list[ConversationMessage] = []
+    needs_consolidation = False
+    for i, msg in enumerate(conversation):
+        if msg["role"] == "system":
+            if i > 0 or system_contents:
+                needs_consolidation = True
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict) and "text" in part:
+                        parts.append(part["text"])
+                    elif isinstance(part, str):
+                        parts.append(part)
+                content = "\n".join(parts)
+            if content:
+                system_contents.append(content)
+        else:
+            non_system.append(msg)
+
+    if not needs_consolidation:
+        return conversation
+
+    merged: ConversationMessage = {
+        "role": "system",
+        "content": "\n\n".join(system_contents),
+    }
+    return [merged, *non_system]
 
 
 def _resolve_chat_template_content_format(
@@ -648,7 +713,15 @@ def safe_apply_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."
         )
-
+    if any(
+        msg["role"] == "developer" for msg in conversation
+    ) and not _detect_developer_role_support(chat_template):
+        conversation = _convert_developer_to_system(conversation)
+        conversation = _consolidate_system_messages(conversation)
+        logger.info_once(
+            "Chat template does not support the 'developer' message role. "
+            "Converting developer messages to 'system' role.",
+        )
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
         chat_template=chat_template,

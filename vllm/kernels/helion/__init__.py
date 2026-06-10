@@ -3,11 +3,13 @@
 """Helion integration for vLLM."""
 
 import vllm.kernels.helion.ops  # noqa: F401  Auto-register all Helion ops
+from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import (
     ConfigManager,
     ConfigSet,
 )
 from vllm.kernels.helion.register import (
+    ConfigPicker,
     ConfiguredHelionKernel,
     HelionKernelWrapper,
     get_kernel_by_name,
@@ -19,9 +21,11 @@ from vllm.kernels.helion.utils import canonicalize_gpu_name, get_canonical_gpu_n
 
 __all__ = [
     # Config management
+    "CaseKey",
     "ConfigManager",
     "ConfigSet",
     # Kernel registration
+    "ConfigPicker",
     "ConfiguredHelionKernel",
     "HelionKernelWrapper",
     "get_kernel_by_name",

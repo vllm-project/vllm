@@ -45,6 +45,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_prefix,
 )
 
 
@@ -292,18 +293,6 @@ class ArceeModel(nn.Module, EagleModelMixin):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 continue
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if "scale" in name or "zero_point" in name:
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is None:
@@ -367,7 +356,10 @@ class ArceeForCausalLM(
         self.config = config
 
         # Initialize the inner Transformer model (ArceeModel)
-        self.model = ArceeModel(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        self.model = ArceeModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
@@ -378,7 +370,7 @@ class ArceeForCausalLM(
                 config.hidden_size,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
-                prefix=f"{prefix}.lm_head",
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix

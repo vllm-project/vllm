@@ -13,7 +13,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    extract_function_from_recipient,
+    is_function_recipient,
+    parse_output_into_messages,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -50,10 +54,12 @@ class OpenAIToolParser(ToolParser):
 
         if len(parser.messages) > 0:
             for msg in parser.messages:
+                if msg.author.role != "assistant":
+                    continue
                 if len(msg.content) < 1:
                     continue
                 msg_text = msg.content[0].text
-                if msg.recipient and msg.recipient.startswith("functions."):
+                if msg.recipient and is_function_recipient(msg.recipient):
                     # If no content-type is given assume JSON, as that's the
                     # most common case with gpt-oss models.
                     if not msg.content_type or "json" in msg.content_type:
@@ -72,7 +78,7 @@ class OpenAIToolParser(ToolParser):
                         ToolCall(
                             type="function",
                             function=FunctionCall(
-                                name=msg.recipient.split("functions.")[1],
+                                name=extract_function_from_recipient(msg.recipient),
                                 arguments=tool_args,
                             ),
                         )

@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 
 # Test parameters
@@ -151,7 +151,7 @@ def test_triton_experts_no_mul_activation(
 @torch.inference_mode()
 def test_workspace_shapes_no_mul_vs_gated():
     """Test that workspace shapes differ correctly between gated and non-gated."""
-    from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
     M, N, K, topk = 64, 256, 128, 2
 
@@ -192,7 +192,7 @@ def test_workspace_shapes_no_mul_vs_gated():
 @torch.inference_mode()
 def test_adjust_n_for_activation():
     """Test the adjust_N_for_activation method."""
-    from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
     experts = TritonExperts(
         moe_config=make_dummy_moe_config(),

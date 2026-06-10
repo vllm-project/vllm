@@ -4,6 +4,7 @@
 import torch
 from einops import rearrange
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
@@ -403,13 +404,16 @@ class _attention(torch.autograd.Function):
         v = v.contiguous()
         s = s.contiguous()
 
-        # Check CUDA compute capability
-        capability = torch.cuda.get_device_capability()
-        if capability[0] < 8:
-            raise RuntimeError(
-                "Flash attention currently only supported",
-                "for compute capability >= 80",
-            )
+        # Check CUDA compute capability (Ampere+ required for flash attention
+        # path). Other accelerators (ROCm, XPU) rely on their own Triton
+        # backend support and skip this check.
+        if current_platform.is_cuda():
+            capability = torch.cuda.get_device_capability()
+            if capability[0] < 8:
+                raise RuntimeError(
+                    "Flash attention currently only supported",
+                    "for compute capability >= 80",
+                )
 
         # Get input dimensions
         b, h, n, d = q.shape

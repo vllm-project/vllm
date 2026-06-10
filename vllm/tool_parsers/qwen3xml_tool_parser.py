@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -26,7 +25,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import find_tool_properties, safe_literal_eval
 
 logger = init_logger(__name__)
 
@@ -821,7 +820,10 @@ class StreamingXMLToolCallParser:
                         raw_for_parse = raw_text + "\n"
                     else:
                         raw_for_parse = raw_text
-                    parsed_value = ast.literal_eval(raw_for_parse)
+                    try:
+                        parsed_value = json.loads(raw_for_parse)
+                    except json.JSONDecodeError:
+                        parsed_value = safe_literal_eval(raw_for_parse)
                     output_arguments = json.dumps(parsed_value, ensure_ascii=False)
                 except Exception:
                     # Fallback: output as string as-is
