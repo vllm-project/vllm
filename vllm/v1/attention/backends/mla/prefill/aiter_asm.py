@@ -5,6 +5,7 @@
 Dispatches through aiter.mla_prefill_ps_asm_fwd -> aiter.mla_reduce_v1.
 """
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -28,6 +29,10 @@ logger = init_logger(__name__)
 _FP8_PREFILL_TILE_Q = 256
 # K-side tiling granularity required by the PS scheduler.
 _KVLEN_GRANULARITY = 128
+# Compute-unit count on gfx950/MI350 (multi_processor_count is always 256).
+# Hardcoded because torch.cuda.get_device_properties() is slow to call on the
+# per-forward metadata path; the value is fixed for the only supported arch.
+_GFX950_CU_NUM = 256
 
 
 class AiterAsmPrefillBackend(MLAPrefillBackend):
@@ -209,12 +214,22 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         ``seq_lens_cpu`` drives the PS scheduler's K-side work split.
         ``max_kvlen`` is the max KV length per sequence in this chunk; pass
         None for the causal new-tokens chunk (K == Q, so it falls back to
-        max_qlen). num_partial_tiles is taken directly from the info call's
-        reduce_partial_map_size, which bounds reduce_indptr[-1] by
-        construction, so sizing logits/attn_lse to it is always safe; the
-        reduce kernel consumes only the live count via reduce_indptr. The
-        info call is pure host arithmetic (no tensors, no device access), so
-        the sizing path is sync-free.
+        max_qlen).
+
+        num_partial_tiles (which sizes the per-call logits/attn_lse scratch in
+        _run_kernel) is computed from a tight host-side bound, NOT from the
+        info call's reduce_partial_map_size. The info bound is
+        qo_tile_cnt * (max_kv_split + cus_per_cluster); its max_kv_split =
+        ceil(max_kvlen/128) factor assumes every q-tile splits into max_kv_split
+        partials, but the scheduler distributes total KV units across thread
+        groups and emits at most one carryover work-item per TG, so the true
+        per-cluster partial count is QT + tgs_per_cluster, independent of KV
+        length (QT = sum over sequences of ceil(qlen/qlen_granularity)). For a
+        long-context chunk at large batch the info bound over-counts by ~256x,
+        which made logits balloon to hundreds of GB and fault on allocation at
+        high concurrency. The tight bound keeps it proportional to the query
+        side only. Both QT and tgs_per_cluster are pure host arithmetic, so the
+        sizing path stays sync-free.
 
         Buffers are read-only after the build: the kernel reads work_indptr/
         work_info/reduce_* and writes only the per-call logits/attn_lse/out
@@ -276,13 +291,42 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
+        # Tight, sync-free upper bound on the per-cluster partial-tile count:
+        # QT (sum over sequences of ceil(qlen/qlen_granularity)) plus one
+        # carryover per thread group in a cluster. partial_o_loc resets per
+        # cluster and is identical across clusters, so this bounds the highest
+        # partial slot the kernel writes; logits/attn_lse are sized to
+        # num_partial_tiles * tile_q rows. Computed on the CPU qo_indptr (no
+        # device read). See the method docstring for why this replaces the
+        # info call's loose reduce_partial_map_size.
+        q_seq_lens = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
+        qt = int(
+            ((q_seq_lens + (_FP8_PREFILL_TILE_Q - 1)) // _FP8_PREFILL_TILE_Q)
+            .sum()
+            .item()
+        )
+        tgs_per_cluster = _GFX950_CU_NUM // math.gcd(num_head_k, _GFX950_CU_NUM)
+        num_partial_tiles = qt + tgs_per_cluster
+
+        # Temporary: compare the tight bound against the info call's loose
+        # reduce_partial_map_size to confirm the old sizing was overly
+        # pessimistic. Remove once validated.
+        logger.debug(
+            "ps num_partial_tiles: tight=%d (qt=%d + tgs_per_cluster=%d) "
+            "vs loose reduce_partial_map_size=%d",
+            num_partial_tiles,
+            qt,
+            tgs_per_cluster,
+            int(reduce_partial_map_size),
+        )
+
         return {
             "work_indptr": work_indptr,
             "work_info": work_info,
             "reduce_indptr": reduce_indptr,
             "reduce_final_map": reduce_final_map,
             "reduce_partial_map": reduce_partial_map,
-            "num_partial_tiles": int(reduce_partial_map_size),
+            "num_partial_tiles": num_partial_tiles,
             "max_q_len": max_qlen,
         }
 
