@@ -14,7 +14,8 @@ mod utils;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
-use axum::{Router, serve::ListenerExt as _};
+use axum::Router;
+use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
