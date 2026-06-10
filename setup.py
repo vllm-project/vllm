@@ -18,7 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools_rust import Binding, RustExtension
 from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -40,6 +39,9 @@ PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
+rust_build = load_module_from_path(
+    "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
+)
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
@@ -1146,16 +1148,9 @@ if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
 # package directory alongside the Python modules.
 # TODO: we may use `RustBin` to directly install it into `bin` directory, but this
 # requires extra work on using precompiled binaries.
-rust_extensions = [
-    RustExtension(
-        target="vllm.vllm-rs",
-        path="rust/src/cmd/Cargo.toml",
-        args=["--bin", "vllm-rs"],
-        features=["native-tls-vendored"],
-        binding=Binding.Exec,
-        optional=not should_require_rust_frontend(),
-    ),
-]
+rust_extensions = rust_build.rust_extensions(
+    optional=not should_require_rust_frontend()
+)
 
 setup(
     # static metadata should rather go in pyproject.toml
@@ -1165,12 +1160,10 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": [
-            "zentorch-weekly==5.2.1.dev20260408"
-        ],  # Zentorch has weekly releases. This pulls the known-good version.
+        "zen": ["zentorch==2.11.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.2.2"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.2"],
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
@@ -1195,11 +1188,6 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
-        "triton-cpu": [
-            "triton @ "
-            "git+https://github.com/triton-lang/triton-cpu.git@270e696d ; "
-            "platform_machine == 'x86_64'",
-        ],  # Remove after stable release
     },
     cmdclass=cmdclass,
     package_data=package_data,

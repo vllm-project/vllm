@@ -8,6 +8,7 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
@@ -15,6 +16,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
@@ -107,6 +109,7 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -118,7 +121,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "SHUFFLE",
+        layout,
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -229,6 +232,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     _cp_gather_indexer_quant_cache_kernel[grid](
         k_cache_value,
         k_cache_scale,
@@ -241,7 +245,7 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "SHUFFLE",
+        layout,
         head_dim,
         block_tile_size,
         head_tile_size,
@@ -406,8 +410,8 @@ def rocm_fp8_paged_mqa_logits(
 
     aiter_paged_mqa_logits_module = None
     # if rocm_aiter_ops.is_enabled():
-    batch_size, next_n, heads, head_dim = q_fp8.shape
-    num_blocks, block_size, _, _ = kv_cache_fp8.shape
+    batch_size, next_n = q_fp8.shape[:2]
+    block_size = kv_cache_fp8.shape[1]
 
     if rocm_aiter_ops.is_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
@@ -418,12 +422,10 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            out_logits = torch.full(
-                [batch_size * next_n, max_model_len],
-                float("-inf"),
-                device="cuda",
-                dtype=torch.float32,
+            (out_logits,) = current_workspace_manager().get_simultaneous(
+                ((batch_size * next_n, max_model_len), torch.float32),
             )
+            out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -433,7 +435,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size == 64,
+                Preshuffle=block_size > 1,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -442,12 +444,10 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
+        (out_qk,) = current_workspace_manager().get_simultaneous(
+            ((heads, batch_size * next_n, max_model_len), torch.float32),
         )
+        out_qk.fill_(float("-inf"))
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -645,6 +645,43 @@ def rocm_aiter_sparse_attn_indexer(
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Profiling early-exit: reserve memory to account for runtime
+        # allocations. Must be in the real impl, not the fake impl —
+        # torch.compile calls the fake impl under FakeTensor mode where
+        # workspace manager operations on the locked real workspace
+        # would corrupt PyTorch's dispatch state.
+        workspace_manager = current_workspace_manager()
+
+        # Prefill k_fp8 and k_scale buffers, used by
+        # rocm_aiter_sparse_attn_indexer's prefill path
+        workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+
+        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        if _ON_GFX942 or _ON_GFX950:
+            workspace_manager.get_simultaneous(
+                ((hidden_states.shape[0], max_model_len), torch.float32),
+            )
+        else:
+            workspace_manager.get_simultaneous(
+                (
+                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    torch.float32,
+                ),
+            )
+        # Transient logits tensor peak memory, produced by
+        # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
+        # (decode). Prefill logits are bounded by
+        # VLLM_SPARSE_INDEXER_MAX_LOGITS_MB via chunking in
+        # split_indexer_prefill_chunks; decode logits are smaller.
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
+
         return rocm_aiter_sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -669,7 +706,6 @@ def rocm_aiter_sparse_attn_indexer(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
-    device = hidden_states.device if k is None else k.device
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
@@ -701,17 +737,15 @@ def rocm_aiter_sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
+
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=device,
-                dtype=torch.uint8,
-            )
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
             if _ON_GFX942:
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
@@ -729,7 +763,6 @@ def rocm_aiter_sparse_attn_indexer(
                     chunk.cu_seq_lens,
                     token_to_seq=chunk.token_to_seq,
                 )
-
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -996,15 +1029,16 @@ def build_ragged_indices_from_dense(
     max_width = indices.shape[1] if indices.ndim == 2 else 0
     lengths = lengths.clamp(min=0, max=max_width).contiguous()
 
-    indptr = torch.empty(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
-    indptr[0] = 0
+    indptr = torch.zeros(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
 
     if indices.numel() == 0:
         flat = torch.empty(0, dtype=torch.int32, device=indices.device)
     else:
         flat = torch.empty(
-            int(indptr[-1].item()), dtype=torch.int32, device=indices.device
+            indices.shape[0] * max_width,
+            dtype=torch.int32,
+            device=indices.device,
         )
         if flat.numel() > 0:
             block_size = 128
