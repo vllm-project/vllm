@@ -86,7 +86,6 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
-    VideoProcessorItems,
 )
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
@@ -96,35 +95,21 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
+from vllm.multimodal.video import (
+    VIDEO_LOADER_REGISTRY,
+    VideoBackend,
+    VideoSourceMetadata,
+    VideoTargetMetadata,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 logger = init_logger(__name__)
 
-try:
-    from qwen_vl_utils import fetch_video as _qwen_fetch_video  # type: ignore
-except ImportError:  # pragma: no cover
-    _qwen_fetch_video = None
-
 # Upper bound on frames used when profiling the worst-case video item, mirroring
 # Qwen2-VL. The real frame count is decided by the HF VideoProcessor at apply
 # time; this only sizes the memory-profiling estimate.
 _MAX_FRAMES_PER_VIDEO = 14
-
-
-def _unwrap_video_input_for_ov2(videos: Any) -> list:
-    from PIL import Image as _PILImage
-
-    def _to_pil_frames(v):
-        if isinstance(v, np.ndarray) and v.ndim == 4:
-            return [_PILImage.fromarray(f) for f in v]
-        if isinstance(v, torch.Tensor) and v.ndim == 4:
-            return [_PILImage.fromarray(f.cpu().numpy()) for f in v]
-        return v
-
-    if isinstance(videos, (list, tuple)):
-        return [_to_pil_frames(v) for v in videos]
-    return _to_pil_frames(videos)
 
 
 def _pack_timestamps(per_video: list[list[float]]) -> torch.Tensor:
@@ -384,14 +369,14 @@ def _create_field_factory(
 
 
 # ---------------------------------------------------------------------------
-# Frame backend (qwen_vl_utils) helpers
+# Frame backend helpers
 # ---------------------------------------------------------------------------
 # The default video pathway materialises each video as a series of PIL frames
-# via ``qwen_vl_utils.fetch_video`` and feeds them to the HF processor through
-# the *image* branch (per-frame timestamp marker + ``<|image_pad|>``). This
-# mirrors the validated lmms-eval ``vllm_hf_chat`` adapter byte-for-byte, and
-# empirically scores higher on Video-MME than OV2's native VideoProcessor
-# frame extractor. Pass ``video_backend="native"`` to fall back to the latter.
+# (decoded + sampled by the registered ``LlavaOnevision2VideoBackend``) and
+# feeds them to the HF processor through the *image* branch (per-frame timestamp
+# marker + ``<|image_pad|>``). This mirrors the validated lmms-eval
+# ``vllm_hf_chat`` adapter, and empirically scores higher on Video-MME than
+# OV2's native VideoProcessor frame extractor.
 _DEFAULT_TIMESTAMP_DECIMALS = 1
 _DEFAULT_FPS = 1.0
 _DEFAULT_MAX_FRAMES = 32
@@ -405,59 +390,65 @@ _TEMPORAL_MERGE_SIZE = 2
 _VIDEO_MARKER = "<|vision_start|><|video_pad|><|vision_end|>"
 _IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>"
 
-# Default min/max pixels follow the OV2 hf-chat reference adapter.
-_DEFAULT_MIN_PIXELS = 4 * 28 * 28
-_DEFAULT_MAX_PIXELS = 256 * 28 * 28
 
-
-def _fetch_frames_with_timestamps(
-    video_url: str,
-    *,
-    fps: float,
-    max_frames: int,
-    timestamp_decimals: int,  # accepted for API symmetry; unused here
-    min_pixels: int = _DEFAULT_MIN_PIXELS,
-    max_pixels: int = _DEFAULT_MAX_PIXELS,
+def _frame_video_to_pil_and_timestamps(
+    item: Any,
 ) -> tuple[list[Image.Image], list[float]]:
-    """qwen_vl_utils.fetch_video + uint8->PIL + even-pad.
+    """Convert a ``(frames_ndarray, metadata)`` video item into
+    ``(pil_frames, timestamps_seconds)``.
 
-    Byte-identical to ``vllm_hf_chat._process_video_with_timestamp``.
-    Returns ``(pil_frames, timestamps_seconds)``.
+    Both real ``video_url`` inputs (decoded + sampled by the registered
+    ``LlavaOnevision2VideoBackend``) and dummy profiling videos arrive here as a
+    ``(frames, metadata)`` tuple because the data parser runs with
+    ``video_needs_metadata=True``. ``frames`` is a ``(T, H, W, C)`` uint8 array;
+    ``metadata`` carries ``frames_indices`` and the source ``fps``.
+
+    Timestamps follow the qwen_vl_utils policy: ``frame_index / original_fps``.
+    The frame count is padded up to ``_TEMPORAL_MERGE_SIZE`` (repeating the last
+    frame) because OV2's vision tower merges frames temporally in pairs.
     """
-    if _qwen_fetch_video is None:
-        raise ImportError(
-            "qwen_vl_utils is required for the frame backend. "
-            "Install via `pip install qwen-vl-utils`."
+    if not (isinstance(item, (tuple, list)) and len(item) == 2):
+        raise ValueError(
+            "LlavaOnevision2 frame backend expects each video as a "
+            f"(frames_ndarray, metadata) tuple; got {type(item).__name__}. "
+            "Pass videos via `video_url` so the registered backend can decode "
+            "and sample them."
         )
+    frames, metadata = item
+    if isinstance(frames, torch.Tensor):
+        frames_np = frames.cpu().numpy()
+    else:
+        frames_np = np.asarray(frames)
 
-    video_request = {
-        "type": "video",
-        "video": video_url,
-        "max_pixels": int(max_pixels),
-        "min_pixels": int(min_pixels),
-        "fps": float(fps),
-        "max_frames": int(max_frames),
-    }
-    video_input, video_metadata = _qwen_fetch_video(
-        video_request, return_video_metadata=True
-    )
-    indices = video_metadata["frames_indices"]
-    src_fps = video_metadata.get("fps", 30.0)
-    if not isinstance(indices, list):
-        indices = indices.tolist()
+    pil_frames = [Image.fromarray(f.astype(np.uint8)) for f in frames_np]
 
-    pil_frames = [
-        Image.fromarray(f.permute(1, 2, 0).numpy().astype(np.uint8))
-        for f in video_input
-    ]
+    indices = metadata.get("frames_indices") if isinstance(metadata, Mapping) else None
+    if indices is None:
+        indices = list(range(len(pil_frames)))
+    elif not isinstance(indices, list):
+        indices = list(indices)
+    # Keep indices aligned with the actual frame count.
+    if len(indices) != len(pil_frames):
+        if len(indices) > len(pil_frames):
+            indices = indices[: len(pil_frames)]
+        else:
+            indices = list(indices) + [
+                indices[-1] if indices else 0
+            ] * (len(pil_frames) - len(indices))
+
+    fps = _DEFAULT_FPS
+    if isinstance(metadata, Mapping) and metadata.get("fps"):
+        fps = float(metadata["fps"])
+    if fps <= 0:
+        fps = _DEFAULT_FPS
 
     # OV2 vision tower: temporal merge=2 -> frame count must be even.
-    if len(indices) % _TEMPORAL_MERGE_SIZE != 0:
-        pad = _TEMPORAL_MERGE_SIZE - len(indices) % _TEMPORAL_MERGE_SIZE
-        indices.extend(indices[-1] for _ in range(pad))
-        pil_frames = list(pil_frames) + [pil_frames[-1]] * pad
+    if len(pil_frames) % _TEMPORAL_MERGE_SIZE != 0:
+        pad = _TEMPORAL_MERGE_SIZE - len(pil_frames) % _TEMPORAL_MERGE_SIZE
+        pil_frames = pil_frames + [pil_frames[-1]] * pad
+        indices = indices + [indices[-1]] * pad
 
-    timestamps = [idx / src_fps for idx in indices]
+    timestamps = [idx / fps for idx in indices]
     return pil_frames, timestamps
 
 
@@ -501,46 +492,118 @@ def _expand_video_markers_in_prompt(
     return "".join(parts)
 
 
-def _normalise_video_item(item: Any) -> str | None:
-    """Return a video path string if ``item`` is a string path or a
-    single-element list of strings; otherwise return None.
+# ---------------------------------------------------------------------------
+# Registered video loader backend (frame sampling)
+# ---------------------------------------------------------------------------
+# OV2 frame-sampling policy, expressed as a vLLM ``VideoBackend`` so videos
+# entering through the standard ``video_url`` -> MediaConnector -> VideoMediaIO
+# path are decoded + sampled inside vLLM (no qwen_vl_utils dependency, and the
+# connector's SSRF / local-file gates apply automatically).
+#
+# Parity note: ``compute_frames_index_to_sample`` faithfully replicates
+# ``qwen_vl_utils.smart_nframes`` (the policy the OV2 hf-chat recipe validated)
+# -- frame *count* and index *selection* are byte-identical to qwen. The one
+# residual difference from the original qwen path is the source frame *count*
+# itself: qwen defaults to a decord decode whereas vLLM has no decord backend
+# and decodes via OpenCV/PyAV. OpenCV reports ``CAP_PROP_FRAME_COUNT`` (a
+# duration x fps estimate) which can differ from decord's exact index count by
+# +/-1 frame on some containers, so sampled indices may shift by one frame on
+# those files. Downstream task metrics are validated to stay within noise.
+_OV2_FRAME_FACTOR = 2
+_OV2_FPS_MIN_FRAMES = 4
 
-    qwen_vl_utils.fetch_video requires a path/URL. If the upstream caller
-    already decoded the video into PIL frames or an ndarray, there is nothing
-    for the frame backend to do -- the native path handles it. We detect that
-    case and let the caller fall back.
+
+def _round_by_factor(n: float, factor: int) -> int:
+    return round(n / factor) * factor
+
+
+def _ceil_by_factor(n: float, factor: int) -> int:
+    import math as _math
+
+    return _math.ceil(n / factor) * factor
+
+
+def _floor_by_factor(n: float, factor: int) -> int:
+    import math as _math
+
+    return _math.floor(n / factor) * factor
+
+
+def _ov2_smart_nframes(
+    total_frames: int,
+    video_fps: float,
+    *,
+    fps: float,
+    min_frames: int,
+    max_frames: int,
+) -> int:
+    """Replicate ``qwen_vl_utils.smart_nframes`` (fps branch).
+
+    Returns an even frame count in ``[min_frames, min(max_frames, total)]``.
     """
-    if isinstance(item, str):
-        return item
-    if isinstance(item, (list, tuple)) and len(item) == 1 and isinstance(item[0], str):
-        return item[0]
-    return None
+    min_frames = _ceil_by_factor(min_frames, _OV2_FRAME_FACTOR)
+    max_frames = _floor_by_factor(max_frames, _OV2_FRAME_FACTOR)
+    nframes = total_frames / video_fps * fps if video_fps > 0 else total_frames
+    nframes = min(min(max(nframes, min_frames), max_frames), total_frames)
+    nframes = _floor_by_factor(nframes, _OV2_FRAME_FACTOR)
+    return max(int(nframes), _OV2_FRAME_FACTOR)
 
 
-def _extract_video_paths(videos: Any) -> list[str] | None:
-    """Extract per-video path strings from a multimodal ``videos`` payload.
+@VIDEO_LOADER_REGISTRY.register(
+    "llava_onevision2",
+    video_processor="LlavaOnevision2VideoProcessor",
+)
+class LlavaOnevision2VideoBackend(VideoBackend):
+    """Frame-sampling backend for LLaVA-OneVision-2.
 
-    Returns a list of paths if every video item is a string path, else None
-    (caller falls back to the native-frame path).
-
-    Accepted shapes:
-      * ``"path.mp4"``                       -> ``["path.mp4"]``
-      * ``["a.mp4", "b.mp4"]``               -> as-is
-      * ``[["a.mp4"], ["b.mp4"]]``           -> flattened
+    Selected automatically for OV2 via the ``video_processor`` binding
+    (``video_processor_type == "LlavaOnevision2VideoProcessor"`` in the model's
+    ``video_preprocessor_config.json``). Decoding uses the inherited OpenCV /
+    PyAV codecs; only the sampling index policy is overridden to match qwen.
     """
-    if videos is None:
-        return None
-    if isinstance(videos, str):
-        return [videos]
-    if not isinstance(videos, (list, tuple)) or len(videos) == 0:
-        return None
-    paths: list[str] = []
-    for item in videos:
-        path = _normalise_video_item(item)
-        if path is None:
-            return None
-        paths.append(path)
-    return paths
+
+    _sampling_suffix = "_llava_onevision2"
+
+    # OV2 hf-chat reference sampling constants (mirror the validated adapter).
+    _FPS = _DEFAULT_FPS
+    _MAX_FRAMES = _DEFAULT_MAX_FRAMES
+    _MIN_FRAMES = _OV2_FPS_MIN_FRAMES
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total = int(source.total_frames_num)
+        if total <= 0:
+            return []
+        video_fps = float(source.original_fps)
+        # Honor caller-provided sampling targets (via ``--media-io-kwargs`` →
+        # ``VideoTargetMetadata``) so benchmarks can override the conservative
+        # defaults (e.g. VSI-Bench needs max_frames=128). Fall back to the OV2
+        # hf-chat reference constants when the target leaves a field unset
+        # (sentinel ``<= 0``).
+        target_fps = float(target.fps) if target.fps > 0 else cls._FPS
+        target_max_frames = (
+            int(target.num_frames) if target.num_frames > 0 else cls._MAX_FRAMES
+        )
+        n = _ov2_smart_nframes(
+            total,
+            video_fps,
+            fps=target_fps,
+            min_frames=cls._MIN_FRAMES,
+            max_frames=target_max_frames,
+        )
+        # qwen uses linspace().round() (NOT the floor cast used by the base
+        # uniform backend), so replicate the rounding exactly.
+        idx = np.linspace(0, total - 1, n).round().astype(int).tolist()
+        # smart_nframes floors to FRAME_FACTOR so ``n`` is even; guard anyway
+        # since OV2's vision tower (temporal merge = 2) requires even counts.
+        if len(idx) % _OV2_FRAME_FACTOR != 0:
+            idx.append(idx[-1])
+        return idx
 
 
 class LlavaOnevision2ImagePixelInputs(TensorSchema):
@@ -1123,8 +1186,16 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_data_parser(self) -> MultiModalDataParser:
+        # ``video_needs_metadata=True`` makes the base parser preserve the
+        # ``(frames, metadata)`` tuples produced by
+        # ``LlavaOnevision2VideoBackend`` (frame backend, via the connector)
+        # AND the ``(dummy, {marker: path})`` tuples produced by
+        # ``prepare_codec_video_input`` (codec backend, direct mm input).
+        # Both survive into ``_call_hf_processor`` where they are dispatched
+        # by metadata content.
         return LlavaOnevision2MultiModalDataParser(
-            self.get_hf_config().vision_config.spatial_merge_size
+            self.get_hf_config().vision_config.spatial_merge_size,
+            video_needs_metadata=True,
         )
 
     def get_hf_processor(self, **kwargs: object):
@@ -1310,6 +1381,45 @@ class LlavaOnevision2DummyInputsBuilder(
             )
         return out
 
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides=None,
+    ):
+        # ``video_needs_metadata=True`` (see ProcessingInfo.get_data_parser)
+        # makes the parser require a metadata dict on every video item, so the
+        # dummy profiling videos must carry one too. ``do_sample_frames=False``
+        # plus ``frames_indices=range(T)`` tells the frame path to consume the
+        # pre-built frames verbatim (no resampling) -- mirrors GLM-4V.
+        # OV2's vision tower (temporal merge = 2) needs an even frame count.
+        num_frames = max(num_frames, _OV2_FRAME_FACTOR)
+        if num_frames % _OV2_FRAME_FACTOR != 0:
+            num_frames += 1
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        video_items = []
+        for video in videos:
+            t = video.shape[0]
+            metadata = {
+                "fps": 1.0,
+                "duration": float(t),
+                "total_num_frames": int(t),
+                "frames_indices": list(range(t)),
+                "video_backend": "llava_onevision2",
+                "do_sample_frames": False,
+            }
+            video_items.append((video, metadata))
+        return video_items
+
 
 class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
@@ -1328,62 +1438,6 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
                 fields_factory=_create_field_factory(self._spatial_merge_size),
             )
         return super()._parse_image_data(data)
-
-    def _parse_video_data(self, data):
-        # Codec backend marks each video as (dummy_ndarray, {marker: path}).
-        # Upstream _parse_video_data unpacks via _get_video_with_metadata and
-        # then drops the metadata dict when video_needs_metadata=False
-        # (parse.py:646), which strips our codec marker before
-        # _call_hf_processor can see it. Detect codec inputs here and yield
-        # them back as tuples via a VideoProcessorItems subclass so
-        # _extract_codec_video_paths still finds the marker after parsing.
-        if _extract_codec_video_paths(data) is not None:
-            if isinstance(data, tuple):
-                items = [data]
-            elif isinstance(data, list):
-                items = list(data)
-            else:
-                items = [data]
-            return _CodecVideoProcessorItems(items)
-        # Frame backend (default): accept raw path string(s) so the model can
-        # run qwen_vl_utils.fetch_video itself. Upstream
-        # MultiModalDataParser._parse_video_data rejects raw strings
-        # (assert_never), forcing callers to pre-decode; override to let the
-        # path survive into _call_hf_processor.
-        paths = _extract_video_paths(data)
-        if paths is not None:
-            return _FrameVideoProcessorItems(paths)
-        # Pre-decoded frames (PIL/ndarray, incl. dummy profiling inputs):
-        # native VideoProcessor path handles them.
-        return super()._parse_video_data(data)
-
-
-class _CodecVideoProcessorItems(VideoProcessorItems):
-    # VideoProcessorItems unwraps to bare ndarray via _unwrap(); we need the
-    # full (ndarray, metadata) tuple to survive into _call_hf_processor so
-    # the codec dispatch can read the path. Override _unwrap to identity.
-    def _unwrap(self, item):
-        return item
-
-    def get_item_for_hash(self, index):
-        return self.data[index]
-
-
-class _FrameVideoProcessorItems(VideoProcessorItems):
-    """Identity-unwrap container for raw video paths.
-
-    The default ``VideoProcessorItems`` unwraps each item into a bare ndarray;
-    we need the raw path string to survive into ``_call_hf_processor`` so the
-    frame backend can call qwen_vl_utils.fetch_video on it. Hashing uses the
-    path string directly (distinct paths -> distinct mm_hash, matching the
-    codec branch convention).
-    """
-
-    def _unwrap(self, item):
-        return item
-
-    def get_item_for_hash(self, index):
-        return self.data[index]
 
 
 class LlavaOnevision2MultiModalProcessor(
@@ -1433,9 +1487,7 @@ class LlavaOnevision2MultiModalProcessor(
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
         _videos = mm_data.get("videos")
-        _images = mm_data.get("images")
         videos_present = _videos is not None and len(_videos) > 0
-        images_present = _images is not None and len(_images) > 0
 
         codec_video_paths = (
             _extract_codec_video_paths(mm_data["videos"]) if videos_present else None
@@ -1487,52 +1539,33 @@ class LlavaOnevision2MultiModalProcessor(
                 )
             )
 
-        # ---- Frame backend (default: qwen_vl_utils.fetch_video) ---------
-        # Materialise each video as a series of PIL frames + per-frame
+        # ---- Frame backend (registered LlavaOnevision2VideoBackend) ------
+        # Every non-codec video reaches here as a ``(frames_ndarray, metadata)``
+        # tuple (``video_needs_metadata=True``): the connector decoded + sampled
+        # it through ``LlavaOnevision2VideoBackend`` for real ``video_url``
+        # inputs, or the dummy-inputs builder attached synthetic metadata during
+        # profiling. We materialise the frames as PIL images + per-frame
         # timestamp markers and feed them through the HF processor's *image*
-        # branch. Byte-identical to the validated lmms-eval ``vllm_hf_chat``
-        # adapter. Selected whenever the caller supplies resolvable video path
-        # string(s) and did not request ``video_backend="native"``.
-        backend = str(call_kwargs.get("video_backend", "frame")).lower()
-        video_paths = (
-            _extract_video_paths(mm_data["videos"]) if videos_present else None
-        )
-        if videos_present and video_paths is not None:
-            # Enforce vLLM's media access controls for *every* path-based video
-            # backend (frame AND native) before anything decodes/fetches the
-            # raw string. Gating this on the frame backend alone would let a
-            # per-request ``video_backend="native"`` bypass the SSRF /
-            # local-file-read checks: the native ``VideoProcessor`` decodes the
-            # path directly at the ``hf_processor`` call further below.
-            # Pre-decoded inputs (PIL/ndarray) yield ``video_paths=None`` and
-            # are skipped.
-            _validate_video_sources(video_paths, self.info.ctx.model_config)
-        if videos_present and backend != "native" and video_paths is not None:
-            fps = float(mm_kwargs.get("target_fps", _DEFAULT_FPS))
-            max_frames = int(mm_kwargs.get("max_frames", _DEFAULT_MAX_FRAMES))
+        # branch (smart_resize + patchify), then re-tag the image-series outputs
+        # as video-series so vLLM's ``<|video_pad|>`` placeholder replacement
+        # finds them. Sampling parity with the original qwen_vl_utils policy is
+        # provided by the backend's ``compute_frames_index_to_sample``; SSRF /
+        # local-file gating is enforced by the connector before decoding.
+        if videos_present:
             timestamp_decimals = int(
                 mm_kwargs.get("timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS)
             )
-            min_pixels = int(mm_kwargs.get("min_pixels", _DEFAULT_MIN_PIXELS))
-            max_pixels = int(mm_kwargs.get("max_pixels", _DEFAULT_MAX_PIXELS))
 
             per_video_frames: list[list[Image.Image]] = []
             per_video_timestamps: list[list[float]] = []
-            for path in video_paths:
-                pil_frames, timestamps = _fetch_frames_with_timestamps(
-                    path,
-                    fps=fps,
-                    max_frames=max_frames,
-                    timestamp_decimals=timestamp_decimals,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
-                )
+            for item in mm_data["videos"]:
+                pil_frames, timestamps = _frame_video_to_pil_and_timestamps(item)
                 per_video_frames.append(pil_frames)
                 per_video_timestamps.append(timestamps)
 
             # Rewrite the prompt so each video marker becomes a sequence of
             # ``<{t} seconds><|vision_start|><|image_pad|><|vision_end|>``
-            # blocks (matches lmms-eval vllm_hf_chat exactly).
+            # blocks (matches the OV2 hf-chat reference exactly).
             new_prompt = _expand_video_markers_in_prompt(
                 prompt,
                 per_video_timestamps,
@@ -1555,8 +1588,7 @@ class LlavaOnevision2MultiModalProcessor(
             merged_mm_data.pop("videos", None)
             merged_mm_data["images"] = flat_frames
 
-            # Build the HF processor call. The image branch only accepts a
-            # small subset of kwargs; video-only kwargs are stripped.
+            # The image branch only accepts a small subset of kwargs.
             frame_call_kwargs = {
                 k: v
                 for k, v in merged_kwargs.items()
@@ -1568,8 +1600,7 @@ class LlavaOnevision2MultiModalProcessor(
             data = output.data if isinstance(output, BatchFeature) else dict(output)
 
             # Re-tag image-series outputs as video-series so vLLM's
-            # placeholder replacement (driven by <|video_pad|> runs) finds
-            # them.
+            # placeholder replacement (driven by <|video_pad|> runs) finds them.
             if "pixel_values" in data:
                 data["pixel_values_videos"] = data.pop("pixel_values")
             if "image_grid_thw" in data:
@@ -1587,105 +1618,17 @@ class LlavaOnevision2MultiModalProcessor(
             postprocessed = self.info.ctx._postprocess_output(data)
             return BatchFeature(postprocessed)
 
-        # ---- Native frame path (deprecated fallback) --------------------
-        # The native OV2 ``VideoProcessor`` frame extractor has known accuracy
-        # gaps versus the default qwen_vl_utils frame backend above. It is
-        # reached only when the caller explicitly passes
-        # ``video_backend="native"`` or supplies pre-decoded frames
-        # (PIL/ndarray, e.g. dummy profiling inputs) that the frame backend
-        # cannot consume. Retained for backward compatibility.
-        if videos_present and backend == "native":
-            import warnings
-
-            warnings.warn(
-                "LlavaOnevision2 native video-frame path has known accuracy "
-                "gaps versus the default qwen_vl_utils frame backend. For "
-                "production use, drop ``video_backend='native'`` (the default "
-                "frame backend) or pass ``video_backend='codec'``.",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        # vLLM's MultiModalDataParser stacks PIL video frames into a 4D
-        # ndarray (T, H, W, C). OV2's processor `__call__` has a heuristic
-        # that misidentifies this as ``list[np.ndarray frames]`` and re-wraps
-        # it, causing Image.fromarray() to fail on the 4D tensor. Unwrap
-        # videos back to ``list[PIL]`` (one video) or
-        # ``list[list[PIL]]`` (batched) before dispatching.
-        if videos_present:
-            mm_data["videos"] = _unwrap_video_input_for_ov2(mm_data["videos"])
-
-        # Python looks up dunder methods on the class, not the instance,
-        # so monkey-patching vp.__call__ is ignored when OV2 invokes
-        # vp(videos=...). Replace the video_processor attribute with
-        # a wrapper object whose own __call__ performs the capture.
-        captured_timestamps: list[list[float]] = []
-        original_vp = None
-        if videos_present and hf_processor.video_processor is not None:
-            original_vp = hf_processor.video_processor
-
-            class _CapturingVP:
-                def __init__(self, inner):
-                    self._inner = inner
-
-                def __call__(self, *a, **kw):
-                    vo = self._inner(*a, **kw)
-                    captured_timestamps.extend(vo["frame_timestamps"])
-                    return vo
-
-                def __getattr__(self, name):
-                    return getattr(self._inner, name)
-
-                def __setattr__(self, name, value):
-                    if name == "_inner":
-                        object.__setattr__(self, name, value)
-                    else:
-                        setattr(self._inner, name, value)
-
-            hf_processor.video_processor = _CapturingVP(original_vp)
-
-        try:
-            output = hf_processor(text=prompt, **mm_data, **call_kwargs)
-        finally:
-            if original_vp is not None:
-                hf_processor.video_processor = original_vp
-
+        # ---- Image-only / text-only call --------------------------------
+        # No videos present: run the HF processor over the (possibly empty)
+        # image set directly. The image branch accepts only a small kwarg
+        # subset.
+        image_call_kwargs = {
+            k: v
+            for k, v in merged_kwargs.items()
+            if k in {"return_tensors", "padding", "max_pixels"}
+        }
+        output = hf_processor(text=prompt, **mm_data, **image_call_kwargs)
         data = output.data if isinstance(output, BatchFeature) else dict(output)
-        if videos_present and not images_present and "pixel_values" in data:
-            data["pixel_values_videos"] = data.pop("pixel_values")
-            data["video_grid_thw"] = data.pop("image_grid_thw")
-            if "patch_positions" in data:
-                data["patch_positions_videos"] = data.pop("patch_positions")
-            # The native VideoProcessor capture only fires when OV2 actually
-            # decodes a path. Pre-decoded frames (e.g. dummy profiling inputs)
-            # bypass it, leaving captured_timestamps empty. Synthesize per-video
-            # frame counts from the grid_thw rows (one row per frame) so field
-            # sharding still produces one video item per input video.
-            if not captured_timestamps:
-                total_frames = int(data["video_grid_thw"].shape[0])
-                videos_arg = mm_data.get("videos")
-                if (
-                    isinstance(videos_arg, (list, tuple))
-                    and videos_arg
-                    and isinstance(videos_arg[0], (list, tuple))
-                ):
-                    num_videos = len(videos_arg)
-                else:
-                    num_videos = 1
-                num_videos = max(1, min(num_videos, total_frames))
-                base, rem = divmod(total_frames, num_videos)
-                per_video = [base + (1 if i < rem else 0) for i in range(num_videos)]
-                captured_timestamps = [[float(j) for j in range(n)] for n in per_video]
-            data["frame_timestamps"] = _pack_timestamps(captured_timestamps)
-            # OV2 emits one grid_thw row per frame; vLLM's field sharding
-            # expects per-video sizing, so record explicit per-video frame
-            # counts to use with flat_from_sizes.
-            data["video_num_frames"] = torch.tensor(
-                [len(ts) for ts in captured_timestamps], dtype=torch.long
-            )
-            data["video_is_codec"] = torch.zeros(
-                (len(captured_timestamps),), dtype=torch.long
-            )
         postprocessed = self.info.ctx._postprocess_output(data)
         return BatchFeature(postprocessed)
 
