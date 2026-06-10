@@ -747,6 +747,11 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
+        # Account for the fp8 block-scale payload (a1q_scale: hidden//16 bytes
+        # per token) that is dispatched alongside the nvfp4 hidden states.
+        # Without this the dispatch region is under-reserved and the combine
+        # payload overflows the per-rank workspace.
+        dispatch_scale_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
