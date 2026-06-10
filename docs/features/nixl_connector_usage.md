@@ -50,7 +50,7 @@ To select a different backend, set `kv_connector_extra_config.backends` in `--kv
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector":"NixlConnector",
-    "kv_role":"kv_both",
+    "kv_role":"kv_producer",
     "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
   }'
 ```
@@ -60,7 +60,7 @@ You can also pass JSON keys individually using dotted arguments, and you can app
 ```bash
 vllm serve <MODEL> \
   --kv-transfer-config.kv_connector NixlConnector \
-  --kv-transfer-config.kv_role kv_both \
+  --kv-transfer-config.kv_role kv_producer \
   --kv-transfer-config.kv_connector_extra_config.backends+ LIBFABRIC
 ```
 
@@ -81,7 +81,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8100 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Consumer (Decoder) Configuration
@@ -96,7 +96,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8200 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Proxy Server
@@ -135,6 +135,196 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Default: 480
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
+
+## Bidirectional KV Transfer (Multi-turn)
+
+In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.
+
+### How it works
+
+The feature relies on a **stateful proxy** that sits between the client and the P/D instances. The proxy tracks `kv_transfer_params` returned by D at the end of each turn, and attaches them to the next turn's request so P knows which blocks to pull from D.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Proxy
+    participant P as Prefill (P)
+    participant D as Decode (D)
+
+    rect rgb(240, 240, 250)
+    note right of Client: Turn 1 — Cache Miss
+    Client->>Proxy: chat request + conversation_id
+    Proxy->>P: request (no remote blocks)
+    activate P
+    note over P: full prefill
+    P-->>Proxy: kv_transfer_params (P's blocks)
+    deactivate P
+    Proxy->>D: request + P's kv_transfer_params
+    activate D
+    D-->P: RDMA read (D pulls KV from P)
+    note over D: decode
+    D-->>Proxy: stream response + kv_transfer_params
+    deactivate D
+    note over Proxy: cache D's kv_transfer_params
+    Proxy-->>Client: response
+    end
+
+    rect rgb(255, 245, 235)
+    note right of Client: Turn 2+ — Cache Hit (Bidirectional)
+    Client->>Proxy: chat request + conversation_id
+    note over Proxy: lookup cached D blocks
+    Proxy->>P: request + D's remote_block_ids
+    activate P
+    P-->D: RDMA read (P pulls KV from D)
+    note over P: prefill new tokens only
+    P-->>Proxy: kv_transfer_params (P's blocks)
+    deactivate P
+    Proxy->>D: request + P's kv_transfer_params
+    activate D
+    D-->P: RDMA read (D pulls new KV from P)
+    note over D: decode
+    D-->>Proxy: stream response + kv_transfer_params
+    deactivate D
+    note over Proxy: update cached kv_transfer_params
+    Proxy-->>Client: response
+    end
+```
+
+**Turn 1 (cache miss):**
+
+1. Client sends a chat request with a `conversation_id` to the proxy.
+2. Proxy forwards the request to P with no remote block info — P computes the full KV cache.
+3. Proxy forwards the request to D along with P's `kv_transfer_params` (block IDs, engine ID, host/port).
+4. D reads KV blocks from P via RDMA (peer-to-peer pull), then generates the response.
+5. D streams the response back through the proxy. The final chunk includes D's own `kv_transfer_params`.
+6. Proxy caches D's `kv_transfer_params` keyed by `conversation_id`, then returns the response to the client.
+
+**Turn 2+ (cache hit — bidirectional):**
+
+1. Client sends the next turn with the same `conversation_id`.
+2. Proxy looks up cached `kv_transfer_params` from the previous turn and attaches D's `remote_block_ids` to the request sent to P.
+3. P reads the existing KV cache from D via RDMA (D→P pull), then computes KV only for the new tokens.
+4. Proxy forwards the request to D with P's updated `kv_transfer_params`.
+5. D reads the new KV blocks from P, generates the response, and returns updated `kv_transfer_params` which the proxy caches for the next turn.
+
+### Configuration
+
+Enable bidirectional KV transfer by setting `bidirectional_kv_xfer` in `kv_connector_extra_config` on **both** P and D instances:
+
+```bash
+# Prefill instance
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "bidirectional_kv_xfer": true
+    }
+  }'
+
+# Decode instance
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+      "bidirectional_kv_xfer": true
+    }
+  }'
+```
+
+Additional configuration options in `kv_connector_extra_config`:
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `bidirectional_kv_xfer` | `false` | Enable bidirectional D→P KV transfer. |
+| `kv_recompute_threshold` | `64` | Minimum number of remote tokens required to trigger a D→P pull. Below this threshold, P recomputes locally instead of pulling (to amortize transfer latency). |
+| `decoder_kv_blocks_ttl` | `480` | TTL (seconds) for KV blocks cached on D for bidirectional reuse. Blocks are released after this duration. Not renewed via heartbeats. |
+
+### Multi-turn proxy setup
+
+Use the provided multi-turn proxy to manage `kv_transfer_params` caching across conversation turns:
+
+```bash
+python examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py \
+  --host 0.0.0.0 --port 8000 \
+  --prefiller-host <P_IP> --prefiller-port 8100 \
+  --decoder-host <D_IP> --decoder-port 8200
+```
+
+The proxy supports multiple P and D instances via round-robin:
+
+```bash
+python examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py \
+  --host 0.0.0.0 --port 8000 \
+  --prefiller-hosts <P_IP1> <P_IP2> --prefiller-ports 8100 8100 \
+  --decoder-hosts <D_IP1> <D_IP2> --decoder-ports 8200 8200
+```
+
+### Client usage
+
+Include a `conversation_id` field in the request body to enable cross-turn KV reuse. Without it, the proxy cannot link turns and falls back to full recomputation.
+
+```bash
+# Turn 1
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "conversation_id": "session-42",
+    "messages": [
+      {"role": "user", "content": "What is vLLM?"}
+    ]
+  }'
+
+# Turn 2 — same conversation_id triggers bidirectional KV pull
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "conversation_id": "session-42",
+    "messages": [
+      {"role": "user", "content": "What is vLLM?"},
+      {"role": "assistant", "content": "vLLM is a high-throughput LLM serving engine..."},
+      {"role": "user", "content": "How does disaggregated prefilling work?"}
+    ]
+  }'
+```
+
+!!! note
+    The `conversation_id` field is a non-standard extension to the OpenAI API. It is consumed by the proxy and not forwarded to the vLLM engine.
+
+### Benchmarking the multi-turn proxy
+
+[`benchmarks/multi_turn/benchmark_serving_multi_turn.py`](../../benchmarks/multi_turn/benchmark_serving_multi_turn.py) supports targeting the disaggregated multi-turn proxy with the `--send-conversation-id` flag, which injects a per-conversation `conversation_id` into every request payload so the proxy can key cross-turn KV cache reuse.
+
+The flag is **off by default** so the benchmark is compatible with strict OpenAI-compatible frontends that reject unknown top-level fields. When benchmarking the multi-turn proxy you must pass it explicitly — otherwise every turn lands as a cache MISS and the bidirectional KV transfer path is never exercised.
+
+```bash
+python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
+  --model <MODEL> --served-model-name <NAME> \
+  --url http://<proxy_host>:8000 \
+  --input-file benchmarks/multi_turn/generate_multi_turn.json \
+  --num-clients 2 --max-active-conversations 6 \
+  --send-conversation-id
+```
+
+### Limitations
+
+- Requires a stateful proxy (or equivalent router) to track and forward `kv_transfer_params` between turns.
+- Currently supported on CUDA with device-buffer KV cache. Host-buffer support (e.g., for Intel XPU) is planned for future work.
+
+!!! warning "Reasoning models with stripped thinking traces"
+    When using reasoning models (e.g. DeepSeek-R1) that produce thinking traces
+    (`<think>...</think>`), D's KV blocks cover the full token sequence including
+    thinking tokens. If the client strips thinking traces from the conversation
+    history before sending the next turn, the prompt P receives will be missing
+    tokens from the middle of what D generated. The block-alignment logic assumes
+    P's prompt is a prefix of D's sequence, so pulling KV blocks from D in this
+    case transfers cache computed for the wrong token positions, producing
+    incorrect results.
+
+    We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
 
 ## Multi-Instance Setup
 
@@ -195,11 +385,10 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 - **kv_producer**: For prefiller instances that generate KV caches
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
-- **kv_both**: Enables symmetric functionality where the connector can act as both producer and consumer. This provides flexibility for experimental setups and scenarios where the role distinction is not predetermined.
+- **kv_both** (deprecated): Previously used as a catch-all when the role was not predetermined. This value is now deprecated for NixlConnector and will be removed in a future release.
 
-!!! tip
-    NixlConnector currently does not distinguish `kv_role`; the actual prefiller/decoder roles are determined by the upper-level proxy (e.g., `toy_proxy_server.py` using `--prefiller-hosts` and `--decoder-hosts`).
-    Therefore, `kv_role` in `--kv-transfer-config` is effectively a placeholder and does not affect NixlConnector's behavior.
+!!! warning
+    `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.
 
 ### KV Load Failure Policy
 
@@ -210,6 +399,10 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 !!! warning
     Using `kv_load_failure_policy="recompute"` can lead to performance degradation in production deployments. When KV loads fail, the decode instance will execute prefill work with decode-optimized configurations, which is inefficient and defeats the purpose of disaggregated prefilling. This also increases tail latency for other ongoing decode requests.
+
+### For NVIDIA GB-series GPUs
+
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 

@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -277,6 +278,83 @@ def test_apply_prefix_caching_mamba_hybrid(
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
+    "local_block_ids,remote_block_ids,"
+    "expected_local,expected_remote",
+    [
+        # SSM prefix caching: remote has 3 placeholder + 1 real block,
+        # local has only the 1 real block. FA blocks are equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [42]],
+            [list(range(10)), [40, 41, 42, 43]],
+            [list(range(10)), [42]],
+            [list(range(10)), [43]],
+            id="ssm_prefix_trim_only",
+        ),
+        # FA partial prefix cache hit with homogeneous TP: local has 4 FA
+        # blocks (prefix cached), remote has full 10. SSM equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(6, 10)), [42]],
+            [list(range(10)), [42]],
+            [list(range(6, 10)), [42]],
+            [list(range(6, 10)), [42]],
+            id="fa_prefix_hit_homo_tp",
+        ),
+        # Both: FA partial prefix hit + SSM placeholder trim.
+        # local FA=[6..9] (4 blocks, prefix cached), remote FA=[0..9]
+        # local SSM=[99], remote SSM=[10, 20, 99] (2 placeholders + real)
+        pytest.param(
+            10,
+            10,
+            [[6, 7, 8, 9], [99]],
+            [list(range(10)), [10, 20, 99]],
+            [[6, 7, 8, 9], [99]],
+            [[6, 7, 8, 9], [99]],
+            id="fa_prefix_hit_and_ssm_trim",
+        ),
+    ],
+)
+def test_apply_prefix_caching_ssm_prefix_cache_hit(
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    local_block_ids,
+    remote_block_ids,
+    expected_local,
+    expected_remote,
+):
+    """_apply_prefix_caching end-trims SSM remote blocks to match the single
+    local block (placeholders dropped) and end-trims FA remote blocks on
+    partial prefix cache hits when physical_per_logical matches.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        local_block_ids, remote_block_ids, remote_physical_per_logical
+    )
+
+    assert aligned_local == expected_local, (
+        f"Expected local {expected_local}, got {aligned_local}"
+    )
+    assert aligned_remote == expected_remote, (
+        f"Expected remote {expected_remote}, got {aligned_remote}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_physical_per_logical,remote_physical_per_logical,"
     "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
     "correct_remote_fa,correct_local_fa",
     [
@@ -375,7 +453,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     """
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
     )
     block_size = 16
     llm_kwargs = {
@@ -385,8 +463,6 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
         "max_num_seqs": 1,
-        # NOTE: Make sure HMA is enabled
-        "disable_hybrid_kv_cache_manager": False,
         "max_num_batched_tokens": 2048,
         "enable_prefix_caching": False,
         "block_size": block_size,
@@ -637,6 +713,30 @@ def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
 
 
 @pytest.mark.cpu_test
+def test_mamba_n1_d_side_builds_decode_metadata():
+    req = create_request(num_tokens=10, do_remote_prefill=True)
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+
+    num_computed_tokens, is_async = sched.get_num_new_matched_tokens(
+        req, num_computed_tokens=0
+    )
+
+    assert num_computed_tokens == req.num_prompt_tokens - 1
+    assert is_async is True
+
+    vllm_config = create_vllm_config()
+    metadata = MockMambaBuilder.build_mamba_metadata(
+        vllm_config,
+        seq_lens=[req.num_prompt_tokens],
+        query_lens=[1],
+        is_prefilling=[True],
+    )
+
+    assert metadata.num_decodes == 1
+    assert metadata.num_prefills == 0
+
+
+@pytest.mark.cpu_test
 def test_mamba_n1_p_side_truncation():
     """P-side: Mamba truncates prompt to N-1, sets max_tokens=1.
 
@@ -698,8 +798,7 @@ def test_has_mamba_init(
 
     block_size = 16
     vllm_config = create_vllm_config(block_size=block_size)
-    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
-    # is set; override so we can test the scheduler's own derivation.
+    # Explicitly enable HMA so we can test the scheduler's own derivation.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(
         block_size=block_size,
@@ -740,6 +839,132 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
     )
 
     assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mamba_type,local_tp,conv_dim_local,conv_rows,temporal_shape,expected_proj_dims",
+    [
+        # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
+        # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
+        pytest.param(
+            "mamba2",
+            1,
+            10240,
+            3,
+            (128, 64, 128),
+            (8192, 1024, 1024),
+            id="nemotron_h_8b_tp1",
+        ),
+        pytest.param(
+            "mamba2",
+            4,
+            2560,
+            3,
+            (32, 64, 128),
+            (2048, 256, 256),
+            id="nemotron_h_8b_tp4",
+        ),
+        # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B (Mamba2)
+        # mamba_num_heads=64, head_dim=64, n_groups=8, ssm_state_size=128
+        pytest.param(
+            "mamba2",
+            1,
+            6144,
+            3,
+            (64, 64, 128),
+            (4096, 1024, 1024),
+            id="nemotron_nano_30b_tp1",
+        ),
+        # Qwen/Qwen3.5-0.8B (GDN, symmetric: num_v=num_k=16)
+        # key_dim=2048, value_dim=2048, conv_dim=6144
+        pytest.param(
+            "gdn_attention",
+            1,
+            6144,
+            3,
+            (16, 128, 128),
+            (2048, 2048, 2048),
+            id="qwen35_08b_tp1",
+        ),
+        pytest.param(
+            "gdn_attention",
+            4,
+            1536,
+            3,
+            (4, 128, 128),
+            (512, 512, 512),
+            id="qwen35_08b_tp4",
+        ),
+        # Qwen/Qwen3.5-4B (GDN, asymmetric: num_v=32, num_k=16, K:V=1:2)
+        # key_dim=2048, value_dim=4096, conv_dim=8192
+        pytest.param(
+            "gdn_attention",
+            1,
+            8192,
+            3,
+            (32, 128, 128),
+            (2048, 2048, 4096),
+            id="qwen35_4b_tp1",
+        ),
+        # Qwen/Qwen3.5-27B (GDN, asymmetric: num_v=48, num_k=16, K:V=1:3)
+        # key_dim=2048, value_dim=6144, conv_dim=10240
+        pytest.param(
+            "gdn_attention",
+            1,
+            10240,
+            3,
+            (48, 128, 128),
+            (2048, 2048, 6144),
+            id="qwen35_27b_tp1",
+        ),
+        pytest.param(
+            "gdn_attention",
+            8,
+            1280,
+            3,
+            (6, 128, 128),
+            (256, 256, 768),
+            id="qwen35_27b_tp8",
+        ),
+    ],
+)
+def test_derive_mamba_conv_split(
+    monkeypatch,
+    mamba_type,
+    local_tp,
+    conv_dim_local,
+    conv_rows,
+    temporal_shape,
+    expected_proj_dims,
+):
+    """Parametrized test for derive_mamba_conv_split with real model configs.
+
+    Values generated by verify_conv_split.py which loads HuggingFace configs
+    and calls vLLM's derive_mamba_conv_split directly.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        derive_mamba_conv_split,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    _TYPE_MAP = {
+        "mamba2": MambaAttentionBackendEnum.MAMBA2,
+        "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
+    }
+    mamba_type_enum = _TYPE_MAP[mamba_type]
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    spec = MambaSpec(
+        block_size=64,
+        shapes=((conv_dim_local, conv_rows), temporal_shape),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        mamba_type=mamba_type_enum,
+    )
+    out = derive_mamba_conv_split(spec, local_tp=local_tp)
+    assert out.local_proj_dims == expected_proj_dims
+    assert out.conv_rows == conv_rows
 
 
 @pytest.mark.cpu_test

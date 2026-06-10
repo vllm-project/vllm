@@ -25,16 +25,9 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
-from .utils import _get_lora_device
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _lora_aux_cuda_stream: torch.cuda.Stream | None = None
-
-    def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-        global _lora_aux_cuda_stream
-        if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-            _lora_aux_cuda_stream = torch.cuda.Stream()
-        return _lora_aux_cuda_stream
 
     def lora_linear_async(
         layer_name: str,

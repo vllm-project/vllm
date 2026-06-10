@@ -6,11 +6,8 @@ from typing import Any, Literal
 from pydantic import field_validator
 
 from vllm.config.utils import config
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-logger = init_logger(__name__)
 
 
 @config
@@ -36,27 +33,16 @@ class AttentionConfig:
     Fixes the split count so grid dimensions are constant across captures,
     and buffers can be pre-allocated to avoid inflating the memory estimate."""
 
-    use_cudnn_prefill: bool = False
-    """Deprecated: cuDNN prefill backend has been removed."""
-
-    use_trtllm_ragged_deepseek_prefill: bool = False
-    """Whether to use TRTLLM ragged deepseek prefill."""
-
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
-
-    disable_flashinfer_prefill: bool | None = None
-    """Whether to disable flashinfer prefill."""
 
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED.
-    This option supersedes use_trtllm_ragged_deepseek_prefill
-    and disable_flashinfer_prefill which are deprecated."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -123,40 +109,3 @@ class AttentionConfig:
         if isinstance(value, str):
             return MLAPrefillBackendEnum[value.upper()]
         return value
-
-    def __post_init__(self) -> None:
-        self._migrate_deprecated_mla_prefill_flags()
-
-    def _migrate_deprecated_mla_prefill_flags(self) -> None:
-        """Migrate deprecated MLA prefill flags to mla_prefill_backend."""
-        # If the new option is already set, it takes precedence
-        if self.mla_prefill_backend is not None:
-            return
-
-        # Check for deprecated flags and migrate them.
-        # Only the first flag encountered sets the backend.
-        if self.use_cudnn_prefill:
-            raise ValueError(
-                "The cuDNN MLA prefill backend has been removed. "
-                "Use --attention-config.mla_prefill_backend=FLASH_ATTN or "
-                "FLASHINFER or TRTLLM_RAGGED instead."
-            )
-
-        if self.use_trtllm_ragged_deepseek_prefill:
-            if self.mla_prefill_backend is None:
-                self.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
-            logger.warning_once(
-                "use_trtllm_ragged_deepseek_prefill is deprecated and "
-                "will be removed in v0.22. Use "
-                "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
-                "instead."
-            )
-
-        if self.disable_flashinfer_prefill:
-            if self.mla_prefill_backend is None:
-                self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
-            logger.warning_once(
-                "disable_flashinfer_prefill is deprecated and will be removed "
-                "in v0.22. Use --attention-config.mla_prefill_backend="
-                "FLASH_ATTN instead."
-            )

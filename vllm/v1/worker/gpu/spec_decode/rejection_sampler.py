@@ -125,6 +125,7 @@ class RejectionSampler:
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
+            use_fp64=self.sampler.use_fp64_gumbel,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,

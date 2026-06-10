@@ -121,7 +121,9 @@ class TestExtractHarmonyStreamingDelta:
 
         token_states = [
             TokenState(
-                channel=channel, recipient="functions.get_weather", text=args_text
+                channel=channel,
+                recipient="functions.get_weather",
+                text=args_text,
             )
         ]
 
@@ -168,7 +170,11 @@ class TestExtractHarmonyStreamingDelta:
         parser = MockStreamableParser(messages=messages)
 
         token_states = [
-            TokenState(channel="commentary", recipient="functions.tool2", text="args")
+            TokenState(
+                channel="commentary",
+                recipient="functions.tool2",
+                text="args",
+            )
         ]
 
         delta_message, _ = extract_harmony_streaming_delta(
@@ -198,75 +204,6 @@ class TestExtractHarmonyStreamingDelta:
 
         assert delta_message.content == delta_text
         assert tools_streamed is False
-
-    @pytest.mark.parametrize("channel", ["commentary", "analysis"])
-    @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")
-    def test_new_tool_call_without_functions_prefix(
-        self, mock_make_tool_call_id, channel
-    ):
-        mock_make_tool_call_id.return_value = "call_bare123"
-        parser = MockStreamableParser()
-
-        token_states = [TokenState(channel=channel, recipient="get_weather", text="")]
-
-        delta_message, tools_streamed = extract_harmony_streaming_delta(
-            harmony_parser=parser,
-            token_states=token_states,
-            prev_recipient=None,
-            include_reasoning=False,
-        )
-
-        assert delta_message is not None
-        assert len(delta_message.tool_calls) == 1
-        tool_call = delta_message.tool_calls[0]
-        assert tool_call.id == "call_bare123"
-        assert tool_call.type == "function"
-        assert tool_call.function.name == "get_weather"
-        assert tool_call.function.arguments == ""
-        assert tool_call.index == 0
-        assert tools_streamed is True
-
-    @pytest.mark.parametrize("channel", ["commentary", "analysis"])
-    def test_tool_call_argument_streaming_without_functions_prefix(self, channel):
-        parser = MockStreamableParser()
-        args_text = '{"location": "Paris"}'
-
-        token_states = [
-            TokenState(channel=channel, recipient="get_weather", text=args_text)
-        ]
-
-        delta_message, tools_streamed = extract_harmony_streaming_delta(
-            harmony_parser=parser,
-            token_states=token_states,
-            prev_recipient="get_weather",
-            include_reasoning=False,
-        )
-
-        assert delta_message is not None
-        tool_call = delta_message.tool_calls[0]
-        assert tool_call.id is None
-        assert tool_call.function.arguments == args_text
-        assert tool_call.index == 0
-        assert tools_streamed is True
-
-    def test_tool_call_index_from_previous_messages_without_functions_prefix(self):
-        messages = [
-            MockMessage(channel="commentary", recipient="tool1"),
-        ]
-        parser = MockStreamableParser(messages=messages)
-
-        token_states = [
-            TokenState(channel="commentary", recipient="tool2", text="args")
-        ]
-
-        delta_message, _ = extract_harmony_streaming_delta(
-            harmony_parser=parser,
-            token_states=token_states,
-            prev_recipient="tool2",
-            include_reasoning=False,
-        )
-
-        assert delta_message.tool_calls[0].index == 1
 
     @pytest.mark.parametrize("channel", ["commentary", "analysis"])
     @patch("vllm.entrypoints.openai.chat_completion.stream_harmony.make_tool_call_id")

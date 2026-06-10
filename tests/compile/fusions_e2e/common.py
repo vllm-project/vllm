@@ -20,6 +20,7 @@ class Matches(NamedTuple):
     attn_quant_fusion: int = 0
     # distributed
     ar_rms_fusion: int = 0
+    aiter_ar_rms_fusion: int = 0
     sequence_parallel: int = 0
     async_tp: int = 0
 
@@ -96,6 +97,9 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     ),
     "ar_rms_fusion": re.compile(
         r"allreduce_rms_fusion.py:\d+] Replaced (\d+) patterns"
+    ),
+    "aiter_ar_rms_fusion": re.compile(
+        r"RocmAiterAllReduceFusionPass Replaced (\d+) patterns"
     ),
     "sequence_parallel": re.compile(
         r"sequence_parallelism.py:\d+] Replaced (\d+) patterns"

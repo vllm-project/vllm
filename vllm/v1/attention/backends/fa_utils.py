@@ -191,15 +191,6 @@ def is_fa_version_supported(fa_version: int) -> bool:
         return False
 
 
-def flash_attn_supports_fp8() -> bool:
-    if current_platform.is_xpu():
-        return True
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
-    )
-
-
 def flash_attn_supports_quant_query_input() -> bool:
     return not current_platform.is_xpu()
 
