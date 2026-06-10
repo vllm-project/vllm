@@ -10,6 +10,9 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import CUDAGraphMode, SpeculativeConfig
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.bailing_linear_attn import (
+    BailingLinearAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -35,7 +38,7 @@ def test_bailing_linear_attention_reports_uniform_batch_cudagraph_support():
         }
     )
 
-    support = LinearAttentionMetadataBuilder.get_cudagraph_support(
+    support = BailingLinearAttentionMetadataBuilder.get_cudagraph_support(
         vllm_config, _create_mamba_spec()
     )
 
@@ -70,7 +73,7 @@ def test_linear_attention_spec_decode_full_graph_metadata_pads_cache_slots():
     )
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
-    builder = LinearAttentionMetadataBuilder(
+    builder = BailingLinearAttentionMetadataBuilder(
         kv_cache_spec=_create_mamba_spec(),
         layer_names=["model.layers.0.self_attn"],
         vllm_config=vllm_config,
@@ -122,7 +125,7 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
     )
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
-    builder = LinearAttentionMetadataBuilder(
+    builder = BailingLinearAttentionMetadataBuilder(
         kv_cache_spec=_create_mamba_spec(),
         layer_names=["model.layers.0.self_attn"],
         vllm_config=vllm_config,
