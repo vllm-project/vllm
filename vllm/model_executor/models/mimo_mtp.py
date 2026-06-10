@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
+# vllm.models.deepseek_v2
 # Copyright 2025 Xiaomi Corporation.
 # Copyright 2023 The vLLM team.
 # Copyright 2024 DeepSeek-AI team.

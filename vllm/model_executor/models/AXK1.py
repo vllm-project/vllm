@@ -65,12 +65,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import (
+from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.models.deepseek_v2 import (
     DeepseekAttention,
     DeepseekV2MLP,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.AXK1 import AXK1Config

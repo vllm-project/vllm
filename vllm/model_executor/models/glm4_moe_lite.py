@@ -54,14 +54,14 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2Attention,
-    DeepseekV2MLAAttention,
-)
 from vllm.model_executor.models.glm4_moe import (
     Glm4MixtureOfExperts,
     Glm4MoE,
     Glm4MoeMLP,
+)
+from vllm.models.deepseek_v2 import (
+    DeepseekV2Attention,
+    DeepseekV2MLAAttention,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors

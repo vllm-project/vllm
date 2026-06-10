@@ -29,7 +29,7 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         hf_config = vllm_config.model_config.hf_config
 
-        # Mirror the check in vllm/model_executor/models/deepseek_v2.py
+        # Mirror the check in vllm/models/deepseek_v2/hw_agnostic/deepseek_v2.py
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 

@@ -17,7 +17,7 @@
 # limitations under the License.
 
 # Adapted from
-# https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
+# vllm.models.deepseek_v2
 from collections.abc import Iterable
 
 import torch
@@ -37,12 +37,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_mtp import (
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v2 import (
     DeepSeekMultiTokenPredictor,
     DeepSeekMultiTokenPredictorLayer,
     SharedHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
 from .openpangu import OpenPanguDecoderLayer

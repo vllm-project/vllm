@@ -82,9 +82,22 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     extract_layer_index,
+    get_pp_missing_layer_names,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -95,22 +108,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
-
-from .interfaces import (
-    MixtureOfExperts,
-    SupportsEagle,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsPP,
-)
-from .utils import (
-    PPMissingLayer,
-    get_pp_missing_layer_names,
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
 
 logger = init_logger(__name__)
 
