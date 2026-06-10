@@ -143,7 +143,7 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Olmo3PythonicToolParser",
     ),
     "openai": (
-        "openai_tool_parser",
+        "gptoss_tool_parser",
         "GptOssToolParser",
     ),
     "phi4_mini_json": (

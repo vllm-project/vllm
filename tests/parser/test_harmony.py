@@ -18,7 +18,8 @@ from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
-from vllm.parser.harmony_parser import HarmonyParser
+from vllm.parser.harmony import HarmonyParser
+from vllm.parser.parser_manager import ParserManager
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -30,7 +31,15 @@ def gpt_oss_tokenizer():
 
 @pytest.fixture
 def harmony_parser(gpt_oss_tokenizer):
-    return HarmonyParser(gpt_oss_tokenizer)
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="openai",
+        reasoning_parser_name="openai_gptoss",
+        enable_auto_tools=True,
+        model_name=REASONING_MODEL_NAME,
+        is_harmony=True,
+    )
+    assert parser_cls is HarmonyParser
+    return parser_cls(gpt_oss_tokenizer)
 
 
 @pytest.fixture

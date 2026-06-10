@@ -5,7 +5,7 @@ from vllm.parser.abstract_parser import (
     DelegatingParser,
     Parser,
 )
-from vllm.parser.harmony_parser import HarmonyParser
+from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
 
 __all__ = [

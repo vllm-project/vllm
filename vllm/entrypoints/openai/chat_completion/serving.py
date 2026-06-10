@@ -134,6 +134,7 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         if (
             is_mistral_tool_parser(self.tool_parser)
@@ -631,15 +632,6 @@ class OpenAIServingChat(OpenAIServing):
                     # handle streaming just a content delta (no parsers)
                     else:
                         delta_message = DeltaMessage(content=delta_text)
-
-                    if (
-                        delta_message is not None
-                        and delta_message.reasoning
-                        and not request.include_reasoning
-                    ):
-                        delta_message.reasoning = None
-                        if not (delta_message.content or delta_message.tool_calls):
-                            delta_message = None
 
                     previous_texts[i] += delta_text
 

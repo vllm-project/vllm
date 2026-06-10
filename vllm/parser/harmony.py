@@ -9,13 +9,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai.types.responses import ResponseOutputItem
-from openai.types.responses.response_output_text import Logprob
-
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
-    ExtractedToolCallInformation,
     FunctionCall,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -24,15 +20,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.parser.abstract_parser import Parser
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-from vllm.tool_parsers.openai_tool_parser import GptOssToolParser
+from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, Role
     from openai_harmony import StreamState as HarmonyStreamState
-
-    from vllm.entrypoints.mcp.tool_server import ToolServer
 
 
 class _SegmentType(Enum):
@@ -68,12 +62,24 @@ class ChunkResult:
     reasoning_token_count: int
 
 
-class HarmonyParser(Parser):
-    reasoning_parser_cls = GptOssReasoningParser
-    tool_parser_cls = GptOssToolParser
-
+class HarmonyParser(DelegatingParser):
     def __init__(self, tokenizer, tools=None, *args, **kwargs):
         super().__init__(tokenizer, tools, *args, **kwargs)
+
+        if self._reasoning_parser and not isinstance(
+            self._reasoning_parser, GptOssReasoningParser
+        ):
+            raise ValueError(
+                "Harmony requires GptOssReasoningParser, "
+                f"got {self._reasoning_parser.__class__.__name__}."
+            )
+
+        if self._tool_parser and not isinstance(self._tool_parser, GptOssToolParser):
+            raise ValueError(
+                "Harmony requires GptOssToolParser, "
+                f"got {self._tool_parser.__class__.__name__}."
+            )
+
         self._harmony_parser = get_streamable_parser_for_assistant()
 
     @property
@@ -130,11 +136,11 @@ class HarmonyParser(Parser):
         ) -> None:
             segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
             match segment_type:
-                case _SegmentType.REASONING if text:
+                case _SegmentType.REASONING if self.reasoning_parser and text:
                     reasoning_parts.append(text)
                 case _SegmentType.CONTENT if text:
                     content_parts.append(text)
-                case _SegmentType.TOOL:
+                case _SegmentType.TOOL if self.tool_parser:
                     assert recipient is not None
                     if content_type is not None and "json" not in content_type:
                         arguments = text
@@ -231,88 +237,4 @@ class HarmonyParser(Parser):
         return ChunkResult(
             segments=segments,
             reasoning_token_count=reasoning_token_count,
-        )
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        assert self._reasoning_parser is not None
-        return self._reasoning_parser.is_reasoning_end(input_ids)
-
-    def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
-    ) -> bool:
-        assert self._reasoning_parser is not None
-        return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
-
-    def prepare_structured_tag(
-        self,
-        original_tag: str | None,
-        tool_server: ToolServer | None,
-    ) -> str | None:
-        assert self._reasoning_parser is not None
-        return self._reasoning_parser.prepare_structured_tag(original_tag, tool_server)
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        raise NotImplementedError(
-            "HarmonyParser parses streaming outputs via parse_delta()."
-        )
-
-    def extract_response_outputs(
-        self,
-        *,
-        model_output: str,
-        model_output_token_ids: Sequence[int],
-        request: ResponsesRequest,
-        enable_auto_tools: bool = False,
-        tool_call_id_type: str = "random",
-        logprobs: list[Logprob] | None = None,
-    ) -> list[ResponseOutputItem]:
-        raise NotImplementedError(
-            "HarmonyParser goes through HarmonyContext, "
-            "which does not call extract_response_outputs()."
-        )
-
-    def extract_reasoning(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> tuple[str | None, str | None]:
-        raise NotImplementedError(
-            "HarmonyParser's parse() does not call extract_reasoning()."
-        )
-
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ExtractedToolCallInformation:
-        raise NotImplementedError(
-            "HarmonyParser's parse() does not call extract_tool_calls()."
-        )
-
-    def extract_reasoning_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
-        raise NotImplementedError(
-            "HarmonyParser's parse_delta() does not call extract_reasoning_streaming()."
-        )
-
-    def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> DeltaMessage | None:
-        raise NotImplementedError(
-            "HarmonyParser's parse_delta() does not call "
-            "extract_tool_calls_streaming()."
         )
