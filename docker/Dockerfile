@@ -958,6 +958,8 @@ ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/kv_connectors_cu12.txt,ro \
+    --mount=type=bind,source=requirements/kv_connectors_cu13.txt,target=/tmp/kv_connectors_cu13.txt,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
     CUDA_HOME=/usr/local/cuda; \
@@ -966,11 +968,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        KV_CONNECTORS_FILE="/tmp/kv_connectors_cu${CUDA_MAJOR}.txt"; \
+        if [ ! -f "$KV_CONNECTORS_FILE" ]; then \
+            echo "Warning: No kv_connectors file for CUDA ${CUDA_MAJOR}, falling back to CUDA 12"; \
+            KV_CONNECTORS_FILE="/tmp/kv_connectors_cu12.txt"; \
+        fi; \
+        uv pip install --system -r "$KV_CONNECTORS_FILE" --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -r "$KV_CONNECTORS_FILE" --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
