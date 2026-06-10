@@ -817,3 +817,25 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     # Boolean should be deserialized as bool
     assert args["enabled"] is True
     assert isinstance(args["enabled"], bool)
+
+
+def test_is_string_type_with_responses_function_tool():
+    """Responses API FunctionTool uses .name, not .function.name."""
+    from openai.types.responses import FunctionTool
+
+    tools = [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "count": {"type": "integer"},
+                },
+            },
+        )
+    ]
+    assert Glm4MoeModelToolParser._is_string_type("get_weather", "city", tools)
+    assert not Glm4MoeModelToolParser._is_string_type("get_weather", "count", tools)
+    assert not Glm4MoeModelToolParser._is_string_type("unknown", "city", tools)

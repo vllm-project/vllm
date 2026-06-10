@@ -94,8 +94,10 @@ def construct_input_messages(
 
     # Prepend the conversation history.
     if prev_msg is not None:
-        # Add the previous messages.
-        messages.extend(prev_msg)
+        # Filter out system messages from previous conversation -- per the
+        # OpenAI spec, instructions should NOT carry over across responses.
+        # The current request's instructions (if any) were already added above.
+        messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
         # Add the previous output.
         for output_item in prev_response_output:
@@ -209,9 +211,12 @@ def _construct_single_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
+        content_text = ""
+        if item.content:
+            content_text = item.content[0].text or ""
         return {
             "role": "assistant",
-            "content": item.content[0].text,
+            "content": content_text,
         }
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
@@ -262,7 +267,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
-    if tools is None or (tool_choice == "none"):
+    if not tools or (tool_choice == "none"):
         tool_dicts = None
     else:
         tool_dicts = [
