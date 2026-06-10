@@ -28,6 +28,7 @@ namespace vllm {
 enum class NVFP4KVScaleSearch {
   DEFAULT,
   FOUR_OVER_SIX,
+  FOUR_OVER_SIX_K_ONLY,
 };
 
 // Compute swizzled scale offset for SM100 trtllm-gen MHA kernel.
@@ -162,7 +163,7 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4_4over6(
 //
 // Threading: one CUDA block per token, threads process heads and
 // groups of 16 elements within each head.
-template <typename scalar_t, NVFP4KVScaleSearch SCALE_SEARCH, bool K_ONLY>
+template <typename scalar_t, NVFP4KVScaleSearch SCALE_SEARCH>
 __global__ void reshape_and_cache_nvfp4_kernel(
     const scalar_t* __restrict__ key,      // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,    // [num_tokens, num_heads, head_size]
@@ -248,7 +249,11 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 
       fp4_packed_t packed;
       if constexpr (SCALE_SEARCH == NVFP4KVScaleSearch::FOUR_OVER_SIX) {
-        if (!K_ONLY || kv == 0) {
+        packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
+            in_vec, global_scale, sf_out_ptr);
+      } else if constexpr (SCALE_SEARCH ==
+                           NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY) {
+        if (kv == 0) {
           packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
               in_vec, global_scale, sf_out_ptr);
         } else {
@@ -393,7 +398,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
         if (kv_cache_dtype == "nvfp4") {
           vllm::reshape_and_cache_nvfp4_kernel<
-              scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT, false>
+              scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT>
               <<<grid, block, 0, stream>>>(
                   key.const_data_ptr<scalar_t>(),
                   value.const_data_ptr<scalar_t>(),
@@ -407,7 +412,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                   scale_block_offset_stride);
         } else if (kv_cache_dtype == "nvfp4_4over6") {
           vllm::reshape_and_cache_nvfp4_kernel<
-              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX, false>
+              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
               <<<grid, block, 0, stream>>>(
                   key.const_data_ptr<scalar_t>(),
                   value.const_data_ptr<scalar_t>(),
@@ -421,7 +426,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                   scale_block_offset_stride);
         } else if (kv_cache_dtype == "nvfp4_4over6_k_only") {
           vllm::reshape_and_cache_nvfp4_kernel<
-              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX, true>
+              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY>
               <<<grid, block, 0, stream>>>(
                   key.const_data_ptr<scalar_t>(),
                   value.const_data_ptr<scalar_t>(),
