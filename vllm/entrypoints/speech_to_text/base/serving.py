@@ -444,12 +444,14 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s, chunk_start_times = (
-            await self._preprocess_speech_to_text(
-                request=request,
-                audio_data=audio_data,
-                request_id=request_id,
-            )
+        (
+            engine_inputs,
+            duration_s,
+            chunk_start_times,
+        ) = await self._preprocess_speech_to_text(
+            request=request,
+            audio_data=audio_data,
+            request_id=request_id,
         )
 
         # Schedule the request and get the result generator.
