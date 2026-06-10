@@ -109,6 +109,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.max_batch_size = 16
     mgr.use_dp = False
     mgr.budget_graphs = {}
+    mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
@@ -179,6 +180,10 @@ class TestFindBudgetGraph:
         assert mgr.token_budgets == [2048, 4096, 8192]
         # Budget selection still works correctly after sorting
         assert mgr._find_smallest_fitting_budget_given_tokens(3000) == 4096
+
+    def test_num_graphs_to_capture_tracks_budgets(self):
+        mgr = _make_manager_with_budgets([8192, 2048, 4096])
+        assert mgr.get_num_graphs_to_capture() == 3
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +414,7 @@ def _make_manager_for_gpu(
     )
     mgr.use_dp = False
     mgr.budget_graphs = {}
+    mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
@@ -467,13 +473,22 @@ class TestEncoderCudaGraphCaptureReplay:
         self.mgr = _make_manager_for_gpu(
             self.model, _BUDGETS, _MAX_BATCH, self.device, self.dtype
         )
-        self.mgr.capture()
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
 
     # --- capture ---
 
     def test_capture_creates_one_graph_per_budget(self):
         assert len(self.mgr.budget_graphs) == len(_BUDGETS)
         assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+
+    def test_capture_uses_supplied_graph_pool(self):
+        assert self.mgr.graph_pool is self.graph_pool
+
+    def test_clear_releases_graphs_and_pool(self):
+        self.mgr.clear()
+        assert self.mgr.budget_graphs == {}
+        assert self.mgr.graph_pool is None
 
     # --- output shape ---
 
@@ -742,7 +757,8 @@ class TestEncoderCudaGraphVideoReplay:
             self.dtype,
             max_frames_per_batch=_VIDEO_MAX_FRAMES,
         )
-        self.mgr.capture()
+        self.graph_pool = current_platform.graph_pool_handle()
+        self.mgr.capture(graph_pool=self.graph_pool)
 
     # --- capture ---
 

@@ -29,7 +29,6 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -45,6 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -143,23 +143,36 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]],
     ) -> None:
         """Convert Anthropic system message to OpenAI format"""
-        if not anthropic_request.system:
-            return
+        system_parts: list[str] = []
 
-        if isinstance(anthropic_request.system, str):
-            openai_messages.append(
-                {"role": "system", "content": anthropic_request.system}
-            )
-        else:
-            system_prompt = ""
-            for block in anthropic_request.system:
-                if block.type == "text" and block.text:
-                    # Strip Claude Code's attribution header which contains
-                    # a per-request hash that defeats prefix caching.
-                    if block.text.startswith("x-anthropic-billing-header"):
-                        continue
-                    system_prompt += block.text
-            openai_messages.append({"role": "system", "content": system_prompt})
+        # Top-level system field
+        if anthropic_request.system:
+            if isinstance(anthropic_request.system, str):
+                system_parts.append(anthropic_request.system)
+            else:
+                for block in anthropic_request.system:
+                    if block.type == "text" and block.text:
+                        # Strip Claude Code's attribution header which contains
+                        # a per-request hash that defeats prefix caching.
+                        if block.text.startswith("x-anthropic-billing-header"):
+                            continue
+                        system_parts.append(block.text)
+
+        # System messages embedded inside the messages array
+        for msg in anthropic_request.messages:
+            if msg.role != "system":
+                continue
+            if isinstance(msg.content, str):
+                system_parts.append(msg.content)
+            else:
+                for block in msg.content:
+                    if block.type == "text" and block.text:
+                        if block.text.startswith("x-anthropic-billing-header"):
+                            continue
+                        system_parts.append(block.text)
+
+        if system_parts:
+            openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
     @classmethod
     def _convert_messages(
@@ -167,6 +180,9 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
         for msg in messages:
+            if msg.role == "system":
+                continue
+
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
 
             if isinstance(msg.content, str):

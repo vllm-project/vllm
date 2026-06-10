@@ -22,7 +22,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.lora.utils import is_moe_model
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
@@ -464,13 +464,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 self.target_modules.append(name)
                 if module.disable_tp:
                     self.tp_disabled_modules.append(name)
-            elif isinstance(module, FusedMoE) and hasattr(
+            elif isinstance(module, RoutedExperts) and hasattr(
                 module.quant_method, "quant_config"
             ):
                 # TODO: support FusedMoE with prequant and 8bit.
                 if self.pre_quant and self.load_8bit:
                     raise ValueError(
-                        "Prequant BitsAndBytes 8bit models with FusedMoE "
+                        "Prequant BitsAndBytes 8bit models with RoutedExperts "
                         "is not supported yet."
                     )
                 # Get the corresponding weight name using module name and
@@ -508,7 +508,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear,)):
                 self.column_sharded_weights_modules.append(name)
-            elif isinstance(module, FusedMoE):
+            elif isinstance(module, RoutedExperts):
                 expert_mapping = self.expert_params_mapping
                 for exp in expert_mapping:
                     if exp[-1] == "w2":
@@ -629,7 +629,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         expert_mapping = self.expert_params_mapping
         expert_qs_dict = {}
         for name, module in model.named_modules():
-            if not isinstance(module, FusedMoE):
+            if not isinstance(module, RoutedExperts):
                 continue
             w1_states_lst = []
             w2_states_lst = []
@@ -744,6 +744,29 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             stacked_quant_state_dict[quant_param_name][shard_index] = quant_state_dict[
                 non_stacked_param_name
             ]
+
+        # repeat k_proj for v_proj for k_eq_v models (e.g. Gemma4)
+        config = getattr(model, "config", None)
+        if config is not None:
+            text_config = config.get_text_config()
+            if getattr(text_config, "attention_k_eq_v", False):
+                shard_packed = {
+                    name
+                    for name, subs in self.modules_mapping.packed_mapping.items()
+                    if len(subs) == 3
+                }
+                for param_name, shards in stacked_quant_state_dict.items():
+                    is_target = (
+                        isinstance(shards, dict)
+                        and len(shards) == 2
+                        and any(
+                            param_name.endswith(f"{p}.weight") for p in shard_packed
+                        )
+                    )
+                    if is_target:
+                        assert 1 in shards and 2 not in shards
+                        shards[2] = shards[1]
+
         return stacked_quant_state_dict
 
     def _bind_quant_states_to_params(
