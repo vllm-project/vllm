@@ -5,6 +5,42 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
+# FP8 activation dtypes the Triton MoE-LoRA kernels cannot consume. The LoRA
+# shrink computes ``tl.dot(x, lora_a)`` and Triton only permits fp8 operands
+# when *both* are fp8. LoRA adapters are bf16/fp16, so an fp8 activation ``x``
+# (produced by an FP8 base MoE) forces an unsupported mixed fp8 x bf16 dot,
+# which fails with ``AssertionError: Unsupported lhs dtype fp8e4nv`` during the
+# profiling forward. See https://github.com/vllm-project/vllm/issues/45101.
+_FP8_ACTIVATION_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e5m2,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2fnuz,
+)
+
+
+def _assert_lora_activation_supported(x: torch.Tensor) -> None:
+    """Fail fast with a clear message if MoE-LoRA gets fp8 activations.
+
+    Args:
+        x: The activation tensor fed into the MoE-LoRA shrink kernel.
+
+    Raises:
+        NotImplementedError: If ``x`` is FP8-quantized, since the Triton
+            MoE-LoRA kernels require bf16/fp16 activations.
+    """
+    if x.dtype in _FP8_ACTIVATION_DTYPES:
+        raise NotImplementedError(
+            "MoE LoRA is not supported with FP8-quantized activations "
+            f"(the base MoE produced {x.dtype} activations). The Triton "
+            "MoE-LoRA kernels require bf16/fp16 activations because the LoRA "
+            "shrink does tl.dot(x, lora_a) and LoRA adapters are bf16/fp16, "
+            "so an fp8 activation forces an unsupported fp8 x bf16 dot. Serve "
+            "the base model in bf16/fp16 to use LoRA, or omit --enable-lora "
+            "to serve the FP8 model without LoRA. See "
+            "https://github.com/vllm-project/vllm/issues/45101."
+        )
+
 
 class LoRAExpertsMixin:
     """
@@ -52,6 +88,7 @@ class LoRAExpertsMixin:
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        _assert_lora_activation_supported(x)
         return lora_context.punica_wrapper.add_lora_w13(
             y,
             x,
@@ -92,6 +129,7 @@ class LoRAExpertsMixin:
         top_k_num: int,
         add_inputs: bool = True,
     ) -> None:
+        _assert_lora_activation_supported(x)
         lora_context.punica_wrapper.add_lora_w2(
             y,
             x,
