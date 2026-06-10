@@ -274,7 +274,9 @@ Save one of the following manifests to `modelserving.yaml`:
                         command:
                           - sh
                           - -c
-                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
+                          
+                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
                         resources:
                           limits:
                             nvidia.com/gpu: "8"
