@@ -1155,10 +1155,69 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with sliding "
-                        "window, sinks, or speculative decoding (multi-token decode)."
-                    )
+                    if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                        # MTP + shuffle KV: route multi-query decode to aiter.pa_fwd_asm.
+                        assert attn_metadata.causal, (
+                            "Shuffle KV layout with multi-token decode "
+                            "requires causal attention."
+                        )
+                        _, _, head_size = query.shape
+                        num_blocks, block_size, num_kv_heads, _ = key_cache.shape
+                        x = 16 // key_cache.element_size()
+                        k_cache_template = torch.empty(
+                            [
+                                num_blocks,
+                                num_kv_heads,
+                                head_size // x,
+                                block_size,
+                                x,
+                            ],
+                            dtype=key_cache.dtype,
+                            device="meta",
+                        )
+                        v_cache_template = torch.empty(
+                            [
+                                num_blocks,
+                                num_kv_heads,
+                                block_size // x,
+                                head_size,
+                                x,
+                            ],
+                            dtype=value_cache.dtype,
+                            device="meta",
+                        )
+                        new_key_cache = key_cache.view_as(k_cache_template)
+                        new_value_cache = value_cache.view_as(v_cache_template)
+                        k_qscale = (
+                            layer._k_scale
+                            if attn_metadata.k_scale is None
+                            else attn_metadata.k_scale
+                        )
+                        v_qscale = (
+                            layer._v_scale
+                            if attn_metadata.v_scale is None
+                            else attn_metadata.v_scale
+                        )
+                        # qo_indptr: cumulative Q-token count per decode seq.
+                        qo_indptr = attn_metadata.query_start_loc[: num_decodes + 1].to(
+                            torch.int32
+                        )
+                        rocm_aiter_ops.pa_fwd_asm(
+                            Q=query[:num_decode_tokens],
+                            K=new_key_cache,
+                            V=new_value_cache,
+                            block_tables=attn_metadata.block_table[:num_decodes],
+                            context_lens=attn_metadata.seq_lens[:num_decodes],
+                            block_tables_stride0=attn_metadata.block_table[
+                                :num_decodes
+                            ].stride(0),
+                            K_QScale=k_qscale,
+                            V_QScale=v_qscale,
+                            out_=output[:num_decode_tokens],
+                            max_qlen=decode_max_query_len,
+                            qo_indptr=qo_indptr,
+                        )
+                        return
                     if not attn_metadata.causal:
                         from aiter.ops.triton.attention.mha_v3 import (
                             flash_attn_with_kvcache,
