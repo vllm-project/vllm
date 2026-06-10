@@ -444,6 +444,25 @@ def _cool_down(config: Any, test_id: str) -> None:
     _log_temp(config, f"{test_id}:post-sleep")
 
 
+# Rotate the weight operand through this many MiB so a revisited buffer has been
+# evicted from the gfx1151 32 MiB MALL -- yields cold-weight measurements (as in
+# a real forward pass, where each weight is read once and evicted before its next
+# use) instead of the hot-MALL numbers a single-buffer cudagraph would report.
+_ROTATE_TARGET_BYTES = 48 << 20
+_ROTATE_MAX = 32
+
+
+def _clone_strided(t: torch.Tensor | None) -> torch.Tensor | None:
+    """Clone preserving exact size AND stride (the K%2048 cliff workaround uses
+    row-padded weight strides; a plain .clone() would compact them and change
+    the measured kernel). None passes through (symmetric path has no carrier)."""
+    if t is None:
+        return None
+    c = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, device=t.device)
+    c.copy_(t)
+    return c
+
+
 def measure_tflops(
     M: int,
     weights: dict[str, torch.Tensor],
@@ -452,7 +471,13 @@ def measure_tflops(
     group_size: int,
     provider: str,
 ) -> tuple[str, float]:
-    """Run the kernel and return (kernel label, median TFLOP/s)."""
+    """Run the kernel and return (kernel label, median TFLOP/s).
+
+    The weight operand is rotated through enough copies to exceed the MALL so
+    each captured call reads cold weights; the activation stays single-buffered
+    (hot), matching a real prefill where activations are freshly produced and
+    weights stream from HBM.
+    """
     from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
         _hybrid_w4a16_apply_impl,
     )
@@ -470,17 +495,42 @@ def measure_tflops(
         weights["w_s_skinny"], weights["w_zp"] if use_zp else None, dtype
     )
 
+    # Build N rotating copies of the (cold) weight operands; the dominant read is
+    # w_q_skinny_i32 (N*K/2 bytes), so size the rotation off it. run() advances a
+    # buffer index per call; do_bench_cudagraph unrolls n_repeat = rep/est calls
+    # into the graph, so at small M (tiny est) n_repeat far exceeds n_buf and the
+    # rotation is complete -- exactly where cache residency matters. At large M
+    # the kernel is compute-bound (cache-insensitive), so partial rotation there
+    # is immaterial.
+    w_bytes = (
+        weights["w_q_skinny_i32"].numel() * weights["w_q_skinny_i32"].element_size()
+    )
+    n_buf = max(2, min(_ROTATE_MAX, -(-_ROTATE_TARGET_BYTES // w_bytes)))
+    bufs = [
+        {
+            "w_q_skinny": _clone_strided(weights["w_q_skinny"]),
+            "w_s_skinny": _clone_strided(weights["w_s_skinny"]),
+            "w_q_skinny_i32": _clone_strided(weights["w_q_skinny_i32"]),
+            "w_zp": _clone_strided(weights["w_zp"]) if use_zp else None,
+            "packed_scale_zp": _clone_strided(packed_scale_zp),
+        }
+        for _ in range(n_buf)
+    ]
+    idx = [0]
+
     def run():
+        w = bufs[idx[0] % n_buf]
+        idx[0] += 1
         return _hybrid_w4a16_apply_impl(
             a,
-            weights["w_q_skinny"],
-            weights["w_s_skinny"],
-            weights["w_q_skinny_i32"],
-            weights["w_zp"] if use_zp else None,
+            w["w_q_skinny"],
+            w["w_s_skinny"],
+            w["w_q_skinny_i32"],
+            w["w_zp"],
             None,  # bias
             cu_count,
             group_size,
-            packed_scale_zp,
+            w["packed_scale_zp"],
         )
 
     ms = triton.testing.do_bench_cudagraph(run, quantiles=[0.5])
