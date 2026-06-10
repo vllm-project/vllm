@@ -14,7 +14,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
