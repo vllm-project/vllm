@@ -54,15 +54,14 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
         (
             MiniMaxText01LinearAttention,
             dict(
-                hidden_size=128,
-                hidden_inner_size=256,
-                num_heads=8,
-                head_dim=32,
-                max_position=2048,
-                block_size=64,
-                num_hidden_layer=12,
-                layer_idx=0,
-                linear_layer_idx=0,
+                config=SimpleNamespace(
+                    hidden_size=256,
+                    num_attention_heads=8,
+                    head_dim=32,
+                    num_hidden_layers=12,
+                    block=64,
+                ),
+                prefix="layers.0.self_attn",
             ),
             LinearAttentionBackend,
             MambaAttentionBackendEnum.LINEAR,
@@ -88,6 +87,8 @@ def test_mamba_layers_get_attn_backend(
     expected_mamba_type,
 ):
     """Test that Mamba-like layers return the correct attention backend."""
+    if layer_class is MiniMaxText01LinearAttention:
+        init_kwargs["vllm_config"] = default_vllm_config
     layer = layer_class(**init_kwargs)
 
     backend_class = layer.get_attn_backend()
