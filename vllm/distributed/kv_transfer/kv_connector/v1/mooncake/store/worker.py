@@ -1382,11 +1382,6 @@ class MooncakeStoreWorker:
             if vllm_config.kv_transfer_config
             else {}
         )
-        if not store_config.enable_dummy_client:
-            store_config.device_name = rdma_utils.get_configured_worker_rnic(
-                protocol=store_config.protocol,
-                configured_device=store_config.device_name,
-            )
         self.store = MooncakeDistributedStore()
         ret = self._setup_mooncake_store(self.store, store_config)
         if ret != 0:
