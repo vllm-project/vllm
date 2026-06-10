@@ -832,12 +832,6 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
-    def set_fused_kv_cache_layout(self):
-        """Called by the fusion pass after confirming this layer will use
-        the fused kernel. Backends that need to adjust their KV cache read
-        path (e.g. permute strides) should override this."""
-        pass
-
     def fused_rope_kvcache_supported(self):
         """
         Does this attention implementation support RoPE+KVCache fusion.

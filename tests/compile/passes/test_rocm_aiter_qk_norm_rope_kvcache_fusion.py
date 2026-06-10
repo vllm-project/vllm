@@ -140,7 +140,9 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             device=device,
         )
 
-    def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
+    def build_attn_metadata(
+        self, batch_size: int, kv_stride_order: tuple[int, ...] | None = None
+    ) -> CommonAttentionMetadata:
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
@@ -153,15 +155,15 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
         )
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        # Caller can force a physical layout; else use the backend's.
+        if kv_stride_order is None:
+            try:
+                kv_stride_order = attn_backend.get_kv_cache_stride_order()
+            except (AttributeError, NotImplementedError):
+                kv_stride_order = tuple(range(len(kv_cache_shape)))
 
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_stride_order)
+        inv_order = [kv_stride_order.index(i) for i in range(len(kv_stride_order))]
 
         raw_tensor = torch.zeros(
             2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
@@ -232,12 +234,15 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     *,
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
+    num_tokens: int,
     num_heads: int,
     num_kv_heads: int,
     head_size: int,
     rotary_dim: int,
     block_size: int,
     is_neox: bool,
+    use_shuffle_kv_layout: str,
+    kv_stride_order: tuple[int, ...],
     dtype: torch.dtype,
     kv_cache_dtype: str,
     rms_norm_eps: float,
@@ -271,6 +276,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE",
             "1" if enable_aiter_triton_rope else "0",
         )
+        m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
 
         model = QKNormRoPEKVCacheTestModel(
@@ -296,14 +302,12 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ]
         backend = TestBackend(*passes)
 
-        T = 5
-
         qkv = torch.randn(
-            T,
+            num_tokens,
             num_heads * head_size + 2 * num_kv_heads * head_size,
             dtype=dtype,
         )
-        pos = torch.arange(T, dtype=torch.long)
+        pos = torch.arange(num_tokens, dtype=torch.long)
 
         qkv_unfused = qkv.clone()
         pos_unfused = pos.clone()
@@ -311,7 +315,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         # Run unfused (eager) forward
         with set_forward_context(None, vllm_config):
             forward_context = get_forward_context()
-            attn_metadata = model.build_attn_metadata(T)
+            attn_metadata = model.build_attn_metadata(num_tokens, kv_stride_order)
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
@@ -326,7 +330,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
             forward_context = get_forward_context()
-            attn_metadata = model_fused.build_attn_metadata(T)
+            attn_metadata = model_fused.build_attn_metadata(num_tokens, kv_stride_order)
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
@@ -340,7 +344,9 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
 
-        ATOL, RTOL = (1e-2, 1e-2)
+        # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
+        # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
+        ATOL, RTOL = (2e-2, 2e-2) if enable_aiter_triton_rope else (1e-2, 1e-2)
         is_fp8_cache = model.kv_cache_dtype != dtype
 
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
@@ -352,15 +358,18 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             # because downstream attention reads K from the cache.
             torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
 
-        torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
+        # Should be bit exact since no processing had been done on v for both paths
+        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
 
-        cache_atol = 5e-2 if is_fp8_cache else ATOL
-        cache_rtol = 1.0 if is_fp8_cache else RTOL
+        # fp8 vs triton-rope ref requires loosening tolerance to 1.25e-1.
+        if is_fp8_cache and enable_aiter_triton_rope:
+            cache_atol = cache_rtol = 1.25e-1
+        else:
+            cache_atol, cache_rtol = ATOL, RTOL
 
-        # K-cache: same layout for both paths, always compare directly.
         torch.testing.assert_close(
-            kv_cache_unfused[0].view(dtype),
-            kv_cache_fused[0].view(dtype),
+            kv_cache_unfused[0].float(),
+            kv_cache_fused[0].float(),
             atol=cache_atol,
             rtol=cache_rtol,
         )
@@ -390,8 +399,17 @@ _FUSION_CONFIGS = [
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
+@pytest.mark.parametrize("num_tokens", [5, 16, 64, 128, 512, 1024, 2048])
+@pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
+@pytest.mark.parametrize(
+    "kv_stride_order",
+    [
+        pytest.param((0, 1, 2, 3, 4), id="block_first"),
+        pytest.param((1, 0, 2, 3, 4), id="kv_first"),
+    ],
+)
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
-@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
@@ -401,6 +419,7 @@ _FUSION_CONFIGS = [
     reason="Only test on ROCm with AITER installed and supported",
 )
 def test_qk_norm_rope_kvcache_fusion(
+    num_tokens: int,
     num_heads: int,
     num_kv_heads: int,
     head_size: int,
@@ -408,6 +427,8 @@ def test_qk_norm_rope_kvcache_fusion(
     is_neox: bool,
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
+    use_shuffle_kv_layout: str,
+    kv_stride_order: tuple[int, ...],
     block_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: str,
@@ -418,12 +439,15 @@ def test_qk_norm_rope_kvcache_fusion(
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
+        num_tokens=num_tokens,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
+        kv_stride_order=kv_stride_order,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
         rms_norm_eps=rms_norm_eps,

@@ -305,7 +305,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
                 continue
-            layer.impl.set_fused_kv_cache_layout()
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     QkNormRopeKvCachePattern(
