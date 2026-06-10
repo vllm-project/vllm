@@ -13,39 +13,20 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
+    _get_workspace_buffer,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
-_DECODE_MAX_TOKENS = 64
-_DECODE_SPLIT_TILE = 64
 
-
-def _cdiv(x: int, y: int) -> int:
-    return (int(x) + int(y) - 1) // int(y)
-
-
-def _max_decode_workspace_tokens(max_num_batched_tokens: int) -> int:
-    return min(int(max_num_batched_tokens), _DECODE_MAX_TOKENS)
-
-
-def _get_decode_scratch(
-    num_tokens: int,
-    num_heads: int,
-    d_v: int,
-    topk: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_splits = _cdiv(topk, _DECODE_SPLIT_TILE)
-    mid_out, mid_lse = current_workspace_manager().get_simultaneous(
-        ((num_tokens, num_heads, num_splits, d_v), torch.bfloat16),
-        ((num_tokens, num_heads, num_splits), torch.float32),
-    )
-    return mid_out, mid_lse
+def _kv_scale_format_for_model(model_type: str | None) -> str:
+    if model_type is not None and model_type.startswith("glm"):
+        return "arbitrary_fp32"
+    return "pow2_fp32"
 
 
 class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
@@ -88,6 +69,17 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             )
 
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
+        self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
+        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        model_type = None
+        if vllm_config.model_config is not None:
+            model_type = getattr(
+                vllm_config.model_config.hf_text_config, "model_type", None
+            )
+        self.kv_scale_format = _kv_scale_format_for_model(model_type)
 
         assert indexer is not None, (
             "FLASHINFER_MLA_SPARSE SM120 requires a sparse-MLA indexer "
@@ -99,36 +91,12 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         if not has_flashinfer_sparse_mla_sm120():
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE SM120 requires FlashInfer's "
-                "sparse-sm120 MLA wrapper."
+                "sparse MLA decode API."
             )
-
-        from flashinfer.mla import BatchMLAPagedAttentionWrapper
-
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        wrapper_device = torch.device("cuda", torch.accelerator.current_device_index())
-        kv_scale_format = "arbitrary_fp32" if self.head_size == 576 else "auto"
-        self._wrapper = BatchMLAPagedAttentionWrapper(
-            torch.empty(1, dtype=torch.int8, device=wrapper_device),
-            backend="sparse-sm120",
-            max_num_tokens=max_tokens,
-            max_num_heads=num_heads,
-            d_v=self.kv_lora_rank,
-            kv_scale_format=kv_scale_format,
-        )
         assert self.topk_indices_buffer is not None
-        # Reserve shared decode scratch before the first real decode.
-        _get_decode_scratch(
-            _max_decode_workspace_tokens(max_tokens),
-            num_heads,
-            self.kv_lora_rank,
-            self.topk_indices_buffer.shape[-1],
-        )
 
-        # The wrapper consumes BF16 Q and packed KV scales directly.
         self.supports_quant_query_input = False
+        self._workspace_buffer: torch.Tensor | None = None
 
     def forward_mqa(
         self,
@@ -137,7 +105,6 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # The wrapper expects a single [T, H, kv_lora_rank + rope] tensor.
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
@@ -162,26 +129,27 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             dtype=q.dtype,
         )
 
-        # Add the singleton kv-head axis expected by the FlashInfer wrapper.
-        kv_cache_4d = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2)
+        if self._workspace_buffer is None:
+            self._workspace_buffer = _get_workspace_buffer(q.device)
 
-        mid_out = None
-        mid_lse = None
-        if num_actual_toks <= _DECODE_MAX_TOKENS:
-            mid_out, mid_lse = _get_decode_scratch(
-                num_actual_toks,
-                self.num_heads,
-                self.kv_lora_rank,
-                topk_indices_physical.shape[-1],
-            )
-
-        self._wrapper.run_sparse_mla(
-            q=q,
-            kv_cache=kv_cache_4d,
-            sparse_indices=topk_indices_physical,
-            out=output,
-            sm_scale=self.scale,
-            mid_out=mid_out,
-            mid_lse=mid_lse,
+        from vllm.utils.flashinfer import (
+            flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
-        return output, None
+
+        out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
+            query=q.unsqueeze(1),
+            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+            workspace_buffer=self._workspace_buffer,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            block_tables=topk_indices_physical.unsqueeze(1),
+            seq_lens=None,
+            max_seq_len=attn_metadata.topk_tokens,
+            out=output.unsqueeze(1),
+            bmm1_scale=self.scale,
+            bmm2_scale=1.0,
+            sparse_mla_top_k=attn_metadata.topk_tokens,
+            kv_scale_format=self.kv_scale_format,
+        )
+        return out.squeeze(1), None

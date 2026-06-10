@@ -13,6 +13,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import autotune as flashinfer_autotune
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
@@ -32,23 +33,14 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
 _FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE"})
 _DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE_DSV4"})
 
-_FLASHINFER_SM120_SPARSE_MLA_DECODE_AUTOTUNE_CONTEXTS = {
-    "FLASHINFER_MLA_SPARSE": (
-        "sparse_mla_sm120_decode_dsv3_2_autotune",
-        "DSv3.2",
-    ),
-    "FLASHINFER_MLA_SPARSE_DSV4": (
-        "sparse_mla_sm120_decode_dsv4_autotune",
-        "DSv4",
-    ),
+_FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
+    "FLASHINFER_MLA_SPARSE": "DSv3.2",
+    "FLASHINFER_MLA_SPARSE_DSV4": "DSv4",
 }
 
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 
-# Fan of num_tokens specializations to pre-JIT for
-# `_compute_slot_mapping_kernel`. On SM12x cold JIT can emit
-# non-deterministic codegen that writes wrong slot_mapping, corrupts KV, and
-# can surface downstream sparse-MLA IMA.
+# Decode-shaped token counts for slot-mapping pre-JIT.
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
     64,
@@ -77,15 +69,15 @@ def _has_deepseek_v4_sparse_mla_backend(runner: "GPUModelRunner") -> bool:
     return False
 
 
-def _flashinfer_sparse_mla_decode_autotune_context(
+def _flashinfer_sparse_mla_decode_label(
     runner: "GPUModelRunner",
     allowed_backends: frozenset[str],
-) -> tuple[str, str] | None:
+) -> str | None:
     for groups in getattr(runner, "attn_groups", []) or ():
         for group in groups:
             name = _attention_backend_name(getattr(group, "backend", None))
             if name in allowed_backends:
-                return _FLASHINFER_SM120_SPARSE_MLA_DECODE_AUTOTUNE_CONTEXTS.get(name)
+                return _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS.get(name)
     return None
 
 
@@ -208,15 +200,10 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     num_tokens: int,
     allowed_backends: frozenset[str],
 ) -> bool:
-    """Autotune FlashInfer's SM120 sparse-MLA decode path.
-
-    Returns True when this function consumed the mixed attention warmup shape.
-    """
+    """Autotune FlashInfer's SM120 sparse-MLA decode path."""
     runner = worker.model_runner
-    context_spec = _flashinfer_sparse_mla_decode_autotune_context(
-        runner, allowed_backends
-    )
-    if context_spec is None:
+    log_label = _flashinfer_sparse_mla_decode_label(runner, allowed_backends)
+    if log_label is None:
         return False
     if worker.vllm_config.kernel_config.enable_flashinfer_autotune is not True:
         return False
@@ -224,23 +211,11 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         return False
 
     try:
-        from flashinfer import sparse_mla_sm120
         from flashinfer.autotuner import AutoTuner
     except ImportError:
         logger.warning(
             "Skipping FlashInfer SM120 sparse MLA decode autotune because "
-            "FlashInfer sparse_mla_sm120 is unavailable."
-        )
-        return False
-
-    autotune_attr, log_label = context_spec
-    autotune_context = getattr(sparse_mla_sm120, autotune_attr, None)
-    if not callable(autotune_context):
-        logger.warning(
-            "Skipping FlashInfer SM120 sparse MLA %s decode autotune because "
-            "this FlashInfer build does not expose %s.",
-            log_label,
-            autotune_attr,
+            "FlashInfer autotuner is unavailable."
         )
         return False
 
@@ -260,7 +235,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
 
     if is_leader:
         logger.info(
-            "Autotuning FlashInfer SM120 sparse MLA %s decode with cache file: %s",
+            "Autotuning FlashInfer SM120 sparse MLA %s decode with cache: %s",
             log_label,
             cache_path,
         )
@@ -272,10 +247,10 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 warmup_executed = _v2_mixed_prefill_decode_warmup(
                     worker,
                     num_tokens,
-                    mixed_step_context=autotune_context(cache_path=str(cache_path)),
+                    mixed_step_context=flashinfer_autotune(True, cache=str(cache_path)),
                 )
             else:
-                with autotune_context(cache_path=str(cache_path)):
+                with flashinfer_autotune(True, cache=str(cache_path)):
                     runner._dummy_run(**dummy_run_kwargs)
         else:
             if _uses_v2_model_runner(runner):
@@ -334,7 +309,7 @@ def _deepseek_v4_sparse_mla_decode_autotune(
 
 
 def flashinfer_sparse_mla_decode_autotune_warmup(worker: "Worker") -> None:
-    """Autotune generic FlashInfer sparse-sm120 MLA decode when selected."""
+    """Autotune generic FlashInfer sparse MLA decode when selected."""
     runner = worker.model_runner
     if runner.is_pooling_model:
         return

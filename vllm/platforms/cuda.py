@@ -122,7 +122,6 @@ def _get_backend_priorities(
                 *sparse_backends,
             ]
         elif device_capability.major == 12:
-            # FLASHINFER_MLA_SPARSE dispatches SM12 sparse MLA to sparse-sm120.
             return [
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE,

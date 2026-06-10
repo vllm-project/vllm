@@ -146,7 +146,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
 
 class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
-    """FlashInfer sparse MLA backend using the SM120 sparse wrapper."""
+    """FlashInfer sparse MLA backend for SM120."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -158,8 +158,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # SM120 must share a block size with the sparse-MLA indexer cache.
-        return [64]
+        return [64, 256]
 
     @staticmethod
     def get_impl_cls() -> type[SparseMLAAttentionImpl]:
@@ -191,7 +190,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         if not has_flashinfer_sparse_mla_sm120():
             return (
                 "FLASHINFER_MLA_SPARSE SM120 requires FlashInfer's "
-                "sparse-sm120 MLA wrapper"
+                "sparse MLA decode API"
             )
         if dtype != torch.bfloat16:
             return "dtype not supported"
@@ -203,8 +202,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
             "fp8_ds_mla",
         ):
             return "kv_cache_dtype not supported"
-        if block_size is not None and block_size != 64:
-            return "block_size not supported"
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
