@@ -11,6 +11,7 @@
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::IntoPyObjectExt;
 
 use crate::request::{Request, RequestStatus};
 
@@ -40,7 +41,7 @@ pub fn scheduler_update_preamble<'py>(
     let a_num_placeholders = intern!(py, "num_output_placeholders");
     let a_is_finished = intern!(py, "is_finished");
 
-    let out = PyList::empty_bound(py);
+    let out = PyList::empty(py);
     let has_failed = failed_kv_load_req_ids.is_some();
     let failed_set = failed_kv_load_req_ids.as_ref();
     let sampled_len = sampled_token_ids.len();
@@ -78,10 +79,10 @@ pub fn scheduler_update_preamble<'py>(
         let generated = if sampled_len > 0 {
             sampled_token_ids.get_item(req_index)?
         } else {
-            PyList::empty_bound(py).into_any()
+            PyList::empty(py).into_any()
         };
         let generated_len = generated
-            .downcast::<PyList>()
+            .cast::<PyList>()
             .map(|l| l.len())
             .unwrap_or(0);
 
@@ -92,7 +93,7 @@ pub fn scheduler_update_preamble<'py>(
         if let Some(scheduled_spec) = scheduled_spec_opt {
             if generated_len > 0 {
                 let num_draft: isize = scheduled_spec
-                    .downcast::<PyList>()?
+                    .cast::<PyList>()?
                     .len() as isize;
                 accepted = generated_len as isize - 1;
                 rejected = num_draft - accepted;
@@ -109,16 +110,16 @@ pub fn scheduler_update_preamble<'py>(
             }
         }
 
-        let tuple = PyTuple::new_bound(
+        let tuple = PyTuple::new(
             py,
             &[
                 req_id,
-                req_index.into_py(py).into_bound(py),
+                req_index.into_bound_py_any(py)?,
                 generated,
-                accepted.into_py(py).into_bound(py),
-                rejected.into_py(py).into_bound(py),
+                accepted.into_bound_py_any(py)?,
+                rejected.into_bound_py_any(py)?,
             ],
-        );
+        )?;
         out.append(tuple)?;
     }
     Ok(out)
@@ -164,7 +165,7 @@ pub fn scheduler_update_loop_rs_request<'py>(
 
     // Output shape: list of tuples. Caller post-processes into real
     // EngineCoreOutput (msgspec dataclass) on the Python side.
-    let out = PyList::empty_bound(py);
+    let out = PyList::empty(py);
 
     for (req_id, _num_sched) in num_scheduled_tokens.iter() {
         if has_failed {
@@ -179,11 +180,11 @@ pub fn scheduler_update_loop_rs_request<'py>(
             _ => continue,
         };
         // Downcast to our Rust Request pyclass; skip if finished.
-        let request_py: Py<Request> = request_obj.downcast::<Request>()?.clone().unbind();
+        let request_py: Py<Request> = request_obj.cast::<Request>()?.clone().unbind();
         // Scope the borrow so mutations later are possible.
         {
-            let r = request_py.borrow(py);
-            if r.rust_is_finished() {
+            let req = request_py.borrow(py);
+            if req.rust_is_finished() {
                 continue;
             }
         }
@@ -198,7 +199,7 @@ pub fn scheduler_update_loop_rs_request<'py>(
             if g.is_none() {
                 Some(Vec::new())
             } else {
-                Some(g.downcast::<PyList>()?.extract()?)
+                Some(g.cast::<PyList>()?.extract()?)
             }
         } else {
             Some(Vec::new())
@@ -208,16 +209,16 @@ pub fn scheduler_update_loop_rs_request<'py>(
         // Spec-decode: apply counter adjustments.
         if let Some(spec) = scheduled_spec_decode_tokens.get_item(&req_id)? {
             if !generated.is_empty() {
-                let num_draft: isize = spec.downcast::<PyList>()?.len() as isize;
+                let num_draft: isize = spec.cast::<PyList>()?.len() as isize;
                 let num_accepted: isize = generated.len() as isize - 1;
                 let num_rejected: isize = num_draft - num_accepted;
                 if num_rejected != 0 {
-                    let mut r = request_py.borrow_mut(py);
-                    if r.num_computed_tokens > 0 {
-                        r.num_computed_tokens -= num_rejected as i64;
+                    let mut req = request_py.borrow_mut(py);
+                    if req.num_computed_tokens > 0 {
+                        req.num_computed_tokens -= num_rejected as i64;
                     }
-                    if r.num_output_placeholders > 0 {
-                        r.num_output_placeholders -= num_rejected as i64;
+                    if req.num_output_placeholders > 0 {
+                        req.num_output_placeholders -= num_rejected as i64;
                     }
                 }
             }
@@ -228,8 +229,8 @@ pub fn scheduler_update_loop_rs_request<'py>(
         let mut stopped = false;
         // Read eos_token_id once — we call out into Python for this.
         let eos_token_id: Option<i64> = {
-            let r = request_py.borrow(py);
-            match r.rust_sampling_params(py) {
+            let req = request_py.borrow(py);
+            match req.rust_sampling_params(py) {
                 Some(sp) => {
                     let v = sp.bind(py).getattr(a_eos).ok();
                     v.and_then(|x| x.extract::<Option<i64>>().ok()).flatten()
@@ -246,18 +247,18 @@ pub fn scheduler_update_loop_rs_request<'py>(
             for (i, &tok) in generated.iter().enumerate() {
                 // Append to both output_token_ids and all_token_ids
                 {
-                    let mut r = request_py.borrow_mut(py);
-                    r.output_token_ids_vec.0.push(tok);
-                    r.all_token_ids_vec.0.push(tok);
+                    let mut req = request_py.borrow_mut(py);
+                    req.output_token_ids_vec.0.push(tok);
+                    req.all_token_ids_vec.0.push(tok);
                 }
                 // Length stop.
                 let (num_tokens, num_output_tokens) = {
-                    let r = request_py.borrow(py);
-                    (r.all_token_ids_vec.0.len(), r.output_token_ids_vec.0.len())
+                    let req = request_py.borrow(py);
+                    (req.all_token_ids_vec.0.len(), req.output_token_ids_vec.0.len())
                 };
                 if num_tokens >= max_model_len || (num_output_tokens as i64) >= max_tokens_i64 {
-                    let mut r = request_py.borrow_mut(py);
-                    r.status = RequestStatus::FINISHED_LENGTH_CAPPED;
+                    let mut req = request_py.borrow_mut(py);
+                    req.status = RequestStatus::FINISHED_LENGTH_CAPPED;
                     stopped = true;
                     trimmed_len = i + 1;
                     break;
@@ -265,8 +266,8 @@ pub fn scheduler_update_loop_rs_request<'py>(
                 // EOS stop.
                 if let Some(eos) = eos_token_id {
                     if tok == eos {
-                        let mut r = request_py.borrow_mut(py);
-                        r.status = RequestStatus::FINISHED_STOPPED;
+                        let mut req = request_py.borrow_mut(py);
+                        req.status = RequestStatus::FINISHED_STOPPED;
                         stopped = true;
                         trimmed_len = i + 1;
                         break;
@@ -291,12 +292,12 @@ pub fn scheduler_update_loop_rs_request<'py>(
         };
 
         // Build the output row.
-        let finish_reason: PyObject = if stopped {
+        let finish_reason: Py<PyAny> = if stopped {
             let is_length = request_py.borrow(py).status == RequestStatus::FINISHED_LENGTH_CAPPED;
             if is_length {
-                "length".into_py(py)
+                "length".into_py_any(py)?
             } else {
-                "stop".into_py(py)
+                "stop".into_py_any(py)?
             }
         } else {
             py.None()
@@ -308,20 +309,20 @@ pub fn scheduler_update_loop_rs_request<'py>(
         }
 
         let (client_index, stop_reason_py, num_cached_tokens, num_ext, num_nans) = {
-            let r = request_py.borrow(py);
+            let req = request_py.borrow(py);
             (
-                r.client_index,
-                r.rust_stop_reason(py),
-                r.num_cached_tokens,
-                r.num_external_computed_tokens,
-                r.num_nans_in_logits,
+                req.client_index,
+                req.rust_stop_reason(py),
+                req.num_cached_tokens,
+                req.num_external_computed_tokens,
+                req.num_nans_in_logits,
             )
         };
         // Take events once.
-        let events_obj: PyObject = {
-            let mut r = request_py.borrow_mut(py);
-            match r.rust_take_events(py) {
-                Some(list) => list.into_py(py),
+        let events_obj: Py<PyAny> = {
+            let mut req = request_py.borrow_mut(py);
+            match req.rust_take_events(py)? {
+                Some(list) => list.into_any().unbind(),
                 None => py.None(),
             }
         };
@@ -329,24 +330,22 @@ pub fn scheduler_update_loop_rs_request<'py>(
         // Need to signal "status transition RUNNING -> stopped" back to Python
         let status_was_running = status_before == RequestStatus::RUNNING;
 
-        let tuple = PyTuple::new_bound(
+        let tuple = PyTuple::new(
             py,
             &[
                 req_id.unbind(),
-                PyList::new_bound(py, trimmed_tokens).into_any().unbind(),
+                PyList::new(py, trimmed_tokens)?.into_any().unbind(),
                 finish_reason,
-                (client_index as u64).into_py(py),
+                (client_index as u64).into_py_any(py)?,
                 events_obj,
-                stop_reason_py
-                    .map(|p| p.into_py(py))
-                    .unwrap_or_else(|| py.None()),
-                num_cached_tokens.into_py(py),
-                num_ext.into_py(py),
-                num_nans.into_py(py),
-                stopped.into_py(py),
-                status_was_running.into_py(py),
+                stop_reason_py.unwrap_or_else(|| py.None()),
+                num_cached_tokens.into_py_any(py)?,
+                num_ext.into_py_any(py)?,
+                num_nans.into_py_any(py)?,
+                stopped.into_py_any(py)?,
+                status_was_running.into_py_any(py)?,
             ],
-        );
+        )?;
         out.append(tuple)?;
     }
     Ok(out)

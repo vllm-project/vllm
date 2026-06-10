@@ -8,7 +8,7 @@ const SENTINEL_HEAD: i32 = -2;
 const SENTINEL_TAIL: i32 = -3;
 const NO_LINK: i32 = i32::MIN;
 
-#[pyclass(module = "vllm_rs")]
+#[pyclass(module = "vllm_rs", str)]
 pub struct KVCacheBlock {
     #[pyo3(get)]
     pub block_id: i32,
@@ -20,6 +20,28 @@ pub struct KVCacheBlock {
     block_hash_bytes: Option<Vec<u8>>,
     #[pyo3(get, set)]
     pub is_null: bool,
+}
+
+// Mirrors the hand-written `__repr__` of the Python dataclass
+// (kv_cache_utils.py also writes it by hand, to avoid recursing through the
+// free-list pointers). The hash is summarized as a byte count instead of
+// dumped raw, and prev/next are always None because Rust owns the list state
+// — neither is expressible with derive(Debug) or the #[pyclass(str = "...")]
+// format-string shorthand. `__repr__` below delegates here; #[pyclass(str)]
+// derives `__str__` from this impl, matching Python's str→repr fallback.
+impl std::fmt::Display for KVCacheBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "KVCacheBlock(block_id={}, ref_cnt={}, _block_hash={}, prev_free_block=None, next_free_block=None)",
+            self.block_id,
+            self.ref_cnt,
+            match &self.block_hash_bytes {
+                Some(b) => format!("{} bytes", b.len()),
+                None => "None".to_string(),
+            }
+        )
+    }
 }
 
 impl KVCacheBlock {
@@ -58,7 +80,7 @@ impl KVCacheBlock {
     fn block_hash<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         self.block_hash_bytes
             .as_ref()
-            .map(|b| PyBytes::new_bound(py, b))
+            .map(|b| PyBytes::new(py, b))
     }
 
     #[setter]
@@ -98,15 +120,7 @@ impl KVCacheBlock {
     fn set_next_free_block(&self, _v: Bound<'_, PyAny>) {}
 
     fn __repr__(&self) -> String {
-        format!(
-            "KVCacheBlock(block_id={}, ref_cnt={}, _block_hash={}, prev_free_block=None, next_free_block=None)",
-            self.block_id,
-            self.ref_cnt,
-            match &self.block_hash_bytes {
-                Some(b) => format!("{} bytes", b.len()),
-                None => "None".to_string(),
-            }
-        )
+        self.to_string()
     }
 }
 
@@ -274,7 +288,7 @@ impl FreeKVCacheBlockQueue {
         n: usize,
     ) -> PyResult<Bound<'py, PyList>> {
         if n == 0 {
-            return Ok(PyList::empty_bound(py));
+            return Ok(PyList::empty(py));
         }
         if n > self.num_free {
             return Err(PyAssertionError::new_err(format!(
@@ -284,7 +298,7 @@ impl FreeKVCacheBlockQueue {
         }
         self.num_free -= n;
 
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         let mut cur = self.head_next;
         for _ in 0..n {
             if cur < 0 {
@@ -368,7 +382,7 @@ impl FreeKVCacheBlockQueue {
         &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         let mut cur = self.head_next;
         while cur >= 0 {
             let idx = cur as usize;

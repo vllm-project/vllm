@@ -134,7 +134,7 @@ impl BlockPool {
         block_hash: Vec<u8>,
         kv_cache_group_ids: Vec<u32>,
     ) -> PyResult<Option<Bound<'py, PyList>>> {
-        let out = PyList::empty_bound(py);
+        let out = PyList::empty(py);
         let map = self.cached_block_hash_to_block.borrow(py);
         for gid in kv_cache_group_ids {
             // Compose key: block_hash + big-endian u32 group_id. Same as
@@ -169,7 +169,7 @@ impl BlockPool {
         };
         if self.enable_caching {
             for item in ret.iter() {
-                let block: Bound<'_, KVCacheBlock> = item.downcast_into::<KVCacheBlock>()?;
+                let block: Bound<'_, KVCacheBlock> = item.cast_into::<KVCacheBlock>()?;
                 self.maybe_evict_cached_block(py, &block)?;
                 let mut b = block.borrow_mut();
                 if b.ref_cnt != 0 {
@@ -181,7 +181,7 @@ impl BlockPool {
             }
         } else {
             for item in ret.iter() {
-                let block: Bound<'_, KVCacheBlock> = item.downcast_into::<KVCacheBlock>()?;
+                let block: Bound<'_, KVCacheBlock> = item.cast_into::<KVCacheBlock>()?;
                 let mut b = block.borrow_mut();
                 if b.ref_cnt != 0 {
                     return Err(PyAssertionError::new_err(
@@ -197,10 +197,10 @@ impl BlockPool {
     /// Touch raises ref_cnt by 1 on each block; if ref_cnt was 0 (in free
     /// queue) and the block is not null, remove it from the queue.
     pub fn touch(&mut self, py: Python<'_>, blocks: Bound<'_, PyAny>) -> PyResult<()> {
-        let it = PyIterator::from_bound_object(&blocks)?;
+        let it = PyIterator::from_object(&blocks)?;
         for item in it {
             let item = item?;
-            let block: Bound<'_, KVCacheBlock> = item.downcast_into::<KVCacheBlock>()?;
+            let block: Bound<'_, KVCacheBlock> = item.cast_into::<KVCacheBlock>()?;
             let (was_free, is_null) = {
                 let b = block.borrow();
                 (b.ref_cnt == 0, b.is_null)
@@ -218,10 +218,10 @@ impl BlockPool {
     /// (ref_cnt==0, not null) back to the free queue.
     pub fn free_blocks(&mut self, py: Python<'_>, ordered_blocks: Bound<'_, PyAny>) -> PyResult<()> {
         // Materialize once.
-        let it = PyIterator::from_bound_object(&ordered_blocks)?;
+        let it = PyIterator::from_object(&ordered_blocks)?;
         let mut materialized: Vec<Py<KVCacheBlock>> = Vec::new();
         for item in it {
-            let b: Bound<'_, KVCacheBlock> = item?.downcast_into::<KVCacheBlock>()?;
+            let b: Bound<'_, KVCacheBlock> = item?.cast_into::<KVCacheBlock>()?;
             materialized.push(b.unbind());
         }
         // First pass: dec ref_cnt.
@@ -304,7 +304,7 @@ impl BlockPool {
         let group_bytes = kv_cache_group_id.to_be_bytes();
         for i in 0..count {
             let blk_obj = blocks.get_item(num_cached + i)?;
-            let blk: Bound<'_, KVCacheBlock> = blk_obj.downcast_into::<KVCacheBlock>()?;
+            let blk: Bound<'_, KVCacheBlock> = blk_obj.cast_into::<KVCacheBlock>()?;
             let (is_null, has_hash) = {
                 let b = blk.borrow();
                 (b.is_null, b.block_hash_ref().is_some())
@@ -318,7 +318,7 @@ impl BlockPool {
                 ));
             }
             let raw_hash_obj = block_hashes.get_item(i)?;
-            let raw_bytes: &[u8] = raw_hash_obj.downcast::<PyBytes>()?.as_bytes();
+            let raw_bytes: &[u8] = raw_hash_obj.cast::<PyBytes>()?.as_bytes();
             let mut combined = Vec::with_capacity(raw_bytes.len() + 4);
             combined.extend_from_slice(raw_bytes);
             combined.extend_from_slice(&group_bytes);

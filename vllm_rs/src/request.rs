@@ -16,12 +16,12 @@ use pyo3::exceptions::{PyAssertionError, PyIndexError, PyTypeError, PyValueError
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PySlice, PyTuple};
-use std::cell::RefCell;
+use pyo3::IntoPyObjectExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------- RequestStatus (IntEnum-equivalent) ----------
 
-#[pyclass(eq, eq_int, module = "vllm_rs")]
+#[pyclass(eq, eq_int, from_py_object, module = "vllm_rs")]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RequestStatus {
     WAITING = 1,
@@ -112,7 +112,7 @@ impl TokenIdsView {
         self.with_slice(py, |s| s.len())
     }
 
-    fn __getitem__<'py>(&self, py: Python<'py>, key: Bound<'py, PyAny>) -> PyResult<PyObject> {
+    fn __getitem__<'py>(&self, py: Python<'py>, key: Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             return self.with_slice(py, |s| {
                 let n = s.len() as isize;
@@ -120,11 +120,11 @@ impl TokenIdsView {
                 if idx < 0 || idx >= n {
                     Err(PyIndexError::new_err("TokenIdsView index out of range"))
                 } else {
-                    Ok(s[idx as usize].into_py(py))
+                    s[idx as usize].into_py_any(py)
                 }
             });
         }
-        if let Ok(slice) = key.downcast::<PySlice>() {
+        if let Ok(slice) = key.cast::<PySlice>() {
             let (start, stop, step, n) = self.with_slice(py, |s| {
                 let ind = slice.indices(s.len() as isize).unwrap();
                 (ind.start, ind.stop, ind.step, s.len() as isize)
@@ -145,7 +145,7 @@ impl TokenIdsView {
                     out
                 }
             });
-            return Ok(PyList::new_bound(py, res).into_py(py));
+            return Ok(PyList::new(py, res)?.into_any().unbind());
         }
         Err(PyTypeError::new_err("TokenIdsView index must be int or slice"))
     }
@@ -226,6 +226,13 @@ pub struct Request {
 
     #[pyo3(get, set)]
     pub status: RequestStatus,
+    // The counters below are deliberately signed (i64), not u64/usize:
+    // they mirror Python ints with signed semantics — num_cached_tokens is
+    // initialized to the sentinel -1, and the spec-decode rollback in
+    // update_from_output subtracts num_rejected from num_computed_tokens /
+    // num_output_placeholders exactly as the Python scheduler does. With an
+    // unsigned type a violated invariant would wrap (or panic in debug)
+    // instead of going negative like CPython.
     #[pyo3(get, set)]
     pub max_tokens: i64,
     #[pyo3(get, set)]
@@ -255,7 +262,7 @@ pub struct Request {
     pub all_token_ids_vec: VecI64,
     prompt_token_ids_vec: Option<Vec<i64>>,
     pub spec_token_ids_vec: VecI64,
-    pub block_hashes_vec: RefCell<Vec<Vec<u8>>>,
+    pub block_hashes_vec: Vec<Vec<u8>>,
     block_hasher: Option<Py<PyAny>>,
 
     events_vec: Vec<Py<PyAny>>,
@@ -288,12 +295,15 @@ impl Request {
         self.stop_reason_py.as_ref().map(|p| p.clone_ref(py))
     }
 
-    pub fn rust_take_events<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyList>> {
+    pub fn rust_take_events<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyList>>> {
         if self.events_vec.is_empty() {
-            return None;
+            return Ok(None);
         }
         let evs = std::mem::take(&mut self.events_vec);
-        Some(PyList::new_bound(py, evs.into_iter().map(|e| e.into_bound(py))))
+        Ok(Some(PyList::new(
+            py,
+            evs.into_iter().map(|e| e.into_bound(py)),
+        )?))
     }
 }
 
@@ -402,7 +412,7 @@ impl Request {
             let extra = sp.bind(py).getattr(intern!(py, "extra_args")).ok();
             if let Some(extra) = extra {
                 if !extra.is_none() {
-                    let d: Option<Bound<'_, PyDict>> = extra.downcast_into::<PyDict>().ok();
+                    let d: Option<Bound<'_, PyDict>> = extra.cast_into::<PyDict>().ok();
                     if let Some(d) = d {
                         d.get_item("kv_transfer_params")
                             .ok()
@@ -450,14 +460,14 @@ impl Request {
             all_token_ids_vec: VecI64(all_tokens),
             prompt_token_ids_vec: prompt_token_ids,
             spec_token_ids_vec: VecI64(Vec::new()),
-            block_hashes_vec: RefCell::new(Vec::new()),
+            block_hashes_vec: Vec::new(),
             block_hasher,
             events_vec: Vec::new(),
             cache_salt,
             stop_reason_py: None,
             kv_transfer_params_py,
             streaming_queue: None,
-            prompt_embeds_per_block_hashes: PyDict::new_bound(py).unbind(),
+            prompt_embeds_per_block_hashes: PyDict::new(py).unbind(),
         };
         Ok(out)
     }
@@ -510,8 +520,8 @@ impl Request {
     }
 
     #[getter]
-    fn mm_features<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(py, self.mm_features.iter().map(|p| p.bind(py).clone()))
+    fn mm_features<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, self.mm_features.iter().map(|p| p.bind(py).clone()))
     }
     #[setter]
     fn set_mm_features(&mut self, py: Python<'_>, v: Bound<'_, PyList>) -> PyResult<()> {
@@ -546,10 +556,11 @@ impl Request {
     // ---- token-ids views ----
 
     #[getter]
-    fn prompt_token_ids<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyList>> {
+    fn prompt_token_ids<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyList>>> {
         self.prompt_token_ids_vec
             .as_ref()
-            .map(|v| PyList::new_bound(py, v))
+            .map(|v| PyList::new(py, v))
+            .transpose()
     }
 
     /// Returns a TokenIdsView bound to this Request (cheap — no copy).
@@ -578,8 +589,8 @@ impl Request {
     }
 
     #[getter]
-    fn spec_token_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(py, &self.spec_token_ids_vec.0)
+    fn spec_token_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, &self.spec_token_ids_vec.0)
     }
 
     #[setter]
@@ -622,12 +633,12 @@ impl Request {
     // ---- block hashes ----
 
     #[getter]
-    fn block_hashes<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        let list = PyList::empty_bound(py);
-        for h in self.block_hashes_vec.borrow().iter() {
-            list.append(PyBytes::new_bound(py, h)).unwrap();
+    fn block_hashes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for h in self.block_hashes_vec.iter() {
+            list.append(PyBytes::new(py, h))?;
         }
-        list
+        Ok(list)
     }
 
     #[pyo3(name = "update_block_hashes")]
@@ -638,13 +649,14 @@ impl Request {
         };
         if let Some(hasher) = hasher {
             let out = hasher.call1(py, (slf.clone_ref(py),))?;
-            let list: Bound<'_, PyList> = out.downcast_bound::<PyList>(py)?.clone();
-            let this = slf.borrow(py);
-            let mut bh = this.block_hashes_vec.borrow_mut();
+            let list: Bound<'_, PyList> = out.cast_bound::<PyList>(py)?.clone();
+            // Extract before re-borrowing — the hasher call may have touched
+            // this Request, and extract() can run arbitrary Python code.
+            let mut new_hashes: Vec<Vec<u8>> = Vec::with_capacity(list.len());
             for item in list.iter() {
-                let bytes: Vec<u8> = item.extract()?;
-                bh.push(bytes);
+                new_hashes.push(item.extract()?);
             }
+            slf.borrow_mut(py).block_hashes_vec.extend(new_hashes);
         }
         Ok(())
     }
@@ -652,24 +664,28 @@ impl Request {
     // ---- events ----
 
     #[getter]
-    fn events<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
-        PyList::new_bound(py, self.events_vec.iter().map(|e| e.bind(py).clone()))
+    fn events<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, self.events_vec.iter().map(|e| e.bind(py).clone()))
     }
 
+    #[pyo3(signature = (event_type, timestamp=None))]
     fn record_event(&mut self, py: Python<'_>, event_type: Bound<'_, PyAny>, timestamp: Option<f64>) -> PyResult<()> {
-        let engine_mod = PyModule::import_bound(py, "vllm.v1.engine")?;
+        let engine_mod = PyModule::import(py, "vllm.v1.engine")?;
         let ece = engine_mod.getattr("EngineCoreEvent")?;
         let ev = ece.call_method1("new_event", (event_type, timestamp))?;
         self.events_vec.push(ev.unbind());
         Ok(())
     }
 
-    fn take_events<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyList>> {
+    fn take_events<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyList>>> {
         if self.events_vec.is_empty() {
-            return None;
+            return Ok(None);
         }
         let evs = std::mem::take(&mut self.events_vec);
-        Some(PyList::new_bound(py, evs.into_iter().map(|e| e.into_bound(py))))
+        Ok(Some(PyList::new(
+            py,
+            evs.into_iter().map(|e| e.into_bound(py)),
+        )?))
     }
 
     // ---- is_finished / finish reason ----
@@ -678,10 +694,10 @@ impl Request {
         self.status as i32 > RequestStatus::PREEMPTED as i32
     }
 
-    fn get_finished_reason<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+    fn get_finished_reason<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         // Delegate to the Python `RequestStatus.get_finished_reason` (via
         // _FINISHED_REASON_MAP) — that logic lives in vllm.v1.request.
-        let request_mod = PyModule::import_bound(py, "vllm.v1.request")?;
+        let request_mod = PyModule::import(py, "vllm.v1.request")?;
         let rs_cls = request_mod.getattr("RequestStatus")?;
         let py_status = rs_cls.call1((self.status as i32,))?;
         let reason = rs_cls.call_method1("get_finished_reason", (py_status,))?;
@@ -714,13 +730,14 @@ impl Request {
             // Invoke the hasher — requires releasing the borrow.
             let hasher = slf.borrow(py).block_hasher.as_ref().unwrap().clone_ref(py);
             let out = hasher.call1(py, (slf.clone_ref(py),))?;
-            let list: Bound<'_, PyList> = out.downcast_bound::<PyList>(py)?.clone();
-            let this = slf.borrow(py);
-            let mut bh = this.block_hashes_vec.borrow_mut();
+            let list: Bound<'_, PyList> = out.cast_bound::<PyList>(py)?.clone();
+            // Extract before re-borrowing — extract() can run arbitrary
+            // Python code that touches this Request.
+            let mut new_hashes: Vec<Vec<u8>> = Vec::with_capacity(list.len());
             for item in list.iter() {
-                let bytes: Vec<u8> = item.extract()?;
-                bh.push(bytes);
+                new_hashes.push(item.extract()?);
             }
+            slf.borrow_mut(py).block_hashes_vec.extend(new_hashes);
         }
         Ok(())
     }
@@ -779,41 +796,41 @@ impl Request {
 
     // ---- pickle support ----
 
-    fn __getstate__<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
+    fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         // Snapshot just the scalar fields + token buffers. Python-held
         // opaque fields (sampling_params etc.) are forwarded as-is.
-        PyTuple::new_bound(
+        PyTuple::new(
             py,
             &[
-                self.request_id.clone().into_py(py),
-                self.client_index.into_py(py),
-                self.priority.into_py(py),
-                self.arrival_time.into_py(py),
+                self.request_id.clone().into_py_any(py)?,
+                self.client_index.into_py_any(py)?,
+                self.priority.into_py_any(py)?,
+                self.arrival_time.into_py_any(py)?,
                 self.sampling_params
                     .as_ref()
-                    .map(|p| p.clone_ref(py).into_py(py))
+                    .map(|p| p.clone_ref(py))
                     .unwrap_or_else(|| py.None()),
                 self.pooling_params
                     .as_ref()
-                    .map(|p| p.clone_ref(py).into_py(py))
+                    .map(|p| p.clone_ref(py))
                     .unwrap_or_else(|| py.None()),
-                (self.status as i32).into_py(py),
-                self.max_tokens.into_py(py),
-                self.num_prompt_tokens.into_py(py),
-                self.num_cached_tokens.into_py(py),
-                self.num_computed_tokens.into_py(py),
-                self.num_output_placeholders.into_py(py),
-                self.num_external_computed_tokens.into_py(py),
-                self.num_nans_in_logits.into_py(py),
-                self.num_preemptions.into_py(py),
-                self.all_token_ids_vec.0.clone().into_py(py),
-                self.output_token_ids_vec.0.clone().into_py(py),
-                self.spec_token_ids_vec.0.clone().into_py(py),
-                self.resumable.into_py(py),
-                self.skip_reading_prefix_cache.into_py(py),
-                self.is_prefill_chunk.into_py(py),
-                self.discard_latest_async_tokens.into_py(py),
-                self.cache_salt.clone().into_py(py),
+                (self.status as i32).into_py_any(py)?,
+                self.max_tokens.into_py_any(py)?,
+                self.num_prompt_tokens.into_py_any(py)?,
+                self.num_cached_tokens.into_py_any(py)?,
+                self.num_computed_tokens.into_py_any(py)?,
+                self.num_output_placeholders.into_py_any(py)?,
+                self.num_external_computed_tokens.into_py_any(py)?,
+                self.num_nans_in_logits.into_py_any(py)?,
+                self.num_preemptions.into_py_any(py)?,
+                self.all_token_ids_vec.0.clone().into_py_any(py)?,
+                self.output_token_ids_vec.0.clone().into_py_any(py)?,
+                self.spec_token_ids_vec.0.clone().into_py_any(py)?,
+                self.resumable.into_py_any(py)?,
+                self.skip_reading_prefix_cache.into_py_any(py)?,
+                self.is_prefill_chunk.into_py_any(py)?,
+                self.discard_latest_async_tokens.into_py_any(py)?,
+                self.cache_salt.clone().into_py_any(py)?,
             ],
         )
     }
