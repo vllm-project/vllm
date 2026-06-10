@@ -143,7 +143,7 @@ colorful==0.5.8
     # via ray
 colorlog==6.10.1
     # via optuna
-compressed-tensors==0.15.0.1
+compressed-tensors==0.17.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -240,8 +240,10 @@ fastar==0.10.0
     # via fastapi-cloud-cli
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@65d80088fca7a8f567fba30415fbcc80f7d2259c
-    # via -r requirements/test/rocm.in
+fastsafetensors==0.3.2
+    # via
+    #   -c requirements/rocm.txt
+    #   -r requirements/test/rocm.in
 filelock==3.25.2
     # via
     #   -c requirements/common.txt
@@ -510,7 +512,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.2
+mistral-common==1.11.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

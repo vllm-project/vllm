@@ -239,9 +239,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "CohereLabs/command-a-plus-05-2026",
+        "CohereLabs/North-Mini-Code",
         trust_remote_code=True,
         is_available_online=False,
+        min_transformers_version="5.9.0",
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
@@ -844,7 +845,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/command-a-vision-07-2025"
+        "CohereLabs/command-a-vision-07-2025",
+        extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
+        min_transformers_version="5.9.0",
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
@@ -937,6 +940,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b",
         extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-speech-4.1-2b-plus",
+        min_transformers_version="5.8.0",
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",

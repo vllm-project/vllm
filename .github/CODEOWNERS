@@ -23,8 +23,13 @@
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
 /vllm/config/cache.py @heheda12345
+
+# Config utils
+/vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
@@ -34,10 +39,11 @@
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/offline_utils.py @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
 # Rust Frontend

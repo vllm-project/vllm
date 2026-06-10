@@ -850,7 +850,14 @@ class NixlConnectorWorker:
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
-            layer_spec = self._layer_specs[layer_name]
+            layer_spec = self._layer_specs.get(layer_name)
+            if layer_spec is None:
+                logger.debug(
+                    "Skipping layer %s as no KVCache spec is present. "
+                    "This is likely because the layer is sharing its KV cache",
+                    layer_name,
+                )
+                continue
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
@@ -2333,9 +2340,25 @@ class NixlConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
-                    assert num_local_blocks == num_remote_blocks
+                if (
+                    _is_ssm_spec(self._group_spec_types[i])
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
+                    # prior to the last one are placeholders (null blocks). Mind that
+                    # this doesn't really impact transfer, as we only still care about
+                    # the last "block", the full in-place state.
+                    assert num_local_blocks == 1, "SSM can only have one local block"
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif (
+                    self._physical_blocks_per_logical_kv_block
+                    == remote_physical_per_logical
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
+                    # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
                         self._physical_blocks_per_logical_kv_block,
                         remote_physical_per_logical,

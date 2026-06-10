@@ -957,6 +957,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             persistent_kv_indices=self.persistent_kv_indices,
             persistent_kv_num_blocks=self.persistent_kv_num_blocks,
             persistent_doc_ids=self.persistent_doc_ids,
+            mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.
