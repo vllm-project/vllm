@@ -898,6 +898,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        # Invalidate cached encoder outputs so multimodal requests recompute
+        # embeddings with the newly updated weights instead of reusing
+        # stale cache entries keyed only by mm_hash.
+        self.llm_engine.reset_encoder_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
