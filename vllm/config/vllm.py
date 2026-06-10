@@ -1033,7 +1033,7 @@ class VllmConfig:
                         f"({margin}) must be smaller than max_model_len - "
                         f"sliding_window ({max_model_len} - {sliding_window} = "
                         f"{max_model_len - sliding_window}). Lower the margin or "
-                        "raise --max-model-len (>= 8192 recommended)."
+                        "raise --max-model-len above sliding_window + margin."
                     )
                 # The R(-D) re-rotation assumes plain (unscaled) RoPE; a scaled
                 # rope (YaRN/linear) shifts the per-frequency angles and would

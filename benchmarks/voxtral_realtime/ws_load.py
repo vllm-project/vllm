@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-ws_load.py — N concurrent real-time-paced /v1/realtime websocket streams.
+ws_load.py: N concurrent real-time-paced /v1/realtime websocket streams.
 
 Protocol mirrored from examples/speech_to_text/realtime/openai_realtime_client.py:
     recv session.created -> send session.update {model} -> send commit (ready)

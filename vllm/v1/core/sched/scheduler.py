@@ -693,7 +693,7 @@ class Scheduler(SchedulerInterface):
                     # [EXPERIMENTAL] Unbounded realtime: before the position clock
                     # would reach max_model_len, re-anchor it down instead of
                     # length-capping, then schedule this chunk's new tokens at the
-                    # rebased positions (FUSED -- the session is re-added this step
+                    # rebased positions (FUSED: the session is re-added this step
                     # and the worker re-rotates its live keys by R(-D)).
                     # num_new_tokens is invariant under re-anchor: the clock and
                     # the accumulated token count both drop by D.
@@ -1183,7 +1183,7 @@ class Scheduler(SchedulerInterface):
         # ``d`` is block-aligned to the scheduler block size = LCM of every KV
         # group's block size, so it is also a whole multiple of EACH group's own
         # block size. The number of leading blocks to drop is therefore computed
-        # PER manager as ``d // mgr.block_size`` -- not one shared count: with
+        # PER manager as ``d // mgr.block_size``, not one shared count: with
         # unequal text/audio sliding windows the decoder and encoder land in
         # separate groups with DIFFERENT block sizes (the encoder's is enlarged to
         # equalize page size), so a single ``d // self.block_size`` would

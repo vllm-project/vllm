@@ -1169,13 +1169,15 @@ class GPUModelRunner(
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
                 # INVARIANT: reanchor_reqs only holds requests scheduled this
-                # step, so the request must be in the persistent batch. Absent
-                # => scheduler bug; log and skip.
+                # step with a positive shift, so each must be in the persistent
+                # batch with D > 0. idx is None (absent from batch) or D <= 0
+                # both mean a scheduler bug; log and skip.
                 logger.error(
                     "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
-                    "but absent from persistent batch (idx=%s, D=%s); key "
-                    "re-rotation dropped -- attention will be corrupted for this "
-                    "stream. This should be unreachable; investigate schedule().",
+                    "but not applicable (idx=%s, D=%s); expected it in the "
+                    "persistent batch with D > 0. Key re-rotation dropped, so "
+                    "attention will be corrupted for this stream. This should be "
+                    "unreachable; investigate schedule().",
                     req_id, idx, D)
                 continue
             # The persistent-batch row already carries the rebased (small) clock

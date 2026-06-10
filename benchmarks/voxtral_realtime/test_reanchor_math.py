@@ -93,7 +93,7 @@ def main():
             )
     print(
         "\nRESULT:",
-        "PASS — R(-D) re-rotation preserves in-window scores" if ok else "FAIL",
+        "PASS: R(-D) re-rotation preserves in-window scores" if ok else "FAIL",
     )
     return 0 if ok else 1
 
