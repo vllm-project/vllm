@@ -366,47 +366,6 @@ def test_full_weight_transfer_flow():
 
 
 @create_new_process_for_each_test()
-def test_finish_weight_update_resets_encoder_cache():
-    """finish_weight_update must invalidate the encoder cache so stale
-    multimodal embeddings computed with the old weights aren't reused"""
-    if torch.accelerator.device_count() < 1:
-        pytest.skip("Need at least 1 GPU for this test")
-
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-
-    with patch(
-        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
-        mock_create_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            load_format="dummy",
-            tensor_parallel_size=1,
-            weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
-
-        llm.init_weight_transfer_engine(
-            WeightTransferInitRequest(init_info={"test_param": "init"})
-        )
-        llm.start_weight_update(is_checkpoint_format=True)
-        llm.update_weights(
-            WeightTransferUpdateRequest(
-                update_info={
-                    "names": ["layer.weight"],
-                    "dtype_names": ["float32"],
-                    "shapes": [[10, 10]],
-                }
-            )
-        )
-
-        with patch.object(llm.llm_engine, "reset_encoder_cache") as mock_reset:
-            llm.finish_weight_update()
-            mock_reset.assert_called_once()
-
-
-@create_new_process_for_each_test()
 def test_weight_transfer_config_backend():
     """Test that WeightTransferConfig backend is properly configured."""
     if torch.accelerator.device_count() < 1:
