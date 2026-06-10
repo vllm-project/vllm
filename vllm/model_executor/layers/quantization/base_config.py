@@ -47,6 +47,18 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    def tie_weight(self, target_layer: nn.Module, source_layer: nn.Module) -> None:
+        """Tie the target layer's weight to the source layer."""
+        # Backward compatibility: keep the default equivalent to the old direct
+        # weight assignment. Quant methods with auxiliary parameters or buffers
+        # should override cleanup_quant_state or tie_weight as needed.
+        target_layer.weight = source_layer.weight
+        target_layer.quant_method = source_layer.quant_method
+
+    def cleanup_quant_state(self, layer: nn.Module) -> None:
+        """Clean up quantization state owned by this method."""
+        return
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 

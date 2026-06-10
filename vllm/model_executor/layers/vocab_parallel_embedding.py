@@ -566,7 +566,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         if self.quant_config and self.quant_config.get_name() == "gguf":
             return embed_tokens
         else:
-            self.weight = embed_tokens.weight
+            self.quant_method.cleanup_quant_state(self)
+            embed_tokens.quant_method.tie_weight(self, embed_tokens)
             return self
 
     def forward(self, input_):
