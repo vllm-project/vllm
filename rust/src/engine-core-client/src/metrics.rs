@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use itertools::Itertools;
+
 use vllm_metrics::{
     EngineLabels, EnginePositionLabels, LoraInfoLabels, SchedulerMetrics, WaitingReasonLabels,
 };
@@ -155,8 +157,8 @@ impl LoraInfoExporter {
         waiting: BTreeSet<String>,
     ) {
         let next = (!running.is_empty() || !waiting.is_empty()).then(|| LoraInfoLabels {
-            running_lora_adapters: join_names(&running),
-            waiting_lora_adapters: join_names(&waiting),
+            running_lora_adapters: running.iter().join(","),
+            waiting_lora_adapters: waiting.iter().join(","),
         });
 
         if self.current != next
@@ -172,17 +174,6 @@ impl LoraInfoExporter {
 
         self.current = next;
     }
-}
-
-fn join_names(names: &BTreeSet<String>) -> String {
-    let mut out = String::new();
-    for name in names {
-        if !out.is_empty() {
-            out.push(',');
-        }
-        out.push_str(name);
-    }
-    out
 }
 
 fn now_unix_secs() -> f64 {
