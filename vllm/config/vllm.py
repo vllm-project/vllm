@@ -1035,15 +1035,21 @@ class VllmConfig:
                         f"{max_model_len - sliding_window}). Lower the margin or "
                         "raise --max-model-len above sliding_window + margin."
                     )
-                # The R(-D) re-rotation assumes plain (unscaled) RoPE; a scaled
-                # rope (YaRN/linear) shifts the per-frequency angles and would
-                # corrupt the rotated keys. Reject rather than mis-rotate.
+                # The R(-D) re-rotation assumes plain (unscaled) RoPE; an actual
+                # scaling (YaRN/linear/dynamic) shifts the per-frequency angles and
+                # would corrupt the rotated keys. Reject only a real scaling type:
+                # Voxtral's config carries a benign rope_scaling with
+                # rope_type="default" (plain RoPE plus an explicit theta), which
+                # must NOT be rejected.
                 for name, cfg in (("text", text_config), ("audio", audio_config)):
-                    if cfg is not None and getattr(cfg, "rope_scaling", None):
+                    rs = getattr(cfg, "rope_scaling", None) if cfg is not None else None
+                    rope_type = str(
+                        (rs or {}).get("rope_type", (rs or {}).get("type", "default"))
+                    ).lower()
+                    if rs and rope_type not in ("default", "none"):
                         raise ValueError(
                             "enable_realtime_unbounded does not support RoPE "
-                            f"scaling; {name}_config has rope_scaling="
-                            f"{getattr(cfg, 'rope_scaling')!r}."
+                            f"scaling; {name}_config has rope_scaling={rs!r}."
                         )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:

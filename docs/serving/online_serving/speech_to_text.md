@@ -232,3 +232,21 @@ reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
   sliding-window decoder; rejected at startup otherwise.
 - `--realtime-reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
   Must be smaller than `max_model_len - sliding_window`.
+
+**Fitting on a 16 GiB GPU.** The model plus a full `PIECEWISE` cudagraph capture leaves little
+room for KV on 16 GiB. The capture set scales with `--max-num-seqs`, so the default (256)
+captures large batch graphs you will never use and can OOM at startup. Set `--max-num-seqs` to
+your real concurrency (for example 16). `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also
+helps: it switches the allocator to growable segments, cuts fragmentation, and frees roughly
+1 GiB on a 16 GiB card, with no effect on results. A working unbounded config on a 16 GiB
+RTX 4090 Laptop, validated at 4 concurrent real-time streams (wall/audio 1.00, flat VRAM
+~14.3 GiB, transcripts complete and identical across streams):
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
+  --tokenizer-mode mistral \
+  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
+  --max-model-len 4096 --no-enable-prefix-caching --max-num-seqs 16 \
+  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 2048 \
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+```
