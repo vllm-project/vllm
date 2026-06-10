@@ -150,12 +150,12 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
-            description=tool.function.description,
+            description=tool.function.description or "",
             parameters=tool.function.parameters,
         )
     return ToolDescription.new(
         name=tool.name,
-        description=tool.description,
+        description=tool.description or "",
         parameters=tool.parameters,
     )
 
