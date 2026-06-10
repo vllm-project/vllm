@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from rapidfuzz import fuzz
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
