@@ -119,7 +119,7 @@ class TestCLSPool:
         hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         metadata = _make_metadata([3], num_scheduled_tokens=[2])
         pooler = CLSPool()
-        with pytest.raises(AssertionError, match="partial prefill"):
+        with pytest.raises(RuntimeError, match="partial prefill"):
             pooler(hidden, metadata)
 
 
@@ -202,7 +202,7 @@ class TestMeanPool:
         hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         metadata = _make_metadata([3], num_scheduled_tokens=[2])
         pooler = MeanPool()
-        with pytest.raises(AssertionError, match="partial prefill"):
+        with pytest.raises(RuntimeError, match="partial prefill"):
             pooler(hidden, metadata)
 
     def test_chunked_accumulation(self):
