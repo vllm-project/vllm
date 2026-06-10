@@ -598,7 +598,8 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                tool_parser_instance = tool_parser(tokenizer, request.tools)
-                request = tool_parser_instance.adjust_request(request=request)
+                request = tool_parser(tokenizer, request.tools).adjust_request(
+                    request=request
+                )
 
         return conversation, [engine_input]
