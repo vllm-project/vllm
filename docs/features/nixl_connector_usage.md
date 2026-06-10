@@ -377,10 +377,10 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 #### Speculative Decoding with P/D Roles
 
-When using speculative decoding (EAGLE, DFlash, MTP, etc.) with disaggregated prefilling, the `kv_role` controls how the drafter behaves:
+When using speculative decoding (EAGLE, DFlash, MTP, etc.) with disaggregated prefilling, the `kv_role` controls block allocation:
 
-- **kv_producer**: The scheduler sets `num_lookahead_tokens=0`, so no extra blocks are allocated for speculative tokens. The drafter forward pass and sampling are skipped entirely — the producer only runs the target model prefill. This avoids a block-count mismatch between producer and consumer that would otherwise cause the KV transfer trimming logic to drop the wrong cache block (see [#43996](https://github.com/vllm-project/vllm/issues/43996)).
-- **kv_consumer**: Retains full speculative decoding behavior — the drafter runs normally after receiving KV from the producer.
+- **kv_producer**: The scheduler sets `num_lookahead_tokens=0`, so no extra blocks are allocated for speculative tokens on the producer. This avoids a block-count mismatch between producer and consumer that would otherwise cause the KV transfer trimming logic to drop the wrong cache block (see [#43996](https://github.com/vllm-project/vllm/issues/43996)). The drafter still runs its prefill pass on the producer to populate the drafter KV cache for transfer.
+- **kv_consumer**: During the KV load step, the consumer also allocates without lookahead blocks to match the producer. On subsequent decode steps, full speculative decoding (including lookahead allocation) resumes normally.
 
 Both instances must still be configured with the same `--speculative-config` so that the KV cache layout (number of layers, head dimensions) is compatible for transfer.
 
