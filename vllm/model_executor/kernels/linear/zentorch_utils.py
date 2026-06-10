@@ -74,7 +74,7 @@ def is_zentorch_moe_supported(layer: torch.nn.Module) -> bool:
             "attribute, so the activation can't be verified."
         )
         return False
-    act = _moe_activation_to_str(activation)
+    act = str(getattr(activation, "value", activation)).lower()
     if act not in _ZENTORCH_MOE_ACTIVATIONS:
         logging.debug(
             "Skipping zentorch fused-MoE: activation %r unsupported (supported: %s).",
