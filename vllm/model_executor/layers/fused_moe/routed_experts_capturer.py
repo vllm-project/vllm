@@ -43,6 +43,14 @@ def get_num_experts(hf_config) -> int:
       - ``num_experts``: Mixtral, Qwen2-MoE, Qwen3-MoE
       - ``n_routed_experts``: DeepSeek-V2/V3
       - ``num_local_experts``: Mixtral (older exports)
+
+    The returned value must be the GLOBAL logical expert count: it sizes
+    the dtype of the scheduler-side slot buffer, and captured IDs are
+    logical (taken before the EPLB logical->physical mapping). All keys
+    above are checkpoint-level globals -- ``num_local_experts`` is
+    Mixtral's HF name for the total expert count, NOT a per-EP-rank
+    count; vLLM's EP sharding never rewrites the HF config. Do not
+    replace this with a per-rank source.
     """
     for key in ("num_experts", "n_routed_experts", "num_local_experts"):
         val = getattr(hf_config, key, None)
@@ -243,12 +251,25 @@ class RoutedExpertsManager:
     Memory: ``routed_experts_by_slot`` is sized for the whole block
     pool (``num_blocks * block_size`` slots). For large block pools
     this can reach multiple GB; see the init log for the exact size.
+
+    KV offload (``num_offload_blocks``): when the CPU OffloadingConnector
+    is active, ``offload_mirror`` shadows the CPU offload block pool.
+    :meth:`offload_store` / :meth:`offload_load` mirror each KV transfer
+    job at block granularity, so routing data follows the exact same
+    lifecycle as the offloaded KV blocks (a CPU block id is overwritten
+    only when the OffloadingManager reuses it). The stored values are
+    LOGICAL expert IDs captured before the EPLB logical->physical
+    mapping; physical/replica expert IDs are never exposed. Under data
+    parallelism each DP scheduler owns an independent offload block pool
+    and mirror; cross-DP request migration or KV/routing reuse is
+    unsupported.
     """
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
+        num_offload_blocks: int | None = None,
     ) -> None:
         # Pick the attention group for block/slot mapping. We require
         # a FullAttentionSpec group rather than any AttentionSpec to
@@ -285,14 +306,44 @@ class RoutedExpertsManager:
             ),
             dtype=expert_id_dtype,
         )
+        # Block-major view over the slot buffer for whole-block copies
+        # (C-contiguous reshape, zero-copy).
+        self._blocks_view = self.routed_experts_by_slot.reshape(
+            kv_cache_config.num_blocks,
+            self.block_size,
+            hf_config.num_hidden_layers,
+            num_experts_per_tok,
+        )
+        self.offload_mirror: np.ndarray | None = None
+        if num_offload_blocks is not None:
+            # Shadow buffer indexed by CPU offload block id. Lifecycle is
+            # implicit: a slot is overwritten exactly when the
+            # OffloadingManager reuses its CPU block id, mirroring the
+            # KV data lifecycle. Requires offloaded block size == GPU
+            # block size (block_size_factor == 1), enforced by the
+            # scheduler at init.
+            self.offload_mirror = np.zeros(
+                (
+                    num_offload_blocks,
+                    self.block_size,
+                    hf_config.num_hidden_layers,
+                    num_experts_per_tok,
+                ),
+                dtype=expert_id_dtype,
+            )
         logger.info(
             "RoutedExpertsManager CPU buffer: %.2f GB "
-            "(slots=%d, layers=%d, top_k=%d, dtype=%s)",
+            "(slots=%d, layers=%d, top_k=%d, dtype=%s), "
+            "offload mirror: %.2f GB (blocks=%s)",
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
             hf_config.num_hidden_layers,
             hf_config.num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
+            self.offload_mirror.nbytes / 1e9
+            if self.offload_mirror is not None
+            else 0.0,
+            num_offload_blocks,
         )
 
     def store_batch(self, data: np.ndarray, slot_mapping: np.ndarray) -> None:
@@ -303,6 +354,49 @@ class RoutedExpertsManager:
         per scheduler step in ``update_from_output``.
         """
         self.routed_experts_by_slot[slot_mapping] = data
+
+    def _check_offload_args(
+        self, gpu_block_ids: np.ndarray, cpu_block_ids: np.ndarray
+    ) -> None:
+        if self.offload_mirror is None:
+            raise RuntimeError(
+                "RoutedExpertsManager offload mirror is not initialized "
+                "but a KV offload transfer was observed"
+            )
+        if len(gpu_block_ids) != len(cpu_block_ids):
+            raise RuntimeError(
+                "routed-experts offload block count mismatch: "
+                f"{len(gpu_block_ids)} GPU vs {len(cpu_block_ids)} CPU blocks"
+            )
+
+    def offload_store(
+        self, gpu_block_ids: np.ndarray, cpu_block_ids: np.ndarray
+    ) -> None:
+        """Mirror routing data GPU-slots -> CPU-shadow for one store job.
+
+        Must be called after :meth:`store_batch` of the step whose
+        scheduler_output carried the store job, so the GPU slots hold
+        the routing of every token covered by the job.
+        """
+        # TODO: coalesce consecutive block-id runs into slice copies
+        # (mirror[c0:c1] = blocks_view[g0:g1]) to skip the fancy-index
+        # temporary; per-step job sizes are small so this is not yet
+        # worth the complexity.
+        self._check_offload_args(gpu_block_ids, cpu_block_ids)
+        assert self.offload_mirror is not None  # narrowed by check above
+        self.offload_mirror[cpu_block_ids] = self._blocks_view[gpu_block_ids]
+
+    def offload_load(
+        self, cpu_block_ids: np.ndarray, gpu_block_ids: np.ndarray
+    ) -> None:
+        """Restore routing data CPU-shadow -> GPU-slots for one load job.
+
+        Loaded tokens never re-run a forward pass, so this is the only
+        writer of their slots until the blocks are freed.
+        """
+        self._check_offload_args(gpu_block_ids, cpu_block_ids)
+        assert self.offload_mirror is not None  # narrowed by check above
+        self._blocks_view[gpu_block_ids] = self.offload_mirror[cpu_block_ids]
 
     def get(
         self,

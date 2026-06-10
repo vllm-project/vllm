@@ -4,6 +4,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,8 +12,10 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    RoutedExpertsManager,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 pytestmark = pytest.mark.cpu_test
 
@@ -233,6 +236,106 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
+
+
+_BLOCK_SIZE = 4
+_NUM_LAYERS = 3
+_TOP_K = 2
+
+
+def _make_manager(
+    *, num_blocks: int = 8, num_offload_blocks: int | None = None
+) -> RoutedExpertsManager:
+    spec = FullAttentionSpec(
+        block_size=_BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+    )
+    hf_config = SimpleNamespace(
+        num_experts=16,
+        num_experts_per_tok=_TOP_K,
+        num_hidden_layers=_NUM_LAYERS,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=hf_config)
+    )
+    return RoutedExpertsManager(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        num_offload_blocks=num_offload_blocks,
+    )
+
+
+def _routing_for_blocks(block_ids: list[int], seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(
+        0,
+        16,
+        size=(len(block_ids) * _BLOCK_SIZE, _NUM_LAYERS, _TOP_K),
+        dtype=np.uint8,
+    )
+
+
+def _slots_for_blocks(block_ids: list[int]) -> np.ndarray:
+    return (
+        np.array(block_ids).reshape(-1, 1) * _BLOCK_SIZE + np.arange(_BLOCK_SIZE)
+    ).flatten()
+
+
+def test_manager_offload_store_load_roundtrip():
+    """Routing data survives GPU block reuse via the offload mirror."""
+    mgr = _make_manager(num_offload_blocks=4)
+
+    # A request computes 2 full blocks; routing lands in the slot buffer.
+    orig_blocks = [2, 5]
+    orig_data = _routing_for_blocks(orig_blocks, seed=0)
+    mgr.store_batch(orig_data, _slots_for_blocks(orig_blocks))
+
+    # Connector stores the blocks to CPU blocks [1, 3]; mirror follows.
+    cpu_blocks = np.array([1, 3], dtype=np.int64)
+    mgr.offload_store(np.array(orig_blocks, dtype=np.int64), cpu_blocks)
+
+    # GPU blocks are freed and reused by another request: slots clobbered.
+    mgr.store_batch(
+        _routing_for_blocks(orig_blocks, seed=1), _slots_for_blocks(orig_blocks)
+    )
+
+    # CPU hit loads the blocks back into fresh GPU blocks [7, 0].
+    new_blocks = [7, 0]
+    mgr.offload_load(cpu_blocks, np.array(new_blocks, dtype=np.int64))
+
+    got = mgr.get(new_blocks, num_tokens=len(orig_blocks) * _BLOCK_SIZE)
+    assert np.array_equal(got, orig_data)
+
+
+def test_manager_offload_mirror_not_initialized_raises():
+    mgr = _make_manager(num_offload_blocks=None)
+    with pytest.raises(RuntimeError, match="mirror is not initialized"):
+        mgr.offload_store(np.array([0]), np.array([0]))
+    with pytest.raises(RuntimeError, match="mirror is not initialized"):
+        mgr.offload_load(np.array([0]), np.array([0]))
+
+
+def test_manager_offload_block_count_mismatch_raises():
+    mgr = _make_manager(num_offload_blocks=4)
+    with pytest.raises(RuntimeError, match="block count mismatch"):
+        mgr.offload_store(np.array([0, 1]), np.array([0]))
+    with pytest.raises(RuntimeError, match="block count mismatch"):
+        mgr.offload_load(np.array([0]), np.array([0, 1]))
+
+
+def test_manager_offload_empty_jobs_are_noop():
+    mgr = _make_manager(num_offload_blocks=4)
+    before = mgr.routed_experts_by_slot.copy()
+    empty = np.array([], dtype=np.int64)
+    mgr.offload_store(empty, empty)
+    mgr.offload_load(empty, empty)
+    assert np.array_equal(mgr.routed_experts_by_slot, before)
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
