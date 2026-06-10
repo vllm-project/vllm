@@ -84,8 +84,12 @@ def _base_serve_args(use_async_eplb: bool = False) -> list[str]:
         "--api-server-count",
         "1",
     ]
-    if use_async_eplb:
-        args.extend(["--eplb-config.use_async", "true"])
+    args.extend(
+        [
+            "--eplb-config.use_async",
+            "true" if use_async_eplb else "false",
+        ]
+    )
 
     leader_address = os.environ.get("LEADER_ADDRESS")
     if leader_address:
