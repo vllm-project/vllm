@@ -180,6 +180,29 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         backend_key = "Flashinfer" if is_flashinfer else "Marlin"
         return shape_map[weight_name][backend_key]
 
+    @staticmethod
+    def _w2_scale_sharding(
+        actorder,
+        group_size: int,
+        intermediate_size_per_partition: int,
+        intermediate_size_full: int,
+    ) -> tuple[bool, int, bool]:
+        """Decide how to shard w2 group scales across TP for WNA16 Marlin MoE.
+
+        Only ``actorder="group"`` permutes activations by ``g_idx`` at runtime
+        and therefore needs the full-K (unsharded) w2 scales plus ``is_k_full``.
+        ``actorder="weight"``/``"static"`` (and ``None``) reorder weights at
+        quantization time, so scales shard normally per TP rank.
+        """
+        load_full_w2 = (actorder == "group") and group_size != -1
+        w2_scales_size = (
+            intermediate_size_full if load_full_w2 else intermediate_size_per_partition
+        )
+        is_k_full = (actorder != "group") or (
+            intermediate_size_per_partition == intermediate_size_full
+        )
+        return load_full_w2, w2_scales_size, is_k_full
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -229,16 +252,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # Only actorder="group" requires runtime g_idx permutation and
-        # therefore full-K w2 scales. "weight" reorders statically at quant
-        # time, so TP sharding of scales and is_k_full work normally.
-        load_full_w2 = (self.actorder == "group") and self.group_size != -1
-        w2_scales_size = (
-            intermediate_size_full if load_full_w2 else intermediate_size_per_partition
-        )
-
-        self.is_k_full = (self.actorder != "group") or (
-            intermediate_size_per_partition == intermediate_size_full
+        load_full_w2, w2_scales_size, self.is_k_full = self._w2_scale_sharding(
+            self.actorder,
+            self.group_size,
+            intermediate_size_per_partition,
+            intermediate_size_full,
         )
 
         if self.strategy == "channel":
