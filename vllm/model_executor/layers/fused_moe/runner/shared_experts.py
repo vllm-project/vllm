@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from enum import IntEnum
 
 import torch
@@ -8,9 +9,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -38,21 +36,15 @@ class SharedExpertsOrder(IntEnum):
     MULTI_STREAM_OVERLAPPED = (3,)
 
 
-class SharedExperts:
+class SharedExperts(torch.nn.Module):
     def __init__(
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        quant_method: QuantizeMethodBase,
         enable_dbo: bool,
+        mk_can_overlap_shared_experts: Callable[[], bool],
     ):
-        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-            FusedMoEMethodBase,
-        )
-
-        # quant_method must be a FusedMoEMethodBase but we can't use the type
-        # due to circular imports.
-        assert isinstance(quant_method, FusedMoEMethodBase)
+        super().__init__()
 
         # The SharedExperts need to handle DBO since they can be called from
         # an MK's finalize method.  We keep a list of outputs indexed by current
@@ -62,7 +54,8 @@ class SharedExperts:
         self._output: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
-        self._quant_method = quant_method
+
+        self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -77,6 +70,10 @@ class SharedExperts:
             self._stream = aux_stream()
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
+
+    # TODO(bnell): Hack for elastic_ep. Get rid of this
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
+        self.moe_config = new_moe_config
 
     @property
     def _disable_shared_experts_overlap(self) -> bool:
@@ -96,7 +93,7 @@ class SharedExperts:
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
-        if self._quant_method.mk_can_overlap_shared_experts:
+        if self._mk_can_overlap_shared_experts():
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (
@@ -119,7 +116,6 @@ class SharedExperts:
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
-            assert self._moe_config.disable_inplace
 
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone
@@ -156,7 +152,7 @@ class SharedExperts:
         self._output[self._output_idx] = None
         return output
 
-    def apply(
+    def forward(
         self,
         shared_experts_input: torch.Tensor,
         order: SharedExpertsOrder,

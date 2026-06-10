@@ -12,11 +12,11 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.api_router import models
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
