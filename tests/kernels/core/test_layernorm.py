@@ -85,6 +85,7 @@ def test_rms_norm(
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("wt_dtype", DTYPES)
 @pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -94,6 +95,7 @@ def test_fused_rms_norm_quant(
     hidden_size: int,
     add_residual: bool,
     dtype: torch.dtype,
+    wt_dtype: torch.dtype,
     quant_scale: float,
     seed: int,
     device: str,
@@ -102,7 +104,8 @@ def test_fused_rms_norm_quant(
     set_random_seed(seed)
     torch.set_default_device(device)
 
-    weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
+    rms_layer = RMSNorm(hidden_size, eps=1e-6, dtype=wt_dtype)
+    rms_layer.weight.data.normal_(mean=1, std=0.1)
     scale = 1 / (2 * hidden_size)
     last_dim = 2 * hidden_size if strided_input else hidden_size
     x_base = torch.randn(num_tokens, last_dim, dtype=dtype)
@@ -116,7 +119,6 @@ def test_fused_rms_norm_quant(
     else:
         residual = residual_fused = None
 
-    out_norm = torch.empty_like(x)
     out_quant = torch.empty_like(x, dtype=FP8_DTYPE)
     out_quant_fused = torch.empty_like(out_quant)
 
@@ -124,7 +126,7 @@ def test_fused_rms_norm_quant(
 
     if add_residual:
         torch.ops._C.fused_add_rms_norm_static_fp8_quant(
-            out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6
+            out_quant_fused, x, residual_fused, rms_layer.weight, quant_scale_t, 1e-6
         )
 
         # Unfused kernel is in-place so it goes second
@@ -132,7 +134,7 @@ def test_fused_rms_norm_quant(
         x_unfused_base = x_base.clone()
         x_unfused = x_unfused_base[..., :hidden_size]
         assert x_unfused.is_contiguous() != strided_input
-        torch.ops._C.fused_add_rms_norm(x_unfused, residual, weight, 1e-6)
+        x_unfused, _ = rms_layer.forward_native(x_unfused, residual)
         torch.ops._C.static_scaled_fp8_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
         )
@@ -141,19 +143,19 @@ def test_fused_rms_norm_quant(
         torch.testing.assert_close(residual_fused, residual, atol=1e-2, rtol=1e-2)
         opcheck(
             torch.ops._C.fused_add_rms_norm_static_fp8_quant,
-            (out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6),
+            (out_quant_fused, x, residual_fused, rms_layer.weight, quant_scale_t, 1e-6),
         )
     else:
         torch.ops._C.rms_norm_static_fp8_quant(
-            out_quant_fused, x, weight, quant_scale_t, 1e-6
+            out_quant_fused, x, rms_layer.weight, quant_scale_t, 1e-6
         )
 
-        torch.ops._C.rms_norm(out_norm, x, weight, 1e-6)
+        out_norm = rms_layer.forward_native(x)
         torch.ops._C.static_scaled_fp8_quant(out_quant, out_norm, quant_scale_t)
 
         opcheck(
             torch.ops._C.rms_norm_static_fp8_quant,
-            (out_quant_fused, x, weight, quant_scale_t, 1e-6),
+            (out_quant_fused, x, rms_layer.weight, quant_scale_t, 1e-6),
         )
 
     torch.testing.assert_close(
