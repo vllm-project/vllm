@@ -166,9 +166,11 @@ class DescriptorView:
             return remote_kernel_blocks // remote_physical_per_logical
         return remote_kernel_blocks
 
-    def remote_stride(self, remote_block_len: int, remote_phys_per_logical: int) -> int:
+    def remote_stride(
+        self, remote_block_len: int, remote_physical_per_logical: int
+    ) -> int:
         if isinstance(self.spec, MambaSpec):
-            return remote_block_len * remote_phys_per_logical
+            return remote_block_len * remote_physical_per_logical
         return remote_block_len
 
     def remote_content(self, remote_block_len: int, remote_ssm_content: int) -> int:
@@ -192,15 +194,16 @@ class NixlConnectorWorker:
         if block_size_ratio is not None:
             kernel_blocks = int(kernel_blocks * block_size_ratio)
 
-        # Compute per-view descriptor offsets for this engine's block count.
+        # Compute per-view descriptor offsets and block counts.
         view_offsets: list[int] = []
+        view_block_counts: list[int] = []
         cumulative_offset = 0
         for view in self._views:
             view_offsets.append(cumulative_offset)
-            view_blocks = view.remote_num_blocks(
-                kernel_blocks, physical_blocks_per_logical
+            view_block_counts.append(
+                view.remote_num_blocks(kernel_blocks, physical_blocks_per_logical)
             )
-            cumulative_offset += view.num_view_regions * view_blocks
+            cumulative_offset += view.num_view_regions * view_block_counts[-1]
 
         all_descs: list[np.ndarray] = []
         for group_idx, group_block_ids in enumerate(block_ids):
@@ -210,17 +213,12 @@ class NixlConnectorWorker:
                     f"at group index {group_idx}"
                 )
             view_idx = self._group_to_view_idx[group_idx]
-            view = self._views[view_idx]
-            view_blocks = view.remote_num_blocks(
-                kernel_blocks, physical_blocks_per_logical
-            )
-            group_arr = np.asarray(group_block_ids)
-            region_ids = np.arange(view.num_view_regions)[:, None]
             all_descs.append(
                 (
                     view_offsets[view_idx]
-                    + region_ids * view_blocks
-                    + group_arr[None, :]
+                    + np.arange(self._views[view_idx].num_view_regions)[:, None]
+                    * view_block_counts[view_idx]
+                    + np.asarray(group_block_ids)[None, :]
                 ).flatten()
             )
 
@@ -280,8 +278,6 @@ class NixlConnectorWorker:
         """
         assert self.transfer_topo is not None
         all_indices = list(range(len(self.spec_per_region)))
-        virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-        physical_blocks_per_logical = self._physical_blocks_per_logical_kv_block
 
         views: list[DescriptorView] = []
         group_to_view: dict[int, int] = {}
@@ -294,12 +290,12 @@ class NixlConnectorWorker:
                 representative_spec = group_spec
 
             if isinstance(representative_spec, MambaSpec):
-                mamba_content = sum(self._mamba_ssm_size)
                 strides = [
-                    self.block_len_per_layer[i] * physical_blocks_per_logical
+                    self.block_len_per_layer[i]
+                    * self._physical_blocks_per_logical_kv_block
                     for i in all_indices
                 ]
-                contents = [mamba_content for _ in all_indices]
+                contents = [sum(self._mamba_ssm_size) for _ in all_indices]
                 num_blocks = self._logical_num_blocks
                 metas_per_region = 4
                 view_virtually_split = False
@@ -307,8 +303,10 @@ class NixlConnectorWorker:
                 strides = [self.block_stride_per_layer[i] for i in all_indices]
                 contents = [self.block_len_per_layer[i] for i in all_indices]
                 num_blocks = self.num_blocks
-                metas_per_region = 2 if virtually_split else 1
-                view_virtually_split = virtually_split
+                metas_per_region = (
+                    2 if self.transfer_topo.virtually_split_kv_in_blocks else 1
+                )
+                view_virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
             else:
                 raise ValueError(
                     f"Unsupported spec type for DescriptorView: "
@@ -987,7 +985,7 @@ class NixlConnectorWorker:
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
 
-        # RFC #42082 (PR #42374): Per-block physical stride per region (bytes).
+        # Per-block physical stride per region (bytes).
         # Read from each registered tensor's stride(0) so it stays correct
         # under layouts that interleave layers within a block (BLHNC/BHLNC)
         # or use page_size_padded (MLA alignment).
@@ -1064,9 +1062,8 @@ class NixlConnectorWorker:
                     self.block_stride_per_layer.append(self.block_len_per_layer[-1])
                 else:
                     self.block_len_per_layer.append(physical_page_size)
-                    # RFC #42082 (PR #42374): stride(0) captures the
-                    # true byte distance between consecutive blocks,
-                    # accounting for page_size_padded alignment.
+                    # stride(0) captures the true byte distance between
+                    # consecutive blocks, accounting for page_size_padded.
                     self.block_stride_per_layer.append(
                         cache.stride(0) * cache.element_size()
                     )
@@ -1186,22 +1183,20 @@ class NixlConnectorWorker:
         result: list[tuple[int, int, int]] = []
 
         for region_pos, region_idx in enumerate(view.region_indices):
-            base_addr = base_addresses[region_idx]
-            stride = view.strides[region_pos] // block_size_ratio
-            content = view.contents[region_pos] // block_size_ratio
-
             metas = build_region_meta(
                 spec=view.spec,
                 num_blocks=num_blocks,
                 block_size=self.block_size,
-                block_stride_bytes=stride,
-                region_content_bytes=content,
+                block_stride_bytes=view.strides[region_pos] // block_size_ratio,
+                region_content_bytes=view.contents[region_pos] // block_size_ratio,
                 virtually_split=view.virtually_split,
             )
 
             for meta in metas:
                 result.extend(
-                    self._view_to_descriptors(meta, base_addr, self.device_id)
+                    self._view_to_descriptors(
+                        meta, base_addresses[region_idx], self.device_id
+                    )
                 )
 
         return result
@@ -1212,11 +1207,7 @@ class NixlConnectorWorker:
         base_addr: int,
         device_id: int,
     ) -> list[tuple[int, int, int]]:
-        """Extract NIXL (addr, len, device_id) descriptors from a 4D view.
-
-        RFC #42082 (PR #42374): replaces manual byte arithmetic loops with
-        stride-based extraction from the meta tensor view.
-        """
+        """Extract NIXL (addr, len, device_id) descriptors from a 4D view."""
         elem = view.element_size()
         block_stride = view.stride(_DIM4_B) * elem
         payload = prod(view.shape[1:]) * elem
@@ -1236,44 +1227,43 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build remote descriptors for one view."""
         assert self.transfer_topo is not None
-        my_tp = self.transfer_topo.tp_size
-        my_rank = self.transfer_topo.tp_rank
-        device_id = nixl_agent_meta.device_id
-
         num_blocks = view.remote_num_blocks(
             nixl_agent_meta.num_blocks, remote_physical_per_logical
         )
-        remote_ssm_content = sum(nixl_agent_meta.ssm_sizes)
         result: list[tuple[int, int, int]] = []
 
         for region_pos, region_idx in enumerate(view.region_indices):
-            base_addr = nixl_agent_meta.kv_caches_base_addr[region_idx]
-            remote_block_len = nixl_agent_meta.block_lens[region_idx]
-
-            stride = view.remote_stride(remote_block_len, remote_physical_per_logical)
-            content = view.remote_content(remote_block_len, remote_ssm_content)
-
             metas = build_region_meta(
                 spec=view.spec,
                 num_blocks=num_blocks,
                 block_size=nixl_agent_meta.block_size,
-                block_stride_bytes=stride,
-                region_content_bytes=content,
+                block_stride_bytes=view.remote_stride(
+                    nixl_agent_meta.block_lens[region_idx],
+                    remote_physical_per_logical,
+                ),
+                region_content_bytes=view.remote_content(
+                    nixl_agent_meta.block_lens[region_idx],
+                    sum(nixl_agent_meta.ssm_sizes),
+                ),
                 virtually_split=view.virtually_split,
             )
 
             for meta in metas:
                 sliced_list = view.spec.slice_for_tp_transfer(
                     meta,
-                    my_tp,
-                    my_rank,
+                    self.transfer_topo.tp_size,
+                    self.transfer_topo.tp_rank,
                     remote_tp_size,
                     remote_tp_rank,
                     self.model_config,
                 )
                 for sliced in sliced_list:
                     result.extend(
-                        self._view_to_descriptors(sliced, base_addr, device_id)
+                        self._view_to_descriptors(
+                            sliced,
+                            nixl_agent_meta.kv_caches_base_addr[region_idx],
+                            nixl_agent_meta.device_id,
+                        )
                     )
 
         return result
@@ -1433,18 +1423,17 @@ class NixlConnectorWorker:
                 self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
-        remote_phys_per_log = physical_blocks_per_logical
-
         blocks_data: list[tuple[int, int, int]] = []
         for view in self._views:
-            view_descs = self._build_view_remote(
-                view,
-                nixl_agent_meta,
-                remote_phys_per_log,
-                remote_tp_rank=remote_tp_rank,
-                remote_tp_size=remote_tp_size,
+            blocks_data.extend(
+                self._build_view_remote(
+                    view,
+                    nixl_agent_meta,
+                    physical_blocks_per_logical,
+                    remote_tp_rank=remote_tp_rank,
+                    remote_tp_size=remote_tp_size,
+                )
             )
-            blocks_data.extend(view_descs)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)

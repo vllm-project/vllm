@@ -120,7 +120,7 @@ def compute_tp_mapping(
     }
 
     # Head offset is computed by spec.slice_for_tp_transfer() in
-    # _build_fa_remote via meta tensor narrowing (no rank_offset_factor needed).
+    # _build_view_remote via meta tensor narrowing (no rank_offset_factor needed).
 
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,

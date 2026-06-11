@@ -97,13 +97,13 @@ class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
 
-    Key property required by subclasses (from RFC #42082):
+    Key property required by subclasses:
       tokens_per_state: int — -1 infinite (recurrent), 1 standard, N compressed
     """
 
     block_size: int
 
-    # From RFC #42082; overridden by each subclass.
+    # Overridden by each subclass.
     @property
     def tokens_per_state(self) -> int:
         raise NotImplementedError
@@ -205,20 +205,17 @@ class KVCacheSpec:
 
 
 # ---------------------------------------------------------------------------
-# KVCacheLayout and helpers — from PR #42374 / RFC #42082.
-# https://github.com/vllm-project/vllm/pull/42374
-# https://github.com/vllm-project/vllm/issues/42082
+# KVCacheLayout and helpers.
 # ---------------------------------------------------------------------------
 
-# Logical dim indices in the 5D stride permutation [L, B, H, N, C]
-# (see: RFC #42082).
+# Logical dim indices in the 5D stride permutation [L, B, H, N, C].
 _DIM_L, _DIM_B, _DIM_H, _DIM_N, _DIM_C = 0, 1, 2, 3, 4
 
 
 class KVCacheLayout(Enum):
     """Physical layout descriptor for a KV cache group.
 
-    The logical shape is always [L, B, H, N, <content>] (RFC #42082).
+    The logical shape is always [L, B, H, N, <content>].
     Each member's value is a stride permutation that maps logical axes
     to physical (memory) order.
     """
@@ -289,8 +286,6 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
-    # PR #42374 defines tokens_per_state as a dataclass field.
-    # We use a @property to avoid frozen-dataclass descriptor conflicts.
     @property
     def tokens_per_state(self) -> int:
         return 1
@@ -554,8 +549,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    # PR #42374 renames compress_ratio → tokens_per_state (a field).
-    # We keep compress_ratio as the field and delegate via @property.
     @property
     def tokens_per_state(self) -> int:
         return self.compress_ratio
@@ -838,8 +831,6 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 
-    # PR #42374 defines tokens_per_state as a dataclass field.
-    # We use a @property to avoid frozen-dataclass descriptor conflicts.
     @property
     def tokens_per_state(self) -> int:
         return -1
