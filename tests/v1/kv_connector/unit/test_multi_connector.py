@@ -366,7 +366,10 @@ def test_multi_example_connector_consistency():
 
 
 def _ignore_event_collection(events: list[str]) -> list[str]:
-    return [event for event in events if event != "take_events"]
+    # Filter out per-step polling hooks that the scheduler calls repeatedly
+    # and which are not meaningful state transitions for these assertions.
+    ignored = {"take_events", "has_pending_push_work"}
+    return [event for event in events if event not in ignored]
 
 
 def get_connector_events() -> dict[str, list[str]]:
