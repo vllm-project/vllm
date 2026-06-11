@@ -31,7 +31,7 @@ QWEN3_CONFIG = GGUFTestConfig(
 
 OLMOE_CONFIG = GGUFTestConfig(
     original_model="allenai/OLMoE-1B-7B-0125",
-    gguf_model_path="allenai/OLMoE-1B-7B-0125-GGUF:Q4_0",
+    gguf_model_path="allenai/OLMoE-1B-7B-0125-GGUF:Q6_K",
 )
 
 
