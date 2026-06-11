@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -331,8 +331,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         # Metadata-independent input GEMMs + RMSNorm stay in the captured
-        # graph; the metadata-dependent rest (q up-proj + kv-insert, indexer,
-        # compressor, MLA attention) runs in the eager break.
+        # graph. For C4A layers, the inner sparse_attn_indexer custom op
+        # runs in the eager break.
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self.attn_gemm_parallel_execute(hidden_states)
         )
@@ -345,9 +345,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
 
-        # attention_impl is wrapped with @eager_break_during_capture: this is
-        # where the breakable cudagraph capture breaks (the attention op runs
-        # eagerly between captured graph segments).
         self.attention_impl(
             hidden_states,
             qr,
@@ -423,7 +420,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
-    @eager_break_during_capture
     def attention_impl(
         self,
         hidden_states: torch.Tensor,
@@ -454,28 +450,52 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
                 return q
 
-            # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
-            # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
-            # MLA compressor. Slot [2] is reserved for the indexer's inner
-            # overlap. ROCm (aux_streams is None) falls back to sequential.
-            q, _ = execute_in_parallel(
-                wq_b_kv_insert,
-                [
-                    lambda: indexer(
-                        hidden_states,
-                        qr,
-                        indexer_kv_score,
-                        indexer_weights,
-                        positions,
-                        self.indexer_rotary_emb,
-                    ),
+            if BreakableCUDAGraphCapture.is_active():
+                compressor_aux_stream = (
+                    aux_streams[1] if aux_streams is not None else None
+                )
+                # try run wq_b_kv_insert in default stream
+                # and compressor in aux stream
+                q, _ = maybe_execute_in_parallel(
+                    wq_b_kv_insert,
                     lambda: compressor(kv_score, positions, self.rotary_emb),
-                ],
-                self.ln_events[0],
-                [self.ln_events[1], self.ln_events[2]],
-                [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
-                enable=aux_streams is not None,
-            )
+                    self.ln_events[0],
+                    self.ln_events[1],
+                    compressor_aux_stream,
+                )
+                indexer(
+                    hidden_states,
+                    qr,
+                    indexer_kv_score,
+                    indexer_weights,
+                    positions,
+                    self.indexer_rotary_emb,
+                )
+            else:
+                # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
+                # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
+                # MLA compressor. Slot [2] is reserved for the indexer's inner
+                # overlap. ROCm (aux_streams is None) falls back to sequential.
+                q, _ = execute_in_parallel(
+                    wq_b_kv_insert,
+                    [
+                        lambda: indexer(
+                            hidden_states,
+                            qr,
+                            indexer_kv_score,
+                            indexer_weights,
+                            positions,
+                            self.indexer_rotary_emb,
+                        ),
+                        lambda: compressor(kv_score, positions, self.rotary_emb),
+                    ],
+                    self.ln_events[0],
+                    [self.ln_events[1], self.ln_events[2]],
+                    [aux_streams[0], aux_streams[1]]
+                    if aux_streams is not None
+                    else None,
+                    enable=aux_streams is not None,
+                )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
             aux_stream = (
