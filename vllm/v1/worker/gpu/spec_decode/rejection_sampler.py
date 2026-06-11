@@ -106,6 +106,7 @@ class RejectionSampler:
         pos = input_batch.positions[input_batch.logits_indices]
         processed_logits = self.sampler.apply_sampling_params(
             logits,
+            input_batch,
             input_batch.expanded_idx_mapping,
             input_batch.idx_mapping_np,
             pos,
