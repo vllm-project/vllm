@@ -20,6 +20,7 @@ use vllm_chat::{
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 
 /// One model/parser configuration used to run the fixed roundtrip fixtures.
+#[derive(Clone)]
 struct RoundtripCase {
     /// Hugging Face model id resolved through the production backend loader.
     model_id: &'static str,
@@ -31,9 +32,43 @@ struct RoundtripCase {
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection used by the output processor.
     reasoning_parser: ParserSelection,
+    /// How this model's chat template handles thinking mode.
+    thinking_behavior: ThinkingBehavior,
     /// JSON formatting expected after this model's template has materialized
     /// tool-call arguments.
     json_fmt: JsonFmt,
+}
+
+#[derive(Clone, Copy)]
+enum ThinkingBehavior {
+    /// The chat template accepts explicit thinking on/off kwargs, and uses
+    /// `default` when the request does not specify either kwarg.
+    Toggleable { default: bool },
+    /// The chat template always behaves as `value` for this fixture.
+    Always { value: bool },
+}
+
+impl ThinkingBehavior {
+    fn default(self) -> bool {
+        match self {
+            Self::Toggleable { default } => default,
+            Self::Always { value } => value,
+        }
+    }
+
+    fn fixtures(self) -> Vec<Option<bool>> {
+        match self {
+            Self::Toggleable { .. } => vec![
+                Some(true),  // explicitly enable thinking
+                Some(false), // explicitly disable thinking
+                None,        // use default template behavior
+            ],
+            Self::Always { value } => vec![
+                Some(value), // explicitly request the supported thinking behavior
+                None,        // use default template behavior
+            ],
+        }
+    }
 }
 
 impl RoundtripCase {
@@ -44,6 +79,7 @@ impl RoundtripCase {
             assistant_stop_suffix: "<|im_end|>\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
         }
     }
@@ -55,6 +91,7 @@ impl RoundtripCase {
             assistant_stop_suffix: "<|im_end|>\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
         }
     }
@@ -66,6 +103,7 @@ impl RoundtripCase {
             assistant_stop_suffix: "[e~[\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
         }
     }
@@ -77,6 +115,7 @@ impl RoundtripCase {
             assistant_stop_suffix: "<｜end▁of▁sentence｜>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
         }
     }
@@ -88,6 +127,7 @@ impl RoundtripCase {
             assistant_stop_suffix: "",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
         }
     }
@@ -100,7 +140,32 @@ impl RoundtripCase {
             assistant_stop_suffix: "<|im_end|>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
+        }
+    }
+
+    /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
+    fn seed_oss() -> Self {
+        Self {
+            model_id: "ByteDance-Seed/Seed-OSS-36B-Instruct",
+            assistant_stop_suffix: "<seed:eos>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// Step-3.5 with `<think>` / `</think>` reasoning tags and newline trimming.
+    fn step3p5() -> Self {
+        Self {
+            model_id: "stepfun-ai/Step-3.5-Flash",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
         }
     }
 }
@@ -127,43 +192,53 @@ roundtrip_tests! {
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    seed_oss => [reasoning_and_content],
+    step3p5 => [reasoning_and_content],
 
     // Note: Kimi K2.5 strips the reasoning content in history.
-    // TODO: we don't respect model-generated tool call id now so `tool_call_mix` cannot pass.
-    // kimi_k25 => [tool_call_mix],
+    kimi_k25 => [tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
 async fn run_roundtrip_reasoning_and_content(case: RoundtripCase) -> Result<()> {
+    for thinking in case.thinking_behavior.fixtures() {
+        run_roundtrip_reasoning_and_content_inner(case.clone(), thinking).await?;
+    }
+    Ok(())
+}
+
+async fn run_roundtrip_reasoning_and_content_inner(
+    case: RoundtripCase,
+    thinking: Option<bool>,
+) -> Result<()> {
     let backends = load_roundtrip_backends(&case).await?;
     let request = roundtrip_request(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
         Vec::new(),
+        thinking,
     );
     let expected_reasoning = "Need compute 2 + 2 directly.";
     let expected_text = "The answer is 4.";
+    let effective_thinking = thinking.unwrap_or(case.thinking_behavior.default());
 
-    let result = run_roundtrip(
-        &case,
-        &backends,
-        &request,
-        AssistantMessage {
-            content: vec![
-                AssistantContentBlock::Reasoning {
-                    text: expected_reasoning.to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: expected_text.to_string(),
-                },
-            ],
-        },
-    )
-    .await?;
+    let assistant = {
+        let mut content = Vec::new();
+        if effective_thinking {
+            content.push(AssistantContentBlock::Reasoning {
+                text: expected_reasoning.to_string(),
+            });
+        }
+        content.push(AssistantContentBlock::Text {
+            text: expected_text.to_string(),
+        });
+        AssistantMessage { content }
+    };
+    let result = run_roundtrip(&case, &backends, &request, assistant).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref().map(str::trim),
-        Some(expected_reasoning)
+        effective_thinking.then_some(expected_reasoning)
     );
     assert_eq!(result.parsed_message.text().trim(), expected_text);
     assert_eq!(result.parsed_message.tool_calls().count(), 0);
@@ -183,9 +258,10 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
             ChatRole::User,
-            "Check Shanghai weather and add 1.00 plus 2.",
+            "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
+        Some(true), // always enable thinking in this fixture
     );
     let expected_reasoning = "Need call the weather and add tools.";
     let expected_text = "I will call the tools.";
@@ -210,9 +286,10 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
                 AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys and a different number
-                    // formatting style to verify text-level fidelity of the roundtrip.
-                    arguments: r#"{"y":1.00,"x":2}"#.to_string(),
+                    // Intentionally use a non-lexical order of keys to verify text-level
+                    // fidelity of the roundtrip where JSON formatting remains stable. The
+                    // `items` key also exercises templates that call `arguments.items()`.
+                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
                 }),
             ],
         },
@@ -240,7 +317,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.00, "x": 2}"#)?,
+        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(
@@ -487,6 +564,7 @@ fn roundtrip_request(
     request_id: impl Into<String>,
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
+    thinking: Option<bool>,
 ) -> ChatRequest {
     let mut request = ChatRequest {
         request_id: request_id.into(),
@@ -500,10 +578,12 @@ fn roundtrip_request(
         ..ChatRequest::for_test()
     };
 
-    // Enable thinking for some models so that rendering and parsing the reasoning block is
-    // exercised in the roundtrip.
-    for key in ["thinking", "enable_thinking"] {
-        request.chat_options.template_kwargs.insert(key.to_string(), true.into());
+    // Explicitly enable or disable thinking so that rendering and parsing the reasoning block is
+    // exercised or skipped in the roundtrip. If unspecified, use the default template behavior.
+    if let Some(thinking) = thinking {
+        for key in ["thinking", "enable_thinking"] {
+            request.chat_options.template_kwargs.insert(key.to_string(), thinking.into());
+        }
     }
 
     request
@@ -531,9 +611,13 @@ fn test_tools() -> Vec<ChatTool> {
                 "type": "object",
                 "properties": {
                     "y": { "type": "number" },
-                    "x": { "type": "number" }
+                    "x": { "type": "number" },
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
                 },
-                "required": ["y", "x"]
+                "required": ["y", "x", "items"]
             }),
             strict: None,
         },

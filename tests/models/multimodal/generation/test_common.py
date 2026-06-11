@@ -785,8 +785,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_25_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmo_26": VLMTestInfo(
         models=["openbmb/MiniCPM-o-2_6"],
@@ -800,8 +798,6 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-o-2_6/discussions/49
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
@@ -979,16 +975,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
         hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
-    ),
-    "qwen_vl": VLMTestInfo(
-        models=["Qwen/Qwen-VL"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
-        max_model_len=1024,
-        max_num_seqs=2,
-        vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
-        prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

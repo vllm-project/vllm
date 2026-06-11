@@ -7,14 +7,11 @@
 
 #include <torch/csrc/stable/ops.h>
 
-// NOTE: These headers are intentionally kept in csrc/quantization/gguf/ (not
-// moved to libtorch_stable) to avoid unnecessary reformatting that would break
-// git rename detection and pollute blame history.
-#include "../../../quantization/gguf/ggml-common.h"
-#include "../../../quantization/gguf/vecdotq.cuh"
-#include "../../../quantization/gguf/dequantize.cuh"
-#include "../../../quantization/gguf/mmvq.cuh"
-#include "../../../quantization/gguf/mmq.cuh"
+#include "ggml-common.h"
+#include "vecdotq.cuh"
+#include "dequantize.cuh"
+#include "mmvq.cuh"
+#include "mmq.cuh"
 #include "moe.cuh"
 #include "moe_vec.cuh"
 

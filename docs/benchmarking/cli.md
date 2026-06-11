@@ -246,6 +246,12 @@ Every image listed in "image_files" is added to the request in the listed order 
 
 The "image" shorthand accepts the same values as "image_files". The "image_url" field accepts either an OpenAI-style object with a "url" field or a URL string.
 
+By default, image references are sent to the serving endpoint as provided, with local image paths converted to `file://` URLs.
+
+If the benchmark client should load local and HTTP(S) images before sending requests, pass `--custom-ensure-client-side-data` to encode them as base64 data URLs on the client side.
+
+Existing `data:image/...` URLs are already self-contained and are kept unchanged.
+
 ```bash
 # need a model with vision capability here
 vllm serve Qwen/Qwen2-VL-7B-Instruct
@@ -253,13 +259,13 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 
 ```bash
 # run benchmarking script
-vllm bench serve--save-result --save-detailed \
+vllm bench serve --save-result --save-detailed \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name custom_image \
   --dataset-path <path-to-your-image-data-jsonl> \
-  --allowed-local-media-path /path/to/image/folder
+  --custom-ensure-client-side-data
 ```
 
 Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.
@@ -398,6 +404,47 @@ vllm bench serve \
 ```
 
 Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+
+#### BFCL (Tool-Calling) Benchmark
+
+The Berkeley Function Calling Leaderboard (BFCL) dataset measures serving
+latency and throughput on realistic tool-calling traffic. Each request
+carries a per-sample `tools` schema and chat history, so the server must
+expose `/v1/chat/completions` with an auto-tool-choice parser enabled.
+The benchmark client always uses the `openai-chat` backend.
+
+Start a tool-parser-enabled server, then run the bench. For example, with
+`gpt-oss-20b`:
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b \
+    --enable-auto-tool-choice \
+    --tool-call-parser openai \
+    --reasoning-parser openai_gptoss
+
+# Client
+vllm bench serve \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model openai/gpt-oss-20b \
+    --dataset-name hf \
+    --dataset-path gorilla-llm/Berkeley-Function-Calling-Leaderboard \
+    --bfcl-categories simple,live_simple,multiple \
+    --num-prompts 200
+```
+
+`--bfcl-categories` is a comma-separated list of BFCL v3 category names
+(without the `BFCL_v3_` prefix or `.json` suffix). Defaults to
+`simple,live_simple,multiple`. Other supported non-multi-turn categories
+include `parallel`, `live_parallel`, `parallel_multiple`,
+`live_parallel_multiple`, `irrelevance`, `live_irrelevance`,
+`live_relevance`, `java`, `javascript`, and `rest`. Multi-turn categories
+are not yet supported.
+
+The dataset class normalizes BFCL's loose schema dialect (`dict` →
+`object`, `float` → `number`, `tuple` → `array`, `any` → `string`) so
+modern grammar backends accept the translated tool definitions.
 
 #### Other HuggingFaceDataset Examples
 
