@@ -316,11 +316,6 @@ def mome_attention_fused_op(
         output.fill_(0)
         return
 
-    hidden_states = hidden_states.contiguous()
-    # FULL CUDA graph pads batch tokens; only num_actual_tokens are processed by
-    # decode/prefill kernels. Initialize output from input so padded tail tokens
-    # are not left uninitialized (garbage can hang later layers / NCCL collectives).
-    output.copy_(hidden_states)
     conv_state_ = conv_state.transpose(-1, -2)
     mome_metadata = forward_context.attn_metadata[layer_name]
     num_decode_tokens = mome_metadata.num_decode_tokens

@@ -246,26 +246,8 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
                 treat_short_extends_as_decodes=False,
             )
         )
-        if (
-            num_prefills == 0
-            and self.use_spec_decode
-            and num_accepted_tokens is not None
-        ):
-            # Keep decode token count consistent with varlen boundaries.
-            #
-            # In FULL graph runtime (and decode-only mixed paths), padded rows are
-            # represented as zero-length queries in query_start_loc. For MoME varlen
-            # decode, the hidden-state slice length must match query_start_loc[-1];
-            # otherwise padded tokens can leak into decode tensors and skew metadata.
-            #
-            # Using the cumulative boundary lets causal_conv1d_update skip padded rows
-            # via query_start == query_end and keeps token metadata self-consistent.
-            num_decode_tokens = int(
-                common_attn_metadata.query_start_loc_cpu[num_decodes].item()
-            )
-            num_prefill_tokens = 0
-        num_reqs = common_attn_metadata.num_reqs
 
+        num_reqs = common_attn_metadata.num_reqs
         state_indices_tensor = common_attn_metadata.block_table_tensor[:num_reqs]
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
