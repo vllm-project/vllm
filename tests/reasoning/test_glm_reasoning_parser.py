@@ -4,7 +4,8 @@
 Tests for GLMReasoningParser streaming tool-call routing.
 
 At long context, vLLM may strip ``<|observation|>`` (id 154829) before the
-reasoning parser sees streamed text, so ``<tool_call>`` (id 154843) emitted after
+reasoning parser sees streamed text, so the ``<tool_call>`` token (from vocab)
+emitted after
 ``</think>`` can be routed to ``delta.reasoning`` instead of
 ``delta.content``. That leaves ``tool_calls`` empty for OpenAI-compatible
 clients (SWE-agent / SWE-bench on GLM-5.x).
@@ -12,14 +13,14 @@ clients (SWE-agent / SWE-bench on GLM-5.x).
 
 from unittest.mock import MagicMock
 
-from vllm.reasoning.glm_reasoning_parser import (
-    _GLM_TOOL_CALL_TOKEN_ID,
-    GLMReasoningParser,
-)
+import pytest
+
+from vllm.reasoning.glm_reasoning_parser import GLMReasoningParser
 
 _THINK_START = 154841
 _THINK_END = 154842
-_TOOL_CALL = _GLM_TOOL_CALL_TOKEN_ID
+# Arbitrary id — parser must read ``<tool_call>`` from vocab, not hardcode GLM-5 ids.
+_TOOL_CALL = 999843
 _OBSERVATION = 154829
 
 
@@ -119,3 +120,43 @@ def test_streaming_end_token_id_from_delegated_parser():
     )
     assert result is not None
     assert result.content == delta
+
+
+def test_tool_call_token_id_read_from_vocab_not_hardcoded():
+    """Routing uses vocab['<tool_call>'], not a fixed model id."""
+    alt_id = 42
+    tok = MagicMock()
+    tok.get_vocab = MagicMock(
+        return_value={
+            "<think>": _THINK_START,
+            "</think>": _THINK_END,
+            "<tool_call>": alt_id,
+            "<|observation|>": _OBSERVATION,
+        }
+    )
+    parser = GLMReasoningParser(tok)
+    assert parser._tool_call_token_id == alt_id
+    delta = "x"
+    result = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[_THINK_END],
+        current_token_ids=[_THINK_END, alt_id],
+        delta_token_ids=[alt_id],
+    )
+    assert result is not None
+    assert result.content == delta
+
+
+def test_init_raises_when_tool_call_missing_from_vocab():
+    tok = MagicMock()
+    tok.get_vocab = MagicMock(
+        return_value={
+            "<think>": _THINK_START,
+            "</think>": _THINK_END,
+            "<|observation|>": _OBSERVATION,
+        }
+    )
+    with pytest.raises(RuntimeError, match="could not locate"):
+        GLMReasoningParser(tok)
