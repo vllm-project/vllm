@@ -184,6 +184,25 @@ def test_normalize_gemma4_mlp_key_from_real_trainer_output():
     )
 
 
+def test_normalize_keeps_model_prefix_for_causal_lm_decoder():
+    """Text-only causal LMs (Gemma3ForCausalLM, Qwen2ForCausalLM, ...)
+    keep the top-level `model.` prefix in vLLM's module tree
+    (`model.layers.<N>...`). Stripping it produces `layers.<N>...`,
+    which matches no module, so the adapter loads but silently no-ops
+    at activation. Regression for that exact failure."""
+    for trainer_key, expected in [
+        (
+            "model.layers.0.self_attn.q_proj.lora_A.default.weight",
+            "model.layers.0.self_attn.q_proj.lora_A.weight",
+        ),
+        (
+            "model.layers.5.mlp.down_proj.lora_B.default.weight",
+            "model.layers.5.mlp.down_proj.lora_B.weight",
+        ),
+    ]:
+        assert normalize_lora_key(trainer_key) == expected
+
+
 def test_split_normalizes_peft_default_segment():
     """`.lora_A.default.weight` and `.lora_B.default.weight` collapse
     to vLLM's expected `.lora_A.weight` / `.lora_B.weight`, combined

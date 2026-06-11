@@ -59,10 +59,10 @@ def normalize_lora_key(key: str) -> str:
         vision_tower.encoder.layers.<N>...      (no leading `model.`)
         embed_vision.embedding_projection       (no leading `model.`)
 
-    For decoder-only models (e.g. Qwen3.5), the trainer saves keys under
-    the standard HF `model.layers.<N>...` prefix, which matches vLLM's
-    module tree exactly — vLLM keeps the `model.` prefix for these models.
-    Example:
+    For text-only causal LMs (e.g. Qwen3, Qwen2ForCausalLM,
+    Gemma3ForCausalLM), the trainer saves keys under the standard HF
+    `model.layers.<N>...` prefix, which matches vLLM's module tree
+    exactly — vLLM keeps the `model.` prefix for these models. Example:
 
         model.layers.0.self_attn.q_proj.lora_A.default.weight
         → model.layers.0.self_attn.q_proj.lora_A.weight   (step 2 only)
@@ -73,12 +73,12 @@ def normalize_lora_key(key: str) -> str:
          - `model.language_model.X` → `language_model.model.X`
            (HF has `.language_model.layers`; vLLM has `.language_model.model.layers`.
            Swap them.)
-         - `model.vision_tower.X`, `model.embed_vision.X`, etc.
-           (Gemma4 multimodal sub-modules) → strip leading `model.`
-           because vLLM does not nest these under a top-level `model.`.
-         - `model.layers.X` and other decoder-only keys → leave as-is.
-           vLLM's decoder-only module trees (e.g. Qwen3.5) keep the
-           `model.` prefix, so stripping it would break key matching.
+         - `model.layers.X` → `model.layers.X` (unchanged)
+           (Text-only causal LMs keep the top-level `model.` in vLLM's
+           tree; stripping it makes the adapter silently no-op.)
+         - `model.X` (any other `model.` prefix) → `X`
+           (The multimodal wrapper's vision_tower / embed_vision / ...
+           subtrees sit at the top level in vLLM without `model.`.)
 
       2. PEFT PeftModel adapter-name segment:
          - `.lora_A.default.weight` → `.lora_A.weight`
@@ -94,9 +94,16 @@ def normalize_lora_key(key: str) -> str:
         # vLLM has `.language_model.model.layers`.
         key = "language_model.model." + key[len("model.language_model."):]
     elif key.startswith("model.layers."):
-        # Qwen3.5: trainer saves under `model.layers.*` but this vLLM
-        # build wraps the decoder under `language_model.model.layers.*`.
-        key = "language_model.model." + key[len("model."):]
+        # Text-only causal LMs (Gemma3ForCausalLM, Qwen2ForCausalLM, ...)
+        # keep the top-level `model.` prefix in vLLM's module tree — their
+        # decoder is `model.layers.<N>...`. Do NOT strip it: stripping
+        # yields `layers.<N>...`, which matches no module, so the adapter
+        # loads but silently no-ops at activation (every layer hits the
+        # "No LoRA weights found ... skipping" branch in
+        # LoRAModelManager.activate_adapter). Only the multimodal wrapper's
+        # sibling subtrees (vision_tower, embed_vision, ...) live at the top
+        # level without `model.` and need the prefix removed below.
+        pass
     elif key.startswith("model."):
         # Gemma4 multimodal sub-modules (vision_tower, embed_vision, …):
         # vLLM exposes these without the top-level `model.` wrapper.
