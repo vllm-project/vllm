@@ -87,6 +87,14 @@ from .utils import request_memory
 
 logger = init_logger(__name__)
 
+
+def _reset_offloader_after_weight_wake(tags: list[str] | None) -> None:
+    if tags is None or "weights" in tags:
+        from vllm.model_executor.offloader.base import get_offloader
+
+        get_offloader().reset_runtime_state()
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -227,6 +235,7 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self._get_sleep_mode_backend().resume(tags)
+        _reset_offloader_after_weight_wake(tags)
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags

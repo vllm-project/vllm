@@ -10,6 +10,12 @@ from pydantic import Field, model_validator
 from vllm.config.utils import config
 
 OffloadBackend = Literal["auto", "uva", "prefetch"]
+PrefetchOffloadSelector = Literal[
+    "routed_experts",
+    "shared_experts",
+    "dense_mlp",
+    "attention",
+]
 
 
 @config
@@ -73,6 +79,19 @@ class PrefetchOffloadConfig:
     parameters of each offloaded layer are offloaded.
     Uses segment matching: "w13_weight" matches "mlp.experts.w13_weight"
     but not "mlp.experts.w13_weight_scale".
+    """
+
+    offload_selectors: set[PrefetchOffloadSelector] = Field(default_factory=set)
+    """Semantic selectors for prefetch offloading.
+    Supported selectors:
+    - "routed_experts": routed MoE expert weights only
+    - "shared_experts": shared-expert weights only
+    - "dense_mlp": dense MLP core weights only
+    - "attention": attention projection weights only
+
+    When empty, selector-based filtering is disabled.
+    When used together with `offload_params`, the selected parameter sets are
+    unioned.
     """
 
 

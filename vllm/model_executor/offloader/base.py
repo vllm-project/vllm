@@ -6,6 +6,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Generator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch.nn as nn
@@ -76,6 +77,11 @@ class BaseOffloader(ABC):
         """
         return
 
+    @property
+    def static_runtime_buffer_bytes(self) -> int:
+        """GPU memory reserved by static runtime buffers."""
+        return 0
+
     def sync_prev_onload(self) -> None:  # noqa: B027
         """Sync previous onload operations. Override in subclasses."""
         pass
@@ -84,12 +90,37 @@ class BaseOffloader(ABC):
         """Join streams after forward. Override in subclasses."""
         pass
 
+    def begin_forward_stats(self) -> None:  # noqa: B027
+        """Start optional per-forward instrumentation."""
+        pass
+
+    def end_forward_stats(self) -> None:  # noqa: B027
+        """Flush optional per-forward instrumentation."""
+        pass
+
+    @contextmanager
+    def record_forward_stats(self) -> Generator[None, None, None]:
+        """Record optional transfer stats for a single model forward."""
+        self.begin_forward_stats()
+        try:
+            yield
+        finally:
+            self.end_forward_stats()
+
     def _wait_for_layer(self, layer_idx: int) -> None:  # noqa: B027
         """Wait for layer prefetch. Override in subclasses."""
         pass
 
-    def _start_prefetch(self, layer_idx: int) -> None:  # noqa: B027
+    def _start_prefetch(  # noqa: B027
+        self,
+        layer_idx: int,
+        is_tail_prefetch: bool = False,
+    ) -> None:
         """Start layer prefetch. Override in subclasses."""
+        pass
+
+    def reset_runtime_state(self) -> None:  # noqa: B027
+        """Reset transient runtime state after lifecycle transitions."""
         pass
 
 
@@ -151,6 +182,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             num_in_group=prefetch.offload_num_in_group,
             prefetch_step=prefetch.offload_prefetch_step,
             offload_params=prefetch.offload_params,
+            offload_selectors=prefetch.offload_selectors,
             mode="cpu",
         )
     elif backend == "uva":

@@ -40,6 +40,10 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _reset_offloader_for_cudagraph_capture() -> None:
+    get_offloader().reset_runtime_state()
+
+
 class AttentionState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
@@ -346,6 +350,7 @@ class CudaGraphManager:
                         graph = torch.cuda.CUDAGraph()
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
+                        _reset_offloader_for_cudagraph_capture()
                         get_offloader().sync_prev_onload()
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)

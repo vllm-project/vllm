@@ -2511,6 +2511,21 @@ class VllmConfig:
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_prefetch_offload_eplb(self) -> "VllmConfig":
+        if self.parallel_config is None or self.offload_config is None:
+            return self
+        prefetch_active = (
+            self.offload_config.offload_backend == "prefetch"
+            or self.offload_config.prefetch.offload_group_size > 0
+        )
+        if self.parallel_config.enable_eplb and prefetch_active:
+            raise ValueError(
+                "Prefetch weight offloading does not support EPLB yet. "
+                "Disable enable_eplb or disable prefetch weight offloading."
+            )
+        return self
+
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None

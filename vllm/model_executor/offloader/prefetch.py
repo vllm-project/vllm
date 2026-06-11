@@ -9,6 +9,7 @@ CUDA graph compatibility. Events allow the copy stream to join CUDA
 graph captures, ensuring H2D copies are properly captured.
 """
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -19,8 +20,37 @@ import torch.nn as nn
 
 # Import prefetch_ops to register custom ops at module load time
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
+from vllm.config.offload import PrefetchOffloadSelector
 from vllm.logger import init_logger
+from vllm.model_executor.offloader import prefetch_offloader_ext as ext
 from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
+from vllm.model_executor.offloader.planner import OffloadUnit, should_offload_module
+from vllm.model_executor.offloader.prefetch_diagnostics import (
+    PrefetchScheduleRow,  # noqa: F401  (re-exported)
+    PrefetchTransferStats,
+    log_prefetch_offload_plan,
+    log_prefetch_schedule,
+)
+from vllm.model_executor.offloader.prefetch_helpers import (
+    maybe_bind_process_to_current_gpu_numa,
+    maybe_retarget_offload_unit,
+    nvtx_range,
+    pick_dependency_tensor,
+    pick_output_dependency_tensor,
+)
+from vllm.model_executor.offloader.prefetch_onload import run_onload_to_static
+from vllm.model_executor.offloader.prefetch_runtime_buffers import (
+    StaticBufferPool,
+    StorageGroupBufferPool,
+    StorageGroupInfo,
+)
+from vllm.model_executor.offloader.prefetch_tail_copy import (
+    TailCopyScheduler,
+    is_wraparound_prefetch,
+)
+from vllm.model_executor.offloader.runtime import PrefetchRuntimeController
+from vllm.model_executor.offloader.selectors import select_module_parameters
+from vllm.model_executor.offloader.slab import SlabLayout
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
@@ -57,73 +87,6 @@ class ParamInfo:
         return numel * get_dtype_size(self.dtype)
 
 
-class StaticBufferPool:
-    """Pre-allocated GPU buffer pool for offloaded parameters.
-
-    Allocates slot_capacity copies of each unique parameter
-    (name, shape, stride, dtype), allowing for double/triple buffering
-    during prefetch.
-
-    Buffer slots are reused circularly: layer N uses slot (N % slot_capacity).
-
-    The key includes parameter name to prevent different parameters within
-    the same layer from sharing buffers. Parameters with the same name
-    across different layers share buffers via the slot mechanism.
-    """
-
-    def __init__(
-        self,
-        param_infos: list[ParamInfo],
-        slot_capacity: int,
-        device: torch.device,
-    ):
-        self.slot_capacity = slot_capacity
-        self.total_bytes = 0
-        self._device = device
-
-        # Group by (shape, stride, dtype) - only allocate unique combinations
-        unique_params: dict[tuple, ParamInfo] = {}
-        for info in param_infos:
-            if info.key not in unique_params:
-                unique_params[info.key] = info
-
-        # Allocate buffers: key -> list of tensors (one per slot)
-        self._buffers: dict[tuple, list[torch.Tensor]] = {}
-        for key, info in unique_params.items():
-            slot_tensors = []
-            for _ in range(slot_capacity):
-                # Use empty_strided to preserve parameter's memory layout
-                buf = torch.empty_strided(
-                    size=info.shape,
-                    stride=info.stride,
-                    dtype=info.dtype,
-                    device=device,
-                )
-                slot_tensors.append(buf)
-                self.total_bytes += info.num_bytes
-            self._buffers[key] = slot_tensors
-
-        logger.debug(
-            "[StaticBufferPool] Allocated %d unique (name, shape, stride, dtype), "
-            "%d slots each, total %.4f GB",
-            len(unique_params),
-            slot_capacity,
-            self.total_bytes / 1e9,
-        )
-
-    def get_buffer(
-        self,
-        name: str,
-        shape: tuple[int, ...],
-        stride: tuple[int, ...],
-        dtype: torch.dtype,
-        slot_idx: int,
-    ) -> torch.Tensor:
-        """Get a static buffer for the given name/shape/stride/dtype/slot."""
-        key = (name, shape, stride, dtype)
-        return self._buffers[key][slot_idx % self.slot_capacity]
-
-
 class PrefetchOffloader(BaseOffloader):
     """Prefetching-based offloader with group-based layer selection.
 
@@ -144,21 +107,33 @@ class PrefetchOffloader(BaseOffloader):
         num_in_group: int,
         prefetch_step: int,
         offload_params: set[str] | None = None,
+        offload_selectors: set[PrefetchOffloadSelector] | None = None,
         mode: str = "cpu",
     ):
+        maybe_bind_process_to_current_gpu_numa()
+
         self.group_size = group_size
         self.num_in_group = num_in_group
         self.prefetch_step = prefetch_step
         self.offload_params = offload_params or set()
+        self.offload_selectors = offload_selectors or set()
         self.mode = mode
 
         # Copy stream for async H2D transfers
         self.copy_stream = torch.cuda.Stream()
+        self.tail_copy_scheduler = TailCopyScheduler(
+            device=torch.accelerator.current_device_index(),
+            copy_stream=self.copy_stream,
+        )
 
-        # Module offloaders and buffer pool (populated in wrap_modules/post_init)
+        # Module offloaders and buffer pools (populated in wrap_modules/post_init)
         self.module_offloaders: list[_ModuleOffloader] = []
+        self.runtime: PrefetchRuntimeController | None = None
         self.buffer_pool: StaticBufferPool | None = None
+        self.storage_group_pool: StorageGroupBufferPool | None = None
         self.total_offloaded_bytes = 0
+        self._static_runtime_buffer_bytes = 0
+        self.transfer_stats = PrefetchTransferStats()
 
     def wrap_modules(
         self,
@@ -169,54 +144,86 @@ class PrefetchOffloader(BaseOffloader):
             "wrap_modules should only be called once"
         )
 
-        all_modules = []
-        offload_modules = []
+        modules: list[nn.Module] = []
+        units: list[OffloadUnit] = []
 
         for module_index, module in enumerate(modules_generator):
-            all_modules.append(module)
+            modules.append(module)
 
             # Select layers to offload based on group pattern
             # Offload last num_in_group layers of each group_size
-            if module_index % self.group_size >= self.group_size - self.num_in_group:
-                if self.offload_params:
-                    whitelist = [
-                        name
-                        for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
-                    ]
-                else:
-                    whitelist = [name for name, _ in module.named_parameters()]
+            if not should_offload_module(
+                module_index,
+                group_size=self.group_size,
+                num_in_group=self.num_in_group,
+            ):
+                continue
 
-                if not whitelist:
-                    continue  # skip layers with no matching params
+            param_names = select_module_parameters(
+                module,
+                selectors=self.offload_selectors,
+                include_names=self.offload_params,
+            )
+            if not param_names:
+                continue  # skip layers with no matching params
 
-                offload_modules.append(module)
-                self.module_offloaders.append(
-                    _ModuleOffloader(
-                        mode=self.mode,
-                        module=module,
-                        copy_stream=self.copy_stream,
-                        whitelist_param_names=whitelist,
-                        layer_idx=len(self.module_offloaders),
-                    )
+            unit_module, unit_param_names = maybe_retarget_offload_unit(
+                module,
+                param_names,
+                selectors=self.offload_selectors,
+                include_names=self.offload_params,
+            )
+            unit = OffloadUnit(
+                module_index=module_index,
+                module=unit_module,
+                param_names=unit_param_names,
+            )
+            units.append(unit)
+            self.module_offloaders.append(
+                _ModuleOffloader(
+                    mode=self.mode,
+                    module=unit.module,
+                    copy_stream=self.copy_stream,
+                    tail_copy_scheduler=self.tail_copy_scheduler,
+                    whitelist_param_names=list(unit.param_names),
+                    layer_idx=len(units) - 1,
+                    transfer_stats=self.transfer_stats,
                 )
+            )
 
-        for index, module in enumerate(offload_modules):
-            self._hook_module_forward(index, module)
+        self.runtime = PrefetchRuntimeController(
+            unit_count=len(units),
+            prefetch_step=self.prefetch_step,
+        )
+        log_prefetch_offload_plan(units)
+        log_prefetch_schedule(units, self.runtime, module_count=len(modules))
 
-        return all_modules
+        for runtime_unit, unit in zip(self.runtime.units, units):
+            self._hook_module_forward(runtime_unit.unit_idx, unit.module)
+
+        return modules
 
     def _hook_module_forward(self, index: int, module: nn.Module):
         """Hook module's forward with torch.compile-compatible sync."""
         original_forward = module.forward
+        assert self.runtime is not None, "Runtime controller not initialized"
+        next_unit = self.runtime.prefetch_after(index)
+        next_unit_idx = None if next_unit is None else next_unit.unit_idx
 
         def forward(*args, **kwargs):
             # Temporarily restore original forward to avoid recursion
             module.forward = original_forward
 
-            # Wait for this layer's prefetch to complete
-            # mutates_args on input_tensor creates data dependency for torch.compile
-            input_tensor = args[0] if args else kwargs.get("hidden_states")
+            # Wait for this layer's prefetch to complete.
+            # mutates_args on the main activation tensor creates the scheduling
+            # dependency for torch.compile. Prefer hidden_states when present;
+            # otherwise pick the first floating-point tensor instead of
+            # blindly using args[0] (which can be metadata like positions).
+            positional_tensors = [arg for arg in args if isinstance(arg, torch.Tensor)]
+            input_tensor = pick_dependency_tensor(
+                positional_tensors,
+                preferred_tensor=kwargs.get("hidden_states"),
+            )
             torch.ops.vllm.wait_prefetch(input_tensor, index)
 
             # No parameter swapping needed - parameters already point to
@@ -225,12 +232,12 @@ class PrefetchOffloader(BaseOffloader):
 
             # Start prefetch for next layer (circular)
             # mutates_args on output_tensor creates ordering dependency
-            next_index = (index + self.prefetch_step) % len(self.module_offloaders)
-            # Handle tuple output (e.g., (hidden_states, residual))
-            if isinstance(output, tuple):
-                torch.ops.vllm.start_prefetch(output[0], next_index)
-            else:
-                torch.ops.vllm.start_prefetch(output, next_index)
+            if next_unit_idx is not None:
+                output_tensor = pick_output_dependency_tensor(output)
+                is_tail_prefetch = is_wraparound_prefetch(index, next_unit_idx)
+                torch.ops.vllm.start_prefetch(
+                    output_tensor, next_unit_idx, is_tail_prefetch
+                )
 
             # No explicit offload needed - static buffers are reused implicitly
 
@@ -251,26 +258,37 @@ class PrefetchOffloader(BaseOffloader):
         1. sync_before_graph_capture() ensures pre-capture work is complete
         2. We can't wait on pre-capture events during capture (isolation error)
         """
-        offloader = self.module_offloaders[layer_idx]
+        with nvtx_range(f"weight_offload.wait unit={layer_idx}"):
+            offloader = self.module_offloaders[layer_idx]
+            assert self.runtime is not None, "Runtime controller not initialized"
 
-        if torch.cuda.is_current_stream_capturing():
-            # During capture, skip wait for pre-capture prefetches.
-            # sync_before_graph_capture() ensures pre-capture work is complete.
-            if not offloader._prefetch_in_capture:
-                return
-            # Event-based wait for in-capture prefetches (graph-compatible)
-            torch.cuda.current_stream().wait_event(offloader._copy_done_event)
-            # Mark that this prefetch has been waited on (joined).
-            offloader._prefetch_in_capture = False
-        else:
-            if offloader._event_valid_for_eager:
-                # Use per-layer event to only wait for THIS layer's copy,
-                # allowing other layers' prefetches to run concurrently.
+            if torch.cuda.is_current_stream_capturing():
+                # During capture, skip wait for pre-capture prefetches.
+                # sync_before_graph_capture() ensures pre-capture work is complete.
+                if not self.runtime.is_pending_in_capture(layer_idx):
+                    return
+                # Event-based wait for in-capture prefetches (graph-compatible)
                 torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+                ext.flush_transfer_timings(self, skip_query=True)
+                # Mark that this prefetch has been waited on (joined).
+                self.runtime.mark_waited(layer_idx)
             else:
-                # Event not usable (unrecorded or recorded during capture).
-                # Fall back to wait_stream to drain all copy_stream work.
-                torch.cuda.current_stream().wait_stream(self.copy_stream)
+                if offloader._event_valid_for_eager:
+                    offloader.wait_until_copy_done_event_recorded()
+                    # Use per-layer event to only wait for THIS layer's copy,
+                    # allowing other layers' prefetches to run concurrently.
+                    ext.record_current_stream_wait(
+                        self,
+                        lambda stream: stream.wait_event(offloader._copy_done_event),
+                    )
+                else:
+                    # Event not usable (unrecorded or recorded during capture).
+                    # Fall back to wait_stream to drain all copy_stream work.
+                    ext.record_current_stream_wait(
+                        self,
+                        lambda stream: stream.wait_stream(self.copy_stream),
+                    )
+                ext.flush_transfer_timings(self)
 
     def sync_prev_onload(self):
         """Sync previous onload operations.
@@ -279,12 +297,36 @@ class PrefetchOffloader(BaseOffloader):
         the compute stream continues. Call this before CUDA graph
         capture/replay or when synchronization is needed.
         """
-        torch.cuda.current_stream().wait_stream(self.copy_stream)
+        for offloader in self.module_offloaders:
+            offloader.wait_until_copy_done_event_recorded()
+        ext.record_current_stream_wait(
+            self, lambda stream: stream.wait_stream(self.copy_stream)
+        )
+        ext.flush_transfer_timings(self)
 
-    def _start_prefetch(self, layer_idx: int):
+    def _start_prefetch(
+        self,
+        layer_idx: int,
+        is_tail_prefetch: bool = False,
+    ):
         """Called by custom op - start async copy to static buffer."""
-        offloader = self.module_offloaders[layer_idx]
-        offloader.start_onload_to_static()
+        with nvtx_range(
+            f"weight_offload.start_prefetch unit={layer_idx} "
+            f"tail={int(is_tail_prefetch)}"
+        ):
+            offloader = self.module_offloaders[layer_idx]
+            assert self.runtime is not None, "Runtime controller not initialized"
+            previous_owner = self.runtime.begin_prefetch(layer_idx)
+            if previous_owner is not None:
+                previous = self.module_offloaders[previous_owner.unit_idx]
+                previous.ensure_cpu_master_freshness()
+                previous.release_runtime_buffer_tracking()
+            self.runtime.mark_prefetch_started(
+                layer_idx,
+                in_capture=offloader.start_onload_to_static(
+                    allow_paced_chunking=is_tail_prefetch,
+                ),
+            )
 
     def join_after_forward(self):
         """Join copy_stream after model forward completes.
@@ -293,19 +335,21 @@ class PrefetchOffloader(BaseOffloader):
         ends. This ensures copy_stream is rejoined for any prefetches started
         during the forward pass.
 
-        We join ALL layers that have _prefetch_in_capture=True, meaning their
+        We join ALL layers that have capture-started prefetches, meaning their
         prefetch was started during capture but not yet waited on (joined).
         This handles both full and piecewise cudagraph modes correctly:
-        - Full mode: joins layers 0..prefetch_step-1 (prefetched by last layers)
+        - Full mode: joins any wraparound prefetches started by later layers
         - Piecewise mode: joins only layers prefetched by THIS subgraph's layers
         """
-        if not self.module_offloaders:
+        if not self.module_offloaders or self.runtime is None:
             return
         # Join all layers whose prefetch was started in capture but not waited on
-        for offloader in self.module_offloaders:
-            if offloader._prefetch_in_capture:
-                torch.cuda.current_stream().wait_event(offloader._copy_done_event)
-                offloader._prefetch_in_capture = False
+        for runtime_unit in self.runtime.pending_capture_prefetches():
+            torch.cuda.current_stream().wait_event(
+                self.module_offloaders[runtime_unit.unit_idx]._copy_done_event
+            )
+            ext.flush_transfer_timings(self, skip_query=True)
+            self.runtime.mark_waited(runtime_unit.unit_idx)
 
     def post_init(self):
         """Allocate static buffer pool and start initial prefetches.
@@ -314,6 +358,7 @@ class PrefetchOffloader(BaseOffloader):
         (in _CpuParamOffloader.__init__), so GPU memory is available for the
         static buffer pool.
         """
+        self._static_runtime_buffer_bytes = 0
         # Sync CPU storage with current param.data BEFORE collecting param info.
         # This is needed because process_weights_after_loading may have:
         # 1. Transformed weights (quantization, transpose, etc.)
@@ -322,47 +367,50 @@ class PrefetchOffloader(BaseOffloader):
         for offloader in self.module_offloaders:
             offloader.sync_cpu_storage()
 
-        # Collect parameter info (now using synced CPU storage)
-        param_infos: list[ParamInfo] = []
-        device: torch.device | None = None
-
-        for offloader in self.module_offloaders:
-            param_infos.extend(offloader.get_param_infos())
-            if device is None:
-                device = offloader.device
-
-        if device is None:
-            # No modules to offload
-            return
-
-        # Allocate static buffer pool
-        self.buffer_pool = StaticBufferPool(
-            param_infos=param_infos,
-            slot_capacity=self.prefetch_step,
-            device=device,
+        module_param_infos, module_storage_group_infos, device = (
+            ext.collect_module_buffer_infos(self.module_offloaders)
         )
+        if device is None:
+            return  # No modules to offload
 
-        # Assign buffer slots and point parameters to GPU buffers
-        for idx, offloader in enumerate(self.module_offloaders):
-            slot_idx = idx % self.prefetch_step
-            offloader.assign_buffer_slot(self.buffer_pool, slot_idx)
+        runtime_buffer_bytes = ext.allocate_runtime_buffers(
+            self, device, module_param_infos, module_storage_group_infos
+        )
 
         # Collect offloaded bytes
         for offloader in self.module_offloaders:
             offloader.post_init()
             self.total_offloaded_bytes += offloader.offloaded_bytes
 
+        self._static_runtime_buffer_bytes = runtime_buffer_bytes
         logger.info_once(
             f"[PrefetchOffloader] Initialized {len(self.module_offloaders)} modules. "
             f"Total GPU memory saved: {self.total_offloaded_bytes / 1e9:.4f} GB, "
-            f"Static buffer pool: {self.buffer_pool.total_bytes / 1e9:.4f} GB "
+            f"Static runtime buffers: "
+            f"{self.static_runtime_buffer_bytes / 1e9:.4f} GB "
             f"(group_size={self.group_size}, num_in_group={self.num_in_group}, "
             f"prefetch_step={self.prefetch_step}, mode={self.mode})"
         )
 
-        # Start initial prefetches
-        for i in range(min(self.prefetch_step, len(self.module_offloaders))):
-            self.module_offloaders[i].start_onload_to_static()
+        self._start_initial_prefetches()
+
+    @property
+    def static_runtime_buffer_bytes(self) -> int:
+        return self._static_runtime_buffer_bytes
+
+    # ---- Lifecycle / instrumentation: thin wrappers around prefetch_offloader_ext ----
+
+    def _start_initial_prefetches(self) -> None:
+        ext.start_initial_prefetches(self)
+
+    def reset_runtime_state(self) -> None:
+        ext.reset_runtime_state(self)
+
+    def begin_forward_stats(self) -> None:
+        ext.begin_forward_stats(self)
+
+    def end_forward_stats(self) -> None:
+        ext.end_forward_stats(self)
 
 
 class _ModuleOffloader:
@@ -376,15 +424,19 @@ class _ModuleOffloader:
         mode: str,
         module: nn.Module,
         copy_stream: torch.cuda.Stream,
+        tail_copy_scheduler: TailCopyScheduler,
         whitelist_param_names: list[str],
         layer_idx: int,
+        transfer_stats: PrefetchTransferStats,
     ):
         self.mode = mode
         self.module = module
         self.device = next(module.parameters()).device
         self.copy_stream = copy_stream
+        self._tail_copy_scheduler = tail_copy_scheduler
         self.layer_idx = layer_idx
         self.offloaded_bytes = 0
+        self.transfer_stats = transfer_stats
 
         # Event to signal when H2D copy to static buffer is complete.
         # Used for per-layer synchronization (both eager and capture modes).
@@ -395,10 +447,9 @@ class _ModuleOffloader:
         # cudagraph capture (events become invalid after capture ends).
         # In these cases we fall back to wait_stream.
         self._event_valid_for_eager = False
-
-        # Track if last prefetch was started during CUDA graph capture.
-        # Used to skip wait_event during capture for pre-capture prefetches.
-        self._prefetch_in_capture = False
+        self._copy_done_event_recorded = threading.Event()
+        self._copy_done_event_recorded.set()
+        self._copy_thread_error: Exception | None = None
 
         assert self.device != torch.device("cpu"), (
             "Module parameters should not already be on CPU "
@@ -408,6 +459,18 @@ class _ModuleOffloader:
         # Buffer pool and slot (assigned in assign_buffer_slot)
         self._buffer_pool: StaticBufferPool | None = None
         self._buffer_slot_idx: int = 0
+        # Three-tier runtime buffer state, finalized by _refresh_runtime_buffer_strategy
+        self._slab_param_names: tuple[str, ...] = ()
+        self._slab_layout: SlabLayout | None = None
+        self._cpu_slab: torch.Tensor | None = None
+        self._gpu_slab: torch.Tensor | None = None
+        self._storage_group_infos: tuple[StorageGroupInfo, ...] = ()
+        self._storage_group_buffers: list[torch.Tensor] = []
+        self._direct_param_names: tuple[str, ...] = ()
+        self._direct_buffers: dict[str, torch.Tensor] = {}
+        self._direct_buffer_bytes = 0
+        self._fallback_reasons: tuple[str, ...] = ()
+        self._use_slab_copy = True
 
         param_dict = dict(self.module.named_parameters())
         assert all(name in param_dict for name in whitelist_param_names), (
@@ -457,15 +520,38 @@ class _ModuleOffloader:
             for name in deleted:
                 del self._param_offloaders[name]
 
+        ext.refresh_runtime_buffer_strategy(self)
+
+    @property
+    def uses_slab_buffers(self) -> bool:
+        return bool(self._slab_param_names)
+
+    @property
+    def uses_storage_group_fallback(self) -> bool:
+        return bool(self._storage_group_infos)
+
+    @property
+    def uses_direct_fallback(self) -> bool:
+        return bool(self._direct_param_names)
+
+    @property
+    def storage_group_infos(self) -> tuple[StorageGroupInfo, ...]:
+        return self._storage_group_infos
+
+    @property
+    def direct_buffer_bytes(self) -> int:
+        return self._direct_buffer_bytes
+
     def get_param_infos(self) -> list[ParamInfo]:
         """Get parameter metadata for buffer pool allocation.
 
         Note: sync_cpu_storage() must be called before this method to ensure
         _cpu_storage reflects the final processed weights (after quantization).
         """
-        infos = []
-        for name, offloader in self._param_offloaders.items():
-            cpu_storage = offloader._cpu_storage
+        assert self.uses_slab_buffers, "No slab-backed parameters for this module"
+        infos: list[ParamInfo] = []
+        for name in self._slab_param_names:
+            cpu_storage = self._param_offloaders[name]._cpu_storage
             assert cpu_storage is not None, "CPU storage not initialized"
             infos.append(
                 ParamInfo(
@@ -477,30 +563,24 @@ class _ModuleOffloader:
             )
         return infos
 
-    def assign_buffer_slot(self, pool: StaticBufferPool, slot_idx: int):
+    def assign_buffer_slot(
+        self,
+        pool: StaticBufferPool | None,
+        storage_group_pool: StorageGroupBufferPool | None,
+        slot_idx: int,
+    ):
         """Assign this module to a buffer slot in the pool.
 
         Also assigns static GPU buffers to each parameter offloader,
         which moves the parameter data to point to the GPU buffer.
         """
-        self._buffer_pool = pool
-        self._buffer_slot_idx = slot_idx
+        ext.assign_module_buffer_slot(self, pool, storage_group_pool, slot_idx)
 
-        # Assign static buffers to parameters
-        # Use CPU storage shape/stride/dtype since param.data is now empty
-        for name, offloader in self._param_offloaders.items():
-            cpu_storage = offloader._cpu_storage
-            assert cpu_storage is not None, "CPU storage not initialized"
-            buffer = pool.get_buffer(
-                name=name,
-                shape=tuple(cpu_storage.shape),
-                stride=tuple(cpu_storage.stride()),
-                dtype=cpu_storage.dtype,
-                slot_idx=slot_idx,
-            )
-            offloader.assign_static_buffer(buffer)
-
-    def start_onload_to_static(self):
+    def start_onload_to_static(
+        self,
+        *,
+        allow_paced_chunking: bool = False,
+    ) -> bool:
         """Start async copy from CPU storage to GPU buffer.
 
         Uses event-based forking to join copy_stream to CUDA graph capture.
@@ -511,36 +591,28 @@ class _ModuleOffloader:
         async). Without this sync, we could overwrite the buffer while it's
         being read.
         """
-        assert self._buffer_pool is not None, "Buffer pool not assigned"
+        return run_onload_to_static(self, allow_paced_chunking=allow_paced_chunking)
 
-        # Track if this prefetch is being captured (for _wait_for_layer logic)
-        self._prefetch_in_capture = torch.cuda.is_current_stream_capturing()
+    def wait_until_copy_done_event_recorded(self) -> None:
+        self._copy_done_event_recorded.wait()
+        if self._copy_thread_error is not None:
+            raise RuntimeError(
+                "Paced prefetch H2D copy thread failed."
+            ) from self._copy_thread_error
 
-        # Fork: record event on compute stream, copy_stream waits on it
-        # This joins copy_stream to any active CUDA graph capture
-        fork_event = torch.cuda.Event()
-        torch.cuda.current_stream().record_event(fork_event)
-        self.copy_stream.wait_event(fork_event)
+    def ensure_cpu_master_freshness(self) -> None:
+        for offloader in self._param_offloaders.values():
+            offloader.ensure_cpu_master_freshness()
 
-        with torch.cuda.stream(self.copy_stream):
-            for name, offloader in self._param_offloaders.items():
-                cpu_storage = offloader._cpu_storage
-                gpu_buffer = offloader._gpu_buffer
-                assert cpu_storage is not None, "CPU storage not initialized"
-                assert gpu_buffer is not None, "GPU buffer not assigned"
-                assert not should_pin_memory() or cpu_storage.is_pinned(), (
-                    f"CPU storage for {name} is not pinned! "
-                    "non_blocking=True H2D copy from non-pinned memory "
-                    "causes stream synchronization that breaks "
-                    "event-based fork synchronization."
-                )
-                gpu_buffer.copy_(cpu_storage, non_blocking=True)
+    def release_runtime_buffer_tracking(self) -> None:
+        for offloader in self._param_offloaders.values():
+            offloader.release_runtime_buffer_tracking()
 
-        # Record completion event for _wait_for_layer to use
-        self._copy_done_event.record(self.copy_stream)
-        # Event is only valid for eager wait_event if recorded outside capture.
-        # Events recorded during capture become invalid after capture ends.
-        self._event_valid_for_eager = not torch.cuda.is_current_stream_capturing()
+    def reset_runtime_tracking(self) -> None:
+        """Clear transient runtime metadata before restarting prefetch."""
+        self._event_valid_for_eager = False
+        self.wait_until_copy_done_event_recorded()
+        self.release_runtime_buffer_tracking()
 
 
 class _BaseParamOffloader(ABC):
@@ -582,6 +654,23 @@ class _BaseParamOffloader(ABC):
         """Initialize offloading (move parameter to storage)."""
         return
 
+    # ---- CPU master tracking hooks (overridden by _CpuParamOffloader) ----
+
+    def mark_cpu_master_synced(self) -> None:
+        return
+
+    def ensure_cpu_master_freshness(self) -> None:
+        return
+
+    def release_runtime_buffer_tracking(self) -> None:
+        return
+
+    def mark_cpu_master_stale(self, reason: str) -> None:
+        return
+
+    def sync_cpu_master_from_runtime(self) -> None:
+        return
+
     @abstractmethod
     def sync_cpu_storage(self) -> None:
         """Sync CPU storage with current param.data.
@@ -612,6 +701,10 @@ class _CpuParamOffloader(_BaseParamOffloader):
         super().__init__(module, param_name)
         self._cpu_storage: torch.Tensor | None = None
         self._gpu_buffer: torch.Tensor | None = None  # Store reference to GPU buffer
+        self._cpu_master_stale: bool = False
+        self._cpu_master_stale_reason: str | None = None
+        self._expected_gpu_buffer_version: int | None = None
+        self._expected_gpu_buffer_ptr: int | None = None
         # Set to True if the underlying nn.Parameter was deleted by
         # process_weights_after_loading (e.g. transient KV-cache scale params
         # such as k_scale/v_scale created by BaseKVCacheMethod.create_weights
@@ -666,7 +759,24 @@ class _CpuParamOffloader(_BaseParamOffloader):
         param = self._param
 
         if param.data.device.type == "cpu":
-            if should_pin_memory() and not param.data.is_pinned():
+            if (
+                self._gpu_buffer is not None
+                and param.data.data_ptr() == self._gpu_buffer.data_ptr()
+            ):
+                # The runtime parameter still aliases the GPU buffer; refresh
+                # CPU master in place so we do not overwrite live GPU memory.
+                assert self._cpu_storage is not None
+                if self._cpu_storage.data_ptr() == param.data.data_ptr():
+                    self._cpu_storage = torch.empty_strided(
+                        size=param.data.size(),
+                        stride=param.data.stride(),
+                        dtype=param.data.dtype,
+                        layout=param.data.layout,
+                        device="cpu",
+                        pin_memory=should_pin_memory(),
+                    )
+                self._cpu_storage.copy_(param.data)
+            elif should_pin_memory() and not param.data.is_pinned():
                 pinned = torch.empty_strided(
                     size=param.data.size(),
                     stride=param.data.stride(),
@@ -711,6 +821,10 @@ class _CpuParamOffloader(_BaseParamOffloader):
 
         # Store reference to GPU buffer for use in start_onload
         self._gpu_buffer = gpu_buffer
+        self._cpu_master_stale = False
+        self._cpu_master_stale_reason = None
+        self._expected_gpu_buffer_version = None
+        self._expected_gpu_buffer_ptr = None
 
         # Point parameter to static GPU buffer - this is what torch.compile sees
         param.data = gpu_buffer
@@ -743,3 +857,55 @@ class _CpuParamOffloader(_BaseParamOffloader):
     def post_init(self):
         """No-op: offloading done in offload_to_cpu/assign_static_buffer."""
         pass
+
+    # ---- CPU master tracking ----
+
+    def mark_cpu_master_synced(self) -> None:
+        if self._gpu_buffer is None:
+            return
+        self._cpu_master_stale = False
+        self._cpu_master_stale_reason = None
+        self._expected_gpu_buffer_version = self._gpu_buffer._version
+        self._expected_gpu_buffer_ptr = self._gpu_buffer.data_ptr()
+
+    def mark_cpu_master_stale(self, reason: str) -> None:
+        self._cpu_master_stale = True
+        self._cpu_master_stale_reason = reason
+
+    def sync_cpu_master_from_runtime(self) -> None:
+        self._update_cpu_storage_from_param()
+        self.mark_cpu_master_synced()
+
+    def release_runtime_buffer_tracking(self) -> None:
+        self._expected_gpu_buffer_version = None
+        self._expected_gpu_buffer_ptr = None
+
+    def ensure_cpu_master_freshness(self) -> None:
+        if self._cpu_master_stale:
+            reason = self._cpu_master_stale_reason or "unknown reason"
+            raise RuntimeError(
+                f"Offloaded parameter {self._param_name} CPU master copy is "
+                f"stale: {reason}."
+            )
+        if self._gpu_buffer is None or self._expected_gpu_buffer_version is None:
+            return
+
+        param = self._param
+        if param.data.data_ptr() != self._expected_gpu_buffer_ptr:
+            self._cpu_master_stale = True
+            self._cpu_master_stale_reason = (
+                "runtime parameter no longer points to the managed runtime buffer"
+            )
+            raise RuntimeError(
+                f"Offloaded parameter {self._param_name} no longer points to the "
+                "managed runtime buffer; CPU master copy is stale."
+            )
+        if self._gpu_buffer._version != self._expected_gpu_buffer_version:
+            self._cpu_master_stale = True
+            self._cpu_master_stale_reason = (
+                "runtime parameter was mutated after CPU master synchronization"
+            )
+            raise RuntimeError(
+                f"Offloaded parameter {self._param_name} was mutated after CPU "
+                "master synchronization; CPU master copy is stale."
+            )
