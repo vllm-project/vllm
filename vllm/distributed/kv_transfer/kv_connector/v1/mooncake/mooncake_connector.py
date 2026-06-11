@@ -663,8 +663,6 @@ class MooncakeXferMetadata(
     registered_alias_group_indices: list[list[list[int]]] = msgspec.field(
         default_factory=list
     )
-    start_layer: int = 0
-    end_layer: int = 0
     remote_pp_size: int = 1
     remote_pp_rank: int = 0
 
@@ -1870,12 +1868,6 @@ class MooncakeConnectorWorker:
         self.registered_layer_index_aliases = []
         self.registered_group_indices = []
         self.registered_alias_group_indices = []
-        (
-            self.start_layer,
-            self.end_layer,
-        ) = self.model_config.get_layers_start_end_indices(
-            self.vllm_config.parallel_config
-        )
         total_num_hidden_layers = self.model_config.get_total_num_hidden_layers()
         layer_group_index_map = self._build_layer_group_index_map()
 
@@ -2089,8 +2081,6 @@ class MooncakeConnectorWorker:
             registered_layer_index_aliases=self.registered_layer_index_aliases,
             registered_group_indices=self.registered_group_indices,
             registered_alias_group_indices=self.registered_alias_group_indices,
-            start_layer=self.start_layer,
-            end_layer=self.end_layer,
             remote_pp_size=self.pp_size,
             remote_pp_rank=self.pp_rank,
         )
