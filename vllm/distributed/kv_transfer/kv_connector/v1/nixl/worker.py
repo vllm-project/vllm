@@ -951,8 +951,6 @@ class NixlConnectorWorker:
                     )
                 else:
                     self.block_len_per_layer.append(physical_page_size)
-                # MLA regions transfer as REPLICATE (whole block, offset 0);
-                # full-attn regions head-SPLIT across TP.
                 is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
                 self._region_is_mla.append(is_mla_region)
 
