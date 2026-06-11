@@ -71,9 +71,9 @@ GEMMA3_CONFIG = GGUFMMTestConfig(
 # Pan-and-scan multimodal - uses unquantized BF16 GGUF
 GEMMA3_CONFIG_PAN_AND_SCAN = GGUFMMTestConfig(
     original_model="google/gemma-3-4b-it",
-    gguf_repo="unsloth/gemma-3-4b-it-GGUF",
-    gguf_backbone="gemma-3-4b-it-BF16.gguf",
-    gguf_mmproj="mmproj-BF16.gguf",
+    gguf_repo="google/gemma-3-4b-it-qat-q4_0-gguf",
+    gguf_backbone="gemma-3-4b-it-q4_0.gguf",
+    gguf_mmproj="mmproj-model-f16-4B.gguf",
     prompt=_GEMMA3_PROMPTS,
     image_names=_GEMMA3_IMAGE_NAMES,
     max_model_len=4096,
