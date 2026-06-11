@@ -2039,7 +2039,7 @@ class VllmConfig:
             # V2 EagleSpeculator supports parallel_drafting for eagle/eagle3 (PEagle).
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("eagle", "eagle3, dflash")
+                and speculative_config.method not in ("eagle", "eagle3", "dflash")
             ):
                 unsupported.append(
                     f"parallel drafting for speculative method "
