@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from json import JSONDecodeError, JSONDecoder
 from typing import Any
 
 from openai.types.chat import (
@@ -27,6 +29,54 @@ from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def normalize_function_call_arguments(arguments: Any) -> str:
+    """Normalize Responses API function_call.arguments for chat preprocessing.
+
+    Codex may send arguments as a JSON object, a valid JSON string, or a
+    string with trailing/consecutive JSON ("Extra data" for json.loads).
+    Chat preprocessing expects a single JSON object encoded as a string.
+    """
+    if arguments is None or arguments == "":
+        return "{}"
+    if isinstance(arguments, (dict, list)):
+        return json.dumps(arguments, ensure_ascii=False)
+    if not isinstance(arguments, str):
+        logger.warning(
+            "Unexpected function_call arguments type %s; using empty object.",
+            type(arguments).__name__,
+        )
+        return "{}"
+
+    content = arguments.strip()
+    if not content:
+        return "{}"
+
+    try:
+        json.loads(content)
+        return content
+    except JSONDecodeError as e:
+        if "Extra data" not in e.msg:
+            logger.warning(
+                "Invalid function_call arguments JSON: %s. Using empty object.",
+                e,
+            )
+            return "{}"
+        try:
+            parsed, _ = JSONDecoder().raw_decode(content)
+        except JSONDecodeError:
+            logger.warning(
+                "Failed to parse function_call arguments with extra data: %s. "
+                "Using empty object.",
+                e,
+            )
+            return "{}"
+        logger.warning(
+            "function_call arguments contained extra JSON data; "
+            "using the first JSON value only."
+        )
+        return json.dumps(parsed, ensure_ascii=False)
 
 
 def should_continue_final_message(
@@ -94,8 +144,10 @@ def construct_input_messages(
 
     # Prepend the conversation history.
     if prev_msg is not None:
-        # Add the previous messages.
-        messages.extend(prev_msg)
+        # Filter out system messages from previous conversation -- per the
+        # OpenAI spec, instructions should NOT carry over across responses.
+        # The current request's instructions (if any) were already added above.
+        messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
         # Add the previous output.
         for output_item in prev_response_output:
@@ -145,7 +197,7 @@ def _maybe_combine_reasoning_and_tool_call(
             id=item.call_id,
             function=FunctionCallTool(
                 name=item.name,
-                arguments=item.arguments,
+                arguments=normalize_function_call_arguments(item.arguments),
             ),
             type="function",
         )
@@ -172,23 +224,41 @@ def construct_chat_messages_with_tool_call(
     return messages
 
 
+def _construct_function_call_assistant_message(
+    *,
+    call_id: str,
+    name: str,
+    arguments: Any,
+) -> ChatCompletionAssistantMessageParam:
+    return ChatCompletionAssistantMessageParam(
+        role="assistant",
+        tool_calls=[
+            ChatCompletionMessageToolCallParam(
+                id=call_id,
+                function=FunctionCallTool(
+                    name=name,
+                    arguments=normalize_function_call_arguments(arguments),
+                ),
+                type="function",
+            )
+        ],
+    )
+
+
 def _construct_single_message_from_response_item(
     item: ResponseInputOutputItem,
 ) -> ChatCompletionMessageParam:
     if isinstance(item, ResponseFunctionToolCall):
-        # Append the function call as a tool call.
-        return ChatCompletionAssistantMessageParam(
-            role="assistant",
-            tool_calls=[
-                ChatCompletionMessageToolCallParam(
-                    id=item.call_id,
-                    function=FunctionCallTool(
-                        name=item.name,
-                        arguments=item.arguments,
-                    ),
-                    type="function",
-                )
-            ],
+        return _construct_function_call_assistant_message(
+            call_id=item.call_id,
+            name=item.name,
+            arguments=item.arguments,
+        )
+    elif isinstance(item, dict) and item.get("type") == "function_call":
+        return _construct_function_call_assistant_message(
+            call_id=item.get("call_id", ""),
+            name=item.get("name", ""),
+            arguments=item.get("arguments"),
         )
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""
@@ -209,9 +279,12 @@ def _construct_single_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
+        content_text = ""
+        if item.content:
+            content_text = item.content[0].text or ""
         return {
             "role": "assistant",
-            "content": item.content[0].text,
+            "content": content_text,
         }
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
@@ -262,7 +335,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
-    if tools is None or (tool_choice == "none"):
+    if not tools or (tool_choice == "none"):
         tool_dicts = None
     else:
         tool_dicts = [

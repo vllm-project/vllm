@@ -6,6 +6,7 @@ import json
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_message import ResponseOutputMessage
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -153,6 +154,52 @@ def test_invalid_function_call_fallback():
     with pytest.raises(ValueError):
         # Pydantic should raise a validation error for the invalid structure
         ResponsesRequest(**request_data)
+
+
+def test_function_call_with_dict_arguments():
+    """Codex may send arguments as a JSON object instead of a string."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "fc_dict",
+                "name": "shell",
+                "arguments": {"command": "ls", "workdir": "/tmp"},
+            }
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    assert len(request.input) == 1
+    assert isinstance(request.input[0], ResponseFunctionToolCall)
+    import json
+
+    assert json.loads(request.input[0].arguments) == {
+        "command": "ls",
+        "workdir": "/tmp",
+    }
+
+
+def test_function_call_with_extra_data_arguments():
+    """History replay may contain concatenated JSON in arguments."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "fc_extra",
+                "name": "shell",
+                "arguments": '{"command":"ls"}{"command":"pwd"}',
+            }
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+    import json
+
+    assert json.loads(request.input[0].arguments) == {"command": "ls"}
 
 
 def test_string_input_not_affected():
@@ -328,3 +375,83 @@ def test_validator_handles_empty_iterator():
 
     request = ResponsesRequest(**mock_data)
     assert request.input == []
+
+
+def test_assistant_message_in_multi_turn_conversation():
+    """Test that assistant messages in input are parsed to ResponseOutputMessage.
+
+    Codex sends prior assistant turns in multi-turn conversations without id,
+    status, or annotations. Without explicit parsing, Pydantic may mis-match
+    the item to ResponseCustomToolCallOutputItem and reject the request.
+    """
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Hello! How can I help you?",
+                    }
+                ],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Tell me a joke"}],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    assert len(request.input) == 3
+    assert request.input[0]["type"] == "message"
+    assert isinstance(request.input[1], ResponseOutputMessage)
+    assert request.input[1].role == "assistant"
+    assert request.input[1].status == "completed"
+    assert request.input[1].id.startswith("msg_")
+    assert request.input[1].content[0].annotations == []
+    assert request.input[2]["type"] == "message"
+
+
+def test_assistant_message_with_string_content():
+    """Assistant messages may use a plain string for content."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "Hello from string content",
+            },
+        ],
+    }
+    request = ResponsesRequest(**request_data)
+    assert isinstance(request.input[0], ResponseOutputMessage)
+    assert request.input[0].content[0].text == "Hello from string content"
+
+
+def test_assistant_message_with_input_text_content_type():
+    """Codex may send input_text type in assistant history content."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "input_text", "text": "Prior reply"}],
+            },
+        ],
+    }
+    request = ResponsesRequest(**request_data)
+    assert isinstance(request.input[0], ResponseOutputMessage)
+    assert request.input[0].content[0].type == "output_text"
+    assert request.input[0].content[0].text == "Prior reply"

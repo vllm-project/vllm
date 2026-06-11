@@ -22,7 +22,10 @@ from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
     _maybe_combine_reasoning_and_tool_call,
     construct_chat_messages_with_tool_call,
+    construct_input_messages,
+    construct_tool_dicts,
     convert_tool_responses_to_completions_format,
+    normalize_function_call_arguments,
     should_continue_final_message,
 )
 
@@ -166,6 +169,19 @@ class TestResponsesUtils:
         formatted_item = _construct_single_message_from_response_item(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+    def test_construct_message_from_output_message_with_empty_content(self):
+        """Empty content must not raise IndexError (Codex may send this)."""
+        output_item = ResponseOutputMessage(
+            id="msg_empty",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _construct_single_message_from_response_item(output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
 
 
 class TestReasoningItemContentPriority:
@@ -738,3 +754,125 @@ class TestMaybeCombineReasoningAndToolCall:
         result = _maybe_combine_reasoning_and_tool_call(item, messages)
 
         assert result is None
+
+
+class TestConstructInputMessagesInstructionsLeak:
+    """Regression tests for #37697: instructions from a prior response
+    should NOT leak through previous_response_id."""
+
+    def test_old_instructions_stripped_from_prev_msg(self):
+        """System message in prev_msg must be dropped so the new request's
+        instructions are the only system message in the conversation."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="new instructions",
+            request_input="What is 3+3?",
+            prev_msg=prev,
+        )
+        system_msgs = [m for m in msgs if m.get("role") == "system"]
+        assert len(system_msgs) == 1
+        assert system_msgs[0]["content"] == "new instructions"
+
+    def test_no_instructions_in_new_request(self):
+        """If the new request has no instructions, old ones should still
+        be stripped -- they must not carry over."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="What is 3+3?",
+            prev_msg=prev,
+        )
+        system_msgs = [m for m in msgs if m.get("role") == "system"]
+        assert len(system_msgs) == 0
+
+    def test_non_system_messages_preserved(self):
+        """User/assistant messages from prev_msg must remain intact."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="new instructions",
+            request_input="Follow up",
+            prev_msg=prev,
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert msgs[0]["content"] == "new instructions"
+        assert msgs[1]["content"] == "Hi"
+        assert msgs[2]["content"] == "Hello"
+        assert msgs[3]["content"] == "Follow up"
+
+    def test_no_prev_msg(self):
+        """Baseline: when there's no prev_msg, instructions work normally."""
+        msgs = construct_input_messages(
+            request_instructions="be helpful",
+            request_input="hello",
+            prev_msg=None,
+        )
+        assert len(msgs) == 2
+        assert msgs[0] == {"role": "system", "content": "be helpful"}
+        assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestConstructToolDicts:
+    def test_empty_tools_returns_none(self):
+        assert construct_tool_dicts([], "auto") is None
+        assert construct_tool_dicts([], "none") is None
+
+
+class TestNormalizeFunctionCallArguments:
+    def test_none_and_empty(self):
+        assert normalize_function_call_arguments(None) == "{}"
+        assert normalize_function_call_arguments("") == "{}"
+        assert normalize_function_call_arguments("   ") == "{}"
+
+    def test_dict_and_list(self):
+        assert normalize_function_call_arguments({"a": 1}) == '{"a": 1}'
+        assert normalize_function_call_arguments([1, 2]) == "[1, 2]"
+
+    def test_valid_json_string_preserved(self):
+        raw = '{"command": "ls", "workdir": "/tmp"}'
+        assert normalize_function_call_arguments(raw) == raw
+
+    def test_extra_data_uses_first_json_value(self):
+        raw = '{"command": "ls"}{"command": "pwd"}'
+        assert normalize_function_call_arguments(raw) == '{"command": "ls"}'
+
+    def test_construct_message_with_dict_arguments(self):
+        item = {
+            "type": "function_call",
+            "call_id": "call_abc",
+            "name": "shell",
+            "arguments": {"command": "ls", "workdir": "/tmp"},
+        }
+        msg = _construct_single_message_from_response_item(item)
+        assert msg["role"] == "assistant"
+        args = msg["tool_calls"][0]["function"]["arguments"]
+        assert args == '{"command": "ls", "workdir": "/tmp"}'
+        import json
+
+        assert json.loads(args)["command"] == "ls"
+
+    def test_construct_message_with_extra_data_arguments(self):
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_xyz",
+            name="shell",
+            arguments='{"command":"ls"} trailing',
+            id="fc_xyz",
+        )
+        msg = _construct_single_message_from_response_item(item)
+        args = msg["tool_calls"][0]["function"]["arguments"]
+        import json
+
+        assert json.loads(args) == {"command": "ls"}
