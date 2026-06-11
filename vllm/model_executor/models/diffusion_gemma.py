@@ -704,7 +704,6 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, dtype=torch.int32, device=device
         )
         # Latest argmax(processed_logits) per slot — what we COMMIT.
-        # HF reference commits `argmax_canvas` (argmax of latest step's logits),
         # NOT `current_canvas` (which is the post-renoise stochastic input for
         # the next denoise step). We keep this separate from `canvas` because
         # canvas gets renoised in-place during denoise, while argmax_canvas is
@@ -810,8 +809,6 @@ class DiffusionGemmaModelState(ModelState):
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
 
         text_config = self.model_config.hf_text_config
-        # Diffusion sampling params come straight from generation_config.json
-        # (RC0.1 flat layout); the checkpoint is the source of truth.
         self.gen_config = self.model_config.try_get_generation_config()
         max_denoising_steps = (
             diffusion_config.max_denoising_steps if diffusion_config else None
