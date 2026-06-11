@@ -299,13 +299,26 @@ def marlin_unpad_output(
     return output[..., :size_n].contiguous()
 
 
-def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+def check_marlin_supports_layer(
+    layer: LinearBase, group_size: int, allow_tile_padding: bool = False
+) -> bool:
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
     )
     input_size_per_partition = (
         getattr(layer, "input_size_per_partition", None) or layer.input_size
     )
+
+    if allow_tile_padding:
+        # Thread-tile misalignment is fixed by zero-padding at weight prep
+        # (see marlin_padded_nk); only a quantization group straddling the
+        # TP shard remains unsupported. Dense layers only - MoE prep does
+        # not pad yet.
+        return (
+            group_size == -1
+            or group_size >= layer.input_size
+            or input_size_per_partition % group_size == 0
+        )
 
     return check_marlin_supports_shape(
         output_size_per_partition=output_size_per_partition,

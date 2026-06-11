@@ -444,3 +444,27 @@ def test_awq_zp_marlin_padded_round_trip(shape):
 
     assert output.shape == (8, size_n)
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
+
+
+class _FakeLinear:
+    def __init__(self, size_n, size_k, input_size=None):
+        self.output_size_per_partition = size_n
+        self.input_size_per_partition = size_k
+        self.output_size = size_n
+        self.input_size = input_size if input_size is not None else size_k
+
+
+def test_check_marlin_supports_layer_allow_tile_padding():
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        check_marlin_supports_layer,
+    )
+
+    # Tile-misaligned but group-aligned: rejected strictly, allowed w/ padding
+    layer = _FakeLinear(4640, 512, input_size=2048)
+    assert not check_marlin_supports_layer(layer, 128)
+    assert check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
+    assert check_marlin_supports_layer(layer, -1, allow_tile_padding=True)
+
+    # A group straddling the TP shard cannot be fixed by padding
+    layer = _FakeLinear(4608, 4672, input_size=18688)
+    assert not check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
