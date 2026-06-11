@@ -316,7 +316,6 @@ def mome_attention_fused_op(
         output.fill_(0)
         return
 
-    hidden_states = hidden_states.contiguous()
     conv_state_ = conv_state.transpose(-1, -2)
     mome_metadata = forward_context.attn_metadata[layer_name]
     num_decode_tokens = mome_metadata.num_decode_tokens
@@ -325,7 +324,7 @@ def mome_attention_fused_op(
     num_decodes = mome_metadata.num_decodes
     num_prefills = mome_metadata.num_prefills
     if num_decodes > 0:
-        decode_hidden_states = hidden_states[:num_decodes].clone()
+        decode_hidden_states = hidden_states[:num_decode_tokens].clone()
         decode_state_indices = mome_metadata.state_indices_tensor_d
         decode_block_idx_last_scheduled_token = (
             mome_metadata.block_idx_last_scheduled_token_d
@@ -333,20 +332,39 @@ def mome_attention_fused_op(
         decode_block_idx_last_computed_token = (
             mome_metadata.block_idx_last_computed_token_d
         )
+        query_start_loc_d = mome_metadata.query_start_loc_d
+        num_accepted_tokens = mome_metadata.num_accepted_tokens
         assert decode_state_indices is not None
         assert decode_block_idx_last_scheduled_token is not None
         assert decode_block_idx_last_computed_token is not None
+        if query_start_loc_d is not None and num_accepted_tokens is not None:
+            assert mome_metadata.max_decode_query_len is not None
+            conv_state_indices = decode_state_indices.contiguous()
+            block_idx_last_scheduled_token = decode_block_idx_last_scheduled_token
+            initial_state_idx = decode_block_idx_last_computed_token
+            max_query_len = mome_metadata.max_decode_query_len
+        else:
+            conv_state_indices = decode_state_indices[:num_decodes].contiguous()
+            block_idx_last_scheduled_token = decode_block_idx_last_scheduled_token[
+                :num_decodes
+            ]
+            initial_state_idx = decode_block_idx_last_computed_token[:num_decodes]
+            num_accepted_tokens = None
+            query_start_loc_d = None
+            max_query_len = -1
+
         decode_output = causal_conv1d_update(
             decode_hidden_states,
             conv_state_,
             conv_weight,
             bias=None,
             activation=None,
-            conv_state_indices=decode_state_indices[:num_decodes].contiguous(),
-            block_idx_last_scheduled_token=(
-                decode_block_idx_last_scheduled_token[:num_decodes]
-            ),
-            initial_state_idx=decode_block_idx_last_computed_token[:num_decodes],
+            conv_state_indices=conv_state_indices,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            initial_state_idx=initial_state_idx,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc_d,
+            max_query_len=max_query_len,
         )
         output[:num_decode_tokens] = decode_output
 
