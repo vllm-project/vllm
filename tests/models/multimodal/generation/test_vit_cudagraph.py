@@ -100,6 +100,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "Describe this video in one sentence."
         ),
         needs_video_metadata=True,
+        vllm_runner_kwargs={"enable_chunked_prefill": True},
         marks=[pytest.mark.core_model],
     ),
     "qwen2_vl": VitCudagraphTestConfig(
