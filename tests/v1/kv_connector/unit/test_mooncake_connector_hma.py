@@ -470,6 +470,11 @@ def test_align_transfer_regions_fans_out_shared_alias_groups():
     assert aligned_groups == [
         (
             "model.layers.4.attn.swa_cache",
+            "model.layers.4.attn",
+            (3,),
+        ),
+        (
+            "model.layers.4.attn.swa_cache",
             "model.layers.6.attn",
             (1,),
         ),
