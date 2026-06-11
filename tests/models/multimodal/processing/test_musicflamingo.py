@@ -17,13 +17,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from importlib.metadata import version
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
-from packaging.version import Version
 from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
@@ -124,12 +122,9 @@ def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
     assert builder.get_dummy_text({"audio": 2}) == "<sound><sound>"
 
 
-@pytest.mark.skipif(
-    Version(version("transformers")) >= Version("5.5"),
-    reason="transformers v5.5 added native MusicFlamingoForConditionalGeneration "
-    "with a different get_audio_features signature (requires input_ids)",
-)
-def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
+def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config(
+    default_vllm_config,
+):
     from transformers.models.musicflamingo import (
         modeling_musicflamingo as hf_musicflamingo_modeling,
     )
@@ -162,6 +157,7 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         "use_mrope": False,
     }
     audio_config = {
+        "model_type": "musicflamingo_encoder",
         "hidden_size": 16,
         "num_attention_heads": 4,
         "intermediate_size": 32,
@@ -187,28 +183,44 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
     ).eval()
 
     vllm_encoder = MusicFlamingoEncoder(config.audio_config).eval()
-    vllm_encoder.load_state_dict(hf_model.audio_tower.state_dict())
+    vllm_encoder.load_state_dict(hf_model.model.audio_tower.state_dict())
 
     vllm_projector = MusicFlamingoMultiModalProjector(config).eval()
-    vllm_projector.load_state_dict(hf_model.multi_modal_projector.state_dict())
+    vllm_projector.load_state_dict(hf_model.model.multi_modal_projector.state_dict())
 
     vllm_rope = MusicFlamingoRotaryEmbedding(config).eval()
-    vllm_rope.load_state_dict(hf_model.pos_emb.state_dict(), strict=False)
+    vllm_rope.load_state_dict(hf_model.model.pos_emb.state_dict(), strict=False)
 
+    # Model one audio split into three consecutive 30s windows (the production
+    # chunking scenario): full, full, and a partial final chunk. Each batch row
+    # is window i of the same sample, so its timestamps start at i * 30s.
     input_features = torch.randn(3, 80, 3000)
     feature_attention_mask = torch.zeros(3, 3000, dtype=torch.bool)
     feature_attention_mask[0, :3000] = True
-    feature_attention_mask[1, :2500] = True
+    feature_attention_mask[1, :3000] = True
     feature_attention_mask[2, :1500] = True
-    rote_timestamps = (
-        torch.arange(750, dtype=torch.float32).unsqueeze(0).repeat(3, 1) * 0.04
+    frame_offsets = torch.arange(750, dtype=torch.float32) * 0.04
+    window_starts = torch.arange(3, dtype=torch.float32) * (750 * 0.04)
+    rote_timestamps = window_starts.unsqueeze(1) + frame_offsets.unsqueeze(0)
+
+    # transformers >= 5.5 reconstructs rotary timestamps from runs of audio
+    # placeholder tokens in input_ids instead of accepting them directly: a
+    # single run spanning all three chunks' post-conv output lengths marks the
+    # rows as windows 0, 1 and 2 of one sample, reproducing the explicit
+    # window_start + arange(n) * frame_step timestamps used for the vLLM path.
+    _, post_lengths = hf_model.model.audio_tower._get_feat_extract_output_lengths(
+        feature_attention_mask.sum(-1).to(torch.long)
     )
+    separator = torch.tensor([config.text_config.pad_token_id], dtype=torch.long)
+    audio_run = torch.full(
+        (int(post_lengths.sum()),), config.audio_token_id, dtype=torch.long
+    )
+    input_ids = torch.cat([separator, audio_run, separator]).unsqueeze(0)
 
     hf_output = hf_model.get_audio_features(
         input_features,
         feature_attention_mask,
-        rote_timestamps=rote_timestamps,
-        return_dict=True,
+        input_ids,
     ).pooler_output
     vllm_attention_mask = _build_audio_encoder_attention_mask(
         feature_attention_mask,
