@@ -134,10 +134,11 @@ impl Normalizable for DetokenizeRequest {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
     use serde_json::json;
     use vllm_chat::ChatTool;
+
+    use super::*;
+    use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
 
     #[test]
     fn tokenize_request_converts_openai_tools() {

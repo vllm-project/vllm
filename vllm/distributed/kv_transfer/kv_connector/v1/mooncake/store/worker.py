@@ -535,7 +535,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_masks = self.coord.store_mask(token_len)
+            store_masks = self.coord.store_mask(
+                token_len, num_prompt_tokens=req_meta.num_prompt_tokens
+            )
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
@@ -1091,6 +1093,7 @@ class MooncakeStoreWorker:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
+            retention_interval=envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known.
