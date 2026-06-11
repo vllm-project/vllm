@@ -1357,10 +1357,10 @@ class PyAVKeyframeVideoBackend(VideoLoader, PyAVVideoBackendMixin):
 
     This is an explicit accuracy/throughput trade-off: returned frames sit
     on GOP boundaries rather than a uniform temporal stride, so temporal
-    coverage follows the source encoding. Scene/object/identity-centric
-    workloads are typically preserved; motion- and temporal-order-sensitive
-    tasks degrade. Opt in deliberately via
-    ``VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes``.
+    coverage follows the source encoding. Tasks that depend on dense or
+    uniform temporal sampling (motion, ordering, counting) degrade; see
+    ``docs/features/multimodal_inputs.md`` for measured trade-offs. Opt in
+    deliberately via ``VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes``.
 
     When the clip has fewer keyframes than ``num_frames``, the available
     keyframes are oversampled (balanced duplication) so downstream

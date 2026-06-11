@@ -853,7 +853,7 @@ vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 
 `num_frames` is the regular frame budget from `--media-io-kwargs` (default 32, also settable per request via the `media_io_kwargs` API field); the env variable applies to offline `LLM` use as well. In our measurements decode time is near-constant (tens of milliseconds for 16 frames, whether the clip is 30 seconds or 10 minutes), roughly 4–40× faster than the lossless PyAV decode path, with the gap growing with clip length.
 
-This fits prefill-heavy workloads — video classification, tagging, and content-level understanding — which generate few tokens, so the GPU spends little time per request and CPU-side video decoding dominates the pipeline. Such tasks rarely need dense temporal sampling: a handful of keyframes carries the signal, and their positions are already indexed in the container, enumerable without decoding anything.
+This targets prefill-heavy workloads that generate few tokens, where CPU-side video decoding rather than the GPU dominates the pipeline. Keyframe positions are already indexed in the container, so they can be enumerated without decoding anything. The measured results below come from single-token multiple-choice video QA; treat other workloads as unvalidated.
 
 **Behavior:**
 
