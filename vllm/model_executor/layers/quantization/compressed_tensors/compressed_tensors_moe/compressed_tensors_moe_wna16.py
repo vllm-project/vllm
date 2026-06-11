@@ -209,8 +209,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         return config_builder(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=getattr(layer, "w13_qzeros", None),
-            w2_zp=getattr(layer, "w2_qzeros", None),
+            w1_zp=None,
+            w2_zp=None,
             block_shape=[0, self.group_size],
         )
 
