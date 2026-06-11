@@ -124,8 +124,6 @@ TEXT_GENERATION_MODELS = {
     "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
-    # Uses Llama
-    # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-2-1b": PPTestSettings.fast(),
