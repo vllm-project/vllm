@@ -68,8 +68,7 @@ class MarlinLinearKernel(MPLinearKernel):
                 c.group_size,
             )
 
-        # A quantization group that straddles TP ranks cannot be fixed by
-        # padding, so group boundaries must still align with the shard.
+        # A group straddling TP ranks cannot be fixed by padding.
         if (
             c.group_size != -1
             and c.group_size < c.full_weight_shape[0]
@@ -80,8 +79,7 @@ class MarlinLinearKernel(MPLinearKernel):
                 f"not divisible by group_size = {c.group_size}."
             )
 
-        # Any other thread-tile misalignment is fixed by zero-padding the
-        # weights in process_weights_after_loading (see marlin_padded_nk).
+        # Tile misalignment is fixed by zero-padding at weight prep.
         return True, None
 
     # note assumes that
@@ -187,8 +185,6 @@ class MarlinLinearKernel(MPLinearKernel):
             self._transform_param(
                 layer,
                 self.w_zp_name,
-                # Padded zero-points are 0, matching the padded scales of 0,
-                # so padded columns dequantize to (0 - 0) * 0 = 0.
                 lambda x: marlin_zero_points(
                     marlin_pad_scales(
                         unpack_cols(

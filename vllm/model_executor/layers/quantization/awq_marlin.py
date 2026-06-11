@@ -289,9 +289,8 @@ class AWQMarlinConfig(QuantizationConfig):
                 skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
-            # Check if the layer is supported by AWQMarlin. Tile-misaligned
-            # shapes are zero-padded at weight prep, so only a quantization
-            # group straddling the TP shard forces the fallback.
+            # Check if the layer is supported by AWQMarlin; tile-misaligned
+            # shapes are fixed by padding at weight prep.
             if not check_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
             ):

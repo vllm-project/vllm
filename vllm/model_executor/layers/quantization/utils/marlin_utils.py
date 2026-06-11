@@ -221,24 +221,30 @@ def marlin_padded_nk(size_n: int, size_k: int, group_size: int = -1) -> tuple[in
     """Minimal (padded_n, padded_k) satisfying a Marlin thread-tile family.
 
     Marlin GEMM and repack require (n % 64, k % 128) or (n % 128, k % 64);
-    TP sharding can produce rank-local shapes satisfying neither, which are
-    zero-padded up to the cheaper family (smallest padded area). K stays
-    divisible by group_size so padded scales keep an integral group count.
+    shapes satisfying neither are zero-padded up to the cheaper family. K
+    stays divisible by group_size so padded scales keep an integral group
+    count. Padded weight regions contribute nothing to the GEMM output:
+    quantized value 0 decodes to 0.0 (FP4/FP8) or is cancelled by the
+    zero-padded scales/zero-points (INT).
     """
     group = group_size if group_size > 0 else 1
     candidates = (
         (round_up(size_n, 64), round_up(size_k, math.lcm(128, group))),
         (round_up(size_n, 128), round_up(size_k, math.lcm(64, group))),
     )
-    return min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    padded_nk = min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    if padded_nk != (size_n, size_k):
+        logger.warning_once(
+            "Marlin requires thread-tile padding for some weight shapes in "
+            "this model. Activations and/or outputs of the padded layers are "
+            "padded/sliced on every forward; performance may be degraded."
+        )
+    return padded_nk
 
 
 def marlin_repacked_nk(qweight: torch.Tensor, num_bits: int) -> tuple[int, int]:
-    """Recover the (size_n, size_k) a weight was repacked with, including any
-    tile padding, from its packed shape (size_k / 16, size_n * 16 / pack).
-    This keeps apply-time code in sync with whatever padding weight prep
-    applied, without threading padded sizes through layer attributes.
-    """
+    """Recover the (size_n, size_k) a Marlin weight was repacked with
+    (including any tile padding) from its packed shape."""
     pack_factor = 32 // num_bits
     size_k = qweight.size(0) * GPTQ_MARLIN_TILE
     size_n = qweight.size(1) * pack_factor // GPTQ_MARLIN_TILE
@@ -249,9 +255,7 @@ def marlin_pad_qweight(
     qweight: torch.Tensor, size_n: int, size_k: int, padded_n: int, padded_k: int
 ) -> torch.Tensor:
     """Zero-pad a GPTQ-layout packed weight (size_k / pack, size_n) for
-    gptq_marlin_repack. Padded quantized values of 0 either decode to 0.0
-    (FP4/FP8) or are cancelled by zero-padded scales/zero-points (INT).
-    """
+    gptq_marlin_repack."""
     if (padded_n, padded_k) == (size_n, size_k):
         return qweight
     pack_factor = size_k // qweight.size(0)
@@ -269,9 +273,7 @@ def marlin_pad_scales(
     group_size: int,
 ) -> torch.Tensor:
     """Zero-pad weight scales (num_groups, size_n); call before
-    marlin_permute_scales and pass the padded extents to it. For group_size
-    <= 0 (channelwise/tensorwise) the single scale row covers all of K.
-    """
+    marlin_permute_scales and pass the padded extents to it."""
     if (padded_n, padded_k) == (size_n, size_k):
         return scales
     pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0
@@ -654,7 +656,6 @@ def apply_gptq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    # Recover (possibly tile-padded) GEMM extents from the packed weight.
     padded_n, padded_k = marlin_repacked_nk(weight, wtype.size_bits)
     reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
 
@@ -725,7 +726,6 @@ def apply_awq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    # Recover (possibly tile-padded) GEMM extents from the packed weight.
     padded_n, padded_k = marlin_repacked_nk(weight, quant_type.size_bits)
     reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
 

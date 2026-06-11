@@ -172,7 +172,6 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
-    # Recover (possibly tile-padded) GEMM extents from the packed weight.
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=4)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
@@ -336,11 +335,9 @@ def prepare_nvfp4_moe_layer_for_marlin(
     N = layer.intermediate_size_per_partition
     num_shards = 2 if is_act_and_mul else 1
 
-    # Pad the rank-local intermediate size to satisfy Marlin thread tiles.
-    # N is both an output extent (w13, per gate/up shard) and an input
-    # extent (w2), while hidden K is tile-aligned in practice. Padded w13
-    # rows are zero so the padded intermediate activations are zero, and
-    # padded w2 columns are zero, so the MoE output is unaffected.
+    # Pad the rank-local intermediate size to satisfy Marlin thread tiles:
+    # N is an output extent of w13 (per gate/up shard) and the input extent
+    # of w2, so the padded region never reaches the MoE output.
     if K % 128 == 0:
         padded_N = round_up(N, 64)
     else:

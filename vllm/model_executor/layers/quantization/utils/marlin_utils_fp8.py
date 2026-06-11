@@ -62,7 +62,6 @@ def apply_fp8_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
-    # Recover (possibly tile-padded) GEMM extents from the packed weight.
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=8)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
@@ -378,7 +377,6 @@ def apply_mxfp8_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
-    # Recover (possibly tile-padded) GEMM extents from the packed weight.
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=8)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
