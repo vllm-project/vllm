@@ -177,6 +177,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
+    VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH: str | None = None
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL: bool = True
     VLLM_TRITON_MLA_SPARSE: bool | None = None
@@ -1421,6 +1422,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
+    ),
+    "VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH": lambda: os.getenv(
+        "VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH"
     ),
     "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL": lambda: bool(
         int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "1"))
