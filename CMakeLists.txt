@@ -190,6 +190,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # the set of architectures we want to compile for and remove the from the
   # CMAKE_CUDA_FLAGS so that they are not applied globally.
   #
+  # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. It is emitted by torch
+  # as `code=compute_*`, while extract_unique_cuda_archs_ascending() records only
+  # `arch=compute_*`. If a kernel really needs PTX, add `+PTX` to that kernel's
+  # component-specific arch list below.
+  #
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
@@ -366,17 +371,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
   # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
-  # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
+  # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd support)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0;9.0;12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0;9.0;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
@@ -388,7 +393,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0" "${CUDA_ARCHS}")
 
   if (MARLIN_OTHER_ARCHS)
 
@@ -678,9 +683,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
     set(SRCS "csrc/libtorch_stable/dsv3_fused_a_gemm.cu")
@@ -833,7 +838,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # kernels for the remaining archs that are not already built for 3x.
   # (Build 8.9 for FP8)
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
-    "7.5;8.0;8.7;8.9+PTX" "${CUDA_ARCHS}")
+    "7.5;8.0;8.7;8.9" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
@@ -882,9 +887,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/libtorch_stable/quantization/w8a8/cutlass/moe/grouped_mm_c3x_sm100.cu")
@@ -979,8 +984,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
-      "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+      list(APPEND SRCS
+        "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_MXFP4_EXPERTS_QUANT=1")
+    else()
+      message(STATUS
+        "Not building mxfp4_experts_quant as CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
+    endif()
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
@@ -1033,11 +1045,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     endif()
   endif()
 
-  # CUTLASS MLA Archs and flags
+  # CUTLASS MLA Archs and flags.
+  # Runtime dispatch is gated in
+  # vllm/v1/attention/backends/mla/cutlass_mla.py.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MLA_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
     set(SRCS
@@ -1058,7 +1072,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # Hadacore kernels
-  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0;9.0" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
     set(SRCS "csrc/libtorch_stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
     set_gencode_flags_for_srcs(
@@ -1166,9 +1180,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
@@ -1176,9 +1190,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
   # moe marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)
 
     #

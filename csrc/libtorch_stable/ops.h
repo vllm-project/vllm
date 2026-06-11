@@ -87,6 +87,7 @@ void get_cutlass_batched_moe_mm_data(
 
 // FP4/NVFP4 ops
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
+bool mxfp4_experts_quant_supported();
 
 void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            torch::stable::Tensor const& A,

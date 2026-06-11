@@ -59,6 +59,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // capability
   ops.def("cutlass_group_gemm_supported(int cuda_device_capability) -> bool");
 
+  // Check if MXFP4 experts activation quantization was compiled and registered.
+  ops.def("mxfp4_experts_quant_supported() -> bool");
+
   // CUTLASS w8a8 grouped GEMM
   ops.def(
       "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
@@ -727,6 +730,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
            TORCH_BOX(&cutlass_scaled_mm_supports_block_fp8));
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
+  ops.impl("mxfp4_experts_quant_supported",
+           TORCH_BOX(&mxfp4_experts_quant_supported));
 #endif
 
   // GGML block size lookup (no tensor args)
