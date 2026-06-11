@@ -88,9 +88,7 @@ def test_get_processor_disable_type_check(monkeypatch):
         def from_pretrained(*args, **kwargs):
             return bare
 
-    monkeypatch.setattr(
-        processor_mod, "convert_model_repo_to_path", lambda name: name
-    )
+    monkeypatch.setattr(processor_mod, "convert_model_repo_to_path", lambda name: name)
     monkeypatch.setattr(
         processor_mod,
         "get_processor_cls_name_from_config",
@@ -103,7 +101,5 @@ def test_get_processor_disable_type_check(monkeypatch):
         get_processor("dummy-model", trust_remote_code=True)
 
     # With disable_type_check=True the same bare processor loads fine.
-    out = get_processor(
-        "dummy-model", trust_remote_code=True, disable_type_check=True
-    )
+    out = get_processor("dummy-model", trust_remote_code=True, disable_type_check=True)
     assert out is bare
