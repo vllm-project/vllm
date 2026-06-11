@@ -999,19 +999,12 @@ class DiffusionGemmaModelState(ModelState):
         # backend can handle mixed batches.
         actual_num_reqs = input_batch.num_reqs
         slots = input_batch.idx_mapping[:actual_num_reqs]
+        # Invariant: the sampler flips is_encoder_phase to False only after a
+        # request's FINAL prompt chunk, so a prompt spanning multiple chunks
+        # (longer than the token budget) stays causal for every chunk.
         self._causal_buf[:actual_num_reqs] = self.diffusion_states.is_encoder_phase[
             slots
         ]
-        # Prefill chunks must always use causal attention. is_encoder_phase is
-        # flipped to False the moment a prefill step runs, so for a prompt that
-        # spans multiple chunks (prompt longer than max_num_batched_tokens) the
-        # later chunks would otherwise be processed bidirectionally, corrupting
-        # the prompt KV. Force causal for any request still prefilling; denoise
-        # vs commit (is_encoder_phase) only applies once prefill is complete.
-        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np).to(
-            self._causal_buf.device, non_blocking=True
-        )
-        self._causal_buf[:actual_num_reqs] |= is_prefilling
         if actual_num_reqs < num_reqs:
             self._causal_buf[actual_num_reqs:num_reqs] = False
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
@@ -1109,9 +1102,6 @@ class DiffusionSampler:
             )
         # Purge any stale logprobs stashed under this slot by a prior request
         # that was aborted between its converging denoise and commit steps.
-        # remove_request does not reach the sampler, so the slot's _pending
-        # entry can survive until the slot is reused — clear it here so the
-        # new request never pops the dead request's logprobs.
         self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
 
@@ -1129,18 +1119,39 @@ class DiffusionSampler:
     # Prefill
     # ------------------------------------------------------------------
 
+    def _finish_prefills(
+        self, input_batch: Any, prefill_indices_np: np.ndarray
+    ) -> None:
+        """Transition requests whose prompt completes this step to denoising.
+
+        Initializes their canvas, seeds draft tokens, and flips
+        is_encoder_phase to False. Mid-chunk requests (prompt longer than the
+        token budget) are left untouched so is_encoder_phase stays True and
+        prepare_attn keeps causal attention for their remaining chunks.
+        """
+        states = self.diffusion_states
+        done_prefill_np = (
+            input_batch.num_computed_prefill_tokens_np[prefill_indices_np]
+            + input_batch.num_scheduled_tokens[prefill_indices_np]
+            >= input_batch.prefill_len_np[prefill_indices_np]
+        )
+        ps = input_batch.idx_mapping_np[prefill_indices_np[done_prefill_np]]
+        if len(ps) == 0:
+            return
+        states.init_canvas(ps)
+        self.req_states.draft_tokens[ps, : self.canvas_length] = states.canvas[ps]
+        ps_gpu = async_copy_to_gpu(
+            ps.astype(np.int64), device=states.is_encoder_phase.device
+        )
+        states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+
     def _handle_prefill(
         self,
         input_batch: Any,
         device: torch.device,
     ) -> SamplerOutput:
-        states = self.diffusion_states
         num_reqs = input_batch.num_reqs
-        CL = self.canvas_length
-        slots = input_batch.idx_mapping[:num_reqs]
-        states.init_canvas(slots)
-        self.req_states.draft_tokens[slots, :CL] = states.canvas[slots]
-        states.is_encoder_phase.index_fill_(0, slots.long(), False)
+        self._finish_prefills(input_batch, np.arange(num_reqs))
         sampled = self._sampled[:num_reqs, :1]
         sampled.zero_()
         num_sampled = self._num_sampled[:num_reqs]
@@ -1218,13 +1229,7 @@ class DiffusionSampler:
         decode_slots_np = slots_np[decode_indices_np]
 
         if len(prefill_indices_np) > 0:
-            ps = slots_np[prefill_indices_np]
-            states.init_canvas(ps)
-            self.req_states.draft_tokens[ps, :CL] = states.canvas[ps]
-            ps_gpu = async_copy_to_gpu(
-                ps.astype(np.int64), device=states.is_encoder_phase.device
-            )
-            states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+            self._finish_prefills(input_batch, prefill_indices_np)
 
         num_decode = len(decode_indices_np)
         self._decode_slots.np[:num_decode] = decode_slots_np
