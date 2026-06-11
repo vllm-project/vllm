@@ -182,7 +182,7 @@ async def send_request_to_prefill(
                 raise RuntimeError(error_message)
 
 
-async def start_decode_request(endpoint, req_data, request_id):
+async def start_decode_request(endpoint, req_data, request_id, data_parallel_rank=None):
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
     )
@@ -190,6 +190,8 @@ async def start_decode_request(endpoint, req_data, request_id):
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
+    if data_parallel_rank is not None:
+        headers["X-data-parallel-rank"] = str(data_parallel_rank)
     response = await session.post(url=endpoint, json=req_data, headers=headers)
     return session, response
 
@@ -283,6 +285,10 @@ async def handle_request(api: str, request: Request):
             req_data_to_prefill["kv_transfer_params"]["remote_hosts"] = list(
                 decode_hosts
             )
+        if selected_prefill_dp_rank is not None:
+            req_data_to_prefill["kv_transfer_params"]["remote_dp_rank"] = (
+                selected_prefill_dp_rank
+            )
 
         prefill_request_url = prefill_instance_endpoint["request_address"] + api
         send_prefill_task = asyncio.create_task(
@@ -317,7 +323,6 @@ async def handle_request(api: str, request: Request):
             req_data["kv_transfer_params"]["remote_hosts"] = prefill_kv.get(
                 "remote_hosts"
             )
-
         prefill_hosts = prefill_instance_endpoint.get("node_hosts") or []
         if prefill_hosts:
             req_data["kv_transfer_params"]["remote_hosts"] = list(prefill_hosts)
@@ -335,7 +340,12 @@ async def handle_request(api: str, request: Request):
 
         decode_request_url = decode_instance_endpoint["request_address"] + api
         decode_request_task = asyncio.create_task(
-            start_decode_request(decode_request_url, req_data, request_id)
+            start_decode_request(
+                decode_request_url,
+                req_data,
+                request_id,
+                selected_prefill_dp_rank,
+            )
         )
 
         session, decode_response = await decode_request_task

@@ -162,10 +162,18 @@ class TransferError(MoRIIOError):
     pass
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
-    read_mode = str(
-        kv_transfer_config.kv_connector_extra_config.get("read_mode", "false")
-    ).lower().strip() in ("true", "1")
+    read_mode = _as_bool(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", False)
+    )
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -299,7 +307,7 @@ class MoRIIOConfig:
         base_notify_port = int(extra_config["notify_port"])
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(
@@ -366,6 +374,10 @@ class MoRIIOConstants:
     # notification is reaped and its blocks force-freed.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Grace period (seconds) during which has_pending_deferred_sends keeps
+    # scheduler probes active after a deferred send is created.
+    # Overridable via kv_connector_extra_config["defer_drain_grace"].
+    DEFAULT_DEFER_DRAIN_GRACE = 2.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -440,6 +452,12 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # DP rank that handled the prefill on the remote side. Proxy sets this
+    # from `selected_prefill_dp_rank` in kv_transfer_params. Used by
+    # `_read_blocks` to pick the correct per-rank session/MR instead of
+    # always reading from remote DP0 (which mismatches num_blocks across
+    # ranks and overflows remote DP0's MR at high concurrency).
+    remote_dp_rank: int = 0
     # Ordered list of all prefill-instance host IPs for multi-node TP.
     # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
     # actual peer host for handshake + post-transfer notify. None or len<=1
@@ -453,13 +471,15 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.freed_transfer_ids: set[TransferId] = set()
 
     def __repr__(self):
         return (
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"freed_transfer_ids={self.freed_transfer_ids}"
         )
 
     def add_new_req(
@@ -527,6 +547,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 kv_transfer_params.get("remote_tp_size", 1),
             ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=int(kv_transfer_params.get("remote_dp_rank", 0) or 0),
             remote_hosts=remote_hosts or None,
         )
         if write_mode:

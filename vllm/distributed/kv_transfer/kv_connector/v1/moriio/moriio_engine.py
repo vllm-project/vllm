@@ -189,7 +189,13 @@ class MoRIIOWriter:
         wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
-        """Check if remote blocks are allocated for this task.
+        """Check if remote blocks are allocated and populated for this task.
+
+        Returns True only when the remote allocation entry exists *and*
+        carries a non-None ``block_ids`` mapping. The latter check ensures
+        that ``_execute_write_task`` is never invoked for a task whose
+        remote ``block_ids`` are still being filled in by the scheduler;
+        without it we would either drop the task or busy-loop on it.
 
         Args:
             task: The write task
@@ -197,9 +203,10 @@ class MoRIIOWriter:
         Returns:
             True if remote blocks are ready
         """
-        return (
-            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+        info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            task.transfer_id
         )
+        return info is not None and info.block_ids is not None
 
     def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
@@ -223,20 +230,16 @@ class MoRIIOWriter:
     def _execute_write_task(self, task: WriteTask) -> None:
         """Execute a single write task.
 
+        Callers must ensure ``_is_remote_ready(task)`` returned ``True``
+        before invoking this method; ``_is_remote_ready`` guarantees that
+        ``request_info.block_ids`` is non-None and the entry exists.
+
         Args:
             task: The write task to execute
 
         """
         # Get remote allocation info
         request_info = self._get_remote_alloc_info(task.transfer_id)
-
-        if request_info.block_ids is None:
-            logger.debug(
-                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
-                task.request_id,
-                task.transfer_id,
-            )
-            return
 
         # Wait for CUDA event
         # The attention computation of the current layer cannot
@@ -345,7 +348,9 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper.waiting_for_transfer_complete()
 
             remote_port = task.remote_notify_port + get_port_offset(
-                request_info.decode_dp_rank, self.worker.tp_rank
+                request_info.decode_dp_rank,
+                self.worker.tp_rank,
+                self.worker.tp_size,
             )
             # Consider using RDMA immediate data in decode side
             # to eliminate the need for this notification.
@@ -611,13 +616,27 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith(MoRIIOConstants.TRANSFER_PREFIX):
-                self._handle_completion_message(msg_str)
-                handled = True
+            # Completion notifications are UTF-8 identifiers. Depending on
+            # mode and peer version they may be transfer_ids, request_ids, or
+            # wrapped IDs; worker-side mapping normalizes them before the
+            # scheduler sees finished requests. Treat any UTF-8 payload as a
+            # completion and drop malformed binary payloads below so one bad
+            # packet cannot kill the notify listener thread.
+            self._handle_completion_message(msg_str)
+            handled = True
         except UnicodeDecodeError:
-            logger.warning("Received non-UTF8 message: %s", msg_str)
+            # Non-UTF-8 payloads are not actionable here (the toy-proxy
+            # convention is UTF-8 request_ids). Logging and dropping the
+            # message is the right behavior; falling through into the
+            # MoRIIOError below would propagate to the listener loop and
+            # kill the notify thread on a single malformed packet.
+            logger.warning(
+                "Received non-UTF8 completion message of %d bytes; dropping",
+                len(msg),
+            )
+            return
         if not handled:
-            raise MoRIIOError(f"Unhandled message format: {msg_str}")
+            raise MoRIIOError(f"Unhandled message format ({len(msg)} bytes)")
 
     def _handle_structured_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
