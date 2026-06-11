@@ -211,7 +211,7 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         # define automatically when those extensions appear in -march.
         if(RVV_BF16_FOUND)
             message(STATUS "BF16 extension detected")
-            set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
+            set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvfbfwma_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
         elseif(RVV_FP16_FOUND)
             message(WARNING "BF16 functionality is not available.")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)

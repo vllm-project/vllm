@@ -954,6 +954,17 @@ inline void fma(FP32Vec16& acc, const FP32Vec16& a, const FP32Vec16& b) {
   acc = acc.fma(a, b);
 }
 
+#ifdef __riscv_zvfbfwma
+inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
+  fixed_bf16x16_t a_lo =
+      RVVI4(__riscv_vlmul_trunc_v_bf16, LMUL_512, _bf16, LMUL_256)(a.reg);
+  fixed_bf16x16_t b_lo =
+      RVVI4(__riscv_vlmul_trunc_v_bf16, LMUL_512, _bf16, LMUL_256)(b.reg);
+  acc.reg = RVVI(__riscv_vfwmaccbf16_vv_f32, LMUL_512)(acc.reg, a_lo, b_lo,
+                                                       FP32Vec16::VEC_ELEM_NUM);
+}
+#endif
+
 template <typename VecT>
 static void interleave_save_16b(const VecT& vec0, const VecT& vec1, void* ptr) {
   alignas(64) uint16_t values0[VecT::VEC_ELEM_NUM];
