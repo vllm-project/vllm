@@ -3,6 +3,10 @@
 # ruff: noqa: E402
 import importlib.util
 import os
+import tempfile
+
+import regex as re
+from packaging import version
 
 
 def _get_torch_cuda_version():
@@ -85,6 +89,48 @@ def _maybe_set_cuda_compatibility_path():
 _maybe_set_cuda_compatibility_path()
 
 import torch
+
+
+def _torch_needs_torchinductor_cache_dir_patch():
+    torch_version = version.parse(str(torch.__version__))
+    return torch_version.release[:2] <= (2, 13)
+
+
+def _patch_torchinductor_default_cache_dir():
+    """Handle TorchInductor cache lookup for UIDs missing from /etc/passwd."""
+    if not _torch_needs_torchinductor_cache_dir_patch():
+        return
+
+    try:
+        from torch._inductor.runtime import cache_dir_utils, runtime_utils
+    except ImportError:
+        return
+
+    if getattr(cache_dir_utils.default_cache_dir, "_vllm_patched", False):
+        return
+
+    def default_cache_dir():
+        import getpass
+
+        try:
+            username = getpass.getuser()
+        except (KeyError, ModuleNotFoundError, OSError):
+            getuid = getattr(os, "getuid", None)
+            username = f"uid_{getuid()}" if callable(getuid) else "unknown_user"
+        sanitized_username = re.sub(r'[\\/:*?"<>|]', "_", username)
+        is_fbcode = getattr(cache_dir_utils, "is_fbcode", lambda: False)
+        return os.path.join(
+            tempfile.gettempdir() if not is_fbcode() else "/var/tmp",
+            "torchinductor_" + sanitized_username,
+        )
+
+    default_cache_dir._vllm_patched = True  # type: ignore[attr-defined]
+    cache_dir_utils.default_cache_dir = default_cache_dir
+    if hasattr(runtime_utils, "default_cache_dir"):
+        runtime_utils.default_cache_dir = default_cache_dir
+
+
+_patch_torchinductor_default_cache_dir()
 
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
