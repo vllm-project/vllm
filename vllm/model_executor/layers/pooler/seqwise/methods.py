@@ -74,15 +74,14 @@ class MeanPool(SequencePoolingMethod):
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
-        # Build segment_ids on CPU so repeat_interleave doesn't need to sync
-        # GPU->CPU to learn its data-dependent output length, then upload
-        # non-blocking. eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
-        segment_ids = torch.repeat_interleave(
-            torch.arange(num_seqs, dtype=torch.long),
-            prompt_lens_cpu,
-        ).to(hidden_states.device, non_blocking=True)
-        prompt_lens = prompt_lens_cpu.to(
+        prompt_lens = prompt_lens_cpu.pin_memory().to(
             hidden_states.device, dtype=torch.int64, non_blocking=True
+        )
+        # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
+        segment_ids = torch.repeat_interleave(
+            torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
+            prompt_lens,
+            output_size=int(prompt_lens_cpu.sum()),
         )
         segment_sums = torch.zeros(
             (num_seqs, hidden_size),

@@ -49,12 +49,11 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self,
-        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=False
+            mm_kwargs, device=self.device, pin_memory=True
         ):
             batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)

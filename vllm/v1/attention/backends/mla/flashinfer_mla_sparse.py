@@ -217,7 +217,7 @@ class FlashInferMLASparseMetadataBuilder(
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            torch.from_numpy(req_id_per_token).pin_memory(), non_blocking=True
         )
         req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
 

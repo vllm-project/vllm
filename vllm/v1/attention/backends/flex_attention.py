@@ -57,7 +57,7 @@ def _offsets_to_doc_ids_tensor(
     doc_ids = torch.repeat_interleave(
         torch.arange(len(counts), dtype=torch.int32), counts
     )
-    return doc_ids.to(device, non_blocking=True)
+    return doc_ids.pin_memory().to(device, non_blocking=True)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
