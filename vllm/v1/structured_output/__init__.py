@@ -277,6 +277,15 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                if req_tokens and grammar.fill_speculative_bitmask(
+                    self._grammar_bitmask,
+                    cumulative_index,
+                    req_tokens,
+                    apply_bitmask,
+                ):
+                    cumulative_index += 1 + len(req_tokens)
+                    continue
+
                 for token in itertools.chain(req_tokens, (-1,)):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:

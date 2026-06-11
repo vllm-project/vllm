@@ -79,6 +79,27 @@ class StructuredOutputGrammar(ABC):
             batch_index (int): The index in the bitmask to fill
         """
 
+    def fill_speculative_bitmask(
+        self,
+        bitmask: "torch.Tensor",
+        batch_index: int,
+        tokens: list[int],
+        apply_bitmask: bool,
+    ) -> bool:
+        """
+        Optionally fills bitmasks for speculative decoding.
+
+        Args:
+            bitmask (torch.Tensor): The bitmask to fill.
+            batch_index (int): The first index in the bitmask to fill.
+            tokens (list[int]): The speculative token ids in scheduler order.
+            apply_bitmask (bool): Whether grammar constraints should be applied.
+
+        Returns:
+            bool: True if this backend handled all speculative bitmask rows.
+        """
+        return False
+
     @abstractmethod
     def is_terminated(self) -> bool:
         """
