@@ -52,6 +52,65 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     return output_dir / "autotune_configs.json"
 
 
+def _warmup_zero_kv_blocks(worker: "Worker") -> None:
+    """Pre-compile _zero_kv_blocks_kernel before the JIT monitor activates.
+
+    The kernel is only invoked during real inference (when new blocks need
+    zeroing), so it never fires during _dummy_run warmup.  A single call with
+    block_id=0 is enough to trigger Triton compilation for the exact constexpr
+    combination (N_SEGS, PAGE_SIZE_EL, BLOCK_SIZE) determined at KV-cache
+    allocation time.
+    """
+    runner = worker.model_runner
+    zeroer = getattr(runner, "_kv_block_zeroer", None)
+    if zeroer is None or zeroer._meta is None:
+        return
+    try:
+        with torch.inference_mode():
+            zeroer.zero_block_ids([0])
+    except Exception:
+        logger.debug("Skipping _zero_kv_blocks_kernel warmup.", exc_info=True)
+
+
+def _warmup_slot_mapping(worker: "Worker") -> None:
+    """Pre-compile _compute_slot_mapping_kernel before the JIT monitor activates.
+
+    _compute_slot_mapping_kernel is called from the real _prepare_inputs path,
+    not from _dummy_run, so it misses the normal warmup phase.  A single call
+    with a minimal 1-request dummy is enough to compile the kernel for the
+    constexpr combination (TOTAL_CP_WORLD_SIZE, TOTAL_CP_RANK,
+    CP_KV_CACHE_INTERLEAVE_SIZE, PAD_ID, BLOCK_SIZE=1024) that is fixed for
+    the lifetime of this worker.
+
+    The block table is not modified: the zero-initialized block-number tensors
+    already present at this point are sufficient for Triton to compile and
+    execute the kernel without error.
+    """
+    runner = worker.model_runner
+    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        return
+    block_tables = getattr(input_batch, "block_table", None)
+    if block_tables is None:
+        return
+
+    device = runner.device
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+
+    try:
+        with torch.inference_mode():
+            block_tables.compute_slot_mapping(
+                num_reqs=1,
+                query_start_loc=query_start_loc,
+                positions=positions,
+            )
+    except Exception:
+        logger.debug(
+            "Skipping _compute_slot_mapping_kernel warmup.", exc_info=True
+        )
+
+
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -104,6 +163,13 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+
+    # Pre-compile infrastructure Triton kernels that are not exercised by
+    # _dummy_run.  These kernels fire on the very first inference request
+    # otherwise, causing a latency spike (and, in some TP configurations,
+    # an NCCL deadlock while one rank stalls in Triton JIT).
+    _warmup_zero_kv_blocks(worker)
+    _warmup_slot_mapping(worker)
 
 
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
