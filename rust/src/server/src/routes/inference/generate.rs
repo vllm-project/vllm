@@ -19,7 +19,7 @@ use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
+    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -27,6 +27,7 @@ use self::types::{
     GenerateLogprob, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateResponseStreamChoice, GenerateStreamResponse,
 };
+use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
@@ -53,7 +54,7 @@ pub async fn generate(
         engine_request_id = tracing::field::Empty,
     );
 
-    let log_request = state.enable_log_requests;
+    let api_server_options = state.api_server_options;
     let stream = prepared.stream;
     let raw_stream = match state
         .chat
@@ -76,7 +77,7 @@ pub async fn generate(
         let chunk_stream = generate_chunk_stream(
             raw_stream,
             prepared.request_id,
-            log_request,
+            api_server_options,
             prepared.options,
         );
         let sse_stream = generate_sse_stream(chunk_stream).instrument(request_span);
@@ -98,7 +99,7 @@ pub async fn generate(
     let response = match collect_generate(
         collected,
         prepared.request_id,
-        log_request,
+        api_server_options,
         prepared.options,
     ) {
         Ok(response) => response,
@@ -112,7 +113,11 @@ pub async fn generate(
 async fn generate_chunk_stream(
     stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
     request_id: String,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         include_usage,
         include_continuous_usage,
@@ -123,20 +128,21 @@ async fn generate_chunk_stream(
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
-    let mut prompt_tokens: Option<u32> = None;
-    let mut output_tokens = 0_u32;
+    let mut prompt_tokens = None;
+    let mut usage = TokenUsage::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
                 if prompt_tokens.is_none() {
                     prompt_tokens =
-                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len() as u32);
+                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len());
                 }
-                let usage_prompt_tokens = prompt_tokens.unwrap_or_default();
+                usage.prompt_token_count = prompt_tokens.unwrap_or_default();
+                usage.cached_token_count = usage.cached_token_count.max(output.cached_token_count);
 
                 let token_ids = output.token_ids;
-                output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
+                usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
                 if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
@@ -144,12 +150,12 @@ async fn generate_chunk_stream(
                 }
 
                 if let Some(finish_reason) = finish_reason.as_ref()
-                    && log_request
+                    && enable_log_requests
                 {
                     info!(
                         stream = true,
-                        prompt_tokens = usage_prompt_tokens,
-                        output_tokens,
+                        prompt_tokens = usage.prompt_token_count,
+                        output_tokens = usage.output_token_count,
                         finish_reason = finish_reason.as_str(),
                         "generate finished"
                     );
@@ -179,7 +185,7 @@ async fn generate_chunk_stream(
                         token_ids,
                     }],
                     usage: include_continuous_usage
-                        .then(|| Usage::from_counts(usage_prompt_tokens, output_tokens)),
+                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
                 })
                 .await;
             }
@@ -197,10 +203,7 @@ async fn generate_chunk_stream(
         y.yield_ok(GenerateStreamResponse {
             request_id,
             choices: Vec::new(),
-            usage: Some(Usage::from_counts(
-                prompt_tokens.unwrap_or_default(),
-                output_tokens,
-            )),
+            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
         })
         .await;
     }
@@ -211,7 +214,10 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
-    log_request: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        ..
+    }: ApiServerOptions,
     ResponseOptions {
         // Ignored: non-streaming raw generate responses do not include usage.
         include_usage: _,
@@ -244,7 +250,7 @@ fn collect_generate(
     };
     let finish_reason = collected.finish_reason.as_str().to_string();
 
-    if log_request {
+    if enable_log_requests {
         info!(
             prompt_tokens = collected.prompt_token_ids.len(),
             output_tokens = collected.token_ids.len(),
@@ -399,6 +405,7 @@ mod tests {
                 token_ids: Vec::new(),
                 logprobs: None,
                 finish_reason: None,
+                cached_token_count: 0,
                 kv_transfer_params: None,
             }),
             Ok(GenerateOutput {
@@ -410,6 +417,7 @@ mod tests {
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
+                cached_token_count: 2,
                 kv_transfer_params: None,
             }),
         ]);
@@ -417,7 +425,10 @@ mod tests {
         let chunks: Vec<_> = generate_chunk_stream(
             stream,
             "raw-stream".to_string(),
-            false,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
             ResponseOptions {
                 include_usage: true,
                 include_continuous_usage: true,
@@ -434,8 +445,28 @@ mod tests {
             2
         );
         assert_eq!(
+            chunks[0]
+                .usage
+                .as_ref()
+                .expect("chunk usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(2)
+        );
+        assert_eq!(
             chunks[1].usage.as_ref().expect("final usage").prompt_tokens,
             2
+        );
+        assert_eq!(
+            chunks[1]
+                .usage
+                .as_ref()
+                .expect("final usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(2)
         );
     }
 }
