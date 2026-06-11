@@ -438,6 +438,12 @@ if(USE_ONEDNN)
         ${VLLM_EXT_SRC})
 endif()
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(VLLM_EXT_SRC
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ENABLE_X86_ISA)
     set(VLLM_EXT_SRC_SGL
         "csrc/cpu/sgl-kernels/conv.cpp"
