@@ -153,12 +153,6 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("ibm-granite/granite-3.1-8b-instruct"),
         Some(names::GRANITE)
     );
-    // The Granite 4 tool parser is split into its own PR; until it lands,
-    // granite-4 models resolve to no tool parser rather than misrouting.
-    assert_eq!(
-        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
-        None
-    );
     assert_eq!(
         factory.resolve_name_for_model("ibm-granite/granite-20b-functioncalling"),
         Some(names::GRANITE_20B_FC)

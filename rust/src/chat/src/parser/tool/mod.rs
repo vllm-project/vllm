@@ -23,6 +23,8 @@ pub mod names {
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
+    // Matches the Python CLI name `--tool-call-parser granite`, which targets
+    // Granite 3.0/3.1 despite the version-agnostic name.
     pub const GRANITE: &str = "granite";
     pub const GRANITE_20B_FC: &str = "granite-20b-fc";
     pub const HERMES: &str = "hermes";
