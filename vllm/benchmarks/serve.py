@@ -323,7 +323,11 @@ class BenchmarkMetrics:
     total_output: int
     request_throughput: float
     request_goodput: float
+    # Total output tokens / wall-clock; the window includes prefill (TTFT).
     output_throughput: float
+    # Per-request median of (output_len - first_chunk) / sum(itls); excludes
+    # prefill. 0.0 if uncomputable (e.g. no itls when streaming is disabled).
+    decode_throughput: float
     total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
@@ -555,6 +559,7 @@ def calculate_metrics(
     tokenizer: TokenizerLike,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    decode_first_chunk: float = 1.0,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -565,6 +570,9 @@ def calculate_metrics(
         tokenizer: The tokenizer to use.
         selected_percentiles: The percentiles to select.
         goodput_config_dict: The goodput configuration.
+        decode_first_chunk: Output tokens produced during TTFT, excluded from
+            decode throughput. 1 for autoregressive models, the canvas length
+            for diffusion.
 
     Returns:
         A tuple of the benchmark metrics and the actual output lengths.
@@ -576,6 +584,7 @@ def calculate_metrics(
     itls: list[float] = []
     tpots: list[float] = []
     all_tpots: list[float] = []
+    decode_tputs: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
     input_audio_duration = 0.0
@@ -607,6 +616,10 @@ def calculate_metrics(
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
             itls += outputs[i].itl
+            # Per-request decode-only throughput (see decode_throughput field).
+            sum_itl = sum(outputs[i].itl)
+            if output_len > decode_first_chunk and sum_itl > 0:
+                decode_tputs.append((output_len - decode_first_chunk) / sum_itl)
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             input_audio_duration += outputs[i].input_audio_duration
@@ -726,6 +739,7 @@ def calculate_metrics(
         request_throughput=completed / dur_s,
         request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
+        decode_throughput=float(np.median(decode_tputs)) if decode_tputs else 0.0,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by the endpoint
@@ -1081,6 +1095,7 @@ async def benchmark(
 
     diffusion_metrics_after = await fetch_diffusion_metrics(base_url, session)
     diffusion_stats: dict[str, Any] | None = None
+    decode_first_chunk: float = 1.0  # AR: first token; diffusion: set below
     if diffusion_metrics_before is not None and diffusion_metrics_after is not None:
         delta_steps = (
             diffusion_metrics_after.num_denoising_steps
@@ -1096,6 +1111,7 @@ async def benchmark(
         )
         if delta_steps > 0 and delta_committed > 0:
             block_size = delta_positions / delta_steps  # canvas length (CL)
+            decode_first_chunk = round(block_size)  # first canvas lands in TTFT
             num_canvases = delta_committed / block_size  # = number of commit steps
             denoising_steps = delta_steps - num_canvases  # exclude commit steps
             diffusion_stats = {
@@ -1115,6 +1131,7 @@ async def benchmark(
             tokenizer=tokenizer,
             selected_percentiles=selected_percentiles,
             goodput_config_dict=goodput_config_dict,
+            decode_first_chunk=decode_first_chunk,
         )
     else:
         metrics = calculate_metrics_for_embeddings(
@@ -1150,9 +1167,17 @@ async def benchmark(
         if tokenizer:
             print(
                 "{:<40} {:<10.2f}".format(
-                    "Output token throughput (tok/s):", metrics.output_throughput
+                    "Output throughput (e2e, incl. prefill) (tok/s):",
+                    metrics.output_throughput,
                 )
             )
+            if metrics.decode_throughput > 0:
+                print(
+                    "{:<40} {:<10.2f}".format(
+                        "Output throughput (decode only) (tok/s):",
+                        metrics.decode_throughput,
+                    )
+                )
             print(
                 "{:<40} {:<10.2f}".format(
                     "Peak output token throughput (tok/s):",
@@ -1187,6 +1212,7 @@ async def benchmark(
             "request_throughput": metrics.request_throughput,
             "request_goodput": metrics.request_goodput if goodput_config_dict else None,
             "output_throughput": metrics.output_throughput,
+            "decode_throughput": metrics.decode_throughput,
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
