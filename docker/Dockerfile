@@ -148,11 +148,9 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
             sudo \
             python3-pip \
             libibverbs-dev \
-            # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-            # as it was causing spam when compiling the CUTLASS kernels
-            gcc-10 \
-            g++-10 \
-        && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+        && (apt-get install -y --no-install-recommends gcc-10 g++-10 \
+            && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+            || true) \
         # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
         # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
         # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
@@ -259,7 +257,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -633,6 +631,8 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 
 # Install Python and system dependencies
 RUN apt-get update -y \
+    && (add-apt-repository -y universe 2>/dev/null || true) \
+    && apt-get update -y \
     && apt-get install -y --no-install-recommends \
         software-properties-common \
         curl \
@@ -641,7 +641,9 @@ RUN apt-get update -y \
         libsm6 \
         libxext6 \
         libgl1 \
-    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+    && if apt-cache show python${PYTHON_VERSION} >/dev/null 2>&1 ; then \
+        echo "python${PYTHON_VERSION} available in base repos, skipping deadsnakes" ; \
+    elif [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
             curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
@@ -992,7 +994,7 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
