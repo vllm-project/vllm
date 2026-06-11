@@ -43,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    maybe_remap_moe_expert_param_name,
     remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -278,9 +279,10 @@ def _load_per_expert_moe_weight(
     tp_rank_end: int,
     per_rank_intermediate_size: int,
 ) -> bool:
-    """Route LLM-Compressor per-expert keys (experts.experts.N.{gate,up,down}_proj.*)
-    into the stacked w13_*/w2_* params, honoring EP/TP. Returns True iff the
-    name matched a per-expert pattern (caller should `continue`)."""
+    """Route compressed-tensors per-expert keys
+    (experts.experts.N.{gate,up,down}_proj.*) into the stacked w13_*/w2_*
+    params, honoring EP/TP. Returns True iff the name matched a per-expert
+    pattern (caller should `continue`)."""
     if ".mlp.experts.experts." not in in_name:
         return False
     parts = in_name.split(".")
@@ -342,6 +344,7 @@ def _load_per_expert_moe_weight(
         return False
 
     fused_name = f"layers.{layer_id}.mlp.experts.{fused_suffix}"
+    fused_name = maybe_remap_moe_expert_param_name(fused_name, params_dict)
     if fused_name not in params_dict:
         # Model didn't allocate this param (e.g. has_bias=False).
         return True
@@ -1084,7 +1087,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
-            # LLM-Compressor / HF gpt-oss per-expert layout: route into the
+            # compressed-tensors / HF gpt-oss per-expert layout: route into the
             # stacked w13_*/w2_* params.
             if _load_per_expert_moe_weight(
                 name,
@@ -1282,7 +1285,7 @@ class GptOssForCausalLM(
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale",
-            # llm-compressor / HF "experts.experts.N.{gate,up}_proj.*" form:
+            # compressed-tensors / HF "experts.experts.N.{gate,up}_proj.*" form:
             # rename to .w1_* / .w3_* so _load_weights_other routes them into
             # the right half of w13_* (already-fused .w13_* names untouched).
             ".gate_proj.weight": ".w1_weight",

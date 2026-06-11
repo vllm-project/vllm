@@ -178,9 +178,13 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             two_i = layer.w13_weight.size(1)
             i = two_i // 2
             device = layer.w13_weight.device
-            perm = torch.empty(two_i, dtype=torch.long, device=device)
-            perm[0::2] = torch.arange(0, i, device=device)
-            perm[1::2] = torch.arange(i, two_i, device=device)
+            perm = torch.stack(
+                [
+                    torch.arange(0, i, device=device),
+                    torch.arange(i, two_i, device=device),
+                ],
+                dim=1,
+            ).flatten()
             has_w13_bias = getattr(layer, "w13_bias", None) is not None
             logger.info_once(
                 "[zen_cpu][swigluoai-permute] Reordering w13 from "

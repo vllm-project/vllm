@@ -2527,8 +2527,75 @@ def _native_topk_score_then_select(
     )
 
 
-def _have_moe_C_op(name: str) -> bool:
-    return hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, name)
+def _topk_softmax_cpu(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    bias: torch.Tensor | None,
+) -> None:
+    _native_topk_score_then_select(
+        torch.softmax,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        bias,
+    )
+
+
+def _topk_sigmoid_cpu(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    bias: torch.Tensor | None,
+) -> None:
+    _native_topk_score_then_select(
+        torch.sigmoid,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        bias,
+    )
+
+
+def _topk_cpu_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    bias: torch.Tensor | None,
+) -> None:
+    return None
+
+
+if not (hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_softmax")):
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    _moe_C_cpu_lib = torch.library.Library("_moe_C", "FRAGMENT")
+    direct_register_custom_op(
+        "topk_softmax",
+        _topk_softmax_cpu,
+        mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
+        fake_impl=_topk_cpu_fake,
+        target_lib=_moe_C_cpu_lib,
+        dispatch_key="CPU",
+    )
+    direct_register_custom_op(
+        "topk_sigmoid",
+        _topk_sigmoid_cpu,
+        mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
+        fake_impl=_topk_cpu_fake,
+        target_lib=_moe_C_cpu_lib,
+        dispatch_key="CPU",
+    )
 
 
 def topk_softmax(
@@ -2539,17 +2606,6 @@ def topk_softmax(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
-    if not _have_moe_C_op("topk_softmax"):
-        _native_topk_score_then_select(
-            torch.softmax,
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return
     torch.ops._moe_C.topk_softmax(
         topk_weights,
         topk_ids,
@@ -2568,17 +2624,6 @@ def topk_sigmoid(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
-    if not _have_moe_C_op("topk_sigmoid"):
-        _native_topk_score_then_select(
-            torch.sigmoid,
-            topk_weights,
-            topk_ids,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
         topk_ids,
