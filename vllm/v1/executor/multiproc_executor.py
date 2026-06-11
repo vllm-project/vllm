@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import multiprocessing
 import os
 import pickle
@@ -989,10 +990,16 @@ class WorkerProc:
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(e)
+                del method, args, kwargs, output_rank
+                gc.collect()
                 continue
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
+            # Release deserialized RPC args immediately so that tensors
+            # allocated are freed before the next dequeue() call.
+            del method, args, kwargs, output_rank
+            gc.collect()
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
