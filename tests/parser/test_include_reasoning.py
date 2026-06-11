@@ -256,10 +256,15 @@ class TestExtractResponseOutputsIncludeReasoning:
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     results: list[DeltaMessage | None] = []
-    for tid in token_ids:
+    for i, tid in enumerate(token_ids):
         delta_text = tokenizer.decode([tid])
+        is_last = i == len(token_ids) - 1
         result = parser.parse_delta(
-            delta_text, [tid], request, prompt_token_ids=prompt_token_ids
+            delta_text,
+            [tid],
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=is_last,
         )
         prompt_token_ids = None
         results.append(result)
@@ -327,7 +332,19 @@ class TestParseDeltaIncludeReasoning:
     def test_streaming_include_false_tool_calls_preserved(self, tokenizer):
         """Tool calls stream correctly when reasoning is suppressed."""
         parser = make_parser(tokenizer, reasoning=True, tool=True)
-        request = make_responses_request(include_reasoning=False)
+        request = make_responses_request(
+            include_reasoning=False,
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+        )
 
         results = stream_text(
             parser,

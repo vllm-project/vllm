@@ -1360,10 +1360,16 @@ class OpenAIServingResponses(OpenAIServing):
             else None
         )
 
+        hide_stream_metadata = (
+            not getattr(request, "include_reasoning", True) and self.parser is not None
+        )
+
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,
