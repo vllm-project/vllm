@@ -302,7 +302,7 @@ def generate_new_kernels():
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
             "else if (a_type == vllm::kFE4M3fn)\n"
-            "  TORCH_CHECK(false, "
+            "  STD_TORCH_CHECK(false, "
             '"marlin kernel with fp8 activation is not built.");'
         )
 
