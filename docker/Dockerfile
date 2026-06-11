@@ -186,7 +186,6 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
 
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
-ENV SCCACHE_ENDPOINT=${USE_SCCACHE:+${SCCACHE_ENDPOINT}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
@@ -301,6 +300,7 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 FROM base AS rust-build
 ARG BUILD_OS
 ARG USE_SCCACHE
+ARG SCCACHE_ENDPOINT
 
 # Install native tools needed only for Rust/protoc builds.
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
@@ -341,6 +341,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}; fi; \
         export RUSTC_WRAPPER=sccache; \
         sccache --show-stats; \
     fi \
@@ -403,6 +404,7 @@ ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG USE_SCCACHE
+ARG SCCACHE_ENDPOINT
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -432,7 +434,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        export CMAKE_BUILD_TYPE=Release \
+        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}; fi \
+        && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
