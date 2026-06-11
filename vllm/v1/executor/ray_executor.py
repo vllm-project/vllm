@@ -258,30 +258,32 @@ class RayDistributedExecutor(Executor):
         }
         self.collective_rpc("adjust_rank", args=(rerank_mapping,))
 
-        # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = []
+        # Get the set of physical GPU IDs used on each node.
+        worker_node_and_physical_gpu_ids = []
         for worker in [self.driver_dummy_worker] + self.workers:
             if worker is None:
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
-            worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            worker_node_and_physical_gpu_ids.append(
+                ray.get(worker.get_node_and_physical_gpu_ids.remote())  # type: ignore[attr-defined]
             )
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
-        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+        node_physical_gpu_ids = defaultdict(list)  # node id -> physical GPU IDs
 
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+        for i, (node_id, physical_gpu_ids) in enumerate(
+            worker_node_and_physical_gpu_ids
+        ):
             node_workers[node_id].append(i)
-            # `gpu_ids` can be a list of strings or integers.
+            # `physical_gpu_ids` can be a list of strings or integers.
             # convert them to integers for consistency.
-            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # NOTE: physical GPU IDs can be larger than 9 (e.g. 16 GPUs),
             # string sorting is not sufficient.
             # see https://github.com/vllm-project/vllm/issues/5590
-            gpu_ids = [int(x) for x in gpu_ids]
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
+            physical_gpu_ids = [int(x) for x in physical_gpu_ids]
+            node_physical_gpu_ids[node_id].extend(physical_gpu_ids)
+        for node_id, physical_gpu_ids in node_physical_gpu_ids.items():
+            node_physical_gpu_ids[node_id] = sorted(physical_gpu_ids)
 
         all_ips = set(worker_ips + [driver_ip])
         n_ips = len(all_ips)
@@ -298,7 +300,7 @@ class RayDistributedExecutor(Executor):
             )
 
         all_args_to_update_environment_variables: list[dict[str, str]] = [
-            {} for _ in worker_node_and_gpu_ids
+            {} for _ in worker_node_and_physical_gpu_ids
         ]
 
         # Environment variables to copy from driver to workers
@@ -321,7 +323,7 @@ class RayDistributedExecutor(Executor):
             "update_environment_variables", args=(self._get_env_vars_to_be_updated(),)
         )
 
-        if len(node_gpus) == 1:
+        if len(node_physical_gpu_ids) == 1:
             # in single node case, we don't need to get the IP address.
             # the loopback address is sufficient
             # NOTE: a node may have several IP addresses, one for each
@@ -337,11 +339,11 @@ class RayDistributedExecutor(Executor):
 
         # Initialize the actual workers inside worker wrapper.
         all_kwargs = []
-        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+        for rank, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
             kwargs = dict(
                 vllm_config=self.vllm_config,
-                assigned_gpu_ids=sorted(node_gpus[node_id]),
+                assigned_physical_gpu_ids=sorted(node_physical_gpu_ids[node_id]),
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,

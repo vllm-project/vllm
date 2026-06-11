@@ -320,12 +320,12 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     is_distributed = dist.is_initialized()
 
-    from vllm.platforms.interface import get_assigned_gpu_ids
+    from vllm.platforms.interface import get_assigned_physical_gpu_ids
 
-    assigned = get_assigned_gpu_ids()
-    if assigned is not None:
-        cache_key = ",".join(str(i) for i in sorted(assigned))
-        num_dev = len(assigned)
+    assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+    if assigned_physical_gpu_ids is not None:
+        cache_key = ",".join(str(i) for i in sorted(assigned_physical_gpu_ids))
+        num_dev = len(assigned_physical_gpu_ids)
     else:
         num_dev = current_platform.device_count()
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
@@ -344,7 +344,11 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
         cache: dict[str, bool] = {}
-        ids = list(assigned) if assigned is not None else list(range(num_dev))
+        ids = (
+            list(assigned_physical_gpu_ids)
+            if assigned_physical_gpu_ids is not None
+            else list(range(num_dev))
+        )
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
         # NOTE: we use `subprocess` rather than `multiprocessing` here

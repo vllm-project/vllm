@@ -120,30 +120,30 @@ class RayWorkerProc(WorkerProc):
             is_driver_worker=is_driver_worker,
         )
 
-    def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
-        """Return (node_id, gpu_ids) assigned to this actor by Ray."""
+    def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
+        """Return (node_id, physical_gpu_ids) assigned to this actor by Ray."""
         node_id = ray.get_runtime_context().get_node_id()
         device_key = current_platform.ray_device_key
         if not device_key:
             raise RuntimeError(
                 f"current platform {current_platform.device_name} does not support ray."
             )
-        gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
-        return node_id, [int(x) for x in gpu_ids]
+        physical_gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
+        return node_id, [int(x) for x in physical_gpu_ids]
 
     def initialize_worker(
         self,
         local_rank: int,
         env_vars: dict[str, str],
         driver_env_vars: dict[str, str] | None = None,
-        assigned_gpu_ids: list[int] | None = None,
+        assigned_physical_gpu_ids: list[int] | None = None,
     ) -> None:
         """Complete initialization after GPU assignment is known.
 
         *driver_env_vars* are applied with ``setdefault`` — they fill
         in missing vars but never overwrite node-local values.
         *env_vars* (e.g. CUDA_VISIBLE_DEVICES) always overwrite.
-        *assigned_gpu_ids* maps local_rank to physical CUDA device index.
+        *assigned_physical_gpu_ids* maps local_rank to physical CUDA device ID.
         """
         if driver_env_vars:
             for key, value in driver_env_vars.items():
@@ -151,10 +151,12 @@ class RayWorkerProc(WorkerProc):
         for key, value in env_vars.items():
             os.environ[key] = value
 
-        if assigned_gpu_ids is not None:
+        if assigned_physical_gpu_ids is not None:
             vllm_config = self._init_kwargs["vllm_config"]
             assert isinstance(vllm_config, VllmConfig)
-            vllm_config.parallel_config.assigned_gpu_ids = assigned_gpu_ids
+            vllm_config.parallel_config.assigned_physical_gpu_ids = (
+                assigned_physical_gpu_ids
+            )
 
         self.local_rank = local_rank
         super().__init__(
@@ -372,26 +374,31 @@ class RayExecutorV2(MultiprocExecutor):
             )
             self.ray_worker_handles.append(handle)
 
-        # Step 6: Discover GPU IDs assigned to each worker via Ray runtime context.
-        worker_node_and_gpu_ids = ray.get(
-            [h.actor.get_node_and_gpu_ids.remote() for h in self.ray_worker_handles]
+        # Step 6: Discover physical GPU IDs assigned to each worker via Ray
+        # runtime context.
+        worker_node_and_physical_gpu_ids = ray.get(
+            [
+                h.actor.get_node_and_physical_gpu_ids.remote()
+                for h in self.ray_worker_handles
+            ]
         )
 
         node_workers: dict[str, list[int]] = defaultdict(list)
-        node_gpus: dict[str, list[int]] = defaultdict(list)
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+        node_physical_gpu_ids: dict[str, list[int]] = defaultdict(list)
+        for i, (node_id, physical_gpu_ids) in enumerate(
+            worker_node_and_physical_gpu_ids
+        ):
             node_workers[node_id].append(i)
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
+            node_physical_gpu_ids[node_id].extend(physical_gpu_ids)
+        for node_id, physical_gpu_ids in node_physical_gpu_ids.items():
+            node_physical_gpu_ids[node_id] = sorted(physical_gpu_ids)
 
-        # Step 7: Initialize workers with correct local_rank and
-        # assigned_gpu_ids. Workers address physical devices directly
-        # instead of relying on CUDA_VISIBLE_DEVICES.
+        # Step 7: Initialize workers with local logical ranks and the
+        # logical-to-physical GPU mapping discovered from Ray placement.
         init_worker_refs = []
-        for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+        for i, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(i)
-            assigned_gpu_ids = sorted(node_gpus[node_id])
+            assigned_physical_gpu_ids = sorted(node_physical_gpu_ids[node_id])
             worker_env_vars: dict[str, str] = {}
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
@@ -399,14 +406,14 @@ class RayExecutorV2(MultiprocExecutor):
                     local_rank,
                     worker_env_vars,
                     self.driver_env_vars,
-                    assigned_gpu_ids=assigned_gpu_ids,
+                    assigned_physical_gpu_ids=assigned_physical_gpu_ids,
                 )
             )
         # Also set on the executor-side config for consistency.
-        if worker_node_and_gpu_ids:
-            node_id_0 = worker_node_and_gpu_ids[0][0]
-            self.vllm_config.parallel_config.assigned_gpu_ids = sorted(
-                node_gpus[node_id_0]
+        if worker_node_and_physical_gpu_ids:
+            node_id_0 = worker_node_and_physical_gpu_ids[0][0]
+            self.vllm_config.parallel_config.assigned_physical_gpu_ids = sorted(
+                node_physical_gpu_ids[node_id_0]
             )
         ray.get(init_worker_refs)
 

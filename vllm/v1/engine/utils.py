@@ -176,23 +176,26 @@ class CoreEngineProcManager:
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Populate assigned_gpu_ids in DP for platforms that cannot
-                # rely on torch.accelerator.set_device_index(), and for Ray.
+                # Populate the logical-to-physical GPU mapping in DP for
+                # platforms that cannot rely on
+                # torch.accelerator.set_device_index(), and for Ray.
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
                 if is_dp and (
                     needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
-                    set_device_control_env_var(vllm_config, local_dp_rank)
+                    set_assigned_physical_gpu_ids_for_dp_rank(
+                        vllm_config, local_dp_rank
+                    )
 
                 with numa_utils.configure_subprocess(
                     # EngineCore itself does not have a TP/PP-local rank.
-                    # When DP is enabled, set_device_control_env_var()
-                    # populates assigned_gpu_ids for this DP shard, so
-                    # local_rank=0 means "the first local GPU in this
-                    # shard". The actual TP/PP worker processes spawned by
-                    # the executor are bound separately with their own
+                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
+                    # populates the logical-to-physical mapping for this DP
+                    # shard, so local_rank=0 means "the first local GPU in
+                    # this shard". The actual TP/PP worker processes spawned
+                    # by the executor are bound separately with their own
                     # local_rank values.
                     vllm_config,
                     local_rank=0,
@@ -272,26 +275,30 @@ class SignalCallback:
         self._event.set()
 
 
-def set_device_control_env_var(vllm_config: VllmConfig, local_dp_rank: int) -> None:
+def set_assigned_physical_gpu_ids_for_dp_rank(
+    vllm_config: VllmConfig, local_dp_rank: int
+) -> None:
     """
-    Populate assigned_gpu_ids on the config for the given DP rank.
+    Populate assigned_physical_gpu_ids on the config for the given DP rank.
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    gpu_ids = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    vllm_config.parallel_config.assigned_gpu_ids = gpu_ids
+    physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+        evar, local_dp_rank, world_size, local_world_size
+    )
+    vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
 
 
-def get_device_indices(
+def get_physical_gpu_ids_for_local_dp_rank(
     device_control_env_var: str,
     local_dp_rank: int,
     world_size: int,
     local_world_size: int | None = None,
 ) -> list[int]:
     """
-    Returns list of physical device indices for the specified
+    Returns list of physical GPU IDs for the specified
     data parallel rank.
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
@@ -439,11 +446,11 @@ class CoreEngineActorManager:
             # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
-                device_indices = get_device_indices(
+                physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
                     device_evar, local_index, world_size
                 )
                 actor_env_vars = self.env_vars_dict.copy()
-                actor_env_vars[device_evar] = ",".join(str(d) for d in device_indices)
+                actor_env_vars[device_evar] = ",".join(str(d) for d in physical_gpu_ids)
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (

@@ -385,7 +385,6 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
-        device_index: int | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -393,14 +392,11 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
-        if device_index is not None:
-            self.device_index = device_index
-        elif _WORLD is not None:
+        if _WORLD is not None:
             self.device_index = _WORLD.device_index
         else:
             assert local_rank >= 0, (
-                "local_rank must be provided when creating the world group "
-                "without device_index"
+                "local_rank must be provided when creating the world group"
             )
             self.device_index = local_rank
 
@@ -453,7 +449,12 @@ class GroupCoordinator:
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{self.device_index}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(
+                    self.device_index
+                )
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
         elif current_platform.is_xpu():
             self.device = torch.device(f"xpu:{self.device_index}")
         elif current_platform.is_out_of_tree():
@@ -1266,7 +1267,6 @@ def init_world_group(
     ranks: list[int],
     local_rank: int,
     backend: str,
-    device_index: int | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1274,7 +1274,6 @@ def init_world_group(
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
-        device_index=device_index,
     )
 
 
@@ -1447,7 +1446,6 @@ def _init_process_group_for_split_group(
     rank: int,
     local_rank: int,
     timeout: timedelta | None,
-    device_index: int | None = None,
 ) -> None:
     """Initialize the default PG with both CPU (gloo) and device (e.g. nccl)
     backends and an eager ``device_id`` binding so that subgroups can be
@@ -1456,8 +1454,12 @@ def _init_process_group_for_split_group(
     """
     if torch.accelerator.is_available() and backend != "gloo":
         init_backend = "cpu:gloo,cuda:nccl"
-        dev_idx = device_index if device_index is not None else local_rank
-        device_id: torch.device | None = torch.device(f"cuda:{dev_idx}")
+        from vllm.platforms import current_platform
+
+        visible_device_index = current_platform.logical_device_id_to_visible_device_id(
+            local_rank
+        )
+        device_id: torch.device | None = torch.device(f"cuda:{visible_device_index}")
     else:
         init_backend = "gloo"
         device_id = None
@@ -1503,7 +1505,6 @@ def _init_elastic_ep_world(
     backend: str,
     rank: int,
     world_size: int,
-    device_index: int | None = None,
 ) -> None:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
@@ -1544,7 +1545,6 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
-    device_index: int | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1628,7 +1628,6 @@ def init_distributed_environment(
                 rank=rank,
                 local_rank=local_rank,
                 timeout=timeout,
-                device_index=device_index,
             )
         else:
             # this backend is used for WORLD
@@ -1664,13 +1663,11 @@ def init_distributed_environment(
 
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
-        _init_elastic_ep_world(
-            config, local_rank, backend, rank, world_size, device_index=device_index
-        )
+        _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
         return
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend, device_index=device_index)
+        _WORLD = init_world_group(ranks, local_rank, backend)
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:

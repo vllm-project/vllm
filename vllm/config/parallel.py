@@ -302,12 +302,14 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
-    assigned_gpu_ids: list[int] | None = None
-    """Physical GPU device IDs to use. Workers address these devices
-    directly instead of relying on CUDA_VISIBLE_DEVICES, preserving
-    full GPU topology visibility (needed for GPU-NIC affinity in RDMA
-    and DeepGEMM MegaMoE init). Example: ``[2, 3]`` makes vLLM use
-    only GPUs 2 and 3. When None, uses all visible devices in order."""
+    assigned_physical_gpu_ids: list[int] | None = None
+    """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
+
+    For example, ``[2, 3]`` means logical GPU 0 maps to physical GPU 2,
+    and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
+    at platform/topology boundaries such as NVML, NIC affinity, P2P
+    checks, and final CUDA device selection when needed. When None,
+    logical IDs map to visible device IDs in order."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
@@ -778,7 +780,7 @@ class ParallelConfig:
             "numa_bind",
             "numa_bind_nodes",
             "numa_bind_cpus",
-            "assigned_gpu_ids",
+            "assigned_physical_gpu_ids",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

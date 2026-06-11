@@ -654,6 +654,15 @@ class TestDeviceIds:
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 
+    def test_device_ids_with_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids are CVD-local indices resolved to physical ids."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
     def test_no_device_ids(self):
         """No --device-ids returns None."""
         args = EngineArgs(model="m")
@@ -665,3 +674,16 @@ class TestDeviceIds:
         EngineArgs.add_cli_args(parser)
         parsed = parser.parse_args(["--model", "m", "--device-ids", "0,2,4"])
         assert parsed.device_ids == [0, 2, 4]
+
+    def test_assigned_physical_gpu_ids_are_physical_with_cvd(self, monkeypatch):
+        """assigned_physical_gpu_ids are already physical and not composed with CVD."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [4, 5])
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+
+        assert current_platform.device_id_to_physical_device_id(0) == 4
+        assert current_platform.device_id_to_physical_device_id(1) == 5
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 0
+        assert current_platform.logical_device_id_to_visible_device_id(1) == 1

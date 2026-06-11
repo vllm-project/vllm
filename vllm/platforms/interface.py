@@ -29,10 +29,10 @@ else:
 
 logger = init_logger(__name__)
 
-_assigned_gpu_ids: list[int] | None = None
+_assigned_physical_gpu_ids: list[int] | None = None
 
 
-def set_assigned_gpu_ids(ids: list[int]) -> None:
+def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
     """Set the physical GPU IDs assigned to this worker process.
     Called during worker init so that device_id_to_physical_device_id()
     can map local_rank to the correct physical device without relying
@@ -40,18 +40,18 @@ def set_assigned_gpu_ids(ids: list[int]) -> None:
 
     Idempotent: a second call with the same value is a no-op.
     Raises AssertionError if called again with a different value."""
-    global _assigned_gpu_ids
-    if _assigned_gpu_ids is not None:
-        assert _assigned_gpu_ids == ids, (
-            f"set_assigned_gpu_ids called with conflicting values: "
-            f"existing={_assigned_gpu_ids}, new={ids}"
+    global _assigned_physical_gpu_ids
+    if _assigned_physical_gpu_ids is not None:
+        assert _assigned_physical_gpu_ids == ids, (
+            f"set_assigned_physical_gpu_ids called with conflicting values: "
+            f"existing={_assigned_physical_gpu_ids}, new={ids}"
         )
         return
-    _assigned_gpu_ids = ids
+    _assigned_physical_gpu_ids = ids
 
 
-def get_assigned_gpu_ids() -> list[int] | None:
-    return _assigned_gpu_ids
+def get_assigned_physical_gpu_ids() -> list[int] | None:
+    return _assigned_physical_gpu_ids
 
 
 def in_wsl() -> bool:
@@ -257,19 +257,14 @@ class Platform:
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
-        if _assigned_gpu_ids is not None:
-            if device_id >= len(_assigned_gpu_ids):
+        if _assigned_physical_gpu_ids is not None:
+            if device_id >= len(_assigned_physical_gpu_ids):
                 raise IndexError(
                     f"device_id {device_id} is out of range for "
-                    f"assigned_gpu_ids {_assigned_gpu_ids} "
-                    f"({len(_assigned_gpu_ids)} devices assigned)"
+                    f"assigned_physical_gpu_ids {_assigned_physical_gpu_ids} "
+                    f"({len(_assigned_physical_gpu_ids)} devices assigned)"
                 )
-            mapped = _assigned_gpu_ids[device_id]
-            # When CVD is also set, assigned_gpu_ids holds logical
-            # indices into the CVD set.  Compose to get physical ids.
-            cvd = os.environ.get(cls.device_control_env_var, "")
-            if cvd:
-                return int(cvd.split(",")[mapped])
+            mapped = _assigned_physical_gpu_ids[device_id]
             return mapped
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
@@ -283,6 +278,31 @@ class Platform:
             return int(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def logical_device_id_to_visible_device_id(cls, device_id: int) -> int:
+        """Map a vLLM-local logical device ID to the current process's
+        visible accelerator ordinal.
+
+        vLLM internals use logical local IDs. Physical IDs are used only
+        at platform/topology boundaries. This helper performs the final
+        translation needed by APIs such as ``torch.device("cuda:N")``.
+        """
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return physical_device_id
+
+        visible_physical_device_ids = [
+            int(physical_id) for physical_id in device_control_env.split(",")
+        ]
+        if physical_device_id not in visible_physical_device_ids:
+            raise RuntimeError(
+                f"Physical device {physical_device_id} for logical device "
+                f"{device_id} is not visible in {cls.device_control_env_var}="
+                f"{device_control_env}"
+            )
+        return visible_physical_device_ids.index(physical_device_id)
 
     @classmethod
     def import_kernels(cls) -> None:
