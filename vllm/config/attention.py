@@ -53,6 +53,11 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    sparse_mla_force_mqa: bool = False
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
+    Set to True to always use the MQA path."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,

@@ -1,0 +1,64 @@
+# Sparse MLA benchmark: forward_mha vs forward_mqa crossover plot
+#
+# Dense pure-prefill sweep to generate a smooth speedup curve.
+# Two crossover points:
+#   - Low end: MQA→MHA around q128-q160
+#   - High end: MHA→MQA around q6k-q8k
+#
+# Usage:
+#   python benchmark.py --config configs/mla_sparse_mha_vs_mqa.yaml
+
+mode: mha_vs_mqa
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+batch_specs:
+  - "q64"
+  - "q96"
+  - "q128"
+  - "q160"
+  - "q192"
+  - "q224"
+  - "q256"
+  - "q320"
+  - "q384"
+  - "q448"
+  - "q512"
+  - "q640"
+  - "q768"
+  - "q896"
+  - "q1k"
+  - "q1280"
+  - "q1536"
+  - "q1792"
+  - "q2k"
+  - "q2560"
+  - "q3k"
+  - "q3584"
+  - "q4k"
+  - "q5k"
+  - "q6k"
+  - "q7k"
+  - "q8k"
+  - "q10k"
+  - "q12k"
+  - "q14k"
+  - "q16k"
+
+backends:
+  - FLASHMLA_SPARSE
+
+device: "cuda:0"
+repeats: 10
+warmup_iters: 3
+profile_memory: true

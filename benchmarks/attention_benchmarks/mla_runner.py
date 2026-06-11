@@ -66,6 +66,7 @@ def create_minimal_vllm_config(
     index_topk: int | None = None,
     prefill_backend: str | None = None,
     kv_cache_dtype: str = "auto",
+    sparse_mla_force_mqa: bool = False,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
@@ -82,6 +83,8 @@ def create_minimal_vllm_config(
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
                         "trtllm"). Configures the attention config to force
                         the specified prefill backend.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+                    forward_mqa (even prefill tokens).
 
     Returns:
         VllmConfig for benchmarking
@@ -187,6 +190,9 @@ def create_minimal_vllm_config(
             vllm_config.attention_config.flash_attn_version = prefill_cfg[
                 "flash_attn_version"
             ]
+
+    if sparse_mla_force_mqa:
+        vllm_config.attention_config.sparse_mla_force_mqa = True
 
     return vllm_config
 
@@ -777,9 +783,20 @@ def _run_single_benchmark(
         indexer.fill_random_indices(total_q, max_kv_len)
 
     # Determine which forward methods to use based on metadata.
-    # Sparse MLA backends always use forward_mqa
-    has_decode = is_sparse or getattr(metadata, "decode", None) is not None
-    has_prefill = not is_sparse and getattr(metadata, "prefill", None) is not None
+    # Non-sparse backends use .decode/.prefill sub-objects.
+    # Sparse backends use num_decode_tokens/num_prefills directly.
+    #
+    # sparse_mla_force_mqa overrides: even for prefill metadata, use MQA.
+    force_mqa = getattr(config, "sparse_mla_force_mqa", False)
+    if force_mqa:
+        has_decode = True
+        has_prefill = False
+    elif is_sparse:
+        has_decode = metadata.num_decode_tokens > 0
+        has_prefill = metadata.num_prefills > 0
+    else:
+        has_decode = metadata.decode is not None
+        has_prefill = metadata.prefill is not None
     if not has_decode and not has_prefill:
         raise RuntimeError("Metadata has neither decode nor prefill metadata")
 
@@ -886,6 +903,7 @@ def _run_mla_benchmark_batched(
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
 ) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
@@ -904,6 +922,8 @@ def _run_mla_benchmark_batched(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
 
     Returns:
         List of BenchmarkResult objects
@@ -954,9 +974,19 @@ def _run_mla_benchmark_batched(
         index_topk=index_topk if is_sparse else None,
         prefill_backend=prefill_backend,
         kv_cache_dtype=kv_cache_dtype,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
     )
 
     results = []
+
+    # Initialize workspace manager (needed by metadata builders)
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        is_workspace_manager_initialized,
+    )
+
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(device)
 
     with set_current_vllm_config(vllm_config):
         # Create backend impl, layer, builder, and indexer (reused across benchmarks)
@@ -1052,6 +1082,7 @@ def run_mla_benchmark(
     num_kv_splits: int | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    sparse_mla_force_mqa: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
@@ -1071,6 +1102,8 @@ def run_mla_benchmark(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
+            forward_mqa (even prefill tokens).
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
@@ -1095,7 +1128,11 @@ def run_mla_benchmark(
 
     # Use unified batched execution
     results = _run_mla_benchmark_batched(
-        backend, configs_with_params, index_topk, prefill_backend=prefill_backend
+        backend,
+        configs_with_params,
+        index_topk,
+        prefill_backend=prefill_backend,
+        sparse_mla_force_mqa=sparse_mla_force_mqa,
     )
 
     # Return single result or list based on input

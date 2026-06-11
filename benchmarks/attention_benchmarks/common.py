@@ -226,6 +226,7 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
+    sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
 
 
 @dataclass
