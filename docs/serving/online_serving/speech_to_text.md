@@ -215,8 +215,13 @@ so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_strea
 
 !!! note
     That `Nx` is a KV-admission ceiling (how many streams *fit* in KV), not measured
-    throughput. Real capacity is `min(KV ceiling, compute, max_num_seqs)`. Narrowing
-    the window trades a little transcription fidelity for KV headroom, so measure on your audio.
+    throughput, and it is computed for requests that fill `max_model_len` -- a realtime
+    session's KV plateaus at the sliding window instead, so for streaming the `Nx`
+    understates stream capacity and the per-stream formula above is the number to size
+    against. Real capacity is `min(KV at the window, compute, max_num_seqs)`; on small
+    GPUs compute saturates first (real-time falls behind) while VRAM stays flat.
+    Narrowing the window trades a little transcription fidelity for KV headroom, so
+    measure on your audio.
 
 !!! note
     Narrowing the window also shrinks the encoder cache budget, so a server configured
