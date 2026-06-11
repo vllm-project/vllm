@@ -635,6 +635,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         "an unexpected condition. Please open an issue if encountered."
                     )
 
+                # The MoE refactor (#41184) moved expert params under
+                # `mlp.experts.routed_experts.*`; remap the legacy checkpoint
+                # name so keys like w2_bias resolve against params_dict.
+                fused_name = fused_name.replace(
+                    ".mlp.experts.", ".mlp.experts.routed_experts."
+                )
+
                 moe_quant_method = _get_moe_weight_dtype(layer_id=layer_id)
 
             if (
