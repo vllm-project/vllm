@@ -3,7 +3,9 @@
 #define CPU_TYPES_VXE_HPP
 
 #include <vecintrin.h>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <torch/all.h>
 namespace vec_op {
@@ -817,8 +819,7 @@ inline void storeFP32<::c10::Half>(float v, ::c10::Half* ptr) {
   // intrinsics for FP32 to FP16 conversion does not use IEEE rounding and can
   // produce incorrect results for some inputs. Process each of the 4 vectors
   // separately.
-  uint32_t in;
-  std::memcpy(&in, &v, sizeof(in));
+  uint32_t in = std::bit_cast<uint32_t>(v);
 
   uint32_t s = (in & 0x80000000) >> 16;  // Sign
   uint32_t e = (in & 0x7F800000) >> 23;  // Exponent
