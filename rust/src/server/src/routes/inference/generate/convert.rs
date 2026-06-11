@@ -8,19 +8,29 @@ use crate::utils::{ResolvedRequestContext, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreparedRequest {
+pub(super) struct PreparedRequest {
     pub request_id: String,
     pub text_request: TextRequest,
     pub stream: bool,
+    /// Public response rendering options for route-layer helpers.
+    pub options: ResponseOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct ResponseOptions {
+    /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether the caller asked for usage on every streamed chunk.
     pub include_continuous_usage: bool,
+    /// Whether the caller requested output logprobs on generate choices.
     pub include_logprobs: bool,
+    /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
 /// text-generation format.
-pub fn prepare_generate_request(
+pub(super) fn prepare_generate_request(
     request: GenerateRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
@@ -65,10 +75,12 @@ pub fn prepare_generate_request(
         request_id: ctx.request_id,
         text_request,
         stream,
-        include_usage,
-        include_continuous_usage,
-        include_logprobs,
-        include_prompt_logprobs,
+        options: ResponseOptions {
+            include_usage,
+            include_continuous_usage,
+            include_logprobs,
+            include_prompt_logprobs,
+        },
     })
 }
 
@@ -158,7 +170,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(!prepared.include_usage);
-        assert!(!prepared.include_continuous_usage);
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
     }
 }
