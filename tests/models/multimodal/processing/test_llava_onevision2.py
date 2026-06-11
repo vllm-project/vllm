@@ -183,6 +183,14 @@ def test_validate_unsupported_scheme_blocked():
         _validate_video_source("ftp://example.com/v.mp4", _model_config())
 
 
+def test_validate_relative_bare_path_blocked():
+    # Bare (scheme=="") paths come only from the codec backend and must be
+    # absolute: resolving a relative path against an ambiguous CWD before the
+    # confinement check is brittle/unsafe, so it is rejected outright.
+    with pytest.raises(ValueError):
+        _validate_video_source("ov2/v.mp4", _model_config(local="/tmp/ov2"))
+
+
 # ---------------------------------------------------------------------------
 # Frame backend marker -> PIL + timestamps (_frame_video_to_pil_and_timestamps)
 #
