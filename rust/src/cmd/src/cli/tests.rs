@@ -44,6 +44,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
@@ -143,7 +144,24 @@ fn serve_passes_enable_request_id_headers_into_config() {
         panic!("expected serve args");
     };
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
-    assert!(config.enable_request_id_headers);
+    assert!(config.api_server_options.enable_request_id_headers);
+}
+
+#[test]
+fn serve_passes_enable_prompt_tokens_details_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-prompt-tokens-details",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.enable_prompt_tokens_details);
 }
 
 #[test]
@@ -166,7 +184,7 @@ fn frontend_args_json_passes_enable_request_id_headers_into_config() {
         panic!("expected frontend args");
     };
     let config = args.into_config();
-    assert!(config.enable_request_id_headers);
+    assert!(config.api_server_options.enable_request_id_headers);
 }
 
 #[test]
@@ -342,6 +360,7 @@ fn frontend_args_accept_json() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
@@ -456,7 +475,7 @@ fn frontend_args_json_ignores_unknown_fields() {
 }
 
 #[test]
-fn frontend_args_json_accepts_noop_fields() {
+fn frontend_args_json_sets_prompt_tokens_details_flag() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
@@ -467,7 +486,7 @@ fn frontend_args_json_accepts_noop_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_server_count":2,"enable_prompt_tokens_details":true}"#,
     ])
     .unwrap();
 
@@ -475,6 +494,7 @@ fn frontend_args_json_accepts_noop_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
+    assert!(args.runtime.enable_prompt_tokens_details);
 }
 
 #[test]
@@ -744,6 +764,7 @@ fn serve_args_accept_handshake_aliases() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
@@ -862,8 +883,11 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
-            enable_log_requests: false,
-            enable_request_id_headers: false,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                enable_request_id_headers: false,
+            },
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
@@ -927,8 +951,11 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
-            enable_log_requests: false,
-            enable_request_id_headers: false,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                enable_request_id_headers: false,
+            },
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
@@ -1007,8 +1034,11 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
-            enable_log_requests: false,
-            enable_request_id_headers: false,
+            api_server_options: ApiServerOptions {
+                enable_log_requests: false,
+                enable_prompt_tokens_details: false,
+                enable_request_id_headers: false,
+            },
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
