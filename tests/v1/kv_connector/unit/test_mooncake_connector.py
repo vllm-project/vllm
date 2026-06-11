@@ -1284,6 +1284,56 @@ def test_register_kv_caches():
             assert worker.registered_layer_indices == [0, 1]
 
 
+def test_register_kv_caches_skips_speculative_layers_outside_base_model():
+    """Speculative MTP KV caches should not be exported as Mooncake regions."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    vllm_config.speculative_config = SimpleNamespace(method="mtp")
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        )
+        normal_cache = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        mtp_cache = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        mtp_layer_index = vllm_config.model_config.get_total_num_hidden_layers()
+        kv_caches = {
+            "model.layers.0.self_attn": normal_cache,
+            f"model.layers.{mtp_layer_index}.attn.swa_cache": mtp_cache,
+        }
+
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as mock_batch_register:
+            connector.register_kv_caches(kv_caches)
+
+        mock_batch_register.assert_called_once()
+        registered_ptrs, registered_lens = mock_batch_register.call_args[0]
+        assert registered_ptrs == [normal_cache.data_ptr()]
+        assert registered_lens == [normal_cache.nbytes]
+        assert worker.registered_layer_names == ["model.layers.0.self_attn"]
+        assert worker.registered_layer_indices == [0]
+
+
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     """Mixed MLA+Eagle caches should register by byte length, not shape."""
 

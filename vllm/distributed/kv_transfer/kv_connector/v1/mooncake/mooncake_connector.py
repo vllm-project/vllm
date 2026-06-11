@@ -1876,12 +1876,24 @@ class MooncakeConnectorWorker:
         ) = self.model_config.get_layers_start_end_indices(
             self.vllm_config.parallel_config
         )
+        total_num_hidden_layers = self.model_config.get_total_num_hidden_layers()
         layer_group_index_map = self._build_layer_group_index_map()
 
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
+            if (
+                self.vllm_config.speculative_config is not None
+                and layer_index >= total_num_hidden_layers
+            ):
+                logger.debug(
+                    "Skipping speculative KV cache layer %s outside the "
+                    "base model layer range [0, %d)",
+                    layer_name,
+                    total_num_hidden_layers,
+                )
+                continue
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
