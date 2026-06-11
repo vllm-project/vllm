@@ -26,6 +26,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
@@ -42,6 +43,8 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 
 logger = init_logger(__name__)
+
+is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 
 @triton.jit
@@ -435,6 +438,7 @@ def unified_attention_diffkv(
         or softmax_segm_expsum is None
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
+        or is_batch_invariant
     )
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers

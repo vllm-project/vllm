@@ -138,6 +138,13 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
         # DiffKV K head sizes (e.g. 192 for MiMo-V2.5) need to be allowed.
         return head_size >= 32
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        # DiffKV only implements decoder self-attention.  Unlike the parent
+        # TritonAttentionBackend (which advertises all types), encoder
+        # attention is not supported, so gate it here at backend selection.
+        return attn_type == AttentionType.DECODER
+
 
 class TritonAttentionDiffKVImpl(TritonAttentionImpl):
     """Triton attention impl for the DiffKV packed KV cache layout."""
@@ -168,8 +175,6 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            return
         # Cache is packed [..., head_size_qk + head_size_v]; the diffkv
         # reshape kernel writes K to [..., :head_size_qk] and V to
         # [..., head_size_qk:hqk+hv].
@@ -221,10 +226,6 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         assert attn_metadata.use_cascade is False, (
             "Cascade attention not supported for TritonAttentionDiffKVImpl"
         )
-        assert self.attn_type not in (
-            AttentionType.ENCODER_ONLY,
-            AttentionType.ENCODER,
-        ), "Encoder attention not supported for TritonAttentionDiffKVImpl"
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         head_size_qk = self.head_size
