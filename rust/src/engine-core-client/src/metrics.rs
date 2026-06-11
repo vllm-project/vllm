@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use itertools::Itertools;
-
 use vllm_metrics::{
-    EngineLabels, EnginePositionLabels, LoraInfoLabels, SchedulerMetrics, WaitingReasonLabels,
+    EngineLabels, EnginePositionLabels, LoraAdapterNames, LoraInfoLabels, SchedulerMetrics,
+    WaitingReasonLabels,
 };
 
 use crate::protocol::stats::SchedulerStats;
@@ -157,8 +156,8 @@ impl LoraInfoExporter {
         waiting: BTreeSet<String>,
     ) {
         let next = (!running.is_empty() || !waiting.is_empty()).then(|| LoraInfoLabels {
-            running_lora_adapters: running.iter().join(","),
-            waiting_lora_adapters: waiting.iter().join(","),
+            running_lora_adapters: LoraAdapterNames(running),
+            waiting_lora_adapters: LoraAdapterNames(waiting),
         });
 
         if self.current != next

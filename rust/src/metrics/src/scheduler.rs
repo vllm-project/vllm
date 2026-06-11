@@ -1,4 +1,7 @@
-use prometheus_client::encoding::EncodeLabelSet;
+use std::collections::BTreeSet;
+
+use itertools::Itertools as _;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
@@ -42,11 +45,21 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
-/// Labels for `vllm:lora_requests_info`: comma-joined adapter names.
+/// Adapter names encoded as a deterministic comma-joined Prometheus label value.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct LoraAdapterNames(pub BTreeSet<String>);
+
+impl EncodeLabelValue for LoraAdapterNames {
+    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        EncodeLabelValue::encode(&self.0.iter().join(","), encoder)
+    }
+}
+
+/// Labels for `vllm:lora_requests_info`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct LoraInfoLabels {
-    pub running_lora_adapters: String,
-    pub waiting_lora_adapters: String,
+    pub running_lora_adapters: LoraAdapterNames,
+    pub waiting_lora_adapters: LoraAdapterNames,
 }
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
