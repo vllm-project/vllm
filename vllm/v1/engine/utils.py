@@ -174,6 +174,11 @@ class CoreEngineProcManager:
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
+        # All ranks share this config object: capture the user-provided
+        # --device-ids list before the per-rank shard overwrites it. Mutating
+        # the config before each proc.start() works because the spawn method
+        # pickles process args at start() time, sequentially per rank.
+        user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 # Populate the logical-to-physical GPU mapping in DP for
@@ -186,7 +191,7 @@ class CoreEngineProcManager:
                     needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
                     set_assigned_physical_gpu_ids_for_dp_rank(
-                        vllm_config, local_dp_rank
+                        vllm_config, local_dp_rank, user_assigned_gpu_ids
                     )
 
                 with numa_utils.configure_subprocess(
@@ -276,17 +281,28 @@ class SignalCallback:
 
 
 def set_assigned_physical_gpu_ids_for_dp_rank(
-    vllm_config: VllmConfig, local_dp_rank: int
+    vllm_config: VllmConfig,
+    local_dp_rank: int,
+    user_assigned_gpu_ids: list[int] | None = None,
 ) -> None:
     """
     Populate assigned_physical_gpu_ids on the config for the given DP rank.
+
+    user_assigned_gpu_ids is the full (un-sharded) --device-ids list, if the
+    user provided one; this DP rank's shard is sliced from it. It is passed
+    explicitly rather than read from the config because callers may reuse
+    one config object across DP ranks, overwriting the field each time.
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
     physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
-        evar, local_dp_rank, world_size, local_world_size
+        evar,
+        local_dp_rank,
+        world_size,
+        local_world_size,
+        user_assigned_gpu_ids=user_assigned_gpu_ids,
     )
     vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
 
@@ -296,6 +312,7 @@ def get_physical_gpu_ids_for_local_dp_rank(
     local_dp_rank: int,
     world_size: int,
     local_world_size: int | None = None,
+    user_assigned_gpu_ids: list[int] | None = None,
 ) -> list[int]:
     """
     Returns list of physical GPU IDs for the specified
@@ -303,9 +320,22 @@ def get_physical_gpu_ids_for_local_dp_rank(
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
     this will return [2, 3] for local_dp_rank=1.
+
+    If user_assigned_gpu_ids is provided (e.g. from --device-ids), this DP
+    rank's shard is sliced from it instead of being derived from the
+    device-control env var.
     """
     if local_world_size is None:
         local_world_size = world_size
+    if user_assigned_gpu_ids is not None:
+        start = local_dp_rank * world_size
+        stop = start + local_world_size
+        if stop > len(user_assigned_gpu_ids):
+            raise ValueError(
+                f"--device-ids provides {len(user_assigned_gpu_ids)} devices, "
+                f"but DP rank {local_dp_rank} needs devices [{start}, {stop})"
+            )
+        return user_assigned_gpu_ids[start:stop]
     try:
         return [
             current_platform.device_id_to_physical_device_id(i)

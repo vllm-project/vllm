@@ -752,3 +752,85 @@ class TestDeviceIds:
         )
 
         assert current_platform.logical_device_id_to_visible_device_id(0) == 1
+
+    def test_device_ids_reject_duplicates(self):
+        """--device-ids must not contain duplicate entries."""
+        args = EngineArgs(model="m", device_ids=[2, 2])
+        with pytest.raises(ValueError, match="duplicates"):
+            args._resolve_device_ids()
+
+    def test_cli_parsing_strips_whitespace(self):
+        """--device-ids tolerates whitespace around commas."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0, 2, 4"])
+        assert parsed.device_ids == [0, 2, 4]
+
+    def test_visible_ordinal_to_physical_ignores_assigned_ids(self, monkeypatch):
+        """visible_device_id_to_physical_device_id maps torch device ordinals,
+        independent of the logical-to-physical mapping.
+
+        Regression test: CustomAllreduce passes device.index (a visible
+        ordinal) and must not index into assigned_physical_gpu_ids, which
+        raised IndexError for non-identity --device-ids like [2, 3].
+        """
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [2, 3])
+        monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+
+        # CVD unset: visible ordinal == physical ID, even beyond the
+        # assigned list's length.
+        assert current_platform.visible_device_id_to_physical_device_id(2) == 2
+        assert current_platform.visible_device_id_to_physical_device_id(3) == 3
+
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+        assert current_platform.visible_device_id_to_physical_device_id(1) == 5
+        with pytest.raises(IndexError, match="out of range"):
+            current_platform.visible_device_id_to_physical_device_id(2)
+
+
+class TestDpDeviceIdSharding:
+    def test_dp_supervisor_device_ids_stay_env_relative(self):
+        """Regression test: the DP supervisor must pass env-relative indices,
+        not physical IDs, because each child re-resolves --device-ids
+        against its inherited device-control env var."""
+        import argparse
+
+        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
+        )
+        assert _build_device_ids(args, local_rank=0) == [0, 1]
+        assert _build_device_ids(args, local_rank=1) == [2, 3]
+
+    def test_dp_supervisor_shards_user_device_ids(self):
+        """User-provided --device-ids are sharded across DP children."""
+        import argparse
+
+        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
+        )
+        assert _build_device_ids(args, local_rank=0) == [4, 5]
+        assert _build_device_ids(args, local_rank=1) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            _build_device_ids(args, local_rank=2)
+
+    def test_dp_rank_shards_user_assigned_gpu_ids(self):
+        """get_physical_gpu_ids_for_local_dp_rank slices the user-provided
+        --device-ids list instead of recomputing from the env var."""
+        from vllm.platforms import current_platform
+        from vllm.v1.engine.utils import get_physical_gpu_ids_for_local_dp_rank
+
+        evar = current_platform.device_control_env_var
+        assert get_physical_gpu_ids_for_local_dp_rank(
+            evar, local_dp_rank=1, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+        ) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            get_physical_gpu_ids_for_local_dp_rank(
+                evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+            )

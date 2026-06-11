@@ -39,15 +39,16 @@ def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
     on CUDA_VISIBLE_DEVICES.
 
     Idempotent: a second call with the same value is a no-op.
-    Raises AssertionError if called again with a different value.
+    Raises RuntimeError if called again with a different value.
 
     This is expected to run during single-threaded worker initialization."""
     global _assigned_physical_gpu_ids
     if _assigned_physical_gpu_ids is not None:
-        assert _assigned_physical_gpu_ids == ids, (
-            f"set_assigned_physical_gpu_ids called with conflicting values: "
-            f"existing={_assigned_physical_gpu_ids}, new={ids}"
-        )
+        if _assigned_physical_gpu_ids != ids:
+            raise RuntimeError(
+                f"set_assigned_physical_gpu_ids called with conflicting values: "
+                f"existing={_assigned_physical_gpu_ids}, new={ids}"
+            )
         return
     _assigned_physical_gpu_ids = ids
 
@@ -264,12 +265,19 @@ class Platform:
             return int(device_id)
         except ValueError as e:
             raise ValueError(
-                f"{cls.device_control_env_var} contains non-integer device ID "
-                f"{device_id!r}, which is not supported by {cls.device_name}."
+                f"Non-integer device ID {device_id!r} is not supported by "
+                f"{cls.device_name}."
             ) from e
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
+        """Map a vLLM-local logical device ID to a physical device ID.
+
+        The input is a logical local ID (e.g. a local rank), NOT a visible
+        device ordinal; for the latter use
+        visible_device_id_to_physical_device_id(). The two coincide only
+        when no logical-to-physical mapping is in effect.
+        """
         if _assigned_physical_gpu_ids is not None:
             if device_id >= len(_assigned_physical_gpu_ids):
                 raise IndexError(
@@ -277,8 +285,7 @@ class Platform:
                     f"assigned_physical_gpu_ids {_assigned_physical_gpu_ids} "
                     f"({len(_assigned_physical_gpu_ids)} devices assigned)"
                 )
-            mapped = _assigned_physical_gpu_ids[device_id]
-            return mapped
+            return _assigned_physical_gpu_ids[device_id]
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
@@ -317,6 +324,28 @@ class Platform:
                 f"{device_control_env}"
             )
         return visible_physical_device_ids.index(physical_device_id)
+
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Map a visible accelerator ordinal (e.g. ``torch.device.index``)
+        to a physical device ID.
+
+        This is the inverse of the env-var translation performed by
+        logical_device_id_to_visible_device_id() and is independent of any
+        logical-to-physical mapping set via set_assigned_physical_gpu_ids().
+        """
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return device_id
+        visible_device_ids = device_control_env.split(",")
+        if device_id >= len(visible_device_ids):
+            raise IndexError(
+                f"visible device ordinal {device_id} is out of range for "
+                f"{cls.device_control_env_var}={device_control_env}"
+            )
+        return cls.device_control_id_to_physical_device_id(
+            visible_device_ids[device_id]
+        )
 
     @classmethod
     def import_kernels(cls) -> None:

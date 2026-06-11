@@ -2134,7 +2134,12 @@ class EngineCoreActorMixin:
         world_size = vllm_config.parallel_config.world_size
         try:
             physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
-                device_control_env_var, local_dp_rank, world_size
+                device_control_env_var,
+                local_dp_rank,
+                world_size,
+                user_assigned_gpu_ids=(
+                    vllm_config.parallel_config.assigned_physical_gpu_ids
+                ),
             )
             vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
         except IndexError as e:

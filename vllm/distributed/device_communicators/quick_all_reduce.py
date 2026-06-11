@@ -129,7 +129,8 @@ class QuickAllReduce:
         assert isinstance(device, torch.device)
         self.device = device
 
-        physical_device_id = current_platform.device_id_to_physical_device_id(
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
             device.index
         )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")

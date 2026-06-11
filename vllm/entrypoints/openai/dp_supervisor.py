@@ -23,7 +23,6 @@ import uvloop
 from fastapi import FastAPI, Response
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
@@ -130,15 +129,25 @@ def _build_vllm_dp_server_args(
     return child_args
 
 
-def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int]:
-    """Build the --device-ids value for a DP child process."""
+def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int | str]:
+    """Build the --device-ids value for a DP child process.
+
+    The child resolves these against its own inherited device-control env
+    var (e.g. CUDA_VISIBLE_DEVICES), so integer IDs must stay env-relative
+    here rather than being translated to physical IDs.
+    """
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
-    return [
-        current_platform.device_id_to_physical_device_id(idx)
-        for idx in range(start, stop)
-    ]
+    device_ids = getattr(args, "device_ids", None)
+    if device_ids is not None:
+        if stop > len(device_ids):
+            raise ValueError(
+                f"--device-ids has {len(device_ids)} entries, but DP rank "
+                f"{local_rank} needs devices [{start}, {stop})"
+            )
+        return device_ids[start:stop]
+    return list(range(start, stop))
 
 
 def _child_base_url(args: argparse.Namespace, port: int) -> str:

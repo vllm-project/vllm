@@ -324,7 +324,9 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
     if assigned_physical_gpu_ids is not None:
-        cache_key = ",".join(str(i) for i in sorted(assigned_physical_gpu_ids))
+        # Key by the ordered list: the cache stores directed local-index
+        # pairs, so permutations of the same set are distinct mappings.
+        cache_key = ",".join(str(i) for i in assigned_physical_gpu_ids)
         num_dev = len(assigned_physical_gpu_ids)
     else:
         num_dev = current_platform.device_count()
@@ -344,11 +346,15 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
         cache: dict[str, bool] = {}
-        ids = (
-            list(assigned_physical_gpu_ids)
-            if assigned_physical_gpu_ids is not None
-            else list(range(num_dev))
-        )
+        # The probe subprocesses inherit this process's device-control env
+        # var, so they must be given visible ordinals, not physical IDs.
+        if assigned_physical_gpu_ids is not None:
+            ids = [
+                current_platform.logical_device_id_to_visible_device_id(local)
+                for local in range(num_dev)
+            ]
+        else:
+            ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))
         # NOTE: we use `subprocess` rather than `multiprocessing` here
@@ -380,9 +386,9 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
                 result = pickle.load(f)
         # Cache entries must be keyed by local indices (0..N-1) because
         # gpu_p2p_access_check() is called with local ranks.
-        phys_to_local = {phys: local for local, phys in enumerate(ids)}
+        id_to_local = {device_id: local for local, device_id in enumerate(ids)}
         for _i, _j, r in zip(batch_src, batch_tgt, result):
-            cache[f"{phys_to_local[_i]}->{phys_to_local[_j]}"] = r
+            cache[f"{id_to_local[_i]}->{id_to_local[_j]}"] = r
         with open(path, "w") as f:
             json.dump(cache, f, indent=4)
     if is_distributed:

@@ -977,7 +977,7 @@ class EngineArgs:
             "--device-ids",
             type=lambda s: [
                 int(device_id) if device_id.isdigit() else device_id
-                for device_id in s.split(",")
+                for device_id in (part.strip() for part in s.split(","))
             ],
             default=None,
             help="Comma-separated physical GPU device IDs or UUIDs to use "
@@ -1717,9 +1717,12 @@ class EngineArgs:
         if not self.device_ids:
             return None
         ids = self.device_ids
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"--device-ids must not contain duplicates: {ids}")
         if all(isinstance(i, str) for i in ids):
             return [
-                current_platform.device_control_id_to_physical_device_id(i) for i in ids
+                current_platform.device_control_id_to_physical_device_id(i)
+                for i in cast(list[str], ids)
             ]
         if any(isinstance(i, str) for i in ids):
             raise ValueError("--device-ids must not mix integer IDs and UUIDs")

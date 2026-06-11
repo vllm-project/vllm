@@ -79,24 +79,25 @@ class RayWorkerProc(WorkerProc):
     1. __init__: lightweight setup, stores init args (no device/model init)
     2. initialize_worker: called after GPU IDs are discovered, completes
        the full WorkerProc initialization with the correct local_rank and
-       CUDA_VISIBLE_DEVICES.
+       logical-to-physical GPU mapping.
 
-    CUDA_VISIBLE_DEVICES setup flow:
+    GPU assignment flow:
 
     1. RayExecutorV2 enables RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES so Ray does
        not set CUDA_VISIBLE_DEVICES on RayWorkerProc actors at creation time.
     2. Each actor is scheduled with a placement group and bundle index; Ray resolves
        the physical GPU ID for that bundle at placement time.
-    3. After placement, the worker discovers that GPU ID and sets
-       CUDA_VISIBLE_DEVICES before finishing WorkerProc initialization.
+    3. After placement, the executor discovers each worker's GPU ID and passes the
+       node's logical-to-physical mapping (assigned_physical_gpu_ids) to
+       initialize_worker(); CUDA_VISIBLE_DEVICES is never modified.
 
-    There is no workaround for this unset-and-reset sequence when the placement group
-    is externally managed: scheduling must complete before CUDA_VISIBLE_DEVICES can
-    match the GPU tied to the worker's bundle.
+    Scheduling must complete before the mapping is known when the placement
+    group is externally managed: only then is the GPU tied to the worker's
+    bundle resolved.
 
     This sequence allows multiple vLLM instances to coexist on the same node:
     each instance is unaware which physical devices others hold, and the
-    externally managed placement group avoids CUDA_VISIBLE_DEVICES conflicts
+    externally managed placement group avoids device assignment conflicts
     by binding workers to specific placement group bundles.
     """
 
@@ -142,7 +143,7 @@ class RayWorkerProc(WorkerProc):
 
         *driver_env_vars* are applied with ``setdefault`` — they fill
         in missing vars but never overwrite node-local values.
-        *env_vars* (e.g. CUDA_VISIBLE_DEVICES) always overwrite.
+        *env_vars* always overwrite.
         *assigned_physical_gpu_ids* maps local_rank to physical CUDA device ID.
         """
         if driver_env_vars:
@@ -409,8 +410,9 @@ class RayExecutorV2(MultiprocExecutor):
                     assigned_physical_gpu_ids=assigned_physical_gpu_ids,
                 )
             )
-        # Also set on the executor-side config for consistency.
-        if worker_node_and_physical_gpu_ids:
+        # Also set on the executor-side config for consistency. The mapping
+        # is per-node, so only do this when all workers share one node.
+        if len(node_physical_gpu_ids) == 1:
             node_id_0 = worker_node_and_physical_gpu_ids[0][0]
             self.vllm_config.parallel_config.assigned_physical_gpu_ids = sorted(
                 node_physical_gpu_ids[node_id_0]
