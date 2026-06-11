@@ -227,7 +227,10 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 
 ![Example Time 4](../assets/design/prefix_caching/example-time-5.png)
 
-**Time 5: Request 1 is finished and free.**
+**Time 5: Request 1 is finished and freed.** Blocks 6, 5, 1, and 0 are
+added to the tail of the free queue in reverse order. Block 6 was only
+partially filled, so it was never cached and keeps `Hash: None`; the other
+freed blocks keep their cached prefix-aware hashes until they are evicted.
 
 ![Example Time 5](../assets/design/prefix_caching/example-time-6.png)
 
