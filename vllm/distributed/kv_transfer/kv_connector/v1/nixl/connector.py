@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NixlConnector – thin facade that delegates to scheduler / worker."""
+"""NIXL connector facades.
+
+This module hosts the thin facade classes that vLLM's KV-connector layer
+instantiates. Almost all the real work lives in the per-mode scheduler
+and worker classes; the connector classes here only forward calls.
+
+* :class:`NixlBaseConnector` – common logic shared by pull and push.
+* :class:`NixlPullConnector` – pull-based (READ) KV transfer.
+* ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -28,15 +37,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
-    NixlConnectorScheduler,
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+    NixlPullConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
     NixlPromMetrics,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-    NixlConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -47,6 +56,12 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+        NixlBaseConnectorScheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        NixlBaseConnectorWorker,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -54,7 +69,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class NixlConnector(KVConnectorBase_V1, SupportsHMA):
+class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
+    """Base connector with common logic shared by pull and push modes."""
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         if any(
@@ -106,16 +123,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler: NixlConnectorScheduler | None = (
-                NixlConnectorScheduler(vllm_config, self.engine_id, kv_cache_config)
-            )
-            self.connector_worker: NixlConnectorWorker | None = None
-        elif role == KVConnectorRole.WORKER:
-            self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker(
-                vllm_config, self.engine_id, kv_cache_config
-            )
+        # Subclasses must set self.connector_scheduler and self.connector_worker
+        self.connector_scheduler: NixlBaseConnectorScheduler | None = None
+        self.connector_worker: NixlBaseConnectorWorker | None = None
 
     ############################################################
     # Class Methods
@@ -256,11 +266,6 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        self.connector_worker.start_load_kv(self._connector_metadata)
-
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
         pass
@@ -299,3 +304,42 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert self.connector_worker is not None
         return self.connector_worker.xfer_handshake_metadata
+
+
+class NixlPullConnector(NixlBaseConnector):
+    """Pull-based (READ) NIXL KV transfer connector."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = NixlPullConnectorScheduler(
+                vllm_config, self.engine_id, kv_cache_config
+            )
+            self.connector_worker = None
+        elif role == KVConnectorRole.WORKER:
+            self.connector_scheduler = None
+            self.connector_worker = NixlPullConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
+
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        assert self.connector_worker is not None
+        assert isinstance(self.connector_worker, NixlPullConnectorWorker)
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.start_load_kv(self._connector_metadata)
+
+
+# Backward compatibility: NixlConnector is the pull-based connector.
+NixlConnector = NixlPullConnector
+
+
+__all__ = [
+    "NixlBaseConnector",
+    "NixlConnector",
+    "NixlPullConnector",
+]
