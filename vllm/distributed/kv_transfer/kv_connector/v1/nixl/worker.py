@@ -782,16 +782,109 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
+    def register_cross_layers_kv_caches(
+        self,
+        kv_cache: torch.Tensor,
+        block_stride: int | None = None,
+    ) -> None:
         """Register a cross-layers KV cache tensor with NIXL.
 
-        `use_uniform_kv_cache()` guarantees a single KV cache group whose
-        layers all share the same `AttentionSpec`, so any layer name from
-        `_layer_specs` yields the correct per-layer spec for `page_size_bytes`.
+        When block_stride is provided, the tensor is a packed allocation
+        where each block_stride-sized chunk contains all layers' data for
+        one block.  We register it as a single NIXL region.
+
+        When block_stride is None, falls back to the uniform-layer path.
         """
-        first_layer = next(iter(self._layer_specs))
-        # Forwarding a real layer name rather than a synthetic key
-        self.register_kv_caches({first_layer: kv_cache})
+        if block_stride is not None:
+            self._register_packed_kv_cache(kv_cache, block_stride)
+        else:
+            first_layer = next(iter(self._layer_specs))
+            self.register_kv_caches({first_layer: kv_cache})
+
+    def _register_packed_kv_cache(
+        self, kv_cache: torch.Tensor, block_stride: int
+    ) -> None:
+        """Register a packed KV cache as a single NIXL region.
+
+        The packed allocation interleaves all layers per block, so each
+        block_stride-byte chunk is one logical block.  We register 1
+        NIXL region and create 1 descriptor per block.
+        """
+        self.transfer_topo = TransferTopology(
+            tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            block_size=self.block_size,
+            engine_id=self.engine_id,
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backends=self.attn_backends,
+            tensor_shape=None,
+            is_mamba=self._has_mamba,
+        )
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config, self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+        )
+
+        total_size = kv_cache.numel() * kv_cache.element_size()
+
+        logger.info(
+            "Registering packed KV cache: total_size=%s, block_stride=%s, "
+            "num_blocks=%s, num_regions=1",
+            total_size, block_stride, self.num_blocks,
+        )
+
+        self.device_id = max(kv_cache.get_device(), 0)
+        caches_data = [
+            (kv_cache.data_ptr(), total_size, self.device_id, "")
+        ]
+
+        self.block_len_per_layer = [block_stride]
+        self.num_regions = 1
+        self.num_descs = self.num_blocks
+        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [
+            kv_cache.data_ptr()
+        ]
+
+        descs = self.nixl_wrapper.get_reg_descs(
+            caches_data, self.nixl_memory_type
+        )
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        self._registered_descs.append(descs)
+
+        self.device_kv_caches = {
+            layer: kv_cache for layer in self._layer_specs
+        }
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        self.src_xfer_handles_by_block_size[self.block_size], \
+            self.src_blocks_data = (
+                self.register_local_xfer_handler(self.block_size)
+            )
+
+        agent_metadata = NixlAgentMetadata(
+            engine_id=self.engine_id,
+            agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+            device_id=self.device_id,
+            kv_caches_base_addr=(
+                self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+            ),
+            num_blocks=self.num_blocks,
+            block_lens=self.block_len_per_layer,
+            kv_cache_layout=self.kv_cache_layout,
+            block_size=self.block_size,
+            ssm_sizes=self._mamba_ssm_size,
+            attn_backend_name=self.backend_name,
+            physical_blocks_per_logical_kv_block=(
+                self._physical_blocks_per_logical_kv_block
+            ),
+        )
+        assert self.compat_hash is not None
+        encoder = msgspec.msgpack.Encoder()
+        self.xfer_handshake_metadata = NixlHandshakePayload(
+            compatibility_hash=self.compat_hash,
+            agent_metadata_bytes=encoder.encode(agent_metadata),
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""

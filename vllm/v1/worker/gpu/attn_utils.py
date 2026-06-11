@@ -151,8 +151,16 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
 ):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+    packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+        if kv_cache_tensor.block_stride > 0:
+            if packed_backing is None:
+                packed_backing = torch.zeros(
+                    kv_cache_tensor.size, dtype=torch.int8, device=device
+                )
+            tensor = packed_backing
+        else:
+            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
@@ -163,7 +171,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors
+    return kv_cache_raw_tensors, packed_backing
 
 
 def _reshape_kv_cache(
@@ -172,9 +180,17 @@ def _reshape_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
+    kv_cache_config: "KVCacheConfig | None" = None,
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
     has_attn, has_mamba = False, False
+
+    layer_packing: dict[str, tuple[int, int]] = {}
+    if kv_cache_config is not None:
+        for kv_tensor in kv_cache_config.kv_cache_tensors:
+            if kv_tensor.block_stride > 0:
+                for ln in kv_tensor.shared_by:
+                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -194,8 +210,13 @@ def _reshape_kv_cache(
                 continue
 
             kv_raw_tensor = kv_cache_raw_tensors[layer_name]
-            assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-            num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
+            packing = layer_packing.get(layer_name)
+            if packing is not None:
+                _, blk_stride = packing
+                num_blocks = kv_raw_tensor.numel() // blk_stride
+            else:
+                assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             if isinstance(kv_cache_spec, AttentionSpec):
                 has_attn = True
@@ -229,14 +250,19 @@ def _reshape_kv_cache(
 
                 dtype = kv_cache_spec.dtype
                 kv_tensor = kv_raw_tensor.view(dtype)
-                if kv_cache_spec.page_size_padded is not None:
-                    # Use strided view to handle page_size_bytes that
-                    # include padding. This follows the same pattern as
-                    # MambaSpec handling in gpu_model_runner.py.
-                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                    # (i.e. the first physical dimension is the block
-                    # index), which holds for all current backends
-                    # (MLA, FlashAttention, TritonAttention, etc.).
+                if packing is not None:
+                    layer_offset, blk_stride = packing
+                    dtype_size = get_dtype_size(dtype)
+                    page_stride = blk_stride // dtype_size
+                    strides = list(torch.empty(kv_cache_shape).stride())
+                    strides[inv_order[0]] = page_stride
+                    kv_cache = torch.as_strided(
+                        kv_tensor,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                        storage_offset=layer_offset // dtype_size,
+                    )
+                elif kv_cache_spec.page_size_padded is not None:
                     dtype_size = get_dtype_size(dtype)
                     page_stride = kv_cache_spec.page_size_bytes // dtype_size
                     strides = list(torch.empty(kv_cache_shape).stride())
@@ -247,7 +273,6 @@ def _reshape_kv_cache(
                         stride=tuple(strides),
                     )
                 else:
-                    # No padding — safe to use a contiguous view.
                     kv_cache = kv_tensor.view(kv_cache_shape)
                 kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
@@ -349,9 +374,9 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], torch.Tensor | None]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
+    kv_cache_raw_tensors, packed_backing = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
@@ -361,9 +386,10 @@ def init_kv_cache(
         kernel_block_sizes=kernel_block_sizes,
         cache_dtype=cache_dtype,
         shared_kv_cache_layers=shared_kv_cache_layers,
+        kv_cache_config=kv_cache_config,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
-    return kv_caches
+    return kv_caches, packed_backing
 
 
 def build_slot_mappings_by_layer(
