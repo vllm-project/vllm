@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the vllm-rs Rust frontend binary.
+# Build vLLM Rust artifacts and install them into the vllm package.
 # Usage: ./build_rust.sh [--debug]
 #
 # By default builds in release mode. Pass --debug for faster compile times
