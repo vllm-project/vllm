@@ -1435,6 +1435,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashQwen3NextDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-Coder-Next",
+        speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
+        use_original_num_layers=True,  # DFlash requires all layers
+        max_model_len=8192,  # Reduce for CI
+        max_num_seqs=32,
+        min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
