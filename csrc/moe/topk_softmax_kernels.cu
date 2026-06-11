@@ -156,9 +156,127 @@ __launch_bounds__(TPB) __global__
     }
 }
 
+struct TopKPair {
+    static const int PAIR = 2;
+    static const int MAX_INDEX = 0;
+    cub::KeyValuePair<int, float> max;
+    cub::KeyValuePair<int, float> secondMax;
+
+    __device__ TopKPair() {}
+    __device__ TopKPair(cub::KeyValuePair<int, float> max, cub::KeyValuePair<int, float> secondMax)
+        : max(max), secondMax(secondMax) {}
+};
+
+struct TopKPairArgMax {
+    __device__ TopKPairArgMax() {}
+    __device__ __forceinline__ TopKPair operator()(const TopKPair& a, const TopKPair& b) const {
+        cub::KeyValuePair<int, float> globalMax, globalSecondMax;
+
+        if (a.max.value > b.max.value || (a.max.value == b.max.value && a.max.key < b.max.key)) {
+            globalMax = a.max;
+            globalSecondMax = (a.secondMax.value > b.max.value || (a.secondMax.value == b.max.value && a.secondMax.key < b.max.key)) ? a.secondMax : b.max;
+        } else {
+            globalMax = b.max;
+            globalSecondMax = (b.secondMax.value > a.max.value || (b.secondMax.value == a.max.value && b.secondMax.key < a.max.key)) ? b.secondMax : a.max;
+        }
+        return TopKPair(globalMax, globalSecondMax);
+    }
+};
+
+template <int TPB, typename IndType>
+__launch_bounds__(TPB) __global__ void moeTopKFast(
+    float* inputs_after_softmax,
+    const bool* finished,
+    float* output,
+    IndType* indices,
+    int* source_rows,
+    const int num_experts,
+    const int k,
+    const int start_expert,
+    const int end_expert,
+    const bool renormalize,
+    const float* bias)
+{
+    using cub_kvp = cub::KeyValuePair<int, float>;
+    using BlockReduce = cub::BlockReduce<TopKPair, TPB>;
+    __shared__ typename BlockReduce::TempStorage tmpStorage;
+    TopKPair thread_pair;
+
+    const int num_rows = gridDim.x;
+    const int block_row = blockIdx.x;
+
+    const bool row_is_active = finished ? !finished[block_row] : true;
+    const int thread_read_offset = blockIdx.x * num_experts;
+    float selected_sum = 0.f;
+
+    for (int k_idx = 0; k_idx < (k + TopKPair::PAIR - 1) / TopKPair::PAIR; ++k_idx)
+    {
+        thread_pair.max.key = 0;
+        thread_pair.max.value = -1.f;
+        thread_pair.secondMax.key = 0;
+        thread_pair.secondMax.value = -1.f;
+
+        cub_kvp inp_kvp;
+        for (int expert = threadIdx.x; expert < num_experts; expert += TPB)
+        {
+            const int idx = thread_read_offset + expert;
+            inp_kvp.key = expert;
+
+            if (bias != nullptr) {
+                inp_kvp.value = inputs_after_softmax[idx] + bias[expert];
+            } else {
+                inp_kvp.value = inputs_after_softmax[idx];
+            }
+
+            if (inp_kvp.value > thread_pair.max.value) {
+                thread_pair.secondMax = thread_pair.max;
+                thread_pair.max = inp_kvp;
+            } else if (inp_kvp.value > thread_pair.secondMax.value) {
+                thread_pair.secondMax = inp_kvp;
+            }
+        }
+
+        TopKPairArgMax reducer;
+        const TopKPair result_pair = BlockReduce(tmpStorage).Reduce(thread_pair, reducer);
+        if (threadIdx.x == 0)
+        {
+#pragma unroll
+            for (int i = 0; i < TopKPair::PAIR; i++)
+            {
+                if (k_idx * 2 + i >= k) break;
+                cub_kvp result = (i == TopKPair::MAX_INDEX) ? result_pair.max : result_pair.secondMax;
+                const int expert = result.key;
+                const bool node_uses_expert = expert >= start_expert && expert < end_expert;
+                const bool should_process_row = row_is_active && node_uses_expert;
+
+                const int idx = k * block_row + k_idx * 2 + i;
+                output[idx] = inputs_after_softmax[thread_read_offset + expert];
+                indices[idx] = should_process_row ? (expert - start_expert) : num_experts;
+                assert(indices[idx] >= 0);
+                source_rows[idx] = (k_idx * 2 + i) * num_rows + block_row;
+                if (renormalize) {
+                    selected_sum += output[idx];
+                }
+                inputs_after_softmax[thread_read_offset + expert] = -1.f;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (renormalize) {
+        if (threadIdx.x == 0) {
+            const float denom = selected_sum > 0.f ? selected_sum : 1.f;
+            for (int k_idx = 0; k_idx < k; ++k_idx) {
+                const int idx = k * block_row + k_idx;
+                output[idx] = output[idx] / denom;
+            }
+        }
+    }
+}
+
 template <int TPB, typename IndType>
 __launch_bounds__(TPB) __global__ void moeTopK(
-    const float* inputs_after_softmax,
+    float* inputs_after_softmax,
     const bool* finished,
     float* output,
     IndType* indices,
@@ -195,21 +313,10 @@ __launch_bounds__(TPB) __global__ void moeTopK(
             const int idx = thread_read_offset + expert;
             inp_kvp.key = expert;
 
-            // Apply correction bias if provided
             if (bias != nullptr) {
               inp_kvp.value = inputs_after_softmax[idx] + bias[expert];
             } else {
               inp_kvp.value = inputs_after_softmax[idx];
-            }
-
-            for (int prior_k = 0; prior_k < k_idx; ++prior_k)
-            {
-                const int prior_winning_expert = indices[k * block_row + prior_k];
-
-                if (prior_winning_expert == expert)
-                {
-                    inp_kvp = thread_kvp;
-                }
             }
 
             thread_kvp = arg_max(inp_kvp, thread_kvp);
@@ -224,14 +331,14 @@ __launch_bounds__(TPB) __global__ void moeTopK(
             const bool should_process_row = row_is_active && node_uses_expert;
 
             const int idx = k * block_row + k_idx;
-            // Return the unbiased scores for output weights
             output[idx] = inputs_after_softmax[thread_read_offset + expert];
             indices[idx] = should_process_row ? (expert - start_expert) : num_experts;
             assert(indices[idx] >= 0);
             source_rows[idx] = k_idx * num_rows + block_row;
             if (renormalize) {
-                selected_sum += inputs_after_softmax[thread_read_offset + expert];
+                selected_sum += output[idx];
             }
+            inputs_after_softmax[thread_read_offset + expert] = -1.f;
         }
         __syncthreads();
     }
@@ -725,9 +832,15 @@ void topkGatingKernelLauncher(
             } else {
                 TORCH_CHECK(false, "Unsupported scoring func");
             }
-            moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
-                workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
-                num_experts, topk, 0, num_experts, renormalize, bias);
+            if (topk == 1) {
+              moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
+                  workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
+                  num_experts, topk, 0, num_experts, renormalize, bias);
+            } else {
+              moeTopKFast<TPB><<<num_tokens, TPB, 0, stream>>>(
+                  workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
+                  num_experts, topk, 0, num_experts, renormalize, bias);
+            }
         }
     }
 }
