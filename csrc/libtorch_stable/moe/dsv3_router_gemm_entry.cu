@@ -18,15 +18,25 @@
  * limitations under the License.
  */
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+
+#include "libtorch_stable/torch_utils.h"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include "core/registration.h"
-#include "dsv3_router_gemm_utils.h"
+#include <stdexcept>
+
+namespace {
+
+inline int getSMVersion() {
+  auto* props = get_device_prop();
+  return props->major * 10 + props->minor;
+}
+
+}  // namespace
 
 static constexpr int DEFAULT_NUM_EXPERTS = 256;
 static constexpr int KIMI_K2_NUM_EXPERTS = 384;
@@ -98,40 +108,48 @@ struct LoopUnroller<kEnd, kEnd, kNumExperts, kHiddenDim> {
   }
 };
 
-void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
-                      const at::Tensor& mat_a,  // [num_tokens, hidden_dim]
-                      const at::Tensor& mat_b   // [num_experts, hidden_dim]
+void dsv3_router_gemm(
+    torch::stable::Tensor& output,       // [num_tokens, num_experts]
+    torch::stable::Tensor const& mat_a,  // [num_tokens, hidden_dim]
+    torch::stable::Tensor const& mat_b   // [num_experts, hidden_dim]
 ) {
-  TORCH_CHECK(output.dim() == 2 && mat_a.dim() == 2 && mat_b.dim() == 2);
+  STD_TORCH_CHECK(output.dim() == 2 && mat_a.dim() == 2 && mat_b.dim() == 2);
 
   const int num_tokens = mat_a.size(0);
   const int num_experts = mat_b.size(0);
   const int hidden_dim = mat_a.size(1);
 
-  TORCH_CHECK(mat_a.size(1) == mat_b.size(1),
-              "mat_a and mat_b must have the same hidden_dim");
-  TORCH_CHECK(hidden_dim == DEFAULT_HIDDEN_DIM,
-              "Expected hidden_dim=", DEFAULT_HIDDEN_DIM,
-              ", but got hidden_dim=", hidden_dim);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(mat_a.size(1) == mat_b.size(1),
+                  "mat_a and mat_b must have the same hidden_dim");
+  STD_TORCH_CHECK(hidden_dim == DEFAULT_HIDDEN_DIM,
+                  "Expected hidden_dim=", DEFAULT_HIDDEN_DIM,
+                  ", but got hidden_dim=", hidden_dim);
+  STD_TORCH_CHECK(
       num_experts == DEFAULT_NUM_EXPERTS || num_experts == KIMI_K2_NUM_EXPERTS,
       "Expected num_experts=", DEFAULT_NUM_EXPERTS,
       " or num_experts=", KIMI_K2_NUM_EXPERTS,
       ", but got num_experts=", num_experts);
-  TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
-              "currently num_tokens must be less than or equal to 16 for "
-              "router_gemm");
-  TORCH_CHECK(mat_a.dtype() == at::kBFloat16, "mat_a must be bf16");
-  TORCH_CHECK(mat_b.dtype() == at::kBFloat16, "mat_b must be bf16");
-  TORCH_CHECK(output.dtype() == at::kFloat || output.dtype() == at::kBFloat16,
-              "output must be float32 or bf16");
+  STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
+                  "currently num_tokens must be less than or equal to 16 for "
+                  "router_gemm");
+  STD_TORCH_CHECK(
+      mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "mat_a must be bf16");
+  STD_TORCH_CHECK(
+      mat_b.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "mat_b must be bf16");
+  STD_TORCH_CHECK(
+      output.scalar_type() == torch::headeronly::ScalarType::Float ||
+          output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "output must be float32 or bf16");
 
-  auto const sm = getSMVersion();
-  TORCH_CHECK(sm >= 90 && sm <= 103, "required SM_103 >= CUDA ARCH >= SM_90");
+  const int sm = getSMVersion();
+  STD_TORCH_CHECK(sm >= 90 && sm <= 103,
+                  "required SM_103 >= CUDA ARCH >= SM_90");
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = get_current_cuda_stream(mat_a.get_device_index());
 
-  if (output.dtype() == at::kFloat) {
+  if (output.scalar_type() == torch::headeronly::ScalarType::Float) {
     if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_float_output(
@@ -145,7 +163,7 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
               reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr()),
               reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
     }
-  } else if (output.dtype() == at::kBFloat16) {
+  } else if (output.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS, DEFAULT_HIDDEN_DIM>::
           unroll_bf16_output(
@@ -164,6 +182,6 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
   }
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("dsv3_router_gemm", &dsv3_router_gemm);
+STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
+  m.impl("dsv3_router_gemm", TORCH_BOX(&dsv3_router_gemm));
 }
