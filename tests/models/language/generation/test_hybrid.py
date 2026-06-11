@@ -43,6 +43,11 @@ HYBRID_MODELS = [
     "tiny-random/qwen3-next-moe",
 ]
 
+HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL = {
+    "LiquidAI/LFM2-1.2B",
+    "tiny-random/qwen3-next-moe",
+}
+
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
@@ -93,7 +98,7 @@ def test_models(
         )
 
     extra_kwargs = {}
-    if model == "LiquidAI/LFM2-1.2B":
+    if model in HYBRID_MODELS_REQUIRING_CHUNKED_PREFILL:
         extra_kwargs["enable_chunked_prefill"] = True
 
     with vllm_runner(

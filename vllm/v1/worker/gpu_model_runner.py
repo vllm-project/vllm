@@ -7099,46 +7099,6 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    def _set_mm_prefix_range_for_metadata(
-        self,
-        attn_metadata: Any,
-        req_doc_ranges: dict[int, list[tuple[int, int]]],
-    ) -> None:
-        """Set mm_prefix_range for all attention metadata objects.
-
-        This method handles both list and non-list attention metadata,
-        computing mm_prefix_range_tensor once and sharing it across all
-        metadata objects to avoid redundant host-to-device transfers.
-        """
-        from vllm.v1.attention.backends.triton_attn import (
-            TritonAttentionMetadata,
-        )
-
-        # Get all metadata objects from either list or dict structure
-        metadata_list = []
-        if isinstance(attn_metadata, list):
-            for ub_metadata in attn_metadata:
-                metadata_list.extend(ub_metadata.values())
-        else:
-            metadata_list.extend(attn_metadata.values())
-
-        # Set mm_prefix_range for all metadata and compute tensor once
-        shared_tensor = None
-        for metadata in metadata_list:
-            metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-
-            # Only compute tensor for TritonAttentionMetadata
-            if isinstance(metadata, TritonAttentionMetadata):
-                if shared_tensor is None:
-                    shared_tensor = (
-                        TritonAttentionMetadata.compute_mm_prefix_range_tensor(
-                            req_doc_ranges,
-                            metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
-                            metadata.seq_lens.device,  # type: ignore[attr-defined]
-                        )
-                    )
-                metadata.mm_prefix_range_tensor = shared_tensor
-
     def _get_max_num_blocks_per_req(self, kv_cache_spec: KVCacheSpec) -> int:
         if (
             isinstance(kv_cache_spec, MambaSpec)
@@ -7148,6 +7108,8 @@ class GPUModelRunner(
                 cdiv(self.model_config.max_model_len, kv_cache_spec.block_size)
                 + kv_cache_spec.num_speculative_blocks
             )
+        if get_kv_cache_spec_kind(kv_cache_spec) != KVCacheSpecKind.MAMBA:
+            return cdiv(self.model_config.max_model_len, kv_cache_spec.block_size)
         return cdiv(
             kv_cache_spec.max_memory_usage_bytes(self.vllm_config),
             kv_cache_spec.page_size_bytes,
