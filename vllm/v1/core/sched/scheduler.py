@@ -296,6 +296,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
+        num_uncached_common_prefix_tokens: int = 0,
     ) -> int:
         num_computed_tokens = (
             request.num_computed_tokens
@@ -335,6 +336,16 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+
+            # Marconi cache admission optimization:
+            # cache common prefixes by scheduling num_new_tokens = common prefix length
+            if (
+                num_uncached_common_prefix_tokens >= block_size
+                and num_new_tokens > num_uncached_common_prefix_tokens
+            ):
+                num_new_tokens = num_uncached_common_prefix_tokens
+                # keep alignment to block_size
+                num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -604,6 +615,7 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                num_uncached_common_prefix_tokens = 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -611,6 +623,14 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+
+                    # In case of hybrid models, obtain hint for Marconi-style APC logic
+                    if self.has_mamba_layers:
+                        num_uncached_common_prefix_tokens = getattr(
+                            self.kv_cache_manager.coordinator,
+                            "num_uncached_common_prefix_tokens",
+                            0,
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -724,6 +744,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
+                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break

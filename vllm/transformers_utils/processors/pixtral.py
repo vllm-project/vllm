@@ -56,11 +56,6 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         image_processor: MistralCommonImageProcessor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
-
-        # Back-compatibility for Transformers v4
-        if not hasattr(self.tokenizer, "init_kwargs"):
-            self.tokenizer.init_kwargs = {}
-
         self.image_processor = image_processor
 
         image_special_ids = self.image_processor.mm_encoder.special_ids

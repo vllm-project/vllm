@@ -218,6 +218,10 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
+# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
+# share paths with different content. uv can extract them in either order,
+# leaving base files that break CUDA 13 CuTe DSL JIT.
+# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
@@ -234,6 +238,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi \
+    && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
+        CUTLASS_DSL_VERSION=$(uv pip show --python /opt/venv/bin/python3 nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
+        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
+            uv pip install --python /opt/venv/bin/python3 --force-reinstall --no-deps \
+                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
+        fi; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -281,7 +292,8 @@ COPY requirements/build/rust.txt requirements/build/rust.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build/rust.txt
 
-# Copy only the Rust build inputs. The binary is the sole artifact we need.
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
@@ -291,8 +303,9 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build the release binary. Cache cargo registry/git, but not target/, because
-# stale target metadata can outlive source updates across BuildKit cache reuse.
+# Build the release artifacts. Cache cargo registry/git, but not target/,
+# because stale target metadata can outlive source updates across BuildKit
+# cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     bash build_rust.sh
@@ -503,9 +516,10 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
 COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
@@ -742,6 +756,10 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
+# share paths with different content. uv can extract them in either order,
+# leaving base files that break CUDA 13 CuTe DSL JIT.
+# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
@@ -749,6 +767,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
+        CUTLASS_DSL_VERSION=$(uv pip show --system nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
+        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
+            uv pip install --system --force-reinstall --no-deps \
+                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
+        fi; \
+    fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
@@ -838,6 +863,19 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
+# share paths with different content. Force -libs-cu13 last after runtime
+# dependency installs so uv cannot leave base files behind.
+# TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
+        CUTLASS_DSL_VERSION=$(uv pip show --system nvidia-cutlass-dsl 2>/dev/null | awk '/^Version:/{print $2}') && \
+        if [ -n "$CUTLASS_DSL_VERSION" ]; then \
+            uv pip install --system --force-reinstall --no-deps \
+                "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
+        fi; \
+    fi
 
 # Download FlashInfer precompiled cubins AFTER all pip installs are done.
 # This must run after the vLLM wheel and EP kernels installs above, because
