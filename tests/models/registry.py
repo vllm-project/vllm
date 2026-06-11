@@ -239,9 +239,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "CohereLabs/command-a-plus-05-2026",
+        "CohereLabs/North-Mini-Code",
         trust_remote_code=True,
         is_available_online=False,
+        min_transformers_version="5.9.0",
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
@@ -504,14 +505,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
     ),
-    "QWenLMHeadModel": _HfExamplesInfo(
-        "Qwen/Qwen-7B-Chat",
-        max_transformers_version="4.53",
-        transformers_version_reason={
-            "hf": "HF model uses remote code that is not compatible with latest Transformers"  # noqa: E501
-        },
-        trust_remote_code=True,
-    ),
     "Qwen2ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2-0.5B-Instruct",
         extras={
@@ -609,7 +602,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
-    "ErnieModel": _HfExamplesInfo("shibing624/text2vec-base-chinese-sentence"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -739,9 +731,6 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
-    "ErnieForTokenClassification": _HfExamplesInfo(
-        "gyr66/Ernie-3.0-base-chinese-finetuned-ner"
-    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
@@ -750,9 +739,6 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    ),
-    "ErnieForSequenceClassification": _HfExamplesInfo(
-        "Forrest20231206/ernie-3.0-base-zh-cls",
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
@@ -844,7 +830,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/command-a-vision-07-2025"
+        "CohereLabs/command-a-vision-07-2025",
+        extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
+        min_transformers_version="5.9.0",
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
@@ -917,6 +905,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "google/gemma-4-E2B-it",
         min_transformers_version="5.5.0",
     ),
+    # TODO: update min_transformers_version when Gemma4 Unified lands in
+    # a stable transformers release.
+    "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        min_transformers_version="5.8.0",
+        is_available_online=False,
+    ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
@@ -930,6 +925,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b",
         extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-speech-4.1-2b-plus",
+        min_transformers_version="5.8.0",
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -1289,16 +1288,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
         "baidu/Qianfan-OCR",
         min_transformers_version="5.6.0",
-    ),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen-VL",
-        extras={"chat": "Qwen/Qwen-VL-Chat"},
-        trust_remote_code=True,
-        max_transformers_version="4.53.3",
-        transformers_version_reason={
-            "hf": "HF model uses deprecated imports which have been removed."
-        },  # noqa: E501
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"

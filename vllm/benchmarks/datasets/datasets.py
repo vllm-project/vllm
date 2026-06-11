@@ -44,6 +44,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -85,6 +86,14 @@ class SampleRequest:
     lora_request: LoRARequest | None = None
     request_id: str | None = None
     timestamp: float | None = None
+    # Pre-built chat messages. When set, the chat backend uses this list
+    # directly and skips constructing messages from `prompt` + multimodal
+    # content. Mutually exclusive with the `prompt`-based path.
+    chat_messages: list[dict[str, Any]] | None = None
+    # Per-request fields merged into the request body (e.g. tools,
+    # tool_choice, response_format). Shallow-merged with --extra-body at
+    # dispatch time; per-request keys win.
+    request_overrides: dict | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -363,7 +372,11 @@ def lora_path_on_disk(lora_path: str) -> str:
 lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 
 
-def process_image(image: Any) -> Mapping[str, Any]:
+def process_image(
+    image: Any,
+    *,
+    ensure_client_side_data: bool = False,
+) -> Mapping[str, Any]:
     """
     Process a single image input and return a multimedia content dictionary.
 
@@ -380,6 +393,9 @@ def process_image(image: Any) -> Mapping[str, Any]:
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
        - Otherwise treats as local file path and prepends "file://".
+       - If ensure_client_side_data is True, local and HTTP(S) image references
+         are loaded and encoded as base64 image data URLs. Existing data:image
+         URLs are kept unchanged.
        - Returns a dictionary with the image URL or base64 data.
 
     Raises:
@@ -403,6 +419,13 @@ def process_image(image: Any) -> Mapping[str, Any]:
             if image.startswith(("http://", "https://", "file://", "data:image/"))
             else f"file://{image}"
         )
+
+        if ensure_client_side_data and not image_url.startswith("data:image/"):
+            try:
+                fetched_image = fetch_image(image_url)
+                image_url = encode_image_url(fetched_image)
+            except Exception as e:
+                raise ValueError(f"Invalid image URL: {image_url}") from e
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
@@ -1645,6 +1668,16 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "value overrides potential output length loaded from the dataset. It is "
         "used only for custom dataset.",
     )
+    custom_group.add_argument(
+        "--custom-ensure-client-side-data",
+        action="store_true",
+        help=(
+            "Ensure custom dataset media is sent as client-side data instead "
+            "of references. For custom_image datasets, this loads local and "
+            "HTTP(S) images on the benchmark client and encodes them as "
+            "base64 data URLs. Existing data:image URLs are kept unchanged."
+        ),
+    )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
     spec_bench_group.add_argument(
@@ -1795,6 +1828,19 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
+    )
+
+    bfcl_group = parser.add_argument_group(
+        "BFCL dataset options", description=BFCLDataset.__doc__
+    )
+    bfcl_group.add_argument(
+        "--bfcl-categories",
+        type=lambda s: [c.strip() for c in s.split(",") if c.strip()],
+        default=None,
+        help="Comma-separated list of BFCL v3 category names (without the "
+        "'BFCL_v3_' prefix or '.json' suffix) to sample from, e.g. "
+        "'simple,live_simple,multiple'. Defaults to "
+        f"'{','.join(BFCLDataset.DEFAULT_CATEGORIES)}'.",
     )
 
     prefix_repetition_group = parser.add_argument_group(
@@ -2055,6 +2101,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.skip_chat_template,
+            chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2075,6 +2122,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
+            ensure_client_side_data=getattr(
+                args, "custom_ensure_client_side_data", False
+            ),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2220,6 +2270,20 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             dataset_class = MMStarDataset
             args.hf_split = args.hf_split if args.hf_split else "val"
             args.hf_subset = None
+        elif (
+            args.dataset_path in BFCLDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in BFCLDataset.SUPPORTED_DATASET_PATHS
+        ):
+            if args.backend != "openai-chat":
+                raise ValueError(
+                    "BFCL dataset requires the 'openai-chat' backend because "
+                    "it sends per-request tool schemas via chat completions."
+                )
+            dataset_class = BFCLDataset
+            # BFCL does not use HF splits/subsets; stub values for base init.
+            args.hf_split = args.hf_split if args.hf_split else "train"
+            args.hf_subset = None
+            hf_kwargs = {"categories": args.bfcl_categories}
         else:
             supported_datasets = set(
                 [
@@ -2381,6 +2445,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
+                chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2468,6 +2533,7 @@ class CustomDataset(BenchmarkDataset):
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        chat_template_kwargs: dict | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # load all data if needed
@@ -2515,6 +2581,7 @@ class CustomDataset(BenchmarkDataset):
                         [{"role": "user", "content": prompt}],
                         add_generation_prompt=True,
                         tokenize=False,
+                        **(chat_template_kwargs or {}),
                     )
 
                 prompt_len = len(tokenizer(prompt).input_ids)
@@ -2627,7 +2694,12 @@ class CustomImageDataset(CustomDataset):
         return parts
 
     @classmethod
-    def _process_content_part(cls, part: dict[str, Any]) -> dict[str, Any]:
+    def _process_content_part(
+        cls,
+        part: dict[str, Any],
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> dict[str, Any]:
         content_type = part.get("type")
         if content_type == "text":
             text = part.get("text")
@@ -2638,12 +2710,22 @@ class CustomImageDataset(CustomDataset):
         if content_type == "image":
             if "image" not in part:
                 raise ValueError("Image content parts must contain an 'image' field.")
-            return dict(process_image(part["image"]))
+            return dict(
+                process_image(
+                    part["image"],
+                    ensure_client_side_data=ensure_client_side_data,
+                )
+            )
 
         if content_type == "image_url":
             image_url = part.get("image_url")
             if isinstance(image_url, str):
-                return dict(process_image(image_url))
+                return dict(
+                    process_image(
+                        image_url,
+                        ensure_client_side_data=ensure_client_side_data,
+                    )
+                )
 
             if isinstance(image_url, dict):
                 url = image_url.get("url")
@@ -2652,7 +2734,12 @@ class CustomImageDataset(CustomDataset):
                         "Image URL content parts must contain a string 'image_url.url'."
                     )
 
-                processed_part = dict(process_image(url))
+                processed_part = dict(
+                    process_image(
+                        url,
+                        ensure_client_side_data=ensure_client_side_data,
+                    )
+                )
                 processed_image_url = dict(processed_part["image_url"])
                 processed_image_url.update(
                     {key: value for key, value in image_url.items() if key != "url"}
@@ -2671,9 +2758,17 @@ class CustomImageDataset(CustomDataset):
         )
 
     @classmethod
-    def _process_interleaved_content(cls, content: Any) -> list[dict[str, Any]]:
+    def _process_interleaved_content(
+        cls,
+        content: Any,
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> list[dict[str, Any]]:
         return [
-            cls._process_content_part(part)
+            cls._process_content_part(
+                part,
+                ensure_client_side_data=ensure_client_side_data,
+            )
             for part in cls._validate_content_parts(content)
         ]
 
@@ -2682,11 +2777,23 @@ class CustomImageDataset(CustomDataset):
         return "".join(part["text"] for part in content if part.get("type") == "text")
 
     @staticmethod
-    def _process_image_files(images: Any) -> dict[str, Any] | list[dict[str, Any]]:
+    def _process_image_files(
+        images: Any,
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         if not isinstance(images, list) or not images:
             raise ValueError("'image_files' must be a non-empty list.")
 
-        mm_content = [dict(process_image(image)) for image in images]
+        mm_content = [
+            dict(
+                process_image(
+                    image,
+                    ensure_client_side_data=ensure_client_side_data,
+                )
+            )
+            for image in images
+        ]
         if len(mm_content) == 1:
             return mm_content[0]
 
@@ -2698,6 +2805,7 @@ class CustomImageDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
+        ensure_client_side_data: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2718,9 +2826,14 @@ class CustomImageDataset(CustomDataset):
                 break
 
             if "content" in item:
-                content = self._process_interleaved_content(item["content"])
+                content = self._process_interleaved_content(
+                    item["content"],
+                    ensure_client_side_data=ensure_client_side_data,
+                )
                 text_prompt = self._get_text_from_content(content)
-                prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt_len = (
+                    1 if tokenizer is None else len(tokenizer(text_prompt).input_ids)
+                )
                 prompt = (
                     [{"role": "user", "content": content}]
                     if enable_multimodal_chat
@@ -2741,8 +2854,11 @@ class CustomImageDataset(CustomDataset):
             if not isinstance(prompt, str):
                 raise ValueError("'prompt' must be a string.")
 
-            prompt_len = len(tokenizer(prompt).input_ids)
-            mm_content = self._process_image_files(item["image_files"])
+            prompt_len = 1 if tokenizer is None else len(tokenizer(prompt).input_ids)
+            mm_content = self._process_image_files(
+                item["image_files"],
+                ensure_client_side_data=ensure_client_side_data,
+            )
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -4230,6 +4346,221 @@ class MMStarDataset(HuggingFaceDataset):
                     expected_output_len=output_len,
                     multi_modal_data=mm_for_request,
                     request_id=request_id_prefix + str(ind),
+                )
+            )
+
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# BFCL (Berkeley Function Calling Leaderboard) Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class BFCLDataset(HuggingFaceDataset):
+    """Berkeley Function Calling Leaderboard dataset.
+
+    https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard
+
+    BFCL ships one JSON-lines file per category at the repo root (e.g.
+    ``BFCL_v3_simple.json``, ``BFCL_v3_live_simple.json``) rather than a
+    single HuggingFace split. Each record has ``{id, question, function}``
+    where ``function`` uses a non-OpenAI schema dialect (``"type": "dict"``).
+
+    This dataset loader:
+      - downloads the selected per-category files via ``hf_hub_download``
+        and interleaves rows round-robin so sampling is balanced
+      - translates BFCL function schemas to OpenAI tool format
+      - sets :attr:`SampleRequest.chat_messages` directly and attaches
+        ``tools`` / ``tool_choice`` via :attr:`SampleRequest.request_overrides`,
+        producing production-alike tool calling traffic when used with an
+        ``openai-chat`` backend
+    """
+
+    DEFAULT_OUTPUT_LEN = 512
+    DEFAULT_CATEGORIES = ("simple", "live_simple", "multiple")
+    SUPPORTED_DATASET_PATHS = {
+        "gorilla-llm/Berkeley-Function-Calling-Leaderboard",
+    }
+    IS_MULTIMODAL = False
+
+    # BFCL primitive type names that are not valid JSON Schema types.
+    # Map them to the closest JSON Schema equivalent so that grammar
+    # backends (xgrammar, outlines) accept the translated tool schema.
+    _TYPE_REMAP = {
+        "dict": "object",
+        "float": "number",
+        "tuple": "array",
+        "any": "string",
+    }
+
+    def load_data(self) -> None:
+        """Defer loading to :meth:`sample` where categories are known."""
+        self.data = None
+
+    def _resolve_categories(self, categories: list[str] | None) -> list[str]:
+        if not categories:
+            return list(self.DEFAULT_CATEGORIES)
+        resolved: list[str] = []
+        for c in categories:
+            c = c.strip()
+            if not c:
+                continue
+            resolved.append(c)
+        return resolved or list(self.DEFAULT_CATEGORIES)
+
+    def _load_category(self, category: str) -> list[dict]:
+        # Local import: huggingface_hub.errors is a small module and
+        # importing at call site keeps module import cheap for users who
+        # never touch BFCL.
+        from huggingface_hub.errors import EntryNotFoundError
+
+        filename = f"BFCL_v3_{category}.json"
+        try:
+            path = hf_api().hf_hub_download(
+                self.dataset_path, filename, repo_type="dataset"
+            )
+        except EntryNotFoundError as e:
+            defaults = ", ".join(self.DEFAULT_CATEGORIES)
+            raise ValueError(
+                f"BFCL category '{category}' not found: file '{filename}' "
+                f"does not exist in {self.dataset_path}. Check --bfcl-categories "
+                f"(defaults: {defaults})."
+            ) from e
+        rows: list[dict] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+        return rows
+
+    @classmethod
+    def _translate_schema(cls, node: Any) -> Any:
+        """Recursively translate BFCL-flavored JSON schema to strict JSON Schema."""
+        if isinstance(node, dict):
+            translated = {k: cls._translate_schema(v) for k, v in node.items()}
+            t = translated.get("type")
+            if isinstance(t, str) and t in cls._TYPE_REMAP:
+                translated["type"] = cls._TYPE_REMAP[t]
+            return translated
+        if isinstance(node, list):
+            return [cls._translate_schema(v) for v in node]
+        return node
+
+    @classmethod
+    def _to_openai_tools(cls, functions: list[dict]) -> list[dict]:
+        tools: list[dict] = []
+        for fn in functions:
+            translated = cls._translate_schema(fn)
+            tools.append({"type": "function", "function": translated})
+        return tools
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        categories: list[str] | None = None,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        categories = self._resolve_categories(categories)
+
+        per_category_rows: list[list[dict]] = [
+            self._load_category(c) for c in categories
+        ]
+        # Round-robin interleave so that when --disable-shuffle is set,
+        # taking the first num_requests rows still yields balanced category
+        # coverage. When shuffle is on (the default) this ordering is
+        # randomized away, which is fine — the subsequent random sample is
+        # already balanced in expectation.
+        interleaved: list[dict] = []
+        max_len = max((len(rows) for rows in per_category_rows), default=0)
+        for i in range(max_len):
+            for rows in per_category_rows:
+                if i < len(rows):
+                    interleaved.append(rows[i])
+
+        if not self.disable_shuffle:
+            rng = random.Random(self.random_seed)
+            rng.shuffle(interleaved)
+
+        sampled_requests: list[SampleRequest] = []
+        for row in interleaved:
+            if len(sampled_requests) >= num_requests:
+                break
+            question = row.get("question")
+            functions = row.get("function")
+            if not question or not functions:
+                continue
+            # BFCL question is list[list[dict]] — outer is turns. Use the
+            # first turn only; skip multi-turn categories in this loader.
+            if not isinstance(question, list) or not question:
+                continue
+            first_turn = question[0]
+            if not isinstance(first_turn, list) or not first_turn:
+                continue
+            messages = first_turn
+            if not isinstance(functions, list):
+                functions = [functions]
+
+            tools = self._to_openai_tools(functions)
+
+            # Best-effort prompt length for percentile bucketing. Pass tools=
+            # so modern chat templates (Llama 3.1+, Qwen, gpt-oss harmony,
+            # Hermes) render the tool schemas — without this, the estimate
+            # misses a significant chunk of the true input for BFCL traffic.
+            # Older tokenizers reject the kwarg; fall back to tools-free.
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    messages,
+                    tools=tools,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except TypeError:
+                rendered = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except Exception as e:
+                # Unexpected template failure — prompt_len will fall back to a
+                # plain-text concatenation. Log so the degraded estimate is
+                # visible instead of silently skewing latency buckets.
+                logger.warning(
+                    "BFCL: apply_chat_template failed for a sample, falling "
+                    "back to plain-text prompt length: %s",
+                    e,
+                    exc_info=True,
+                )
+                rendered = None
+            if rendered is not None:
+                prompt_len = len(tokenizer(rendered).input_ids)
+            else:
+                text = "\n".join(m.get("content", "") for m in messages)
+                prompt_len = len(tokenizer(text).input_ids)
+
+            # The chat backend uses `messages` directly; `prompt` is only
+            # kept as a fallback string for display/debug.
+            prompt_text = messages[-1].get("content", "") if messages else ""
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt_text,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(len(sampled_requests)),
+                    chat_messages=messages,
+                    request_overrides={
+                        "tools": tools,
+                        "tool_choice": "auto",
+                    },
                 )
             )
 
