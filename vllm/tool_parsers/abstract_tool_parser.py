@@ -60,6 +60,7 @@ class ToolParser:
     # xgrammar builtin structural tag model key. Subclasses set this when
     # their parsed tool-call syntax matches a builtin xgrammar format.
     structural_tag_model: str | None = None
+    engine_based_streaming: bool = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

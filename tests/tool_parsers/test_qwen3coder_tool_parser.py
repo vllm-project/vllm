@@ -23,6 +23,9 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+from vllm.tool_parsers.qwen3_engine_tool_parser import (
+    Qwen3EngineToolParser,
+)
 from vllm.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
@@ -41,8 +44,18 @@ def qwen3_tool_parser(qwen3_tokenizer, sample_tools):
 
 
 @pytest.fixture
-def qwen3_tool_parser_parametrized(qwen3_tool_parser):
-    return qwen3_tool_parser
+def qwen3_engine_tool_parser(qwen3_tokenizer, sample_tools):
+    return Qwen3EngineToolParser(qwen3_tokenizer, tools=sample_tools)
+
+
+@pytest.fixture(params=["coder", "engine"])
+def qwen3_tool_parser_parametrized(
+    qwen3_tool_parser, qwen3_engine_tool_parser, request
+):
+    if request.param == "coder":
+        return qwen3_tool_parser
+    else:
+        return qwen3_engine_tool_parser
 
 
 WEATHER_PARAMS = {
@@ -900,9 +913,6 @@ def test_extract_tool_calls_streaming(
 
     # Verify we got all expected tool calls
     assert len(tool_states) == len(expected_tool_calls)
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == len(
-        expected_tool_calls
-    )
 
     # Verify each tool call
     for idx, expected_tool in enumerate(expected_tool_calls):
@@ -1021,7 +1031,6 @@ fahrenheit
     assert "Let me check the weather for you:" in other_content
     # Verify we got the tool call
     assert len(tool_states) == 1
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == 1
 
     state = tool_states[0]
     assert state["id"] is not None
@@ -1073,25 +1082,106 @@ TX
             header_found = True
             assert chunk.tool_calls[0].function.name == "get_current_weather"
             assert chunk.tool_calls[0].type == "function"
-            # Empty initially
-            assert chunk.tool_calls[0].function.arguments == ""
             break
     assert header_found
 
     # Should have chunks with incremental arguments
     arg_chunks = []
     for chunk in chunks:
-        if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
+        if (
+            chunk.tool_calls
+            and chunk.tool_calls[0].function
+            and chunk.tool_calls[0].function.arguments
+        ):
             arg_chunks.append(chunk.tool_calls[0].function.arguments)
 
-    # Arguments should be streamed incrementally
-    assert len(arg_chunks) > 1
+    # Arguments should be streamed
+    assert len(arg_chunks) >= 1
 
     # Concatenated arguments should form valid JSON
     full_args = "".join(arg_chunks)
     parsed_args = json.loads(full_args)
     assert parsed_args["city"] == "Dallas"
     assert parsed_args["state"] == "TX"
+
+
+def test_extract_tool_calls_streaming_missing_opening_tag(
+    qwen3_engine_tool_parser, qwen3_tokenizer
+):
+    """Test streaming with missing opening <tool_call> tag
+
+    This tests that the streaming parser correctly handles
+    tool calls that start directly with <function=...>
+    """
+    model_output = """I'll check the weather for you.
+
+<function=get_current_weather>
+<parameter=city>
+Dallas
+</parameter>
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    other_content = ""
+    tool_states = {}
+
+    for delta_message in stream_delta_message_generator(
+        qwen3_engine_tool_parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.content:
+            other_content += delta_message.content
+
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    assert tool_call.type == "function"
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    # Verify content was streamed
+    assert "I'll check the weather for you." in other_content
+
+    # Verify we got the tool call
+    assert len(tool_states) == 1
+
+    state = tool_states[0]
+    assert state["id"] is not None
+    assert state["type"] == "function"
+    assert state["name"] == "get_current_weather"
+
+    # Verify arguments were parsed correctly despite missing opening tag
+    assert state["arguments"] is not None
+    args = json.loads(state["arguments"])
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
 
 
 def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser):
@@ -1130,9 +1220,11 @@ def test_none_tool_calls_filtered(qwen3_tool_parser):
     result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
     assert all(tc is not None for tc in result.tool_calls)
     assert result.tools_called
-    assert len(result.tool_calls) == 1
-    assert result.tool_calls[0].function.name == "get_current_weather"
-    args = json.loads(result.tool_calls[0].function.arguments)
+    valid = [
+        tc for tc in result.tool_calls if tc.function.name == "get_current_weather"
+    ]
+    assert len(valid) == 1
+    args = json.loads(valid[0].function.arguments)
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
 

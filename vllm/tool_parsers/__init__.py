@@ -155,12 +155,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "PythonicToolParser",
     ),
     "qwen3_coder": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "qwen3_xml": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "seed_oss": (
         "seed_oss_tool_parser",
@@ -193,6 +193,11 @@ _TOOL_PARSERS_TO_REGISTER = {
     "apertus": (
         "apertus_tool_parser",
         "ApertusToolParser",
+    ),
+    # Engine-based parser adapters (opt-in via --tool-call-parser=X_engine)
+    "qwen3_engine": (
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
 }
 

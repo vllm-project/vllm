@@ -120,6 +120,11 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
     ),
+    # Engine-based parser adapters (opt-in via --reasoning-parser=X_engine)
+    "qwen3_engine": (
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
+    ),
 }
 
 
