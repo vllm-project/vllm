@@ -53,9 +53,6 @@ class TPMapping:
     # Maps each source rank to its FA head slot index.
     rank_to_attention_slot: dict[int, int]
 
-    # FA head offset factor for hetero-TP (D_TP > P_TP).
-    rank_offset_factor: int
-
 
 # ======================================================================
 # TP mapping computation
@@ -122,21 +119,11 @@ def compute_tp_mapping(
         for r in all_ranks
     }
 
-    # --- Rank offset factor ---
-    if transfer_topology.is_mla or tp_size <= remote_tp_size:
-        # We don't index into remote for reading, no offset needed.
-        rank_offset_factor = 0
-    elif tp_size > total_num_kv_heads:
-        local_head = tp_rank * total_num_kv_heads // tp_size
-        p_start = attn_ranks[0] * total_num_kv_heads // remote_tp_size
-        rank_offset_factor = local_head - p_start
-    else:
-        # D TP > P TP: we index into remote to read different heads depending on rank.
-        rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
+    # Head offset is computed by spec.slice_for_tp_transfer() in
+    # _build_view_remote via meta tensor narrowing (no rank_offset_factor needed).
 
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=tuple(all_ranks),
         rank_to_attention_slot=rank_to_attention_slot,
-        rank_offset_factor=rank_offset_factor,
     )

@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -96,10 +96,17 @@ class KVCacheSpecKind(str, Enum):
 class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
+
+    Key property required by subclasses:
+      tokens_per_state: int — -1 infinite (recurrent), 1 standard, N compressed
     """
 
-    # number of tokens in a block
     block_size: int
+
+    # Overridden by each subclass.
+    @property
+    def tokens_per_state(self) -> int:
+        raise NotImplementedError
 
     @property
     def page_size_bytes(self) -> int:
@@ -114,6 +121,47 @@ class KVCacheSpec:
     @property
     def storage_block_size(self) -> int:
         return self.block_size
+
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+    ) -> list[tuple[int, int, int, int]]:
+        """Decompose a flat region shape into per-transfer-part 4D shapes.
+
+        Called by ``build_region_meta`` in the NIXL worker.  The input
+        *shape* is ``(B, 1, N, flat_C)`` where *flat_C* is the total
+        content per block in elements.  The method returns one
+        ``(B, H, N, C)`` shape per transfer part.
+
+        ``AttentionSpec`` overrides this to split heads out of *flat_C*
+        and optionally halve K/V when *virtually_split* is True.
+        ``MambaSpec`` overrides this to return 4 shapes for the 3-read
+        sub-projection decomposition (x, B, C, SSM).
+        Other specs (MLA) use the default halving.
+        """
+        if virtually_split:
+            B, _, N, flat_C = shape
+            half = flat_C // 2
+            return [(B, 1, N, half), (B, 1, N, half)]
+        return [shape]
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+    ) -> list[torch.Tensor]:
+        """Return the sub-tensor(s) to transfer for a TP mapping.
+
+        The base implementation returns the tensor unchanged.  Subclasses
+        override to select head overlaps (attention) or channel chunks
+        (Mamba/SSM).
+        """
+        return [tensor]
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -156,6 +204,80 @@ class KVCacheSpec:
         )
 
 
+# ---------------------------------------------------------------------------
+# KVCacheLayout and helpers.
+# ---------------------------------------------------------------------------
+
+# Logical dim indices in the 5D stride permutation [L, B, H, N, C].
+_DIM_L, _DIM_B, _DIM_H, _DIM_N, _DIM_C = 0, 1, 2, 3, 4
+
+
+class KVCacheLayout(Enum):
+    """Physical layout descriptor for a KV cache group.
+
+    The logical shape is always [L, B, H, N, <content>].
+    Each member's value is a stride permutation that maps logical axes
+    to physical (memory) order.
+    """
+
+    LBHNC = (0, 1, 2, 3, 4)  # [L, B, H, N, C] (identity)
+    LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
+    BLHNC = (1, 0, 2, 3, 4)  # [B, L, H, N, C]
+    BHLNC = (1, 2, 0, 3, 4)  # [B, H, L, N, C]
+
+    @property
+    def stride_order(self) -> tuple[int, ...]:
+        return self.value
+
+    @property
+    def layer_stride_order(self) -> tuple[int, ...]:
+        """4D permutation [B, H, N, C] for per-layer tensors."""
+        if not self.is_layer_compact:
+            compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
+            raise ValueError(
+                f"KVCacheLayout.{self.name} cannot produce a 4D"
+                f" layer_stride_order because L is not outermost."
+                f" Use a layer-compact layout: {compact}"
+            )
+        return tuple(i - 1 for i in self.value if i != _DIM_L)
+
+    @property
+    def is_layer_compact(self) -> bool:
+        """True when the layer is compact; i.e. the L dimension is outermost."""
+        return self.value[_DIM_L] == 0
+
+    @property
+    def is_block_contiguous(self) -> bool:
+        """True when [H, N, C] is contiguous within a block."""
+        return self.value[-3:] == (_DIM_H, _DIM_N, _DIM_C)
+
+    @classmethod
+    def from_layout_string(cls, s: str) -> KVCacheLayout:
+        """Map legacy layout strings ("HND", "NHD") to KVCacheLayout.
+
+        "HND" (heads-first) → LBHNC; "NHD" (tokens-first) → LBNHC.
+        """
+        return _LAYOUT_STRING_MAP[s]
+
+
+_LAYOUT_STRING_MAP: dict[str, KVCacheLayout] = {
+    "HND": KVCacheLayout.LBHNC,
+    "NHD": KVCacheLayout.LBNHC,
+}
+
+
+def num_states_for(block_size: int, tokens_per_state: int) -> int:
+    """Derive num_states at allocation time (not part of the spec)."""
+    if tokens_per_state == -1:
+        return 1  # recurrent: single state per block
+    return block_size // tokens_per_state
+
+
+# 4D dim indices for per-layer [B, H, N, C] tensors.
+# Used by slice_for_tp_transfer below.
+_DIM4_B, _DIM4_H, _DIM4_N, _DIM4_C = 0, 1, 2, 3
+
+
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
@@ -163,6 +285,71 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+
+    @property
+    def tokens_per_state(self) -> int:
+        return 1
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+    ) -> list[torch.Tensor]:
+        total_kv = model_config.get_total_num_kv_heads()
+
+        if total_kv >= my_tp:
+            my_start = my_rank * total_kv // my_tp
+            my_end = (my_rank + 1) * total_kv // my_tp
+        else:
+            my_head = my_rank * total_kv // my_tp
+            my_start, my_end = my_head, my_head + 1
+
+        if total_kv >= other_tp:
+            other_start = other_rank * total_kv // other_tp
+            other_end = (other_rank + 1) * total_kv // other_tp
+        else:
+            other_head = other_rank * total_kv // other_tp
+            other_start, other_end = other_head, other_head + 1
+
+        overlap_start = max(my_start, other_start)
+        overlap_end = min(my_end, other_end)
+        assert overlap_start < overlap_end, (
+            f"No head overlap between local rank {my_rank}/{my_tp} "
+            f"[{my_start},{my_end}) and remote rank {other_rank}/{other_tp} "
+            f"[{other_start},{other_end}) with total_kv={total_kv}. "
+            f"TP mapping should not pair these ranks."
+        )
+
+        h_start = overlap_start - other_start
+        h_len = overlap_end - overlap_start
+        other_heads = other_end - other_start
+        assert tensor.shape[_DIM4_H] == other_heads, (
+            f"tensor H={tensor.shape[_DIM4_H]} does not match expected "
+            f"remote heads={other_heads} for rank {other_rank}/{other_tp} "
+            f"with total_kv={total_kv}."
+        )
+
+        return [tensor.narrow(_DIM4_H, h_start, h_len)]
+
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+    ) -> list[tuple[int, int, int, int]]:
+        B, _, N, flat_C = shape
+        if self.kv_quant_mode.is_nvfp4:
+            nvfp4_dim = nvfp4_kv_cache_full_dim(self.head_size)
+            H = flat_C // nvfp4_dim
+            return [(B, H, N, nvfp4_dim)]
+        if virtually_split:
+            H = flat_C // (2 * self.head_size)
+            return [(B, H, N, self.head_size), (B, H, N, self.head_size)]
+        H = flat_C // self.head_size
+        return [(B, H, N, self.head_size)]
 
     @property
     def page_size_bytes(self) -> int:
@@ -363,6 +550,21 @@ class MLAAttentionSpec(FullAttentionSpec):
         _apply_alignment_padding(self)
 
     @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+    ) -> list[torch.Tensor]:
+        return [tensor]
+
+    @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
 
@@ -541,6 +743,22 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     def __post_init__(self):
         _apply_alignment_padding(self)
 
+    # Same tokens_per_state delegation as MLAAttentionSpec.
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+    ) -> list[torch.Tensor]:
+        return [tensor]
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -612,6 +830,97 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+
+    @property
+    def tokens_per_state(self) -> int:
+        return -1
+
+    # ----- Sub-projection decomposition (mirrors derive_mamba_conv_split) -----
+
+    @property
+    def conv_rows(self) -> int:
+        """Number of conv kernel rows (DS layout: shapes[0] = (dim, rows))."""
+        return self.shapes[0][1]
+
+    @property
+    def conv_dtype_size(self) -> int:
+        return get_dtype_size(self.dtypes[0])
+
+    @property
+    def conv_proj_dims(self) -> tuple[int, int, int]:
+        """Per-rank column counts for the 3 conv sub-projections.
+
+        Mamba2: (x_local, b_local, c_local) where b == c.
+        GDN:    (key_local, key_local, value_local).
+        """
+        local_conv_dim = self.shapes[0][0]
+        if self.mamba_type == MambaAttentionBackendEnum.MAMBA2:
+            x_local = self.shapes[1][0] * self.shapes[1][1]
+            remainder = local_conv_dim - x_local
+            b_local = remainder // 2
+            return (x_local, b_local, b_local)
+        elif self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+            value_dim_local = self.shapes[1][0] * self.shapes[1][1]
+            key_dim_local = (local_conv_dim - value_dim_local) // 2
+            return (key_dim_local, key_dim_local, value_dim_local)
+        raise NotImplementedError(
+            f"Conv proj dims not supported for {self.mamba_type!r}"
+        )
+
+    @property
+    def conv_proj_bytes(self) -> tuple[int, int, int]:
+        """Byte sizes of the 3 sub-projections for one rank."""
+        row_bytes = self.conv_rows * self.conv_dtype_size
+        d0, d1, d2 = self.conv_proj_dims
+        return (d0 * row_bytes, d1 * row_bytes, d2 * row_bytes)
+
+    @property
+    def conv_state_bytes(self) -> int:
+        return prod(self.shapes[0]) * self.conv_dtype_size
+
+    @property
+    def content_bytes(self) -> int:
+        """Total content bytes per block (conv + SSM), excluding padding."""
+        return sum(
+            prod(s) * get_dtype_size(d) for s, d in zip(self.shapes, self.dtypes)
+        )
+
+    # ----- End sub-projection decomposition -----
+
+    def transfer_shapes(
+        self,
+        shape: tuple[int, int, int, int],
+        virtually_split: bool,
+    ) -> list[tuple[int, int, int, int]]:
+        B, _, N, flat_C = shape
+        # Proportional scaling: multiply before dividing so that
+        # remote pages smaller than local (tp_ratio < 0) also work.
+        total = self.content_bytes
+        p0, p1, p2 = self.conv_proj_bytes
+        ssm = total - self.conv_state_bytes
+        return [
+            (B, 1, N, p0 * flat_C // total),
+            (B, 1, N, p1 * flat_C // total),
+            (B, 1, N, p2 * flat_C // total),
+            (B, 1, N, ssm * flat_C // total),
+        ]
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+    ) -> list[torch.Tensor]:
+        if my_tp <= other_tp:
+            return [tensor]
+        tp_ratio = my_tp // other_tp
+        C = tensor.shape[_DIM4_C]
+        chunk = C // tp_ratio
+        local_offset = my_rank % tp_ratio
+        return [tensor.narrow(_DIM4_C, local_offset * chunk, chunk)]
 
     @property
     def page_size_bytes(self) -> int:
