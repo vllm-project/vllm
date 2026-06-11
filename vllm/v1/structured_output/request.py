@@ -7,7 +7,6 @@ from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
 
-from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
@@ -17,8 +16,6 @@ from vllm.v1.structured_output.backend_types import (
 
 if TYPE_CHECKING:
     from vllm.reasoning import ReasoningParser
-
-logger = init_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -53,17 +50,6 @@ class StructuredOutputRequest:
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
-            except Exception as exc:
-                # A grammar-compilation failure (e.g. xgrammar rejecting an
-                # auto-generated tool_choice schema) must not be allowed to
-                # propagate from the scheduler loop and kill EngineCore.
-                # Surface it as a client-side ValueError so the request fails
-                # cleanly instead of taking down the engine.
-                self.status = RequestStatus.FINISHED_ERROR
-                logger.exception("Grammar compilation failed for structured output")
-                raise ValueError(
-                    f"Failed to compile grammar for structured output: {exc}"
-                ) from exc
         return True
 
     @property
