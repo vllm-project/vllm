@@ -206,6 +206,9 @@ class NixlConnectorWorker:
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
+        # Unset only when the worker is built directly in unit tests; a real
+        # model always registers regions (no-KV-cache crashes long before here).
+        # Fall back to all-SPLIT to preserve the pre-per-region behavior.
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
         # Descriptors (blocks) per stream; all streams share the same count.
@@ -2519,11 +2522,12 @@ class NixlConnectorWorker:
         if virtually_split and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            # Per-stream block length: a 2-stream SPLIT region (full-attn under
-            # the virtually-split layout) uses block_len//2; REPLICATE (MLA,
-            # key-only) and non-split layouts use the whole block.
-            two_streams = virtually_split and not self._is_region_replicated(layer_idx)
-            block_len = self.block_len_per_layer[layer_idx] // (2 if two_streams else 1)
+            # Per-descriptor block length: a SPLIT region (full-attn under the
+            # virtually-split layout) emits separate K and V and uses
+            # block_len//2; REPLICATE (MLA, key-only) and non-split layouts use
+            # the whole block.
+            half_block = virtually_split and not self._is_region_replicated(layer_idx)
+            block_len = self.block_len_per_layer[layer_idx] // (2 if half_block else 1)
         return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
