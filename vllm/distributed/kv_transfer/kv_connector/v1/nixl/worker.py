@@ -328,22 +328,6 @@ class NixlConnectorWorker:
             )
             group_to_view[group_idx] = len(views) - 1
 
-        for view_idx, view in enumerate(views):
-            logger.info(
-                "DBG_VIEW[%d] spec=%s num_blocks=%d "
-                "metas_per_region=%d virtually_split=%s "
-                "num_regions=%d strides=%s contents=%s",
-                view_idx,
-                type(view.spec).__name__,
-                view.num_blocks,
-                view.metas_per_region,
-                view.virtually_split,
-                len(view.region_indices),
-                view.strides[:3],
-                view.contents[:3],
-            )
-        logger.info("DBG_GROUP_MAP %s", group_to_view)
-
         return views, group_to_view
 
     def __init__(
@@ -1215,23 +1199,9 @@ class NixlConnectorWorker:
                 virtually_split=view.virtually_split,
             )
 
-            before = len(result)
             for meta in metas:
                 result.extend(
                     self._view_to_descriptors(meta, base_addr, self.device_id)
-                )
-            if region_pos < 3:
-                payloads = [r[1] for r in result[before : before + 4]]
-                logger.info(
-                    "DBG_LOCAL view=%s region=%d stride=%d "
-                    "content=%d num_blocks=%d metas=%d payloads=%s",
-                    type(view.spec).__name__,
-                    region_idx,
-                    stride,
-                    content,
-                    num_blocks,
-                    len(metas),
-                    payloads,
                 )
 
         return result
@@ -1292,7 +1262,6 @@ class NixlConnectorWorker:
                 virtually_split=view.virtually_split,
             )
 
-            before = len(result)
             for meta in metas:
                 sliced_list = view.spec.slice_for_tp_transfer(
                     meta,
@@ -1306,25 +1275,6 @@ class NixlConnectorWorker:
                     result.extend(
                         self._view_to_descriptors(sliced, base_addr, device_id)
                     )
-            if region_pos < 3:
-                payloads = [r[1] for r in result[before : before + 4]]
-                logger.info(
-                    "DBG_REMOTE view=%s region=%d stride=%d "
-                    "content=%d num_blocks=%d metas=%d "
-                    "my_tp=%d my_rank=%d other_tp=%d other_rank=%d "
-                    "payloads=%s",
-                    type(view.spec).__name__,
-                    region_idx,
-                    stride,
-                    content,
-                    num_blocks,
-                    len(metas),
-                    my_tp,
-                    my_rank,
-                    remote_tp_size,
-                    remote_tp_rank,
-                    payloads,
-                )
 
         return result
 
@@ -1342,15 +1292,6 @@ class NixlConnectorWorker:
             blocks_data.extend(
                 self._build_view_local(view, local_base_addresses, block_size_ratio)
             )
-        logger.info(
-            "DBG_LOCAL_TOTAL descs=%d engine=%s rank=%d ratio=%d first5_payloads=%s",
-            len(blocks_data),
-            self.engine_id,
-            self.tp_rank,
-            block_size_ratio,
-            [x[1] for x in blocks_data[:5]],
-        )
-
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
@@ -1504,17 +1445,6 @@ class NixlConnectorWorker:
                 remote_tp_size=remote_tp_size,
             )
             blocks_data.extend(view_descs)
-
-        logger.info(
-            "DBG_REMOTE_TOTAL descs=%d engine=%s remote_rank=%d "
-            "local_rank=%d remote_phys_per_log=%d first5_payloads=%s",
-            len(blocks_data),
-            engine_id,
-            remote_tp_rank,
-            self.tp_rank,
-            remote_phys_per_log,
-            [x[1] for x in blocks_data[:5]],
-        )
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
