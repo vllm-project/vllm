@@ -76,6 +76,11 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    FT_UTILITY_METHOD,
+    EngineCoreSentinel,
+    fault_tolerant_wrapper,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -935,6 +940,16 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
+            # Initialize fault tolerance settings.
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
+            if self.enable_fault_tolerance:
+                self.ft_sentinel = EngineCoreSentinel(
+                    engine=self,
+                    parallel_config=vllm_config.parallel_config,
+                )
+
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
             # and to overlap some serialization/deserialization with the
@@ -1220,6 +1235,7 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
@@ -1528,6 +1544,14 @@ class EngineCoreProc(EngineCore):
                             request = self.preprocess_add_request(req)
                         except Exception:
                             self._handle_request_preproc_error(req)
+                            continue
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        request = generic_decoder.decode(data_frames)
+                        client_idx, call_id, method, args = request
+                        if method == FT_UTILITY_METHOD:
+                            self.ft_sentinel.handle_command(
+                                client_idx, call_id, args[0]
+                            )
                             continue
                     else:
                         request = generic_decoder.decode(data_frames)
@@ -1866,6 +1890,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
