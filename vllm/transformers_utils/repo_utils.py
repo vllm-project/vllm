@@ -6,10 +6,11 @@ import fnmatch
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
@@ -50,6 +51,32 @@ def hf_fs() -> "huggingface_hub.HfFileSystem":
 
 
 _R = TypeVar("_R")
+
+
+@contextmanager
+def retry_with_kwargs_in_ci(
+    func: Callable[..., _R],
+    **retry_kwargs: Any,
+) -> Iterator[Callable[..., _R]]:
+    """Retry a function with extra keyword arguments after a CI-only failure."""
+
+    def wrapper(*args, **kwargs) -> _R:
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if not os.environ.get("CI"):
+                raise
+            if all(kwargs.get(key) == value for key, value in retry_kwargs.items()):
+                raise
+            logger.warning(
+                "Call to %s failed in CI; retrying with kwargs %s: %s",
+                getattr(func, "__qualname__", func),
+                tuple(retry_kwargs),
+                e,
+            )
+            return func(*args, **{**kwargs, **retry_kwargs})
+
+    yield wrapper
 
 
 def with_retry(
