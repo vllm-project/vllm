@@ -72,35 +72,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             image_sizes=([height, width],), **mm_processor_kwargs
         )
         image_tokens = mm_tokens["num_image_tokens"][0]
-        return self._get_max_encoder_tokens(processor, mm_tokens) or image_tokens
-
-    @staticmethod
-    def _get_mm_values(mm_tokens: object, key: str) -> object:
-        if isinstance(mm_tokens, Mapping):
-            return mm_tokens.get(key)
-        return getattr(mm_tokens, key, None)
-
-    def _get_max_encoder_tokens(
-        self, processor: object, mm_tokens: object
-    ) -> int | None:
-        if "gemma3" not in processor.__class__.__name__.lower():
-            return None
-
-        vision_config = getattr(self.get_hf_config(), "vision_config", None)
-        image_size = getattr(vision_config, "image_size", None)
-        patch_size = getattr(vision_config, "patch_size", None)
-        if not image_size or not patch_size:
-            return None
-
-        # Gemma3 pools each 64x64 SigLIP patch grid down to 256 image tokens.
-        # Profile the vision encoder against the pre-pooling patch-token count.
-        patches_per_image = (image_size // patch_size) ** 2
-        num_image_patches = self._get_mm_values(mm_tokens, "num_image_patches") or [1]
-        if isinstance(num_image_patches, int):
-            max_image_patches = num_image_patches
-        else:
-            max_image_patches = max(num_image_patches)
-        return patches_per_image * int(max_image_patches)
+        return image_tokens
 
     def get_max_image_size(self):
         return 10_000, 10_000  # hardcode for arbitrary very large size
