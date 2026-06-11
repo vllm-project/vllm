@@ -30,6 +30,12 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
+        # Asynchronously copy the bitmask to GPU.
+        with torch.cuda.stream(self.copy_stream):
+            bitmask = async_copy_to_gpu(
+                grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
+            )
+
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
         req_ids = input_batch.req_ids
@@ -40,23 +46,6 @@ class StructuredOutputsWorker:
             logits_start_idx = cu_num_logits[req_idx]
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
-
-        if not mapping:
-            return
-
-        # The scheduler may produce more bitmask rows than logits (e.g.
-        # diffusion models schedule canvas-length tokens but denoise steps
-        # emit fewer logits). Trim to match the actual logits count.
-        num_masks = grammar_bitmask.shape[0]
-        if num_masks > len(mapping):
-            grammar_bitmask = grammar_bitmask[: len(mapping)]
-        assert grammar_bitmask.shape[0] == len(mapping)
-
-        # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
-            bitmask = async_copy_to_gpu(
-                grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
-            )
 
         # Asynchronously copy the mapping to GPU.
         with torch.cuda.stream(self.copy_stream):
@@ -72,6 +61,7 @@ class StructuredOutputsWorker:
         current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
+        assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
