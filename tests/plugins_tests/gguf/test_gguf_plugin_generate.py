@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 
 from ...conftest import VllmRunner
 from ...models.utils import check_logprobs_close
+from ...utils import multi_gpu_test
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -98,6 +99,26 @@ def check_model_outputs(
 @pytest.mark.parametrize("num_logprobs", [8])
 @pytest.mark.parametrize("tp_size", [1])
 def test_models(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: GGUFTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tp_size: int,
+) -> None:
+    check_model_outputs(
+        vllm_runner, example_prompts, model, dtype, max_tokens, num_logprobs, tp_size
+    )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("tp_size", [2])
+@multi_gpu_test(num_gpus=2)
+def test_distributed(
     vllm_runner: type[VllmRunner],
     example_prompts: list[str],
     model: GGUFTestConfig,
