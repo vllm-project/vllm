@@ -43,6 +43,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use crate::config::ApiServerOptions;
 use crate::state::AppState;
 
 fn request_output(
@@ -787,8 +788,12 @@ async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
     )
     .await;
     let app = build_router(Arc::new(
-        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-            .with_request_id_headers(true),
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_request_id_headers: true,
+                ..Default::default()
+            },
+        ),
     ));
     (app, engine_task)
 }
