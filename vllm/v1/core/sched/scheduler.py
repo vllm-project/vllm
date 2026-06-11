@@ -102,7 +102,8 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * self.vllm_config.parallel_config.pipeline_parallel_size
+        self.max_num_per_batch = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -390,7 +391,9 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-
+            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+            if current_batch_size == self.max_num_per_batch:
+                break
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -416,6 +419,7 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
+                + request.num_spec_tokens_in_flight
                 - request.num_computed_tokens
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
@@ -577,7 +581,8 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -882,6 +887,20 @@ class Scheduler(SchedulerInterface):
                     self._inflight_prefills.add(request)
                     continue
 
+                # Speculative decode related.
+                if request.spec_token_ids:
+                    num_scheduled_spec_tokens = (num_new_tokens +
+                                                 num_computed_tokens -
+                                                 request.num_tokens)
+                    if num_scheduled_spec_tokens > 0:
+                        # Trim spec_token_ids list to num_scheduled_spec_tokens.
+                        del request.spec_token_ids[num_scheduled_spec_tokens:]
+                        scheduled_spec_decode_tokens[request.request_id] = (
+                            request.spec_token_ids)
+                    else:
+                        # Prefill request: spec tokens not applicable yet.
+                        request.spec_token_ids = []
+
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(
@@ -1064,9 +1083,18 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+            # Track in-flight spec tokens so the scheduling formula can
+            # compensate for the optimistic advance of num_computed_tokens
+            # when there is a batch-queue delay (PP > 1).
+            # Skip for async scheduling: num_output_placeholders already
+            # accounts for spec tokens, so setting this would double-count.
+            if not self.scheduler_config.async_scheduling:
+                request.num_spec_tokens_in_flight = len(
+                    spec_decode_tokens.get(req_id, ()))
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
             )
@@ -1150,7 +1178,6 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks],
     ) -> CachedRequestData:
         req_ids: list[str] = []
-        new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
@@ -1161,22 +1188,6 @@ class Scheduler(SchedulerInterface):
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
-            # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
-            # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
-            # omit this payload.
-            if self.use_pp and not self.scheduler_config.async_scheduling:
-                # When using PP, the scheduler sends the sampled tokens back,
-                # because there's no direct communication between the first-
-                # stage worker and the last-stage worker. Otherwise, we don't
-                # need to send the sampled tokens back because the model runner
-                # will cache them.
-                num_tokens = num_scheduled_tokens[req_id] - len(
-                    spec_decode_tokens.get(req_id, ())
-                )
-                token_ids = req.all_token_ids[
-                    req.num_computed_tokens : req.num_computed_tokens + num_tokens
-                ]
-                new_token_ids.append(token_ids)
             scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
@@ -1194,7 +1205,6 @@ class Scheduler(SchedulerInterface):
         return CachedRequestData(
             req_ids=req_ids,
             resumed_req_ids=resumed_req_ids,
-            new_token_ids=new_token_ids,
             all_token_ids=all_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
@@ -1391,6 +1401,7 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -1473,6 +1484,12 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            # Clear in-flight spec token count now that the output for
+            # this scheduling step has arrived.
+            # Only relevant for sync scheduling (async uses
+            # num_output_placeholders instead).
+            if not self.scheduler_config.async_scheduling:
+                request.num_spec_tokens_in_flight = 0
             if scheduled_spec_token_ids and generated_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
@@ -1629,6 +1646,15 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+        # Update spec token ids from model output. Called after the loop
+        # so that request state (is_prefill_chunk) is already updated,
+        # equivalent to the post_step timing.
+        if spec_token_ids is not None:
+            self.update_draft_token_ids(DraftTokenIds(
+                req_ids=model_runner_output.req_ids,
+                draft_token_ids=spec_token_ids,
+            ))
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -2028,6 +2054,7 @@ class Scheduler(SchedulerInterface):
                 # otherwise.
                 request.async_tokens_to_discard = request.num_output_placeholders
                 request.num_output_placeholders = 0
+                request.num_spec_tokens_in_flight = 0
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
