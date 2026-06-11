@@ -34,8 +34,8 @@ class bench_params_t:
             f"N {self.num_tokens} "
             f"x D {self.hidden_size} "
             f"x R {self.add_residual} "
-            f"x DT {self.dtype}"
-            f"x WDT {self.wt_dtype}"
+            f"x DT {self.dtype} "
+            f"x WDT {self.wt_dtype} "
             f"x GS {self.group_size}"
         )
 
