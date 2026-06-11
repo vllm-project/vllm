@@ -332,13 +332,21 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                     EngineCoreOutputs {
                         engine_index: 0,
                         outputs: vec![
-                            request_output_with_logprobs(
-                                &request.request_id,
-                                vec![33],
-                                None,
-                                Some(logprobs_for_position(33, -0.1, 1, 99, -0.2)),
-                                Some(prompt_logprobs()),
-                            ),
+                            EngineCoreOutput {
+                                prefill_stats: Some(PrefillStats {
+                                    num_prompt_tokens: 2,
+                                    num_cached_tokens: 1,
+                                    num_local_cached_tokens: 1,
+                                    ..Default::default()
+                                }),
+                                ..request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![33],
+                                    None,
+                                    Some(logprobs_for_position(33, -0.1, 1, 99, -0.2)),
+                                    Some(prompt_logprobs()),
+                                )
+                            },
                             request_output_with_logprobs_and_kv(
                                 &request.request_id,
                                 vec![44],
@@ -373,6 +381,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
+    assert_eq!(collected.usage.cached_token_count, 1);
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
