@@ -902,7 +902,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
-        "gg-hf-st/diffusiongemma-26B-A4B-it",
+        "google/diffusiongemma-26B-A4B-it",
         trust_remote_code=True,
     ),
     "Gemma4ForConditionalGeneration": _HfExamplesInfo(
