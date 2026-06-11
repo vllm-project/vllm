@@ -71,45 +71,118 @@ class RequestManager:
         self.max_num_seqs = max_num_seqs
         self.num_long_req_per_domain = 0
         self.num_req_per_dp = [0] * self.cp_world_size
+        # Track which request IDs have been counted into per-rank counters.
+        # This prevents free_req() from decrementing counters for requests
+        # that were never added (e.g. aborted while in
+        # WAITING_FOR_REMOTE_KVS before add_req was called).
+        self.req_id_to_ranks: dict[str, tuple[int, ...]] = {}
 
         self.balancer = NoStandardBucketLoadBalancer(
             num_buckets=self.cp_world_size,
             max_length=long_request_threshold)
 
+    def _has_capacity(self, ranks: list[int] | tuple[int, ...]) -> bool:
+        """Check if all given ranks have at least one request slot free."""
+        return all(
+            self.num_req_per_dp[rank] < self.max_num_seqs
+            for rank in ranks
+        )
+
     def select_dp(self, request: Request, is_long: bool, specify_dp: bool, num_new_tokens: int, rank_budgets: list[int]) -> list[int] | None:
         if len(request.cp_ranks) > 0:
-            if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]) and all([rank_budgets[rank] >= num_new_tokens for rank in request.cp_ranks]):
+            if self._has_capacity(request.cp_ranks) and all([rank_budgets[rank] >= num_new_tokens for rank in request.cp_ranks]):
                 return request.cp_ranks
             else:
                 return None
 
         if is_long and not specify_dp:
+            if not self._has_capacity(list(range(self.cp_world_size))):
+                return None
             return [
                 i for i in range(self.cp_world_size)
             ]
-        else:
-            # Get the the dp with the least number of requests
-            best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
-            if rank_budgets[best_dp] < num_new_tokens:
-                max_budget = max(rank_budgets)
-                if num_new_tokens > max_budget:
-                    return None
-                best_dp = rank_budgets.index(max_budget)
-            return [best_dp]
+        # Short request (or long with specify_dp=True):
+        # pick the least-loaded rank that has capacity and budget.
+        candidates = [
+            rank for rank in range(self.cp_world_size)
+            if self.num_req_per_dp[rank] < self.max_num_seqs
+            and rank_budgets[rank] >= num_new_tokens
+        ]
+        if not candidates:
+            return None
+        return [min(candidates, key=lambda rank: self.num_req_per_dp[rank])]
 
     def add_req(self, request: Request) -> None:
-        if len(request.cp_ranks) > 1:
+        request_id = request.request_id
+        if request_id in self.req_id_to_ranks:
+            # Already counted — skip to keep add_req idempotent.
+            logger.debug(
+                "RequestManager add_req SKIP (already counted) "
+                "req_id=%s cp_ranks=%s tracked_ranks=%s",
+                request_id,
+                request.cp_ranks,
+                self.req_id_to_ranks.get(request_id),
+            )
+            return
+
+        ranks = tuple(request.cp_ranks)
+        assert ranks, (
+            f"RequestManager add_req: request {request_id} "
+            f"has no cp_ranks"
+        )
+        if not self._has_capacity(ranks):
+            # Capacity exceeded — this should not happen if select_dp
+            # is working correctly, but log a warning instead of crashing.
+            logger.warning(
+                "RequestManager add_req: no capacity for request %s, "
+                "ranks=%s, num_req_per_dp=%s, max_num_seqs=%s. "
+                "This indicates a select_dp capacity check gap.",
+                request_id,
+                ranks,
+                self.num_req_per_dp[:],
+                self.max_num_seqs,
+            )
+
+        self.req_id_to_ranks[request_id] = ranks
+        if len(ranks) > 1:
             self.num_long_req_per_domain += 1
 
-        for rank in request.cp_ranks:
+        for rank in ranks:
             self.num_req_per_dp[rank] += 1
 
-    def free_req(self, request: Request) -> None:
-        if len(request.cp_ranks) > 1:
+    def free_req(self, request: Request) -> bool:
+        """Release per-rank request count for *request*.
+
+        Returns True if the request was actually freed (i.e. it had been
+        previously counted by add_req). Returns False if the request was
+        never counted — this happens when a request in
+        WAITING_FOR_REMOTE_KVS is aborted before add_req was called.
+        In that case num_req_per_dp is unchanged, preventing count drift.
+        """
+        ranks = self.req_id_to_ranks.pop(request.request_id, None)
+        if ranks is None:
+            logger.warning(
+                "RequestManager free_req SKIP (never counted) "
+                "req_id=%s cp_ranks=%s num_req_per_dp=%s",
+                request.request_id,
+                request.cp_ranks,
+                self.num_req_per_dp[:],
+            )
+            return False
+
+        if len(ranks) > 1:
             self.num_long_req_per_domain -= 1
 
-        for rank in request.cp_ranks:
+        for rank in ranks:
             self.num_req_per_dp[rank] -= 1
+            assert self.num_req_per_dp[rank] >= 0, (
+                f"RequestManager BUG: num_req_per_dp[{rank}] went negative "
+                f"after free_req(req_id={request.request_id}, "
+                f"tracked_ranks={ranks}). "
+                f"num_req_per_dp={self.num_req_per_dp}, "
+                f"req_id_to_ranks keys={list(self.req_id_to_ranks.keys())}"
+            )
+        return True
 
     def get_num_req_per_dp(self, dp_rank: int) -> int:
         return self.num_req_per_dp[dp_rank]
@@ -268,6 +341,18 @@ class CrossDPScheduler(Scheduler):
         requests that were never counted (e.g. aborted while still in
         WAITING), so this stays correct on every release path.
         """
+        logger.debug(
+            "CrossDPScheduler._free_request req_id=%s status=%s "
+            "cp_ranks=%s was_in_long_running=%s "
+            "request_manager_before=%s "
+            "delay_free_blocks=%s",
+            request.request_id,
+            request.status,
+            request.cp_ranks,
+            request.request_id in self.long_running_req_ids,
+            self.request_manager,
+            delay_free_blocks,
+        )
         self._unmark_long_running(request)
         self.request_manager.free_req(request)
         self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
