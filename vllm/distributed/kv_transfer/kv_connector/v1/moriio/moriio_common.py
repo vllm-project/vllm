@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import psutil
 import regex as re
 import torch
 import zmq
@@ -25,7 +26,8 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
-    make_zmq_socket,
+    is_valid_ipv6_address,
+    split_zmq_path,
 )
 
 if TYPE_CHECKING:
@@ -184,6 +186,7 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
 
+
 def _normalize_node_hosts(value: Any, config_key: str) -> list[str]:
     if value is None:
         return []
@@ -221,8 +224,6 @@ def get_moriio_node_hosts(
             return node_hosts
 
     return [default_host]
-
-
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
@@ -556,8 +557,74 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_recv[request_id] = _req
 
 
+_MORIIO_ZMQ_KEEPALIVE_OPTS = (
+    (zmq.TCP_KEEPALIVE, 1),
+    (zmq.TCP_KEEPALIVE_IDLE, 30),
+    (zmq.TCP_KEEPALIVE_INTVL, 10),
+    (zmq.TCP_KEEPALIVE_CNT, 3),
+)
+
+
+def _make_moriio_zmq_socket(
+    ctx: zmq.Context,
+    path: str,
+    socket_type: Any,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> zmq.Socket:
+    mem = psutil.virtual_memory()
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+
+    sock = ctx.socket(socket_type)
+
+    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.RCVHWM, 0)
+        sock.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.SNDHWM, 0)
+        sock.setsockopt(zmq.SNDBUF, buf_size)
+
+    if socket_type == zmq.ROUTER and router_handover:
+        sock.setsockopt(zmq.ROUTER_HANDOVER, 1)
+
+    if identity is not None:
+        sock.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        sock.setsockopt(zmq.LINGER, linger)
+
+    # Mgmt-rail notify/handshake streams are sparse; a silently dead TCP peer
+    # can park reads until the retransmit ladder expires. Keepalive applies to
+    # accepted connections too and must be set before bind/connect.
+    for option, value in _MORIIO_ZMQ_KEEPALIVE_OPTS:
+        sock.setsockopt(option, value)
+
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
+
+    if socket_type == zmq.ROUTER:
+        sock.bind(path)
+    else:
+        sock.connect(path)
+
+    return sock
+
+
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(
+    socket_type: Any,
+    addr: str,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
@@ -566,9 +633,15 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(
-            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
+        sock = _make_moriio_zmq_socket(
+            ctx,
+            addr,
+            socket_type,
+            identity=identity,
+            linger=linger,
+            router_handover=router_handover,
         )
+        yield sock
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
