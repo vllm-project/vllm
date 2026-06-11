@@ -115,7 +115,6 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     _f16Vec<scalar_t, width> temp = input_v[stride_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
-    residual_v[id] = temp;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -131,7 +130,9 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+    int stride_id = blockIdx.x * vec_input_stride + idx;
     int id = blockIdx.x * vec_hidden_size + idx;
+    _f16Vec<scalar_t, width> inp = input_v[stride_id];
     _f16Vec<scalar_t, width> res = residual_v[id];
     _f16Vec<scalar_wt_t, width> w = weight_v[idx];
     using Converter = _typeConvert<scalar_t>;
@@ -139,7 +140,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     using HipT = typename Converter::hip_type;
 #pragma unroll
     for (int i = 0; i < width; ++i) {
-      float x = Converter::convert(res.data[i]);
+      float x = Converter::convert(inp.data[i]);
+      x += Converter::convert(res.data[i]);
       // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
       // temp hack to convert from wt_dtype -> float -> inp_dtype 
       // as direct wt_dtype -> inp_dtype isn't available 
@@ -147,6 +149,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
       out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
           Converter::convert(out_norm_h), scale_inv);
     }
+    residual_v[id] += inp;
   }
 }
 
@@ -167,11 +170,9 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * hidden_size + idx];
-    float x = (float)z;
+    float x = input[blockIdx.x * input_stride + idx];
+    x += residual[blockIdx.x * hidden_size + idx];
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -187,11 +188,13 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x = (float)input[blockIdx.x * input_stride + idx];
+    x += residual[blockIdx.x * hidden_size + idx];
     // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
     scalar_t out_norm = static_cast<scalar_t>(static_cast<scalar_wt_t>(x * s_variance) * weight[idx]);
     out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
         static_cast<float>(out_norm), scale_inv);
+    residual[blockIdx.x * hidden_size + idx] = static_cast<scalar_t>(x);
   }
 }
 
