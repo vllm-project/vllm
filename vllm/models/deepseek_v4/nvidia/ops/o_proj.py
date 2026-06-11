@@ -58,10 +58,14 @@ def deep_gemm_fp8_o_proj(
         device=o.device,
         dtype=torch.bfloat16,
     )
+    wo_a_scale = getattr(wo_a, "weight_scale_inv", None)
+    if wo_a_scale is None:
+        wo_a_scale = wo_a.weight_scale
+
     fp8_einsum(
         "bhr,hdr->bhd",
         (o_fp8, o_scale),
-        (wo_a.weight, wo_a.weight_scale_inv),
+        (wo_a.weight, wo_a_scale),
         z,
         recipe=einsum_recipe,
     )
