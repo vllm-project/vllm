@@ -14,9 +14,6 @@ from math import ceil
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
-    evict_and_alloc,
-)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferAck,
     XferReq,
@@ -51,12 +48,19 @@ CONSUMER_READ_TIMEOUT_S = 20.0
 class ECCPUConsumer:
     """Consumer state machine over a duck-typed transport and transfer engine.
 
-    Per-``mm_hash`` progress lives in ``_remote_encodings`` as a
-    ``PendingRead`` (``read_handle is None`` ⇒ awaiting the ``XferAck``;
-    set ⇒ READ in flight) or a ``None`` tombstone (a NACK that
-    ``ensure_cache_available`` consumes to fall through to local encode).
-    Completed reads move to ``_ready`` and then to ``_loaded`` once handed to
-    the worker.
+    Block ownership lives in ``_blocks`` (``mm_hash → list[int]``), populated
+    the moment blocks are allocated in ``_start_read`` and cleared when they
+    are freed, quarantined, or evicted.
+
+    Per-``mm_hash`` progress is tracked separately:
+
+    * ``_remote_encodings``: ``PendingRead`` (``read_handle is None`` ⇒
+      awaiting ``XferAck``; set ⇒ READ in flight) or ``None`` tombstone (a
+      NACK that ``ensure_cache_available`` consumes to fall through to local
+      encode). Completed reads are removed from this dict immediately by
+      ``_poll_read``, so every entry represents a read that is still pending.
+    * ``_loaded``: ordered set (``dict[str, None]``) of mm_hashes already
+      handed to the worker. Insertion order drives FIFO eviction.
     """
 
     def __init__(
@@ -71,24 +75,25 @@ class ECCPUConsumer:
         self._engine = engine
         self._compat_hash = compat_hash
 
-        # In-flight encodings
+        # In-flight encodings: mm_hash → PendingRead | None (tombstone)
         self._remote_encodings: dict[str, PendingRead | None] = {}
 
-        # Local encodings (On CPU)
-        self._ready: set[str] = set()
-        self._loaded: dict[str, list[int]] = {}
+        # Single source of truth for block ownership.
+        # Populated in _start_read; removed on free / quarantine / eviction.
+        self._blocks: dict[str, list[int]] = {}
+
+        # mm_hashes whose bytes are in our local mmap, kept alive for re-serves.
+        # dict[str, None] preserves insertion order for FIFO eviction.
+        self._loaded: dict[str, None] = {}
         self._pending_reload: set[str] = set()
+
         # Reads given up on while possibly still DMA-ing; blocks held until
         # check_xfer_state reports terminal (see QuarantinedRead).
         self._quarantine: list[QuarantinedRead] = []
 
     def has_cache_item(self, identifier: str) -> bool:
-        """True iff the bytes for `identifier` are in our local mmap, either
-        because the read just completed (`_ready`, worker copies this step) or
-        because the worker already copied them last step and we have not yet
-        freed the blocks (`_loaded`).
-        """
-        return identifier in self._loaded or identifier in self._ready
+        """True iff the bytes for `identifier` are in our local mmap."""
+        return identifier in self._loaded
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         """Ensure the mm_hash will be (re-)loaded into encoder_cache this step.
@@ -140,15 +145,12 @@ class ECCPUConsumer:
             if pos.offset + pos.length <= num_computed_tokens:
                 continue
             mm_hash = feature.mm_hash or feature.identifier
-            if self.has_cache_item(mm_hash):
-                if mm_hash in self._loaded:
-                    self._pending_reload.add(mm_hash)
-                    logger.debug(
-                        "EC: mm_hash=%s locally loaded, queued for reload",
-                        mm_hash,
-                    )
-                else:
-                    logger.debug("EC: mm_hash=%s already ready", mm_hash)
+            if mm_hash in self._loaded:
+                self._pending_reload.add(mm_hash)
+                logger.debug(
+                    "EC: mm_hash=%s locally loaded, queued for reload",
+                    mm_hash,
+                )
                 continue
             if mm_hash in self._remote_encodings:
                 if self._remote_encodings[mm_hash] is None:
@@ -222,14 +224,16 @@ class ECCPUConsumer:
             return self._memory_context.region.alloc(n_blocks)
         except AllocationError:
             pass
-        result = evict_and_alloc(
-            n_blocks,
-            self._loaded,
-            self._memory_context.region,
-            protected=self._pending_reload,
-        )
-        if result is not None:
-            return result
+        region = self._memory_context.region
+        for mm_hash in list(self._loaded):
+            if mm_hash in self._pending_reload:
+                continue
+            region.free(self._blocks.pop(mm_hash))
+            del self._loaded[mm_hash]
+            try:
+                return region.alloc(n_blocks)
+            except AllocationError:
+                continue
         raise AllocationError(
             f"ECSharedRegion exhausted: cannot satisfy {n_blocks} blocks "
             f"even after evicting all evictable cache entries — operator "
@@ -241,9 +245,12 @@ class ECCPUConsumer:
 
         The NIXL READ is issued later, in ``_handle_ack``, once the producer's
         ``XferAck`` supplies its fresh metadata and the source block indices.
+        Blocks are registered in ``_blocks`` immediately so every subsequent
+        code path has a single place to look up or free them.
         """
         n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
         indices = self._fifo_alloc(n_blocks)
+        self._blocks[mm_hash] = indices
         try:
             addr: PeerAddr = (info["peer_host"], int(info["peer_port"]))
             peer = self._transport.ensure_dealer(addr)
@@ -251,11 +258,10 @@ class ECCPUConsumer:
                 peer, XferReq(mm_hash=mm_hash, compatibility_hash=self._compat_hash)
             )
         except Exception:
-            self._memory_context.region.free(indices)
+            self._memory_context.region.free(self._blocks.pop(mm_hash))
             raise
         self._remote_encodings[mm_hash] = PendingRead(
             addr=addr,
-            dst_indices=indices,
             deadline=time.monotonic() + CONSUMER_XFER_ACK_TIMEOUT_S,
         )
         logger.debug(
@@ -266,12 +272,16 @@ class ECCPUConsumer:
             addr[1],
         )
 
-    def drain(self) -> None:
-        """Advance every in-flight read one step: tear down dead peers, apply
-        arriving acks, then poll running reads and expire stale ack waits.
+    def drain(self) -> set[str]:
+        """Advance every in-flight read one step.
+
+        Returns the set of mm_hashes whose reads completed this call.
+        Acks are applied first, then reads are polled (completed ones are
+        removed from ``_remote_encodings`` immediately), and only then are dead
+        peers cleaned up — so ``on_peer_down`` never sees a read that has
+        already finished.
         """
-        for addr in self._transport.poll_dead_peers():
-            self.on_peer_down(addr)
+        completed: set[str] = set()
         for addr, ack in self._transport.poll_responses():
             self._handle_ack(addr, ack)
         now = time.monotonic()
@@ -282,7 +292,10 @@ class ECCPUConsumer:
                 # Poll the in-flight READ; only if it is still running past its
                 # budget do we give up. NIXL cannot abort it, so the blocks go
                 # to quarantine (not freed) until the transfer reports terminal.
-                if not self._poll_read(mm_hash, pr) and now > pr.deadline:
+                result = self._poll_read(mm_hash, pr)
+                if result == "done":
+                    completed.add(mm_hash)
+                elif result == "proc" and now > pr.deadline:
                     logger.warning(
                         "EC: READ for mm_hash=%s from %s:%d still in flight after "
                         "%.0fs; quarantining and falling back to local encode",
@@ -292,7 +305,7 @@ class ECCPUConsumer:
                         CONSUMER_READ_TIMEOUT_S,
                     )
                     self._quarantine.append(
-                        QuarantinedRead(pr.dst_indices, pr.read_handle)
+                        QuarantinedRead(self._blocks.pop(mm_hash), pr.read_handle)
                     )
                     self._remote_encodings[mm_hash] = None
             elif now > pr.deadline:
@@ -304,9 +317,12 @@ class ECCPUConsumer:
                     pr.addr[1],
                     CONSUMER_XFER_ACK_TIMEOUT_S,
                 )
-                self._memory_context.region.free(pr.dst_indices)
+                self._memory_context.region.free(self._blocks.pop(mm_hash))
                 self._remote_encodings[mm_hash] = None
+        for addr in self._transport.poll_dead_peers():
+            self.on_peer_down(addr)
         self._drain_quarantine()
+        return completed
 
     def _handle_ack(self, addr: PeerAddr, ack: XferAck) -> None:
         """Register the producer from the ack's fresh metadata and issue the
@@ -345,15 +361,16 @@ class ECCPUConsumer:
                     ack.mm_hash,
                     ack.status.name,
                 )
-            self._memory_context.region.free(pr.dst_indices)
+            self._memory_context.region.free(self._blocks.pop(ack.mm_hash))
             self._remote_encodings[ack.mm_hash] = None
             return
+        dst_indices = self._blocks[ack.mm_hash]
         try:
             peer = self._transport.register_source(
                 addr, ack.agent_metadata, ack.mem_descriptor
             )
             handle = self._engine.post_read(
-                pr.dst_indices,
+                dst_indices,
                 peer.remote_read_handle,
                 ack.src_block_indices,
                 notif_msg=ack.mm_hash.encode("utf-8"),
@@ -363,7 +380,7 @@ class ECCPUConsumer:
                 "EC: failed to start READ for mm_hash=%s; falling back to local encode",
                 ack.mm_hash,
             )
-            self._memory_context.region.free(pr.dst_indices)
+            self._memory_context.region.free(self._blocks.pop(ack.mm_hash))
             self._remote_encodings[ack.mm_hash] = None
             return
         pr.read_handle = handle
@@ -371,16 +388,19 @@ class ECCPUConsumer:
         logger.debug(
             "EC: READ started mm_hash=%s n_blocks=%d peer=%s:%d",
             ack.mm_hash,
-            len(pr.dst_indices),
+            len(dst_indices),
             addr[0],
             addr[1],
         )
 
-    def _poll_read(self, mm_hash: str, pr: PendingRead) -> bool:
-        """Check one in-flight READ. Returns True once it settles — promoted to
-        `_ready` on completion, or tombstoned + freed on failure — and False
-        while it is still in flight (`PROC`). A terminal state means no transfer
-        can still touch the blocks, so freeing on failure here is DMA-safe.
+    def _poll_read(self, mm_hash: str, pr: PendingRead) -> str:
+        """Check one in-flight READ.
+
+        Returns ``"done"`` when the read completes successfully (entry removed
+        from ``_remote_encodings``), ``"proc"`` while still in flight, or
+        ``"failed"`` when the read fails (tombstoned + blocks freed). A
+        terminal state guarantees no transfer can still touch the blocks, so
+        freeing on failure is DMA-safe.
         """
         assert pr.read_handle is not None
         try:
@@ -392,16 +412,16 @@ class ECCPUConsumer:
                 mm_hash,
             )
             self._engine.release_xfer_handle(pr.read_handle)
-            self._memory_context.region.free(pr.dst_indices)
+            self._memory_context.region.free(self._blocks.pop(mm_hash))
             self._remote_encodings[mm_hash] = None
-            return True
+            return "failed"
         if state == "DONE":
             self._engine.release_xfer_handle(pr.read_handle)
-            self._ready.add(mm_hash)
+            del self._remote_encodings[mm_hash]
             logger.debug("EC: read arrived mm_hash=%s", mm_hash)
-            return True
+            return "done"
         if state == "PROC":
-            return False
+            return "proc"
         logger.warning(
             "EC: READ for mm_hash=%s in unexpected state %r; "
             "falling back to local encode",
@@ -409,9 +429,9 @@ class ECCPUConsumer:
             state,
         )
         self._engine.release_xfer_handle(pr.read_handle)
-        self._memory_context.region.free(pr.dst_indices)
+        self._memory_context.region.free(self._blocks.pop(mm_hash))
         self._remote_encodings[mm_hash] = None
-        return True
+        return "failed"
 
     def _drain_quarantine(self) -> None:
         """Release and free quarantined reads once their transfer is terminal.
@@ -453,8 +473,9 @@ class ECCPUConsumer:
         producer; a still-dead producer then terminates via the XferAck
         timeout instead of looping. Blocks of a read that already posted its
         READ are quarantined (the transfer may still be DMA-ing); blocks of a
-        read still awaiting its XferAck are freed immediately. Reads that have
-        already completed (`_ready`) are left to be promoted.
+        read still awaiting its XferAck are freed immediately. Completed reads
+        have already been removed from ``_remote_encodings`` by ``drain()``
+        and are therefore unaffected.
         """
         evicted_agent_name = self._transport.evict_peer(addr)
         retrying = 0
@@ -462,13 +483,13 @@ class ECCPUConsumer:
         for mm_hash, pr in list(self._remote_encodings.items()):
             if pr is None or pr.addr != addr:
                 continue
-            if mm_hash in self._ready:
-                continue
             if pr.read_handle is not None:
-                self._quarantine.append(QuarantinedRead(pr.dst_indices, pr.read_handle))
+                self._quarantine.append(
+                    QuarantinedRead(self._blocks.pop(mm_hash), pr.read_handle)
+                )
                 quarantined += 1
             else:
-                self._memory_context.region.free(pr.dst_indices)
+                self._memory_context.region.free(self._blocks.pop(mm_hash))
                 retrying += 1
             del self._remote_encodings[mm_hash]
         logger.info(
@@ -482,31 +503,30 @@ class ECCPUConsumer:
     def build_loads(self) -> dict[str, list[int]]:
         """Drain progress, promote arrived mm_hashes, re-emit cached reloads."""
         # (a) Advance in-flight reads and apply any arrivals.
-        self.drain()
+        completed = self.drain()
         # (b) Hand newly-arrived mm_hashes to the worker; move to loaded
         #     cache. Blocks stay allocated so that subsequent requests for
         #     the same mm_hash are re-served with a local mmap→GPU re-copy
         #     instead of a producer round-trip.
         loads: dict[str, list[int]] = {}
-        for mm_hash in list(self._ready):
-            pr = self._remote_encodings.pop(mm_hash, None)
-            if pr is None:
+        for mm_hash in completed:
+            if mm_hash not in self._blocks:
+                # Defensive: drain() removes completed reads from
+                # _remote_encodings immediately, so _blocks should always
+                # be present here; guard against unexpected edge cases.
                 continue
-            loads[mm_hash] = pr.dst_indices
-            self._loaded[mm_hash] = pr.dst_indices
+            loads[mm_hash] = self._blocks[mm_hash]
+            self._loaded[mm_hash] = None
             logger.debug("EC: load issued mm_hash=%s", mm_hash)
-        self._ready.clear()
         # (c) Re-serve cached entries requested this step via a local
         #     mmap→GPU re-copy.
         for mm_hash in self._pending_reload:
-            if mm_hash not in loads:
-                blocks = self._loaded.get(mm_hash)
-                if blocks is not None:
-                    loads[mm_hash] = blocks
-                    logger.debug(
-                        "EC: Local mmap cache hit mm_hash=%s",
-                        mm_hash,
-                    )
+            if mm_hash not in loads and mm_hash in self._loaded:
+                loads[mm_hash] = self._blocks[mm_hash]
+                logger.debug(
+                    "EC: Local mmap cache hit mm_hash=%s",
+                    mm_hash,
+                )
         self._pending_reload = set()
         return loads
 

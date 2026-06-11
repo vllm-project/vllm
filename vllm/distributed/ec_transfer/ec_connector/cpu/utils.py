@@ -74,10 +74,13 @@ class PendingRead:
     needed. `deadline` (monotonic) bounds whichever phase is current: the
     `XferAck` wait while `read_handle is None`, then the read budget once the
     READ is posted (it is reset at that transition).
+
+    Block indices for this read are stored in the consumer's `_blocks` map
+    (keyed by `mm_hash`) rather than here, so there is a single source of
+    truth for block ownership across all in-flight phases.
     """
 
     addr: PeerAddr
-    dst_indices: list[int]
     deadline: float
     read_handle: int | None = None
 
