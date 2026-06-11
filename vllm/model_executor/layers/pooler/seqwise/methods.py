@@ -40,9 +40,8 @@ class CLSPool(SequencePoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with CLS pooling"
-        )
+        if pooling_cursor.is_partial_prefill():
+            raise RuntimeError("partial prefill is not supported with CLS pooling")
 
         return hidden_states[pooling_cursor.first_token_indices_gpu]
 
@@ -64,9 +63,8 @@ class MeanPool(SequencePoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with MEAN pooling"
-        )
+        if pooling_cursor.is_partial_prefill():
+            raise RuntimeError("partial prefill is not supported with MEAN pooling")
 
         prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
         num_seqs = prompt_lens_cpu.numel()
@@ -108,7 +106,9 @@ class MeanPool(SequencePoolingMethod):
         return segment_sums / prompt_lens.unsqueeze(1)
 
 
-def get_seq_pooling_method(pooling_type: SequencePoolingType | str):
+def get_seq_pooling_method(
+    pooling_type: SequencePoolingType | str,
+) -> SequencePoolingMethod:
     if pooling_type == "CLS":
         return CLSPool()
     if pooling_type == "LAST":

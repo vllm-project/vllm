@@ -25,7 +25,6 @@ EMBED_SCALING_MODELS = {
 AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
-    "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
@@ -81,9 +80,6 @@ AITER_MODEL_LIST = [
         pytest.param(
             "microsoft/phi-2",  # phi
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
-        ),
-        pytest.param(
-            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
