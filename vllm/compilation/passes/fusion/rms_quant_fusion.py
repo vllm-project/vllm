@@ -38,10 +38,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 
-_RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
-_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
-
-
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
     return torch.empty(
         *args, **kwargs, dtype=torch.bfloat16, device=current_platform.device_type
