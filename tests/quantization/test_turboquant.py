@@ -44,33 +44,53 @@ PRESET_EXPECTED = {
         key_fp8=True,  key_quant_bits=8,
         key_mse_bits=0, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
+        key_centroid_bits=4, value_centroid_bits=4,
+        n_key_centroids=16, n_value_centroids=16,
+        value_mse_supported=True,
         norm_correction=False,
-        key_packed_size=128, value_packed_size=68,
-        slot_size=196, slot_size_aligned=196,
+        key_packed_size=128, value_packed_size=66,
+        value_uniform_packed_size=68, value_mse_packed_size=66,
+        value_mse_slot_size=194, value_mse_slot_size_aligned=194,
+        slot_size=194, slot_size_aligned=194,
     ),
     "turboquant_4bit_nc": dict(
         key_fp8=False, key_quant_bits=4,
         key_mse_bits=4, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
+        key_centroid_bits=4, value_centroid_bits=4,
+        n_key_centroids=16, n_value_centroids=16,
+        value_mse_supported=True,
         norm_correction=True,
-        key_packed_size=66, value_packed_size=68,
-        slot_size=134, slot_size_aligned=134,
+        key_packed_size=66, value_packed_size=66,
+        value_uniform_packed_size=68, value_mse_packed_size=66,
+        value_mse_slot_size=132, value_mse_slot_size_aligned=132,
+        slot_size=132, slot_size_aligned=132,
     ),
     "turboquant_k3v4_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=4,
         mse_bits=3, n_centroids=8, centroid_bits=3,
+        key_centroid_bits=3, value_centroid_bits=4,
+        n_key_centroids=8, n_value_centroids=16,
+        value_mse_supported=True,
         norm_correction=True,
-        key_packed_size=50, value_packed_size=68,
-        slot_size=118, slot_size_aligned=118,
+        key_packed_size=50, value_packed_size=66,
+        value_uniform_packed_size=68, value_mse_packed_size=66,
+        value_mse_slot_size=116, value_mse_slot_size_aligned=116,
+        slot_size=116, slot_size_aligned=116,
     ),
     "turboquant_3bit_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=3,
         mse_bits=3, n_centroids=8, centroid_bits=3,
+        key_centroid_bits=3, value_centroid_bits=3,
+        n_key_centroids=8, n_value_centroids=8,
+        value_mse_supported=True,
         norm_correction=True,
-        key_packed_size=50, value_packed_size=52,
-        slot_size=102, slot_size_aligned=102,
+        key_packed_size=50, value_packed_size=50,
+        value_uniform_packed_size=52, value_mse_packed_size=50,
+        value_mse_slot_size=100, value_mse_slot_size_aligned=100,
+        slot_size=100, slot_size_aligned=100,
     ),
 }
 # fmt: on
@@ -91,6 +111,198 @@ class TestTurboQuantConfig:
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
             TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
 
+    def test_store_value_mse_requires_value_midpoints(self):
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        key = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        value = torch.empty_like(key)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.zeros(1, dtype=torch.int32)
+        PiT = torch.eye(cfg.head_dim, dtype=torch.float32)
+        midpoints = torch.zeros(cfg.n_key_centroids - 1, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="value_midpoints"):
+            triton_turboquant_store(
+                key,
+                value,
+                kv_cache,
+                slot_mapping,
+                PiT,
+                midpoints,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+            )
+
+    def test_decode_value_mse_requires_value_centroids(self):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        query = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        block_table = torch.zeros(1, 1, dtype=torch.int32)
+        seq_lens = torch.ones(1, dtype=torch.int32)
+        Pi = torch.eye(cfg.head_dim, dtype=torch.float32)
+        centroids = torch.zeros(cfg.n_key_centroids, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="value_centroids"):
+            triton_turboquant_decode_attention(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=block_table,
+                seq_lens=seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=1.0,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+            )
+
+    def test_store_uniform_fallback_requires_uniform_slot_size(self):
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        key = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        value = torch.empty_like(key)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.zeros(1, dtype=torch.int32)
+        PiT = torch.eye(cfg.head_dim, dtype=torch.float32)
+        midpoints = torch.zeros(cfg.n_key_centroids - 1, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="uniform value path"):
+            triton_turboquant_store(
+                key,
+                value,
+                kv_cache,
+                slot_mapping,
+                PiT,
+                midpoints,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+                value_mse=False,
+            )
+
+    def test_decode_uniform_fallback_requires_uniform_slot_size(self):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k3v4_nc", head_dim=16)
+        query = torch.empty(1, 1, cfg.head_dim, dtype=torch.float16)
+        kv_cache = torch.empty(
+            1,
+            1,
+            1,
+            cfg.slot_size_aligned,
+            dtype=torch.uint8,
+        )
+        block_table = torch.zeros(1, 1, dtype=torch.int32)
+        seq_lens = torch.ones(1, dtype=torch.int32)
+        Pi = torch.eye(cfg.head_dim, dtype=torch.float32)
+        centroids = torch.zeros(cfg.n_key_centroids, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match="uniform value path"):
+            triton_turboquant_decode_attention(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=block_table,
+                seq_lens=seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=1.0,
+                mse_bits=cfg.key_mse_bits,
+                key_packed_size=cfg.key_packed_size,
+                value_quant_bits=cfg.effective_value_quant_bits,
+                value_mse=False,
+            )
+
+    def test_backend_supports_mm_prefix(self):
+        pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionBackend,
+        )
+
+        assert TurboQuantAttentionBackend.supports_mm_prefix()
+
+    def test_decode_launcher_accepts_mm_prefix_range(self):
+        import inspect
+
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        sig = inspect.signature(triton_turboquant_decode_attention)
+        assert "mm_prefix_range" in sig.parameters
+
+    def test_sdpa_mask_applies_mm_prefix_bidirectional_range(self):
+        pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionImpl,
+        )
+
+        impl = object.__new__(TurboQuantAttentionImpl)
+        impl.scale = 1.0
+
+        query = torch.tensor(
+            [[[10.0, 0.0]], [[10.0, 0.0]], [[10.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        key = torch.tensor(
+            [[[-10.0, 0.0]], [[-10.0, 0.0]], [[10.0, 0.0]]],
+            dtype=torch.float32,
+        )
+        value = torch.tensor(
+            [[[0.0, 0.0]], [[0.0, 0.0]], [[1.0, 0.0]]],
+            dtype=torch.float32,
+        )
+
+        causal_out = impl._sdpa_with_causal_and_mm_prefix_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=None,
+        )
+        mm_out = impl._sdpa_with_causal_and_mm_prefix_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=torch.tensor([[0, 2]], dtype=torch.int32),
+        )
+
+        assert causal_out[0, 0, 0] < 0.01
+        assert mm_out[0, 0, 0] > 0.99
+
     # ---- Per-preset concrete value checks (table-driven) ----
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
@@ -106,6 +318,7 @@ class TestTurboQuantConfig:
         cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
         exp = PRESET_EXPECTED[preset]
         assert cfg.value_quant_bits == exp["value_quant_bits"]
+        assert cfg.value_mse_supported is exp["value_mse_supported"]
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_bits_and_centroids(self, preset):
@@ -114,6 +327,10 @@ class TestTurboQuantConfig:
         assert cfg.mse_bits == exp["mse_bits"]
         assert cfg.n_centroids == exp["n_centroids"]
         assert cfg.centroid_bits == exp["centroid_bits"]
+        assert cfg.key_centroid_bits == exp["key_centroid_bits"]
+        assert cfg.value_centroid_bits == exp["value_centroid_bits"]
+        assert cfg.n_key_centroids == exp["n_key_centroids"]
+        assert cfg.n_value_centroids == exp["n_value_centroids"]
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
     def test_norm_correction(self, preset):
@@ -126,6 +343,10 @@ class TestTurboQuantConfig:
         exp = PRESET_EXPECTED[preset]
         assert cfg.key_packed_size == exp["key_packed_size"]
         assert cfg.value_packed_size == exp["value_packed_size"]
+        assert cfg.value_uniform_packed_size == exp["value_uniform_packed_size"]
+        assert cfg.value_mse_packed_size == exp["value_mse_packed_size"]
+        assert cfg.value_mse_slot_size == exp["value_mse_slot_size"]
+        assert cfg.value_mse_slot_size_aligned == exp["value_mse_slot_size_aligned"]
         assert cfg.slot_size == exp["slot_size"]
         assert cfg.slot_size_aligned == exp["slot_size_aligned"]
 
@@ -516,7 +737,12 @@ class TestStoreDecodeRoundTrip:
 
     @pytest.mark.parametrize(
         "preset",
-        ["turboquant_k8v4", "turboquant_4bit_nc"],
+        [
+            "turboquant_k8v4",
+            "turboquant_4bit_nc",
+            "turboquant_k3v4_nc",
+            "turboquant_3bit_nc",
+        ],
     )
     def test_single_token_roundtrip(self, preset):
         """Store 1 token, decode with query=key, check attention output.
@@ -550,11 +776,15 @@ class TestStoreDecodeRoundTrip:
         PiT = H
         Pi = H
 
-        # Generate centroids
-        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        # Generate key/value centroids
+        centroids, _ = solve_lloyd_max(D, cfg.key_centroid_bits)
         centroids = centroids.float().to(device)
         c_sorted, _ = centroids.sort()
         midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+        value_centroids, _ = solve_lloyd_max(D, cfg.value_centroid_bits)
+        value_centroids = value_centroids.float().to(device)
+        v_sorted, _ = value_centroids.sort()
+        value_midpoints = ((v_sorted[:-1] + v_sorted[1:]) / 2).to(device)
 
         # Random K, V
         torch.manual_seed(123)
@@ -585,6 +815,8 @@ class TestStoreDecodeRoundTrip:
             key_packed_size=cfg.key_packed_size,
             value_quant_bits=cfg.effective_value_quant_bits,
             key_fp8=cfg.key_fp8,
+            value_midpoints=value_midpoints,
+            value_mse=cfg.value_mse_supported,
         )
 
         # Decode: use key as query so attention = softmax([1]) * V = V
@@ -604,6 +836,8 @@ class TestStoreDecodeRoundTrip:
             key_packed_size=cfg.key_packed_size,
             value_quant_bits=cfg.effective_value_quant_bits,
             key_fp8=cfg.key_fp8,
+            value_centroids=value_centroids,
+            value_mse=cfg.value_mse_supported,
             norm_correction=cfg.norm_correction,
             PiT=PiT,
             max_num_kv_splits=4,
@@ -623,3 +857,213 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    def test_value_mse_decode_with_mm_prefix_range(self):
+        """Decode kernel supports VALUE_MSE=True with USE_MM_PREFIX=True."""
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        preset = "turboquant_k3v4_nc"
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
+        D = 128
+        Hk = 1
+        Hq = 1
+        block_size = 16
+        device = torch.device(DEVICE_TYPE)
+
+        Pi = _build_hadamard(D, DEVICE_TYPE)
+        PiT = Pi
+        centroids, _ = solve_lloyd_max(D, cfg.key_centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+        value_centroids, _ = solve_lloyd_max(D, cfg.value_centroid_bits)
+        value_centroids = value_centroids.float().to(device)
+        v_sorted, _ = value_centroids.sort()
+        value_midpoints = ((v_sorted[:-1] + v_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(123)
+        key = torch.randn(1, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(1, Hk, D, device=device, dtype=torch.float16)
+
+        kv_cache = torch.zeros(
+            1,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            torch.tensor([0], device=device, dtype=torch.int32),
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            value_midpoints=value_midpoints,
+            value_mse=cfg.value_mse_supported,
+        )
+
+        output = triton_turboquant_decode_attention(
+            query=key.expand(1, Hq, D).contiguous(),
+            kv_cache=kv_cache,
+            block_table=torch.tensor([[0]], device=device, dtype=torch.int32),
+            seq_lens=torch.tensor([1], device=device, dtype=torch.int32),
+            Pi=Pi,
+            centroids=centroids,
+            scale=1.0 / math.sqrt(D),
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            value_centroids=value_centroids,
+            value_mse=cfg.value_mse_supported,
+            norm_correction=cfg.norm_correction,
+            PiT=PiT,
+            max_num_kv_splits=4,
+            mm_prefix_range=torch.tensor([[[0, 0]]], device=device, dtype=torch.int32),
+        )
+
+        cos_sim = torch.nn.functional.cosine_similarity(
+            output.float().reshape(1, D),
+            value.float().reshape(1, D),
+        ).item()
+        assert cos_sim > 0.85
+
+    @pytest.mark.parametrize(
+        "preset",
+        [
+            "turboquant_k8v4",
+            "turboquant_4bit_nc",
+            "turboquant_k3v4_nc",
+            "turboquant_3bit_nc",
+        ],
+    )
+    def test_full_dequant_value_mse_inverse_rotation(self, preset):
+        """Full-dequant returns value-MSE data in rotated space.
+
+        The continuation path applies inverse Hadamard after full dequant.
+        This test verifies the kernel's value-MSE layout and the required
+        postprocess without depending on the full attention backend.
+        """
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            _tq_full_dequant_kv,
+            _use_fp8_e4b15,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
+        assert cfg.value_mse_supported
+
+        D = 128
+        Hk = 2
+        N = 4
+        block_size = 16
+        num_blocks = 1
+        device = torch.device(DEVICE_TYPE)
+
+        Pi = _build_hadamard(D, DEVICE_TYPE)
+        PiT = Pi
+
+        centroids, _ = solve_lloyd_max(D, cfg.key_centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        value_centroids, _ = solve_lloyd_max(D, cfg.value_centroid_bits)
+        value_centroids = value_centroids.float().to(device)
+        v_sorted, _ = value_centroids.sort()
+        value_midpoints = ((v_sorted[:-1] + v_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(234)
+        key = torch.randn(N, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(N, Hk, D, device=device, dtype=torch.float16)
+
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.arange(N, device=device, dtype=torch.int32)
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+            value_midpoints=value_midpoints,
+            value_mse=cfg.value_mse_supported,
+        )
+
+        block_table = torch.tensor([[0]], device=device, dtype=torch.int32)
+        k_out = torch.empty(1, Hk, block_size, D, device=device, dtype=torch.float16)
+        v_out = torch.empty(1, Hk, block_size, D, device=device, dtype=torch.float32)
+        grid = (block_size, Hk)
+        _tq_full_dequant_kv[grid](
+            kv_cache,
+            block_table,
+            centroids,
+            value_centroids,
+            k_out,
+            v_out,
+            k_out.stride(0),
+            k_out.stride(1),
+            k_out.stride(2),
+            v_out.stride(0),
+            v_out.stride(1),
+            v_out.stride(2),
+            kv_cache.stride(0),
+            kv_cache.stride(1),
+            kv_cache.stride(2),
+            block_table.stride(0),
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_HEADS=Hk,
+            MSE_BYTES=math.ceil(D * cfg.key_mse_bits / 8),
+            KPS=cfg.key_packed_size,
+            VQB=cfg.effective_value_quant_bits,
+            VAL_DATA_BYTES=math.ceil(D * cfg.effective_value_quant_bits / 8),
+            MSE_BITS=cfg.key_mse_bits,
+            KEY_FP8=1 if cfg.key_fp8 else 0,
+            VALUE_MSE=1,
+            BLOCK_D=next_power_of_2(D),
+            NORM_CORRECTION=1 if cfg.norm_correction else 0,
+            FP8_E4B15=_use_fp8_e4b15(device.index or 0),
+            num_warps=4,
+        )
+
+        v_deq_rot = v_out[0, :, :N, :].transpose(0, 1).contiguous()
+        v_deq = (v_deq_rot.float().reshape(-1, D) @ Pi).reshape(N, Hk, D)
+        for token_idx in range(N):
+            for head_idx in range(Hk):
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    v_deq[token_idx, head_idx].unsqueeze(0),
+                    value[token_idx, head_idx].float().unsqueeze(0),
+                ).item()
+                assert cos_sim > 0.85, (
+                    f"{preset} token={token_idx} head={head_idx}: "
+                    f"cosine_sim={cos_sim:.4f} < 0.85"
+                )
