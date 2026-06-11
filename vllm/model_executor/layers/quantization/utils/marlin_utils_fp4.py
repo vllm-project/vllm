@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
@@ -333,6 +334,34 @@ def prepare_nvfp4_moe_layer_for_marlin(
     E = layer.num_experts
     K = layer.hidden_size
     N = layer.intermediate_size_per_partition
+    num_shards = 2 if is_act_and_mul else 1
+
+    # Pad the rank-local intermediate size to satisfy Marlin thread tiles.
+    # N is both an output extent (w13, per gate/up shard) and an input
+    # extent (w2), while hidden K is tile-aligned in practice. Padded w13
+    # rows are zero so the padded intermediate activations are zero, and
+    # padded w2 columns are zero, so the MoE output is unaffected.
+    if K % 128 == 0:
+        padded_N = round_up(N, 64)
+    else:
+        assert K % 64 == 0, f"hidden_size = {K} unsupported by Marlin tiles"
+        padded_N = round_up(N, 128)
+
+    def pad_w13(x: torch.Tensor) -> torch.Tensor:
+        """Zero-pad each gate/up shard of a (E, num_shards * N, cols)
+        tensor to padded_N rows."""
+        if padded_N == N:
+            return x
+        x = x.view(E, num_shards, N, x.size(-1))
+        x = torch.nn.functional.pad(x, (0, 0, 0, padded_N - N))
+        return x.reshape(E, num_shards * padded_N, -1)
+
+    def pad_w2(x: torch.Tensor, packing: int) -> torch.Tensor:
+        """Zero-pad the packed N (last) dim of a (E, K, N / packing)
+        tensor."""
+        if padded_N == N:
+            return x
+        return torch.nn.functional.pad(x, (0, (padded_N - N) // packing))
 
     device = w13.device
     param_dtype = layer.params_dtype
@@ -346,13 +375,16 @@ def prepare_nvfp4_moe_layer_for_marlin(
     # Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
-        num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
             size_n, size_k = N * num_shards, K
+            assert weight.shape == (E, size_n, size_k // 2)
+            weight = pad_w13(weight)
+            size_n = padded_N * num_shards
         else:
             size_n, size_k = K, N
-
-        assert weight.shape == (E, size_n, size_k // 2)
+            assert weight.shape == (E, size_n, size_k // 2)
+            weight = pad_w2(weight, packing=2)
+            size_k = padded_N
 
         for i in range(E):
             qweight = weight[i].view(torch.int32).T.contiguous()
@@ -380,11 +412,12 @@ def prepare_nvfp4_moe_layer_for_marlin(
         scales = scales.to(param_dtype)
 
         tensor_list = []
-        num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
-            size_n, size_k = N * num_shards, K
+            scales = pad_w13(scales)
+            size_n, size_k = padded_N * num_shards, K
         else:
-            size_n, size_k = K, N
+            scales = pad_w2(scales, packing=GROUP_SIZE)
+            size_n, size_k = K, padded_N
 
         # All experts share one global_scale, so compute the max
         # scale_factor across all experts first, then apply uniformly.
