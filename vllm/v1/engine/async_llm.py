@@ -1109,7 +1109,9 @@ class AsyncLLM(EngineClient):
     async def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         await self.collective_rpc("finish_weight_update")
-        # Invalidate cached encoder outputs so multimodal requests recompute
-        # embeddings with the newly updated weights instead of reusing
-        # stale cache entries keyed only by mm_hash.
+        # Invalidate cached state computed with the old weights so it isn't
+        # reused for subsequent requests:
+        # - prefix cache: KV blocks computed with the old weights
+        # - encoder cache: multimodal embeddings keyed only by mm_hash
+        await self.reset_prefix_cache()
         await self.reset_encoder_cache()
