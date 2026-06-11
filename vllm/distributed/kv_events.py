@@ -459,8 +459,9 @@ class ZmqEventPublisher(EventPublisher):
         for seq, buf in self._buffer:
             if seq >= start_seq:
                 # [identity, empty_delim, topic, seq_bytes, payload]
-                # identity and empty_delim are stripped by the REQ socket;
-                # receiving side gets (topic, seq_bytes, payload)
+                # identity is stripped by the ROUTER on send; the empty
+                # delimiter is stripped by the receiving REQ socket, which
+                # gets (topic, seq_bytes, payload)
                 self._replay.send_multipart(
                     (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
                 )
