@@ -1393,9 +1393,20 @@ class PyAVKeyframeVideoBackend(VideoLoader, PyAVVideoBackendMixin):
             source = cls.get_metadata(container)
             stream = container.streams.video[0]
             time_base = stream.time_base
-            # Containers may omit average_rate; assume 30 fps so the
-            # frames_indices labels stay finite.
-            src_fps = source.original_fps if source.original_fps > 0 else 30.0
+            if source.original_fps > 0:
+                src_fps = source.original_fps
+            elif source.duration > 0 and source.total_frames_num > 0:
+                # Container omitted average_rate but reported frames and
+                # duration; derive the rate so frames_indices and the fps
+                # metadata field stay consistent.
+                src_fps = source.total_frames_num / source.duration
+                source = source._replace(original_fps=src_fps)
+            else:
+                raise ValueError(
+                    "pyav_keyframes: container reports no frame rate and no "
+                    "frame-count/duration pair to derive one; cannot map "
+                    "keyframe PTS to frame indices"
+                )
 
             kf_pts = [
                 packet.pts
