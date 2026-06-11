@@ -3,7 +3,8 @@
 
 // VLEN-to-LMUL mapping for RISC-V Vector extension.
 //
-// LMUL_<N> expands to the LMUL suffix giving N total bits of vector data:
+// LMUL_<N> expands to the LMUL suffix giving N total bits of vector data.
+// LMUL_64 is used by 8-lane int8/uint8 vectors.
 //   VLEN=128:
 //     LMUL_64=mf2, LMUL_128=m1, LMUL_256=m2, LMUL_512=m4, LMUL_1024=m8
 //   VLEN=256:
