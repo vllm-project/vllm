@@ -261,6 +261,26 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    # Relaxed acceptance for reasoning/thinking spans.
+    # Only applies to greedy rejection sampling. During the model's thinking
+    # phase (token IDs between `<think>` and `</think>` as detected by the
+    # configured reasoning_parser), a draft token is accepted if it appears
+    # in the target model's top-K candidates AND its probability is at least
+    # P(top1) * relax_ratio. Outside the thinking phase, strict acceptance
+    # is used.
+    relaxed_thinking: bool = False
+    """Enable relaxed acceptance during thinking phase."""
+    relax_ratio: float = 1.0
+    """Multiplicative ratio in (0, 1]. P(candidate) >= P(top1) * relax_ratio
+    is required for candidate to be eligible. Used when relaxed_thinking is
+    enabled."""
+    relax_top_k: int = 1
+    """Top-K cutoff for candidate set. Used when relaxed_thinking is enabled."""
+    reasoning_parser: str | None = None
+    """Reasoning parser name (e.g. 'deepseek_r1') used to detect thinking
+    phase token boundaries via its start_token_id/end_token_id attributes.
+    Required when relaxed_thinking is enabled."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -992,6 +1012,21 @@ class SpeculativeConfig:
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
             )
+        if self.relaxed_thinking:
+            if not (0 < self.relax_ratio <= 1):
+                raise ValueError(
+                    "relax_ratio must be in (0, 1] when relaxed_thinking is "
+                    f"enabled, got {self.relax_ratio}."
+                )
+            if self.relax_top_k < 1:
+                raise ValueError(
+                    "relax_top_k must be >= 1 when relaxed_thinking is enabled, "
+                    f"got {self.relax_top_k}."
+                )
+            if not self.reasoning_parser:
+                raise ValueError(
+                    "reasoning_parser must be set when relaxed_thinking is enabled."
+                )
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates

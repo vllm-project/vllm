@@ -992,6 +992,29 @@ class VllmConfig:
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.relaxed_thinking
+        ):
+            if self.scheduler_config.async_scheduling:
+                raise ValueError(
+                    "relaxed_thinking cannot be used with "
+                    "scheduler_config.async_scheduling because "
+                    "step_with_batch_queue can schedule the next verification "
+                    "window before update_from_output refreshes "
+                    "Request.thinking_state, leaving a one-window-stale "
+                    "relaxed-acceptance flag after </think>."
+                )
+
+            # device_type is canonical after DeviceConfig.__post_init__;
+            # checking it avoids resolving current_platform during config
+            # validation (which is unavailable on device-less runners).
+            if self.device_config.device_type == "cpu":
+                raise ValueError(
+                    "relaxed_thinking is not supported on CPU workers because "
+                    "CPUModelRunner._postprocess_triton does not patch the "
+                    "relaxed thinking rejection-sampling kernel."
+                )
 
         logger.info_once(
             "Asynchronous scheduling is %s.",
@@ -2016,6 +2039,8 @@ class VllmConfig:
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
+            if speculative_config.relaxed_thinking:
+                unsupported.append("relaxed thinking speculative decoding")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
