@@ -913,18 +913,6 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_with_add_fp8_group_quant(
-        x, residual, weight, variance_epsilon, group_size
-    )
-
-
-def _rocm_aiter_rmsnorm_with_add_fp8_group_quant(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
     gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
@@ -972,17 +960,6 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_fp8_group_quant(
-        x, weight, variance_epsilon, group_size
-    )
-
-
-def _rocm_aiter_rmsnorm_fp8_group_quant(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int,
     gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
@@ -1026,7 +1003,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_fp8_group_quant(
+    return _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         x,
         weight,
         variance_epsilon,
@@ -1043,7 +1020,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_rmsnorm_with_add_fp8_group_quant(
+    return _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         x,
         residual,
         weight,
@@ -1100,13 +1077,6 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_group_fp8_quant(x, group_size)
-
-
-def _rocm_aiter_group_fp8_quant(
-    x: torch.Tensor,
-    group_size: int,
     gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
@@ -1144,13 +1114,6 @@ def _rocm_aiter_group_fp8_quant_fake(
 
 
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_act_mul_and_fp8_group_quant(x, group_size)
-
-
-def _rocm_aiter_act_mul_and_fp8_group_quant(
     x: torch.Tensor,
     group_size: int,
     gemm_out_zero_init: torch.Tensor | None = None,
@@ -1208,7 +1171,7 @@ def _rocm_aiter_group_fp8_quant_with_zero_init_impl(
     gemm_out_zero_init: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_group_fp8_quant(
+    return _rocm_aiter_group_fp8_quant_impl(
         x,
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
@@ -1220,7 +1183,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
     gemm_out_zero_init: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_act_mul_and_fp8_group_quant(
+    return _rocm_aiter_act_mul_and_fp8_group_quant_impl(
         x,
         group_size,
         gemm_out_zero_init=gemm_out_zero_init,
@@ -1228,17 +1191,6 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
 
 
 def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gemma_rmsnorm_fp8_group_quant(
-        x, weight, variance_epsilon, group_size
-    )
-
-
-def _rocm_aiter_gemma_rmsnorm_fp8_group_quant(
     x: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
@@ -1299,7 +1251,7 @@ def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gemma_rmsnorm_fp8_group_quant(
+    return _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
         x,
         weight,
         variance_epsilon,
@@ -1309,18 +1261,6 @@ def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl(
 
 
 def _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
-    x: torch.Tensor,
-    z: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gated_rmsnorm_fp8_group_quant(
-        x, z, weight, variance_epsilon, group_size
-    )
-
-
-def _rocm_aiter_gated_rmsnorm_fp8_group_quant(
     x: torch.Tensor,
     z: torch.Tensor,
     weight: torch.Tensor,
@@ -1408,7 +1348,7 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _rocm_aiter_gated_rmsnorm_fp8_group_quant(
+    return _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
         x,
         z,
         weight,
