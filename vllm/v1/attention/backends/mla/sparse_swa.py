@@ -73,9 +73,14 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # determines the SWA block size of 64 tokens per block.
         # TODO(yifan): make SWA block size automatically determined and configurable.
         self.block_size = 64
-        assert self.dtype == torch.uint8
+        # uint8: legacy FlashMLA UE8M0 paged layout. bfloat16 / float8_e4m3fn:
+        # FlashInfer contiguous full-cache layout.
+        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # FlashMLA's UE8M0 paged layout needs 576B alignment; FlashInfer's
+        # contiguous bf16/fp8 cache uses the natural element-size page.
+        is_flashmla = self.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -83,7 +88,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=576 if is_flashmla else None,
             model_version="deepseek_v4",
         )
 

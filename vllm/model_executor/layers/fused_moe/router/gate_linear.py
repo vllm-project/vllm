@@ -3,18 +3,22 @@
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm._custom_ops as ops
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @PluggableLayer.register("gate_linear")
 class GateLinear(ReplicatedLinear):
-    """MoE gate linear layer with three-tier GEMM dispatch:
+    """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, batch<=16, supported dims)
-    2. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
-    3. F.linear via ReplicatedLinear (ultimate fallback)
+    1. DSV3 specialized kernel (SM90+, fp32 out, M<=16, H=7168, E=256/384)
+    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out,
+       M<=32, H=3072, E=256)
+    3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    4. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
     (e.g. when the required dtype depends on the expert quantization
@@ -24,6 +28,11 @@ class GateLinear(ReplicatedLinear):
     # Dimensions supported by the DSV3 specialized kernel
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
     DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
+
+    # Dimensions supported by the fp32 specialized kernel
+    FP32_SUPPORTED_NUM_EXPERTS = [256]
+    FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+    FP32_MAX_TOKENS = 32
 
     def __init__(
         self,
@@ -35,15 +44,14 @@ class GateLinear(ReplicatedLinear):
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
-        is_hopper_or_blackwell = current_platform.is_device_capability(
-            (9, 0)
-        ) or current_platform.is_device_capability_family(100)
+        is_hopper = current_platform.is_device_capability((9, 0))
+        is_blackwell = current_platform.is_device_capability_family(100)
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and is_hopper_or_blackwell and not bias
+            current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
 
         # If fp32 compute is required and no specialized kernel is available,
-        # store weights in fp32 so Tier 3 computes in fp32 natively.
+        # store weights in fp32 so the fallback linear path computes in fp32.
         if force_fp32_compute and not can_use_specialized_kernels:
             params_dtype = torch.float32
 
@@ -63,6 +71,19 @@ class GateLinear(ReplicatedLinear):
             self.allow_specialized_router_gemm
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
+        )
+        # See https://github.com/vllm-project/vllm/pull/44217
+        # for more details.
+        self._dsv3_max_batch = 16 if is_hopper else 8
+
+        # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
+        self.allow_fp32_router_gemm = (
+            not bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_cuda()
+            and (is_hopper or is_blackwell)
+            and output_size in self.FP32_SUPPORTED_NUM_EXPERTS
+            and input_size in self.FP32_SUPPORTED_HIDDEN_SIZES
         )
 
         # cuBLAS bf16→fp32 eligibility
@@ -92,10 +113,8 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        import vllm._custom_ops as ops
-
         # Tier 1: DSV3 specialized kernel
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= self._dsv3_max_batch:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,
@@ -103,15 +122,56 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: cuBLAS bf16→fp32
+        # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
+        # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
+        # capture does not freeze the runtime num_tokens branch.
+        if self.allow_fp32_router_gemm and x.dtype in (
+            torch.float32,
+            torch.bfloat16,
+        ):
+            output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
+            return output, None
+
+        # Tier 3: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return output, None
 
-        # Tier 3: F.linear (ReplicatedLinear)
+        # Tier 4: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
         return output, output_bias
+
+
+_FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
+
+
+def fp32_router_gemm_dispatch_impl(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """
+    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
+    otherwise fall back to F.linear.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+        return ops.fp32_router_gemm(x, weight)
+    else:
+        return torch.nn.functional.linear(x.float(), weight)
+
+
+def fp32_router_gemm_dispatch_fake(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="fp32_router_gemm_dispatch",
+    op_func=fp32_router_gemm_dispatch_impl,
+    fake_impl=fp32_router_gemm_dispatch_fake,
+)
