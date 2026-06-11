@@ -538,11 +538,16 @@ class TransferTopology:
         return -(remote_tp_size // self.tp_size)
 
     def block_size_ratio(self, remote_block_size: int) -> int:
-        """Calculate the block size ratio between local and remote."""
-        assert self.block_size % remote_block_size == 0, (
-            f"Local block size {self.block_size} is not divisible "
-            f"by remote block size {remote_block_size} or vice versa."
-        )
+        """Calculate the block size ratio between local and remote.
+
+        When the local and remote block sizes are not evenly divisible
+        (e.g. hybrid MLA+GDN models whose MLA component is TP-independent),
+        returns ``1`` as a safe fallback rather than raising. Downstream
+        code in the nixl worker handles the non-divisible case via
+        byte-level ``block_lens``.
+        """
+        if self.block_size % remote_block_size != 0:
+            return 1
         return self.block_size // remote_block_size
 
     def is_kv_replicated(
