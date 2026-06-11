@@ -76,6 +76,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -1102,9 +1103,7 @@ class NixlConnectorWorker:
                         f"{self.transfer_topo.is_kv_layout_blocks_first}"
                     )
 
-                if not self.use_mla:
-                    # Different kv cache shape is not supported by HeteroTP.
-                    # This must also hold true for Mamba-like models.
+                if not isinstance(layer_spec, MLAAttentionSpec):
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
                     )
@@ -1429,20 +1428,10 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for p_idx, handle_data in enumerate(
-                self._build_local_splits_from_plan(
-                    plan,
-                    self.src_blocks_data,
-                )
+            for handle_data in self._build_local_splits_from_plan(
+                plan,
+                self.src_blocks_data,
             ):
-                local_lens = [d[1] for d in handle_data]
-                logger.info(
-                    "DBG_LOCAL_SPLIT rank=%s p_idx=%s num_descs=%s unique_lens=%s",
-                    self.tp_rank,
-                    p_idx,
-                    len(handle_data),
-                    sorted(set(local_lens)),
-                )
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
                 )
@@ -1452,23 +1441,15 @@ class NixlConnectorWorker:
         ### Register remote agent memory regions
         blocks_data: list[tuple[int, int, int]] = []
         for view in self._views:
-            view_data = self._build_view_remote(
-                view,
-                nixl_agent_meta,
-                physical_blocks_per_logical,
-                remote_tp_rank=remote_tp_rank,
-                remote_tp_size=remote_tp_size,
+            blocks_data.extend(
+                self._build_view_remote(
+                    view,
+                    nixl_agent_meta,
+                    physical_blocks_per_logical,
+                    remote_tp_rank=remote_tp_rank,
+                    remote_tp_size=remote_tp_size,
+                )
             )
-            remote_lens = [d[1] for d in view_data]
-            logger.info(
-                "DBG_REMOTE rank=%s remote_rank=%s view=%s num_descs=%s unique_lens=%s",
-                self.tp_rank,
-                remote_tp_rank,
-                type(view.spec).__name__,
-                len(view_data),
-                sorted(set(remote_lens)),
-            )
-            blocks_data.extend(view_data)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
