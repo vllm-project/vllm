@@ -1038,6 +1038,7 @@ class RoutedExperts(PluggableLayer):
             "e_score_correction_bias",
             "w13_input_scale",
             "w2_input_scale",
+            "hash_indices_table",
         }
 
         # Parameters of non-expert submodules that live inside runner (RoutedExperts).
