@@ -458,6 +458,10 @@ def check_aiter_fused_qk_rmsnorm_per_token_quant() -> bool:
     This is the fused RMSNorm + FP8 per-token-quant HIP kernel used to fuse the
     paired q/kv RMSNorm + FP8 per-token quantization in the MLA FP8 attention
     path.
+
+    TODO(xaguilar-amd): remove this guard once the minimum supported AITER
+    version provides fused_qk_rmsnorm_per_token_quant, as with
+    check_aiter_fused_qk_rmsnorm below.
     """
     global _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT
     if _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT is None:
