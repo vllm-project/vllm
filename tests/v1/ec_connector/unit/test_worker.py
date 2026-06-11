@@ -31,10 +31,10 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
+    ECRegionContext,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import ECRegionLayout
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     ECSharedRegion,
@@ -55,14 +55,14 @@ _requires_cuda = pytest.mark.skipif(
 )
 
 
-def _make_layout() -> ECRegionLayout:
+def _make_layout() -> ECRegionContext:
     """Fresh layout backed by a real per-test mmap file."""
     region = ECSharedRegion(
         instance_id=str(uuid.uuid4()),
         num_blocks=_NUM_BLOCKS,
         block_size_bytes=_BLOCK_SIZE_BYTES,
     )
-    return ECRegionLayout(
+    return ECRegionContext(
         region=region,
         dtype=_DTYPE,
         hidden_dim=_HIDDEN_DIM,
@@ -96,7 +96,7 @@ def make_worker():
     end of the test, so each test starts from a fresh /dev/shm file.
     """
     workers: list[ECCPUWorker] = []
-    layouts: list[ECRegionLayout] = []
+    layouts: list[ECRegionContext] = []
 
     def factory(
         *,
@@ -190,12 +190,11 @@ def test_save_caches_writes_to_assigned_blocks(make_worker, n_elements, n_blocks
 def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
     """When the scheduler hasn't pre-allocated blocks for ``mm_hash`` (the
     request opted out, or this is a consumer-only node), ``save_caches`` is
-    a pure no-op — the early return must trigger before
-    ``_ensure_copy_stream`` is even called.
+    a pure no-op — the early return must trigger before any stream work.
 
     No @_requires_cuda: on hosts without a GPU, any accidental CUDA call
     will raise immediately, turning a silent correctness regression
-    into an obvious test failure
+    into an obvious test failure.
     """
     worker = make_worker()
     sentinel = 0x42
@@ -206,6 +205,21 @@ def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
     worker.save_caches({}, "h", _meta(saves={}))
 
     assert torch.all(worker._cpu_blocks == sentinel)
+
+
+def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
+    """``save_caches`` must raise ``AssertionError`` when the encoder output
+    is larger than the allocated block space.
+
+    The assert fires before any stream work so no CUDA is required.
+    Using a CPU tensor keeps the test host-agnostic.
+    """
+    worker = make_worker()
+    # 2 blocks × 16 bytes = 32 bytes allocated; source is 3 rows × 8 elements
+    # × 2 bytes = 48 bytes — 16 bytes over capacity.
+    src = torch.zeros(3 * _HIDDEN_DIM, dtype=_DTYPE)  # CPU tensor, no CUDA needed
+    with pytest.raises(AssertionError, match="exceeds allocated blocks"):
+        worker.save_caches({"h": src}, "h", _meta(saves={"h": [0, 1]}))
 
 
 # ── start_load_caches ────────────────────────────────────────────────────────
@@ -271,19 +285,15 @@ def test_start_load_caches_preserves_existing_encoder_cache_entry(make_worker):
     )
 
 
+@_requires_cuda
 def test_start_load_caches_noop_when_loads_is_empty(make_worker):
-    """When ``meta.loads`` is empty the early-return must fire before
-    ``_ensure_copy_stream`` is called — mirroring
-    ``test_save_caches_noop_when_mm_hash_not_in_saves``.
-
-    No @_requires_cuda: on hosts without a GPU any accidental
-    ``torch.cuda.Stream()`` call will raise immediately.
+    """When ``meta.loads`` is empty the early-return must fire before any
+    stream work is enqueued and ``encoder_cache`` must remain unmodified.
     """
     worker = make_worker()
     encoder_cache: dict[str, torch.Tensor] = {}
     worker.start_load_caches(encoder_cache, _meta(loads={}))
 
-    assert worker._copy_stream is None
     assert encoder_cache == {}
 
 
@@ -354,44 +364,31 @@ def test_save_then_load_round_trips_bytes(make_worker):
 
 
 @_requires_cuda
-def test_ensure_copy_stream_is_idempotent(make_worker):
-    """``_ensure_copy_stream`` must create the stream and event exactly once;
-    subsequent calls must be no-ops that leave the existing objects in place.
+def test_streams_initialized_at_construction(make_worker):
+    """``_save_stream`` and ``_load_stream`` must be fully initialized CUDA
+    streams as soon as ``__init__`` returns — no lazy creation needed.
     """
     worker = make_worker()
-    assert worker._copy_stream is None
-    assert worker._copy_event is None
-
-    worker._ensure_copy_stream()
-    stream = worker._copy_stream
-    event = worker._copy_event
-    assert stream is not None
-    assert event is not None
-
-    worker._ensure_copy_stream()
-    assert worker._copy_stream is stream, "_copy_stream was replaced on second call"
-    assert worker._copy_event is event, "_copy_event was replaced on second call"
+    assert isinstance(worker._save_stream, torch.cuda.Stream)
+    assert isinstance(worker._load_stream, torch.cuda.Stream)
+    assert worker._save_stream != worker._load_stream
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "rank,pin_available,expected_pinned",
+    "pin_available,expected_pinned",
     [
-        (0, True, True),  # only path that should pin
-        (0, False, False),  # rank 0 but platform forbids pinning
-        (1, True, False),  # other rank: must NOT re-register the shared range
-        (3, True, False),
+        (True, True),  # platform allows pinning → every worker must pin
+        (False, False),  # platform forbids pinning → no pin
     ],
-    ids=["rank0-available", "rank0-unavailable", "rank1", "rank3"],
+    ids=["available", "unavailable"],
 )
-def test_init_pins_memory_only_on_rank_zero_when_available(
-    rank, pin_available, expected_pinned
-):
-    """``cudaHostRegister`` must run at most once per shared address range.
-    The worker enforces this by gating ``pin_memory()`` on rank == 0 AND
-    ``is_pin_memory_available()``.
+def test_init_pins_memory_when_available(pin_available, expected_pinned):
+    """Every TP worker lives in its own process with its own GPU, so every
+    worker must call ``pin_memory()`` for its own GPU when the platform
+    allows it. The only gate is ``is_pin_memory_available()``.
     """
     layout = _make_layout()
     layout.region.pin_memory = MagicMock()  # type: ignore[method-assign]
@@ -406,7 +403,7 @@ def test_init_pins_memory_only_on_rank_zero_when_available(
             return_value=pin_available,
         ),
     ):
-        ECCPUWorker(_vllm_config(rank=rank))
+        ECCPUWorker(_vllm_config(rank=0))
 
     try:
         if expected_pinned:
@@ -428,18 +425,22 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     runs anywhere — no real mmap, no CUDA, no pin-memory machinery.
     """
     worker = object.__new__(ECCPUWorker)
-    worker._region = Mock(spec=ECSharedRegion)
+    mock_region = Mock(spec=ECSharedRegion)
+    worker._memory_context = Mock(spec=ECRegionContext)
+    worker._memory_context.region = mock_region
     worker._cpu_blocks = MagicMock()  # cleared to None by shutdown
+    worker._save_stream = MagicMock()
+    worker._load_stream = MagicMock()
 
     worker.shutdown()
-    worker._region.cleanup.assert_called_once()
+    mock_region.cleanup.assert_called_once()
     assert worker._cpu_blocks is None
 
-    worker._region.cleanup.side_effect = RuntimeError("boom")
+    mock_region.cleanup.side_effect = RuntimeError("boom")
     with caplog_vllm.at_level(logging.DEBUG, logger="vllm"):
         worker.shutdown()  # exception must be swallowed
 
-    assert worker._region.cleanup.call_count == 2
+    assert mock_region.cleanup.call_count == 2
     assert any(
         "worker region cleanup failed" in r.message
         for r in caplog_vllm.records

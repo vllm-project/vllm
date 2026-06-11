@@ -15,19 +15,19 @@ import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
+    evict_and_alloc,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     EC_CONNECTOR_VERSION,
     XferAck,
     XferReq,
     XferStatus,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
-    evict_and_alloc,
-)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PinnedEncoding
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
-    ECSharedRegion,
 )
 from vllm.logger import init_logger
 
@@ -56,25 +56,15 @@ class ECCPUProducer:
 
     def __init__(
         self,
-        region: ECSharedRegion,
+        memory_context: ECRegionContext,
         engine: Any,
-        agent_metadata: bytes,
-        mem_descriptor_bytes: bytes,
         compat_hash: str,
-        hidden_dim: int,
-        element_size: int,
-        block_size_bytes: int,
         peer_host: str,
         peer_port: int,
     ) -> None:
-        self._region = region
+        self._memory_context = memory_context
         self._engine = engine
-        self._agent_metadata = agent_metadata
-        self._mem_descriptor_bytes = mem_descriptor_bytes
         self._compat_hash = compat_hash
-        self._hidden_dim = hidden_dim
-        self._element_size = element_size
-        self._block_size_bytes = block_size_bytes
         self._peer_host = peer_host
         self._peer_port = peer_port
 
@@ -138,7 +128,7 @@ class ECCPUProducer:
                     req.mm_hash,
                 )
                 return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
-            self._region.pin(block_indices)
+            self._memory_context.region.pin(block_indices)
 
         deadline = time.monotonic() + PRODUCER_PIN_LEASE_S
         pin = self._pinned_encodings.get(req.mm_hash)
@@ -154,8 +144,8 @@ class ECCPUProducer:
             mm_hash=req.mm_hash,
             status=XferStatus.OK,
             src_block_indices=block_indices,
-            agent_metadata=self._agent_metadata,
-            mem_descriptor=self._mem_descriptor_bytes,
+            agent_metadata=self._engine._agent_metadata,
+            mem_descriptor=self._engine._mem_descriptor_bytes,
         )
 
     def poll(self) -> None:
@@ -198,7 +188,7 @@ class ECCPUProducer:
         with self._lock:
             blocks = self._local_encodings.get(mm_hash)
             if blocks is not None:
-                self._region.unpin(blocks)
+                self._memory_context.region.unpin(blocks)
         pin.deadlines.pop(0)
         if not pin.deadlines:
             del self._pinned_encodings[mm_hash]
@@ -225,6 +215,46 @@ class ECCPUProducer:
 
     # ── main-thread methods ───────────────────────────────────────────────────
 
+    def ensure_cache_available(
+        self, request: "Request", num_computed_tokens: int
+    ) -> bool:
+        """Probe whether the mmap region can hold this request's encoder outputs.
+
+        Performs a speculative alloc-then-free for each feature not already
+        tracked or cached. Returns False if the region is exhausted (all blocks
+        pinned by in-flight NIXL reads), causing the scheduler to defer the
+        request. The actual allocation happens later in build_saves via the
+        normal _fifo_alloc path.
+        """
+        for feature in request.mm_features:
+            pos = feature.mm_position
+            if pos.offset + pos.length <= num_computed_tokens:
+                continue
+            mm_hash = feature.mm_hash or feature.identifier
+            if mm_hash in self._pending_save or mm_hash in self._pending_new_encodings:
+                continue
+            with self._lock:
+                if mm_hash in self._local_encodings:
+                    continue
+            size_bytes = (
+                pos.length
+                * self._memory_context.hidden_dim
+                * self._memory_context.element_size
+            )
+            n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
+            try:
+                indices = self._fifo_alloc(n_blocks)
+                self._memory_context.region.free(indices)
+            except AllocationError:
+                logger.debug(
+                    "EC: producer cannot reserve %d blocks for mm_hash=%s; "
+                    "deferring request",
+                    n_blocks,
+                    mm_hash,
+                )
+                return False
+        return True
+
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
         mm_hash = feature.mm_hash or feature.identifier
@@ -233,7 +263,11 @@ class ECCPUProducer:
         with self._lock:
             if mm_hash in self._local_encodings:
                 return
-        size_bytes = feature.mm_position.length * self._hidden_dim * self._element_size
+        size_bytes = (
+            feature.mm_position.length
+            * self._memory_context.hidden_dim
+            * self._memory_context.element_size
+        )
         self._pending_new_encodings[mm_hash] = size_bytes
         logger.debug("EC: save scheduled mm_hash=%s size_bytes=%d", mm_hash, size_bytes)
 
@@ -254,7 +288,9 @@ class ECCPUProducer:
             if mm_hash not in local_snapshot and mm_hash not in self._pending_save:
                 continue
             size_bytes = (
-                feature.mm_position.length * self._hidden_dim * self._element_size
+                feature.mm_position.length
+                * self._memory_context.hidden_dim
+                * self._memory_context.element_size
             )
             params[mm_hash] = {
                 "peer_host": self._peer_host,
@@ -270,12 +306,15 @@ class ECCPUProducer:
 
     def _fifo_alloc(self, n_blocks: int) -> list[int]:
         try:
-            return self._region.alloc(n_blocks)
+            return self._memory_context.region.alloc(n_blocks)
         except AllocationError:
             pass
         with self._lock:
             result = evict_and_alloc(
-                n_blocks, self._local_encodings, self._region, skip_pinned=True
+                n_blocks,
+                self._local_encodings,
+                self._memory_context.region,
+                skip_pinned=True,
             )
         if result is not None:
             return result
@@ -301,7 +340,7 @@ class ECCPUProducer:
             with self._lock:
                 if mm_hash in self._local_encodings:
                     continue
-            n_blocks = max(1, ceil(size_bytes / self._block_size_bytes))
+            n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
             indices = self._fifo_alloc(n_blocks)
             self._pending_save[mm_hash] = indices
             saves[mm_hash] = indices
@@ -320,5 +359,5 @@ class ECCPUProducer:
             blocks = self._local_encodings.get(mm_hash)
             if blocks is not None:
                 for _ in pin.deadlines:
-                    self._region.unpin(blocks)
+                    self._memory_context.region.unpin(blocks)
         self._pinned_encodings.clear()

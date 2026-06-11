@@ -17,7 +17,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
 )
 from vllm.logger import init_logger

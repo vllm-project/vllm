@@ -11,10 +11,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
-)
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    ECRegionContext,
     setup_ec_region,
 )
 from vllm.logger import init_logger
@@ -42,29 +41,22 @@ class ECCPUWorker:
     def __init__(self, vllm_config: "VllmConfig") -> None:
         # Same helper the scheduler uses; both processes converge on the
         # same mmap file via `instance_id=engine_id`.
-        layout = setup_ec_region(vllm_config)
-        self._region = layout.region
-        self._dtype = layout.dtype
-        self._hidden_dim = layout.hidden_dim
-        self._block_size_bytes = layout.block_size_bytes
+        self._memory_context: ECRegionContext = setup_ec_region(vllm_config)
 
-        # Pin once from TP rank 0 — the mmap is shared across all TP
-        # workers in the same process group, and cudaHostRegister must
-        # not be called twice on the same address range.
-        if is_pin_memory_available() and vllm_config.parallel_config.rank == 0:
-            self._region.pin_memory()
+        # Each TP worker lives in its own process with its own GPU, so each
+        # must register the mmap with its own GPU via cudaHostRegister.
+        if is_pin_memory_available():
+            self._memory_context.region.pin_memory()
 
-        self._cpu_blocks = self._region.blocks
+        self._cpu_blocks: torch.Tensor = self._memory_context.region.blocks
 
-        # Dedicated CUDA stream keeps mmap <-> GPU copies off the model's
-        # compute stream.
-        self._copy_stream: torch.cuda.Stream | None = None
-        self._copy_event: torch.cuda.Event | None = None
-
-    def _ensure_copy_stream(self) -> None:
-        if self._copy_stream is None:
-            self._copy_stream = torch.cuda.Stream()
-            self._copy_event = torch.cuda.Event()
+        # Dedicated CUDA streams keep mmap <-> GPU copies off the compute stream.
+        # Separate streams allow save and load to run concurrently on ec_both nodes
+        # (they operate on disjoint mm_hashes and have no data dependency).
+        # Safe to create here: set_device_index() has already run before
+        # ensure_ec_transfer_initialized() is called.
+        self._save_stream: torch.cuda.Stream = torch.cuda.Stream()
+        self._load_stream: torch.cuda.Stream = torch.cuda.Stream()
 
     def save_caches(
         self,
@@ -89,32 +81,23 @@ class ECCPUWorker:
 
         src = encoder_cache[mm_hash]
         # View as flat bytes for indexed block-sized slicing.
-        src_bytes = src.reshape(-1).view(torch.uint8)
+        src_bytes = src.view(-1).view(torch.uint8)
         total_bytes = src_bytes.numel()
 
-        allocated_bytes = len(block_indices) * self._block_size_bytes
-        if total_bytes > allocated_bytes:
-            # EC block allocation was undersized; data will be truncated and
-            # the consumer will reconstruct a wrong-shaped tensor.
-            logger.error(
-                "EC: encoder output truncated for mm_hash=%s: "
-                "%d bytes available but only %d allocated "
-                "(%d blocks × %d). shape=%s hidden_dim=%d.",
-                mm_hash,
-                total_bytes,
-                allocated_bytes,
-                len(block_indices),
-                self._block_size_bytes,
-                list(src.shape),
-                self._hidden_dim,
-            )
+        allocated_bytes = len(block_indices) * self._memory_context.block_size_bytes
+        assert total_bytes <= allocated_bytes, (
+            f"EC: encoder output exceeds allocated blocks for mm_hash={mm_hash}: "
+            f"{total_bytes} bytes but only {allocated_bytes} allocated "
+            f"({len(block_indices)} blocks × {self._memory_context.block_size_bytes}). "
+            f"shape={list(src.shape)} hidden_dim={self._memory_context.hidden_dim}"
+        )
 
-        self._ensure_copy_stream()
-        assert self._copy_stream is not None
-        with torch.cuda.stream(self._copy_stream):
+        # Wait for encodings to be generated on GPU before copying.
+        self._save_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self._save_stream):
             for i, block_idx in enumerate(block_indices):
-                start = i * self._block_size_bytes
-                end = min(start + self._block_size_bytes, total_bytes)
+                start = i * self._memory_context.block_size_bytes
+                end = min(start + self._memory_context.block_size_bytes, total_bytes)
                 if start >= end:
                     break
                 self._cpu_blocks[block_idx, : end - start].copy_(
@@ -123,7 +106,7 @@ class ECCPUWorker:
         # Cross-boundary visibility: a remote consumer pulls these bytes by
         # NIXL READ, so a GPU-side event is not sufficient — the copy must be
         # CPU-complete before the blocks are served.
-        self._copy_stream.synchronize()
+        self._save_stream.synchronize()
 
     def start_load_caches(
         self,
@@ -142,12 +125,8 @@ class ECCPUWorker:
         if not metadata.loads:
             return
 
-        self._ensure_copy_stream()
-        assert self._copy_stream is not None
-        assert self._copy_event is not None
-
         device_type = current_platform.device_type
-        with torch.cuda.stream(self._copy_stream):
+        with torch.cuda.stream(self._load_stream):
             for mm_hash, block_indices in metadata.loads.items():
                 if mm_hash in encoder_cache:
                     continue
@@ -158,19 +137,19 @@ class ECCPUWorker:
                 # producer's encoder output and must be reapplied here.
                 gathered = self._cpu_blocks[block_indices]
                 encoder_cache[mm_hash] = (
-                    gathered.view(self._dtype)
-                    .reshape(len(block_indices), self._hidden_dim)
+                    gathered.view(self._memory_context.dtype)
+                    .reshape(len(block_indices), self._memory_context.hidden_dim)
                     .to(device=device_type, non_blocking=True)
                 )
-            self._copy_event.record(self._copy_stream)
-
-        torch.cuda.current_stream().wait_event(self._copy_event)
+        torch.cuda.current_stream().wait_stream(self._load_stream)
 
     def shutdown(self) -> None:
+        self._save_stream.synchronize()
+        self._load_stream.synchronize()
         # Drop the cached blocks view before region cleanup; otherwise
         # mmap_obj.close() raises BufferError on its memoryview export.
         self._cpu_blocks = None  # type: ignore[assignment]
         try:
-            self._region.cleanup()
+            self._memory_context.region.cleanup()
         except Exception:
             logger.debug("EC: worker region cleanup failed", exc_info=True)

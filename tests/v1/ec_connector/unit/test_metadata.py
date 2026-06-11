@@ -5,10 +5,13 @@
 import msgspec
 import pytest
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferAck,
     XferReq,
+    XferStatus,
     compute_ec_compatibility_hash,
 )
 
@@ -44,14 +47,7 @@ _ack_decoder = msgspec.msgpack.Decoder(XferAck)
 
 
 def _make_req(**overrides) -> XferReq:
-    defaults = dict(
-        mm_hash="abc123",
-        dst_block_indices=[0, 1, 2],
-        consumer_agent_name="engine-a",
-        consumer_nixl_metadata=b"\xde\xad\xbe\xef",
-        consumer_mem_descriptor=b"\x00\x01\x02",
-        compatibility_hash="deadbeef",
-    )
+    defaults = dict(mm_hash="abc123", compatibility_hash="deadbeef")
     defaults.update(overrides)
     return XferReq(**defaults)
 
@@ -61,16 +57,41 @@ def test_xfer_req_roundtrip():
     assert _req_decoder.decode(_encoder.encode(req)) == req
 
 
-@pytest.mark.parametrize("ok", [True, False])
-def test_xfer_ack_roundtrip(ok):
-    ack = XferAck(mm_hash="abc123", ok=ok)
+@pytest.mark.parametrize(
+    "status",
+    [
+        XferStatus.OK,
+        XferStatus.NACK_MISSING,
+        XferStatus.NACK_INCOMPAT,
+        XferStatus.NACK_VERSION,
+        XferStatus.NACK_INTERNAL,
+    ],
+)
+def test_xfer_ack_roundtrip(status):
+    ack = XferAck(
+        mm_hash="abc123",
+        status=status,
+        src_block_indices=[1, 2, 3],
+        agent_metadata=b"\xde\xad",
+        mem_descriptor=b"\x00\x01",
+    )
     decoded = _ack_decoder.decode(_encoder.encode(ack))
     assert decoded == ack
 
 
+def test_xfer_ack_nack_omits_optional_fields():
+    """A NACK carries no grant payload; the optional fields default to empty."""
+    ack = XferAck(mm_hash="x", status=XferStatus.NACK_MISSING)
+    decoded = _ack_decoder.decode(_encoder.encode(ack))
+    assert decoded == ack
+    assert decoded.src_block_indices == []
+    assert decoded.agent_metadata == b""
+    assert decoded.mem_descriptor == b""
+
+
 def test_tag_discriminator_rejects_wrong_type():
     with pytest.raises((msgspec.DecodeError, msgspec.ValidationError)):
-        _req_decoder.decode(_encoder.encode(XferAck(mm_hash="x", ok=True)))
+        _req_decoder.decode(_encoder.encode(XferAck(mm_hash="x", status=XferStatus.OK)))
     with pytest.raises((msgspec.DecodeError, msgspec.ValidationError)):
         _ack_decoder.decode(_encoder.encode(_make_req()))
 
@@ -89,31 +110,11 @@ def test_xfer_req_explicit_version_preserved(version):
 # ── field validation ─────────────────────────────────────────────────────────
 
 
-def test_xfer_req_rejects_non_int_block_indices():
-    bad = _encoder.encode(
-        {
-            "type": "req",
-            "mm_hash": "x",
-            "dst_block_indices": ["a", "b"],
-            "consumer_agent_name": "a",
-            "consumer_nixl_metadata": b"",
-            "consumer_mem_descriptor": b"",
-            "compatibility_hash": "",
-        }
-    )
-    with pytest.raises((msgspec.DecodeError, msgspec.ValidationError)):
-        _req_decoder.decode(bad)
-
-
 def test_xfer_req_rejects_missing_required_field():
     bad = _encoder.encode(
         {
             "type": "req",
             # mm_hash deliberately omitted
-            "dst_block_indices": [0],
-            "consumer_agent_name": "a",
-            "consumer_nixl_metadata": b"",
-            "consumer_mem_descriptor": b"",
             "compatibility_hash": "",
         }
     )
@@ -121,8 +122,21 @@ def test_xfer_req_rejects_missing_required_field():
         _req_decoder.decode(bad)
 
 
-def test_xfer_ack_rejects_non_bool_ok():
-    bad = _encoder.encode({"type": "ack", "mm_hash": "x", "ok": "yes"})
+def test_xfer_ack_rejects_non_int_src_block_indices():
+    bad = _encoder.encode(
+        {
+            "type": "ack",
+            "mm_hash": "x",
+            "status": int(XferStatus.OK),
+            "src_block_indices": ["a", "b"],
+        }
+    )
+    with pytest.raises((msgspec.DecodeError, msgspec.ValidationError)):
+        _ack_decoder.decode(bad)
+
+
+def test_xfer_ack_rejects_unknown_status():
+    bad = _encoder.encode({"type": "ack", "mm_hash": "x", "status": 999})
     with pytest.raises((msgspec.DecodeError, msgspec.ValidationError)):
         _ack_decoder.decode(bad)
 

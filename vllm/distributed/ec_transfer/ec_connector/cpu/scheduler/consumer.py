@@ -13,13 +13,14 @@ import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
+    evict_and_alloc,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferAck,
     XferReq,
     XferStatus,
-)
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
-    evict_and_alloc,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     PeerAddr,
@@ -28,7 +29,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
 )
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
-    ECSharedRegion,
 )
 from vllm.logger import init_logger
 
@@ -61,25 +61,20 @@ class ECCPUConsumer:
 
     def __init__(
         self,
-        region: ECSharedRegion,
+        memory_context: ECRegionContext,
         transport: Any,
         engine: Any,
-        local_xfer_handle: int,
         compat_hash: str,
-        hidden_dim: int,
-        element_size: int,
-        block_size_bytes: int,
     ) -> None:
-        self._region = region
+        self._memory_context = memory_context
         self._transport = transport
         self._engine = engine
-        self._local_xfer_handle = local_xfer_handle
         self._compat_hash = compat_hash
-        self._hidden_dim = hidden_dim
-        self._element_size = element_size
-        self._block_size_bytes = block_size_bytes
 
+        # In-flight encodings
         self._remote_encodings: dict[str, PendingRead | None] = {}
+
+        # Local encodings (On CPU)
         self._ready: set[str] = set()
         self._loaded: dict[str, list[int]] = {}
         self._pending_reload: set[str] = set()
@@ -183,7 +178,11 @@ class ECCPUConsumer:
             # protects vllm_version/model/dtype/block_size; this guards
             # against a mismatch within otherwise-compatible peers (bug
             # in the producer or in the orchestrator's announcement).
-            expected_size = pos.length * self._hidden_dim * self._element_size
+            expected_size = (
+                pos.length
+                * self._memory_context.hidden_dim
+                * self._memory_context.element_size
+            )
             announced_size = int(info.get("size_bytes", -1))
             if announced_size != expected_size:
                 logger.warning(
@@ -194,8 +193,8 @@ class ECCPUConsumer:
                     mm_hash,
                     expected_size,
                     pos.length,
-                    self._hidden_dim,
-                    self._element_size,
+                    self._memory_context.hidden_dim,
+                    self._memory_context.element_size,
                 )
                 continue
             try:
@@ -220,11 +219,14 @@ class ECCPUConsumer:
 
     def _fifo_alloc(self, n_blocks: int) -> list[int]:
         try:
-            return self._region.alloc(n_blocks)
+            return self._memory_context.region.alloc(n_blocks)
         except AllocationError:
             pass
         result = evict_and_alloc(
-            n_blocks, self._loaded, self._region, protected=self._pending_reload
+            n_blocks,
+            self._loaded,
+            self._memory_context.region,
+            protected=self._pending_reload,
         )
         if result is not None:
             return result
@@ -240,7 +242,7 @@ class ECCPUConsumer:
         The NIXL READ is issued later, in ``_handle_ack``, once the producer's
         ``XferAck`` supplies its fresh metadata and the source block indices.
         """
-        n_blocks = max(1, ceil(size_bytes / self._block_size_bytes))
+        n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
         indices = self._fifo_alloc(n_blocks)
         try:
             addr: PeerAddr = (info["peer_host"], int(info["peer_port"]))
@@ -249,7 +251,7 @@ class ECCPUConsumer:
                 peer, XferReq(mm_hash=mm_hash, compatibility_hash=self._compat_hash)
             )
         except Exception:
-            self._region.free(indices)
+            self._memory_context.region.free(indices)
             raise
         self._remote_encodings[mm_hash] = PendingRead(
             addr=addr,
@@ -302,7 +304,7 @@ class ECCPUConsumer:
                     pr.addr[1],
                     CONSUMER_XFER_ACK_TIMEOUT_S,
                 )
-                self._region.free(pr.dst_indices)
+                self._memory_context.region.free(pr.dst_indices)
                 self._remote_encodings[mm_hash] = None
         self._drain_quarantine()
 
@@ -343,7 +345,7 @@ class ECCPUConsumer:
                     ack.mm_hash,
                     ack.status.name,
                 )
-            self._region.free(pr.dst_indices)
+            self._memory_context.region.free(pr.dst_indices)
             self._remote_encodings[ack.mm_hash] = None
             return
         try:
@@ -351,7 +353,6 @@ class ECCPUConsumer:
                 addr, ack.agent_metadata, ack.mem_descriptor
             )
             handle = self._engine.post_read(
-                self._local_xfer_handle,
                 pr.dst_indices,
                 peer.remote_read_handle,
                 ack.src_block_indices,
@@ -362,7 +363,7 @@ class ECCPUConsumer:
                 "EC: failed to start READ for mm_hash=%s; falling back to local encode",
                 ack.mm_hash,
             )
-            self._region.free(pr.dst_indices)
+            self._memory_context.region.free(pr.dst_indices)
             self._remote_encodings[ack.mm_hash] = None
             return
         pr.read_handle = handle
@@ -391,7 +392,7 @@ class ECCPUConsumer:
                 mm_hash,
             )
             self._engine.release_xfer_handle(pr.read_handle)
-            self._region.free(pr.dst_indices)
+            self._memory_context.region.free(pr.dst_indices)
             self._remote_encodings[mm_hash] = None
             return True
         if state == "DONE":
@@ -408,7 +409,7 @@ class ECCPUConsumer:
             state,
         )
         self._engine.release_xfer_handle(pr.read_handle)
-        self._region.free(pr.dst_indices)
+        self._memory_context.region.free(pr.dst_indices)
         self._remote_encodings[mm_hash] = None
         return True
 
@@ -435,7 +436,7 @@ class ECCPUConsumer:
                 still_pending.append(q)
                 continue
             self._engine.release_xfer_handle(q.read_handle)
-            self._region.free(q.dst_indices)
+            self._memory_context.region.free(q.dst_indices)
             logger.debug(
                 "EC: quarantined read settled (state=%s); freed %d block(s)",
                 state,
@@ -467,7 +468,7 @@ class ECCPUConsumer:
                 self._quarantine.append(QuarantinedRead(pr.dst_indices, pr.read_handle))
                 quarantined += 1
             else:
-                self._region.free(pr.dst_indices)
+                self._memory_context.region.free(pr.dst_indices)
                 retrying += 1
             del self._remote_encodings[mm_hash]
         logger.info(

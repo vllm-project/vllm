@@ -5,12 +5,16 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm import envs
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
-    compute_ec_compatibility_hash,
+    ECRegionContext,
+    setup_ec_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.consumer import (
     ECCPUConsumer,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
+    compute_ec_compatibility_hash,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.nixl_engine import (
     NixlEngine,
@@ -21,11 +25,6 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.producer import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport import (
     ZmqConsumerTransport,
     ZmqProducerTransport,
-)
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
-    build_block_descs,
-    serialize_mem_descriptor,
-    setup_ec_region,
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config  # noqa: F401
 from vllm.logger import init_logger
@@ -61,32 +60,19 @@ class ECCPUScheduler:
                 "ECCPUConnector requires NIXL; "
                 "install the `nixl` package or set a different ec_connector."
             )
-
-        layout = setup_ec_region(vllm_config)
-        self._region = layout.region
-        self._hidden_dim = layout.hidden_dim
-        self._element_size = layout.element_size
-        self._block_size_bytes = layout.block_size_bytes
-        self._num_blocks = layout.num_blocks
-
-        engine = NixlEngine(self._engine_id)
-
-        block_descs = build_block_descs(
-            self._region.base_ptr,
-            self._num_blocks,
-            self._block_size_bytes,
-            device_id=0,
+        self._memory_context: ECRegionContext = setup_ec_region(vllm_config)
+        engine = NixlEngine(
+            agent_name=self._engine_id,
+            base_ptr=self._memory_context.region.base_ptr,
+            num_blocks=self._memory_context.num_blocks,
+            block_size_bytes=self._memory_context.block_size_bytes,
+            total_size_bytes=self._memory_context.region.total_size_bytes,
         )
-        local_xfer_handle = engine.register_region(
-            block_descs, self._region.base_ptr, self._region.total_size_bytes
-        )
-        self._agent_metadata: bytes = engine.get_agent_metadata()
-        self._mem_descriptor_bytes: bytes = serialize_mem_descriptor(block_descs)
         self._compat_hash: str = compute_ec_compatibility_hash(
             vllm_version=VLLM_VERSION,
             model=str(vllm_config.model_config.model),
-            dtype=str(layout.dtype),
-            block_size_bytes=self._block_size_bytes,
+            dtype=str(self._memory_context.dtype),
+            block_size_bytes=self._memory_context.block_size_bytes,
         )
 
         self._engine = engine
@@ -103,14 +89,9 @@ class ECCPUScheduler:
                 port=self._peer_port,
             )
             self._producer = ECCPUProducer(
-                region=self._region,
+                memory_context=self._memory_context,
                 engine=engine,
-                agent_metadata=self._agent_metadata,
-                mem_descriptor_bytes=self._mem_descriptor_bytes,
                 compat_hash=self._compat_hash,
-                hidden_dim=self._hidden_dim,
-                element_size=self._element_size,
-                block_size_bytes=self._block_size_bytes,
                 peer_host=self._peer_host,
                 peer_port=self._peer_port,
             )
@@ -125,14 +106,10 @@ class ECCPUScheduler:
                 engine=engine,
             )
             self._consumer = ECCPUConsumer(
-                region=self._region,
+                memory_context=self._memory_context,
                 transport=consumer_transport,
                 engine=engine,
-                local_xfer_handle=local_xfer_handle,
                 compat_hash=self._compat_hash,
-                hidden_dim=self._hidden_dim,
-                element_size=self._element_size,
-                block_size_bytes=self._block_size_bytes,
             )
 
     # ── public API ────────────────────────────────────────────────────────────
@@ -146,10 +123,15 @@ class ECCPUScheduler:
     def ensure_cache_available(
         self, request: "Request", num_computed_tokens: int
     ) -> bool:
-        if not self._is_consumer:
-            return True
-        assert self._consumer is not None
-        return self._consumer.ensure_cache_available(request, num_computed_tokens)
+        if self._is_producer:
+            assert self._producer is not None
+            if not self._producer.ensure_cache_available(request, num_computed_tokens):
+                return False
+        if self._is_consumer:
+            assert self._consumer is not None
+            if not self._consumer.ensure_cache_available(request, num_computed_tokens):
+                return False
+        return True
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         if self._is_producer:
@@ -195,6 +177,6 @@ class ECCPUScheduler:
             logger.debug("ec: deregister failed", exc_info=True)
 
         try:
-            self._region.cleanup()
+            self._memory_context.region.cleanup()
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)

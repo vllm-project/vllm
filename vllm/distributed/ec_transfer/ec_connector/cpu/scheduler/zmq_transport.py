@@ -15,7 +15,7 @@ import msgspec
 import zmq
 from zmq.utils.monitor import recv_monitor_message
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferAck,
     XferReq,
     XferStatus,

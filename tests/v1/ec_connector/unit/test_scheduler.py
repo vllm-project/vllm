@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ECCPUScheduler.
+"""Unit tests for ECCPUScheduler (consumer-side NIXL READ model).
 
 Mocking policy
 --------------
@@ -11,15 +11,15 @@ Only the parts that require external I/O are mocked:
   - setup_ec_region (lets us inject a real ECSharedRegion with known dims)
 
 Everything else is real: ECSharedRegion, threading primitives, msgspec codecs,
-all scheduler logic. The router thread is replaced by a sentinel that parks
-on _stop_event so it starts, can be joined, and never touches the mocked
-sockets — the router-loop body itself is out of scope for unit tests; cover
-it with an integration test using real inproc:// sockets.
+all scheduler logic. The producer's router thread is replaced by a sentinel
+that parks on _stop_event so it starts, can be joined, and never touches the
+mocked sockets — the router-loop body itself is covered by an integration test
+using real inproc:// sockets.
 """
 
 import contextlib
 import logging
-import uuid
+import time
 from unittest.mock import MagicMock, Mock, patch
 
 import msgspec
@@ -38,18 +38,20 @@ from utils import (  # noqa: E402  (test-local helper module)
     _request_for,
 )
 
-from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     EC_CONNECTOR_VERSION,
     XferAck,
     XferReq,
+    XferStatus,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport import (
     ZmqProducerTransport,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     ConsumerPeer,
-    ProducerPeer,
+    PendingRead,
+    QuarantinedRead,
     serialize_mem_descriptor,
 )
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
@@ -58,20 +60,13 @@ from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 
-# ── scheduler-specific helpers ────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
+_encoder = msgspec.msgpack.Encoder()
 
-def _inject_in_flight(
-    sched: ECCPUScheduler, mm_hash: str, identity: bytes
-) -> tuple[str, object]:
-    """Add a fake in-flight entry; return (xfer_id, handle)."""
-    handle = object()
-    xfer_id = str(uuid.uuid4())
-    sched._producer._in_flight[xfer_id] = (identity, mm_hash, handle)
-    return xfer_id, handle
-
-
-_ack_encoder = msgspec.msgpack.Encoder()
+# A valid serialized mem descriptor: the real engine deserializes it in
+# add_remote_source (only NIXL itself is mocked), so it must decode cleanly.
+_MEM_DESC = serialize_mem_descriptor([(0, _BLOCK_SIZE, 0)])
 
 
 def _dealer_returning(frames: list) -> MagicMock:
@@ -81,8 +76,67 @@ def _dealer_returning(frames: list) -> MagicMock:
     return dealer
 
 
-def _ack_frames(mm_hash: str, ok: bool) -> list[bytes]:
-    return [b"", _ack_encoder.encode(XferAck(mm_hash=mm_hash, ok=ok))]
+def _ack_frames(
+    mm_hash: str,
+    status: XferStatus,
+    *,
+    src_block_indices: list[int] | None = None,
+    agent_metadata: bytes = b"agent-meta",
+    mem_descriptor: bytes = _MEM_DESC,
+) -> list[bytes]:
+    ack = XferAck(
+        mm_hash=mm_hash,
+        status=status,
+        src_block_indices=src_block_indices or [],
+        agent_metadata=agent_metadata if status == XferStatus.OK else b"",
+        mem_descriptor=mem_descriptor if status == XferStatus.OK else b"",
+    )
+    return [b"", _encoder.encode(ack)]
+
+
+def _silent_dealer() -> MagicMock:
+    """Mock DEALER whose recv_multipart raises zmq.Again (no acks pending)."""
+    dealer = MagicMock()
+    dealer.recv_multipart.side_effect = zmq.Again
+    return dealer
+
+
+def _put_peer(
+    sched: ECCPUScheduler, addr=("host", 1234), **peer_kwargs
+) -> ConsumerPeer:
+    """Insert a ConsumerPeer straight into the pool.
+
+    The DEALER defaults to one that yields no acks, so a drain() that touches
+    this peer does not spin on a bare MagicMock.
+    """
+    dealer = peer_kwargs.pop("zmq_dealer", None) or _silent_dealer()
+    peer = ConsumerPeer(zmq_dealer=dealer, **peer_kwargs)
+    sched._consumer._transport._peer_pool[addr] = peer
+    return peer
+
+
+def _pending(
+    addr=("host", 1234), *, dst_indices, read_handle=None, ttl=999.0
+) -> PendingRead:
+    return PendingRead(
+        addr=addr,
+        dst_indices=dst_indices,
+        deadline=time.monotonic() + ttl,
+        read_handle=read_handle,
+    )
+
+
+def _make_xfer_req(
+    *,
+    mm_hash: str = "h",
+    compatibility_hash: str = "",
+    connector_version: int = EC_CONNECTOR_VERSION,
+) -> XferReq:
+    return XferReq(
+        mm_hash=mm_hash,
+        compatibility_hash=compatibility_hash,
+        connector_version=connector_version,
+    )
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -180,13 +234,12 @@ def both(make_scheduler) -> ECCPUScheduler:
     return make_scheduler(is_producer=True, is_consumer=True)
 
 
-# ── role gating (behavioral, not hasattr) ─────────────────────────────────────
+# ── role gating ───────────────────────────────────────────────────────────────
 
 
 def test_ensure_cache_available_returns_true_on_producer_only(producer):
     req = _request_for(_feature("h"))
     assert producer.ensure_cache_available(req, num_computed_tokens=0) is True
-    # Producer has no consumer state; has_cache_item always returns False.
     assert producer.has_cache_item("h") is False
 
 
@@ -196,31 +249,27 @@ def test_producer_methods_no_op_on_consumer(consumer):
     consumer.update_state_after_alloc(MagicMock(), index=0)  # must not raise
 
 
-# ── _producer_fifo_alloc ──────────────────────────────────────────────────────
+# ── producer _fifo_alloc ──────────────────────────────────────────────────────
 
 
 def test_producer_alloc_succeeds_when_pool_has_space(producer):
-    indices = producer._producer._fifo_alloc(3)
-    assert len(indices) == 3
+    assert len(producer._producer._fifo_alloc(3)) == 3
 
 
 def test_producer_alloc_evicts_oldest_unpinned(producer):
-    """Eviction iterates _local_encodings in insertion order (FIFO)."""
-    region = producer._region
-    old = region.alloc(4)
-    new = region.alloc(4)
-    producer._producer._local_encodings["old"] = old
-    producer._producer._local_encodings["new"] = new
+    region = producer._memory_context.region
+    producer._producer._local_encodings["old"] = region.alloc(4)
+    producer._producer._local_encodings["new"] = region.alloc(4)
 
     result = producer._producer._fifo_alloc(3)
 
     assert len(result) == 3
-    assert "old" not in producer._producer._local_encodings  # FIFO entry was evicted
+    assert "old" not in producer._producer._local_encodings
     assert "new" in producer._producer._local_encodings
 
 
 def test_producer_alloc_skips_pinned_blocks(producer):
-    region = producer._region
+    region = producer._memory_context.region
     pinned = region.alloc(4)
     not_pinned = region.alloc(4)
     region.pin(pinned)
@@ -230,44 +279,96 @@ def test_producer_alloc_skips_pinned_blocks(producer):
     result = producer._producer._fifo_alloc(3)
 
     assert len(result) == 3
-    assert "pinned" in producer._producer._local_encodings  # skipped: still pinned
+    assert "pinned" in producer._producer._local_encodings
     assert "not_pinned" not in producer._producer._local_encodings
     region.unpin(pinned)
 
 
 def test_producer_alloc_raises_when_all_encodings_pinned(producer):
-    region = producer._region
+    region = producer._memory_context.region
     all_idx = region.alloc(_NUM_BLOCKS)
     region.pin(all_idx)
     producer._producer._local_encodings["only"] = all_idx
-
     with pytest.raises(AllocationError):
         producer._producer._fifo_alloc(1)
-
     region.unpin(all_idx)
 
 
-def test_producer_alloc_evicts_multiple_to_satisfy_request(producer):
-    """A single eviction may not free enough; the loop must continue evicting."""
-    region = producer._region
-    a = region.alloc(2)
-    b = region.alloc(2)
-    c = region.alloc(2)
-    d = region.alloc(2)  # pool now empty
-    producer._producer._local_encodings["a"] = a
-    producer._producer._local_encodings["b"] = b
-    producer._producer._local_encodings["c"] = c
-    producer._producer._local_encodings["d"] = d
+# ── ensure_cache_available (producer) ────────────────────────────────────────
 
-    # Request 5 blocks: must evict a (2 freed → still short), b (4 → still
-    # short), c (6 → satisfies). d should survive.
-    result = producer._producer._fifo_alloc(5)
 
-    assert len(result) == 5
-    assert "a" not in producer._producer._local_encodings
-    assert "b" not in producer._producer._local_encodings
-    assert "c" not in producer._producer._local_encodings
-    assert "d" in producer._producer._local_encodings
+def test_producer_ensure_probes_and_returns_blocks(producer):
+    """Probe returns True and leaves the free pool unchanged (alloc + free)."""
+    free_before = len(producer._memory_context.region._free)
+    req = _request_for(_feature("h", length=1))
+    assert producer.ensure_cache_available(req, num_computed_tokens=0) is True
+    assert len(producer._memory_context.region._free) == free_before
+
+
+def test_producer_ensure_evicts_unpinned_to_make_room(producer):
+    """When the region is full the probe evicts unpinned encodings to make room."""
+    region = producer._memory_context.region
+    producer._producer._local_encodings["old"] = region.alloc(_NUM_BLOCKS)
+
+    req = _request_for(_feature("h", length=1))
+    assert producer.ensure_cache_available(req, num_computed_tokens=0) is True
+    assert "old" not in producer._producer._local_encodings
+
+
+def test_producer_ensure_returns_false_when_all_blocks_pinned(producer):
+    """When all blocks are pinned by in-flight reads, returns False to defer."""
+    region = producer._memory_context.region
+    all_idx = region.alloc(_NUM_BLOCKS)
+    region.pin(all_idx)
+    producer._producer._local_encodings["pinned"] = all_idx
+
+    req = _request_for(_feature("h", length=1))
+    assert producer.ensure_cache_available(req, num_computed_tokens=0) is False
+    region.unpin(all_idx)
+
+
+def test_producer_ensure_skips_feature_in_local_encodings(producer):
+    """mm_hash already stored — no probe, region free count unchanged."""
+    producer._producer._local_encodings["h"] = [0]
+    free_before = len(producer._memory_context.region._free)
+    assert producer.ensure_cache_available(_request_for(_feature("h")), 0) is True
+    assert len(producer._memory_context.region._free) == free_before
+
+
+def test_producer_ensure_skips_feature_in_pending_save(producer):
+    """mm_hash already allocated last step — no probe."""
+    producer._producer._pending_save["h"] = [0]
+    free_before = len(producer._memory_context.region._free)
+    assert producer.ensure_cache_available(_request_for(_feature("h")), 0) is True
+    assert len(producer._memory_context.region._free) == free_before
+
+
+def test_producer_ensure_skips_feature_in_pending_new_encodings(producer):
+    """mm_hash already registered by a running request — no double-probe."""
+    producer._producer._pending_new_encodings["h"] = _BLOCK_SIZE
+    free_before = len(producer._memory_context.region._free)
+    assert producer.ensure_cache_available(_request_for(_feature("h")), 0) is True
+    assert len(producer._memory_context.region._free) == free_before
+
+
+def test_producer_ensure_skips_already_computed_feature(producer):
+    """Feature whose range is fully computed is not probed."""
+    req = _request_for(_feature("h", length=1, offset=0))
+    assert producer.ensure_cache_available(req, num_computed_tokens=1) is True
+
+
+def test_scheduler_ensure_false_when_producer_blocked(make_scheduler):
+    """ECCPUScheduler.ensure_cache_available returns
+    False when producer can't reserve."""
+    sched = make_scheduler(is_producer=True, is_consumer=False)
+    region = sched._memory_context.region
+    all_idx = region.alloc(_NUM_BLOCKS)
+    region.pin(all_idx)
+    sched._producer._local_encodings["pinned"] = all_idx
+
+    req = _request_for(_feature("h"))
+    assert sched.ensure_cache_available(req, num_computed_tokens=0) is False
+    region.unpin(all_idx)
 
 
 # ── update_state_after_alloc ──────────────────────────────────────────────────
@@ -276,7 +377,6 @@ def test_producer_alloc_evicts_multiple_to_satisfy_request(producer):
 def test_update_state_queues_size_bytes(producer):
     req = _request_for(_feature("h1", length=2))
     producer.update_state_after_alloc(req, index=0)
-
     expected_size = 2 * _HIDDEN_DIM * _ELEMENT_SIZE
     assert producer._producer._pending_new_encodings == {"h1": expected_size}
 
@@ -298,22 +398,18 @@ def test_update_state_dedups_against_local_encodings(producer):
 
 def test_build_meta_promotes_pending_save(producer):
     producer._producer._pending_save["h1"] = [0, 1]
-
     producer.build_connector_meta(Mock(spec=SchedulerOutput))
-
     assert producer._producer._local_encodings["h1"] == [0, 1]
     assert producer._producer._pending_save == {}
 
 
 def test_build_meta_allocates_for_pending_new_encodings(producer):
     producer._producer._pending_new_encodings["h2"] = _BLOCK_SIZE  # exactly 1 block
-
     meta = producer.build_connector_meta(Mock(spec=SchedulerOutput))
-
     assert "h2" in meta.saves
     assert len(meta.saves["h2"]) == 1
     assert "h2" in producer._producer._pending_save
-    assert producer._producer._pending_new_encodings == {}  # drained
+    assert producer._producer._pending_new_encodings == {}
 
 
 def test_build_meta_rounds_up_partial_block(producer):
@@ -322,258 +418,157 @@ def test_build_meta_rounds_up_partial_block(producer):
     assert len(meta.saves["h"]) == 2
 
 
-# ── _handle_xfer_req ──────────────────────────────────────────────────────────
-
-
-_EMPTY_MEM_DESCRIPTOR = serialize_mem_descriptor([])
-
-
-def _make_xfer_req(
-    *,
-    mm_hash: str = "h",
-    dst_indices: list[int] | None = None,
-    consumer_agent_name: str = "consumer-agent",
-    consumer_nixl_metadata: bytes = b"meta",
-    consumer_mem_descriptor: bytes = _EMPTY_MEM_DESCRIPTOR,
-    compatibility_hash: str | None = None,
-    connector_version: int = EC_CONNECTOR_VERSION,
-) -> XferReq:
-    return XferReq(
-        mm_hash=mm_hash,
-        dst_block_indices=dst_indices if dst_indices is not None else [0],
-        consumer_agent_name=consumer_agent_name,
-        consumer_nixl_metadata=consumer_nixl_metadata,
-        consumer_mem_descriptor=consumer_mem_descriptor,
-        compatibility_hash=compatibility_hash if compatibility_hash is not None else "",
-        connector_version=connector_version,
-    )
+# ── handle_xfer_req (producer grants) ─────────────────────────────────────────
 
 
 def test_handle_xfer_req_version_mismatch_nacks(producer):
     req = _make_xfer_req(connector_version=EC_CONNECTOR_VERSION + 99)
-    producer._producer.handle_xfer_req(b"peer-id", req)
-    assert producer._producer._pending_nacks == [(b"peer-id", req.mm_hash)]
-    assert not producer._producer._in_flight
+    ack = producer._producer.handle_xfer_req(b"peer-id", req)
+    assert ack.status == XferStatus.NACK_VERSION
+    assert not producer._producer._pinned_encodings
 
 
 def test_handle_xfer_req_compat_hash_mismatch_nacks(producer):
     req = _make_xfer_req(compatibility_hash="not-a-real-hash")
-    producer._producer.handle_xfer_req(b"peer-id", req)
-    assert producer._producer._pending_nacks == [(b"peer-id", req.mm_hash)]
-    assert not producer._producer._in_flight
+    ack = producer._producer.handle_xfer_req(b"peer-id", req)
+    assert ack.status == XferStatus.NACK_INCOMPAT
+    assert not producer._producer._pinned_encodings
 
 
 def test_handle_xfer_req_unknown_mm_hash_nacks(producer):
     req = _make_xfer_req(mm_hash="unknown", compatibility_hash=producer._compat_hash)
-    producer._producer.handle_xfer_req(b"peer-id", req)
-    assert producer._producer._pending_nacks == [(b"peer-id", "unknown")]
+    ack = producer._producer.handle_xfer_req(b"peer-id", req)
+    assert ack.status == XferStatus.NACK_MISSING
+    assert ack.mm_hash == "unknown"
+    assert not producer._producer._pinned_encodings
 
 
-def test_handle_xfer_req_success_pins_and_records_in_flight(producer):
-    indices = producer._region.alloc(1)
+def test_handle_xfer_req_success_pins_and_returns_grant(producer):
+    indices = producer._memory_context.region.alloc(2)
     producer._producer._local_encodings["h"] = indices
-    req = _make_xfer_req(
-        mm_hash="h",
-        dst_indices=[7],
-        compatibility_hash=producer._compat_hash,
-    )
-
-    producer._producer.handle_xfer_req(b"peer-id", req)
-
-    # Pinned for the in-flight transfer.
-    assert all(idx in producer._region._ref_count for idx in indices)
-    # Recorded in _in_flight under a fresh xfer_id.
-    assert len(producer._producer._in_flight) == 1
-    [(_xfer_id, (identity, mm_hash, _handle))] = producer._producer._in_flight.items()
-    assert identity == b"peer-id"
-    assert mm_hash == "h"
-    # NIXL was instructed to WRITE.
-    producer._engine._nixl.make_prepped_xfer.assert_called_once()
-    producer._engine._nixl.transfer.assert_called_once()
-
-
-def test_handle_xfer_req_post_failure_unpins_and_nacks(producer):
-    indices = producer._region.alloc(1)
-    producer._producer._local_encodings["h"] = indices
-
-    producer._engine._nixl.make_prepped_xfer.side_effect = RuntimeError("nixl error")
-
     req = _make_xfer_req(mm_hash="h", compatibility_hash=producer._compat_hash)
-    producer._producer.handle_xfer_req(b"peer-id", req)
 
-    # Block was unpinned so eviction can reclaim it.
-    assert not producer._region._ref_count
-    # NACK queued for the consumer.
-    assert producer._producer._pending_nacks == [(b"peer-id", "h")]
-    # Nothing in flight.
-    assert not producer._producer._in_flight
+    ack = producer._producer.handle_xfer_req(b"peer-id", req)
 
-
-# ── _ensure_remote_peer ───────────────────────────────────────────────────────
-
-
-def test_ensure_remote_peer_first_contact_adds_agent(producer):
-    req = _make_xfer_req(
-        consumer_agent_name="consumer", consumer_nixl_metadata=b"new-meta"
-    )
-    peer = producer._producer._ensure_remote_peer(req)
-
-    producer._engine._nixl.add_remote_agent.assert_called_once_with(b"new-meta")
-    assert peer.nixl_metadata_bytes == b"new-meta"
-    assert producer._producer._remote_peers["consumer"] is peer
+    assert ack.status == XferStatus.OK
+    assert ack.src_block_indices == indices
+    # Fresh producer metadata + mem descriptor travel on the grant.
+    assert ack.agent_metadata == producer._engine._agent_metadata
+    assert ack.mem_descriptor == producer._engine._mem_descriptor_bytes
+    # Source blocks pinned, one deadline recorded.
+    assert all(idx in producer._memory_context.region._ref_count for idx in indices)
+    assert len(producer._producer._pinned_encodings["h"].deadlines) == 1
 
 
-def test_ensure_remote_peer_returns_cached_on_metadata_match(producer):
-    req = _make_xfer_req(consumer_nixl_metadata=b"meta-A")
-    first = producer._producer._ensure_remote_peer(req)
+def test_handle_xfer_req_concurrent_reads_refcount(producer):
+    """Two grants for the same mm_hash nest the pin (two deadlines)."""
+    indices = producer._memory_context.region.alloc(1)
+    producer._producer._local_encodings["h"] = indices
+    req = _make_xfer_req(mm_hash="h", compatibility_hash=producer._compat_hash)
 
-    second = producer._producer._ensure_remote_peer(req)
+    producer._producer.handle_xfer_req(b"c1", req)
+    producer._producer.handle_xfer_req(b"c2", req)
 
-    assert second is first
-    # add_remote_agent must have been called exactly once (first contact only).
-    producer._engine._nixl.add_remote_agent.assert_called_once()
-
-
-def test_ensure_remote_peer_metadata_change_replaces_agent(producer):
-    req1 = _make_xfer_req(consumer_nixl_metadata=b"meta-A")
-    first = producer._producer._ensure_remote_peer(req1)
-
-    req2 = _make_xfer_req(consumer_nixl_metadata=b"meta-B")
-    second = producer._producer._ensure_remote_peer(req2)
-
-    producer._engine._nixl.remove_remote_agent.assert_called_once_with(
-        first.nixl_agent_name
-    )
-    assert second is not first
-    assert second.nixl_metadata_bytes == b"meta-B"
+    assert len(producer._producer._pinned_encodings["h"].deadlines) == 2
+    assert producer._memory_context.region._ref_count[indices[0]] == 2
 
 
-# ── _post_nixl_write ──────────────────────────────────────────────────────────
+# ── poll: notif unpin + lease sweep (producer) ────────────────────────────────
 
 
-def test_post_nixl_write_block_count_mismatch_raises(producer):
-    peer = ProducerPeer(
-        nixl_agent_name="a", nixl_metadata_bytes=b"m", nixl_xfer_handle=1
-    )
-    with pytest.raises(ValueError, match="block count mismatch"):
-        producer._engine.post_write(
-            producer._producer._local_xfer_handle, [0, 1], peer, [9]
-        )
-
-
-def test_post_nixl_write_invokes_make_and_transfer(producer):
-    peer = ProducerPeer(
-        nixl_agent_name="a", nixl_metadata_bytes=b"m", nixl_xfer_handle=1
-    )
-    producer._engine._nixl.make_prepped_xfer.return_value = "handle-77"
-    handle = producer._engine.post_write(
-        producer._producer._local_xfer_handle, [0], peer, [9]
-    )
-
-    assert handle == "handle-77"
-    producer._engine._nixl.make_prepped_xfer.assert_called_once()
-    producer._engine._nixl.transfer.assert_called_once_with("handle-77")
-
-
-# ── _sweep_completions ────────────────────────────────────────────────────────
-
-
-def _setup_in_flight_with_pin(
-    producer: ECCPUScheduler, mm_hash: str = "h", n_blocks: int = 1
-) -> tuple[list[int], object]:
-    indices = producer._region.alloc(n_blocks)
+def _grant(producer, mm_hash="h", n=1):
+    indices = producer._memory_context.region.alloc(n)
     producer._producer._local_encodings[mm_hash] = indices
-    producer._region.pin(indices)
-    _, handle = _inject_in_flight(producer, mm_hash, b"peer-id")
-    return indices, handle
+    req = _make_xfer_req(mm_hash=mm_hash, compatibility_hash=producer._compat_hash)
+    producer._producer.handle_xfer_req(b"peer-id", req)
+    return indices
 
 
-def test_sweep_done_unpins_releases_handle_and_acks_ok(producer):
-    indices, handle = _setup_in_flight_with_pin(producer, "h", n_blocks=2)
-    producer._engine._nixl.check_xfer_state.return_value = "DONE"
+def test_poll_notif_unpins_source(producer):
+    indices = _grant(producer, "h", n=2)
+    producer._engine._nixl.get_new_notifs.return_value = {"peer": [b"h"]}
 
-    routes = producer._producer.sweep_completions()
+    producer._producer.poll()
 
-    assert routes == [(b"peer-id", "h", True)]
-    producer._engine._nixl.release_xfer_handle.assert_called_once_with(handle)
-    assert all(idx not in producer._region._ref_count for idx in indices)
-    assert not producer._producer._in_flight
+    assert all(idx not in producer._memory_context.region._ref_count for idx in indices)
+    assert "h" not in producer._producer._pinned_encodings
 
 
-def test_sweep_proc_does_not_release_or_ack(producer):
-    indices, _handle = _setup_in_flight_with_pin(producer, "h")
-    producer._engine._nixl.check_xfer_state.return_value = "PROC"
-
-    routes = producer._producer.sweep_completions()
-
-    assert routes == []
-    producer._engine._nixl.release_xfer_handle.assert_not_called()
-    # Still pinned and in flight.
-    assert all(idx in producer._region._ref_count for idx in indices)
-    assert producer._producer._in_flight
-    producer._region.unpin(indices)
+def test_poll_notif_for_unknown_hash_is_noop(producer):
+    producer._engine._nixl.get_new_notifs.return_value = {"peer": [b"ghost"]}
+    producer._producer.poll()  # must not raise
+    assert not producer._producer._pinned_encodings
 
 
-def test_sweep_unexpected_state_acks_fail_and_releases(producer):
-    indices, handle = _setup_in_flight_with_pin(producer, "h")
-    producer._engine._nixl.check_xfer_state.return_value = "WAT"
+def test_poll_lease_expiry_force_unpins(producer):
+    indices = _grant(producer, "h", n=1)
+    # Force the lease into the past.
+    producer._producer._pinned_encodings["h"].deadlines = [time.monotonic() - 1.0]
 
-    routes = producer._producer.sweep_completions()
+    producer._producer.poll()
 
-    assert routes == [(b"peer-id", "h", False)]
-    producer._engine._nixl.release_xfer_handle.assert_called_once_with(handle)
-    assert not producer._producer._in_flight
-    # Blocks must be unpinned so eviction can reclaim them.
-    assert all(idx not in producer._region._ref_count for idx in indices)
+    assert all(idx not in producer._memory_context.region._ref_count for idx in indices)
+    assert "h" not in producer._producer._pinned_encodings
 
 
-def test_sweep_check_xfer_state_exception_treated_as_failure(producer):
-    indices, handle = _setup_in_flight_with_pin(producer, "h")
-    producer._engine._nixl.check_xfer_state.side_effect = RuntimeError("rpc lost")
+def test_poll_notif_then_late_lease_does_not_double_unpin(producer):
+    """Once a notif fully unpins an encoding, a later lease sweep is a no-op."""
+    indices = _grant(producer, "h", n=1)
+    producer._engine._nixl.get_new_notifs.return_value = {"peer": [b"h"]}
+    producer._producer.poll()  # notif unpins
+    # A second poll (lease sweep over an empty table) must not over-unpin.
+    producer._engine._nixl.get_new_notifs.return_value = {}
+    producer._producer.poll()
+    assert all(idx not in producer._memory_context.region._ref_count for idx in indices)
 
-    routes = producer._producer.sweep_completions()
 
-    assert routes == [(b"peer-id", "h", False)]
-    producer._engine._nixl.release_xfer_handle.assert_called_once_with(handle)
-    # Blocks must be unpinned so eviction can reclaim them.
-    assert all(idx not in producer._region._ref_count for idx in indices)
+def test_has_pending_pins(producer):
+    assert producer._producer.has_pending_pins() is False
+    _grant(producer, "h")
+    assert producer._producer.has_pending_pins() is True
 
 
-def test_sweep_drains_pending_nacks(producer):
-    producer._producer._pending_nacks.append((b"peer-id", "x"))
-    routes = producer._producer.sweep_completions()
-    assert routes == [(b"peer-id", "x", False)]
-    assert producer._producer._pending_nacks == []
+# ── engine.post_read ──────────────────────────────────────────────────────────
+
+
+def test_post_read_block_count_mismatch_raises(consumer):
+    with pytest.raises(ValueError, match="block count mismatch"):
+        consumer._engine.post_read([0, 1], 7, [9], notif_msg=b"h")
+
+
+def test_post_read_invokes_make_read_and_transfer(consumer):
+    consumer._engine._nixl.make_prepped_xfer.return_value = "handle-77"
+    handle = consumer._engine.post_read([0], 7, [9], notif_msg=b"h")
+    assert handle == "handle-77"
+    op = consumer._engine._nixl.make_prepped_xfer.call_args[0][0]
+    assert op == "READ"
+    consumer._engine._nixl.transfer.assert_called_once_with("handle-77")
 
 
 # ── request_finished (producer) ───────────────────────────────────────────────
 
 
 def test_request_finished_returns_no_params_when_nothing_known(producer):
-    req = _request_for(_feature("h"))
-    done, params = producer.request_finished(req)
+    done, params = producer.request_finished(_request_for(_feature("h")))
     assert done is False
     assert params is None
 
 
-def test_request_finished_emits_for_local_encoding_hits(producer):
+def test_request_finished_emits_address_and_size_only(producer):
     producer._producer._local_encodings["h"] = [0]
-    req = _request_for(_feature("h", length=1))
-
-    done, params = producer.request_finished(req)
+    done, params = producer.request_finished(_request_for(_feature("h", length=1)))
 
     assert done is False
-    assert params is not None and "h" in params
     info = params["h"]
     assert info["peer_host"] == producer._peer_host
     assert info["peer_port"] == producer._peer_port
     assert info["size_bytes"] == _HIDDEN_DIM * _ELEMENT_SIZE
-    assert isinstance(info["nixl_agent_metadata_b64"], str)
+    # No NIXL metadata is ever announced through the routing layer.
+    assert "nixl_agent_metadata_b64" not in info
+    assert set(info) == {"peer_host", "peer_port", "size_bytes"}
 
 
 def test_request_finished_emits_for_pending_save_hits(producer):
-    """Race window: a request may finish before its save promotion. The
-    producer must still announce so the consumer can fetch it next step."""
     producer._producer._pending_save["h"] = [0]
     _, params = producer.request_finished(_request_for(_feature("h")))
     assert params is not None and "h" in params
@@ -587,354 +582,359 @@ def test_request_finished_uses_identifier_when_mm_hash_falsy(producer):
     assert "ident-only" in params
 
 
-# ── _drain_acks (consumer) ────────────────────────────────────────────────────
+# ── _start_read (consumer) ────────────────────────────────────────────────────
 
 
-def _inject_peer_with_remote(
-    sched: ECCPUScheduler, mm_hash: str, ok: bool
-) -> list[int]:
-    indices = sched._region.alloc(2)
-    sched._consumer._remote_encodings[mm_hash] = (indices, ("host", 1234))
-    dealer = _dealer_returning([_ack_frames(mm_hash, ok)])
-    sched._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=dealer,
-        nixl_agent_name="remote-agent",
-        nixl_metadata_bytes=b"meta",
-    )
-    return indices
+def test_start_read_sends_xfer_req(consumer):
+    dealer = MagicMock()
+    _put_peer(consumer, zmq_dealer=dealer)
 
+    consumer._consumer._start_read("h", _info(), _BLOCK_SIZE)
 
-def test_drain_ok_ack_moves_hash_to_ready(consumer):
-    _inject_peer_with_remote(consumer, "h", ok=True)
-    consumer._consumer.drain_acks()
-
-    assert "h" in consumer._consumer._ready
-    # Blocks stay allocated in _remote_encodings until build_connector_meta
-    # promotes them to _loaded; the ok path must NOT free them early.
-    assert "h" in consumer._consumer._remote_encodings
-
-
-def test_drain_fail_ack_frees_blocks(consumer):
-    _inject_peer_with_remote(consumer, "h", ok=False)
-    consumer._consumer.drain_acks()
-
-    # NACK leaves a None tombstone for ensure_cache_available to consume.
-    assert consumer._consumer._remote_encodings.get("h") is None
-    assert "h" not in consumer._consumer._ready
-    assert set(consumer._region._free) == set(range(_NUM_BLOCKS))
-
-
-def test_drain_ignores_ack_for_unknown_hash(consumer):
-    dealer = _dealer_returning([_ack_frames("unknown", ok=True)])
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=dealer, nixl_agent_name="a", nixl_metadata_bytes=b"m"
-    )
-    consumer._consumer.drain_acks()
-
-    assert "unknown" not in consumer._consumer._ready
-
-
-def test_drain_drops_malformed_payload(consumer):
-    indices = consumer._region.alloc(1)
-    consumer._consumer._remote_encodings["h"] = (indices, ("host", 1234))
-    dealer = _dealer_returning([[b"", b"\xff\xff\xff"]])  # not a valid msgpack
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=dealer, nixl_agent_name="a", nixl_metadata_bytes=b"m"
-    )
-
-    consumer._consumer.drain_acks()
-
-    assert "h" not in consumer._consumer._ready
-    # Blocks must not have been freed on decode error.
-    assert consumer._consumer._remote_encodings["h"][0] == indices
-
-
-def test_drain_processes_multiple_acks_from_same_peer(consumer):
-    """Two acks arrive in the same drain cycle from the same peer (e.g. two
-    requests to the same producer completed in the same step). Both must be
-    processed; the loop must not break after the first valid ack."""
-    idx_a = consumer._region.alloc(1)
-    idx_b = consumer._region.alloc(1)
-    consumer._consumer._remote_encodings["a"] = (idx_a, ("host", 1234))
-    consumer._consumer._remote_encodings["b"] = (idx_b, ("host", 1234))
-    dealer = _dealer_returning([_ack_frames("a", ok=True), _ack_frames("b", ok=False)])
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=dealer, nixl_agent_name="agent", nixl_metadata_bytes=b"m"
-    )
-
-    consumer._consumer.drain_acks()
-
-    assert "a" in consumer._consumer._ready
-    assert "a" in consumer._consumer._remote_encodings  # blocks held for build_meta
-    assert (
-        consumer._consumer._remote_encodings.get("b") is None
-    )  # NACK: blocks freed, tombstone left
-    assert "b" not in consumer._consumer._ready
-
-
-# ── _get_or_add_peer (consumer) ───────────────────────────────────────────────
-
-
-def test_get_or_add_peer_first_contact_creates_dealer(consumer):
-    fake_dealer = MagicMock()
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.make_zmq_socket",
-        return_value=fake_dealer,
-    ):
-        peer = consumer._consumer._transport.get_or_create_peer(
-            ("host", 1234), b"new-meta"
-        )
-
-    consumer._engine._nixl.add_remote_agent.assert_called_once_with(b"new-meta")
-    assert peer.zmq_dealer is fake_dealer
-    assert peer.nixl_metadata_bytes == b"new-meta"
-    # nixl_agent_name must capture the handle returned by add_remote_agent —
-    # it is used by remove_remote_agent on metadata change and shutdown.
-    assert peer.nixl_agent_name == consumer._engine._nixl.add_remote_agent.return_value
-    assert consumer._consumer._transport._peer_pool[("host", 1234)] is peer
-
-
-def test_get_or_add_peer_returns_cached_on_metadata_match(consumer):
-    fake_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=fake_dealer,
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta-A",
-    )
-
-    peer = consumer._consumer._transport.get_or_create_peer(("host", 1234), b"meta-A")
-
-    assert peer.zmq_dealer is fake_dealer
-    consumer._engine._nixl.add_remote_agent.assert_not_called()
-
-
-def test_get_or_add_peer_metadata_change_replaces_dealer(consumer):
-    stale_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=stale_dealer,
-        nixl_agent_name="old-agent",
-        nixl_metadata_bytes=b"old-meta",
-    )
-
-    new_dealer = MagicMock()
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.make_zmq_socket",
-        return_value=new_dealer,
-    ):
-        peer = consumer._consumer._transport.get_or_create_peer(
-            ("host", 1234), b"new-meta"
-        )
-
-    consumer._engine._nixl.remove_remote_agent.assert_called_once_with("old-agent")
-    stale_dealer.close.assert_called_once_with(linger=0)
-    assert peer.zmq_dealer is new_dealer
-    assert peer.nixl_metadata_bytes == b"new-meta"
-    # New entry's agent name must reflect the fresh add_remote_agent call.
-    assert peer.nixl_agent_name == consumer._engine._nixl.add_remote_agent.return_value
-    # Pool must be updated to the new entry so subsequent calls hit the cache.
-    assert consumer._consumer._transport._peer_pool[("host", 1234)] is peer
-
-
-def test_get_or_add_peer_remove_agent_failure_still_creates_new_entry(consumer):
-    """If remove_remote_agent raises , the error is swallowed and a fresh
-    entry is created regardless.
-    Propagating the exception would leave the consumer with a dead peer and
-    no path to reconnect."""
-    stale_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=stale_dealer,
-        nixl_agent_name="old-agent",
-        nixl_metadata_bytes=b"old-meta",
-    )
-    consumer._engine._nixl.remove_remote_agent.side_effect = RuntimeError(
-        "already gone"
-    )
-
-    new_dealer = MagicMock()
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.make_zmq_socket",
-        return_value=new_dealer,
-    ):
-        peer = consumer._consumer._transport.get_or_create_peer(
-            ("host", 1234), b"new-meta"
-        )
-
-    # New entry created despite the exception.
-    assert peer.zmq_dealer is new_dealer
-    assert peer.nixl_metadata_bytes == b"new-meta"
-    assert consumer._consumer._transport._peer_pool[("host", 1234)] is peer
-
-
-# ── _alloc_and_start_xfer (consumer) ──────────────────────────────────────────
-
-
-def test_alloc_and_start_xfer_sends_correct_xfer_req(consumer):
-    fake_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=fake_dealer,
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-    )
-
-    consumer._consumer._alloc_and_start_xfer("h", _info(metadata=b"meta"), _BLOCK_SIZE)
-
-    fake_dealer.send_multipart.assert_called_once()
-    sent_frames = fake_dealer.send_multipart.call_args[0][0]
-    # Frame 0 is the empty DEALER delimiter; frame 1 is the XferReq payload.
-    assert sent_frames[0] == b""
-    req = msgspec.msgpack.decode(sent_frames[1], type=XferReq)
+    dealer.send_multipart.assert_called_once()
+    sent = dealer.send_multipart.call_args[0][0]
+    assert sent[0] == b""
+    req = msgspec.msgpack.decode(sent[1], type=XferReq)
     assert req.mm_hash == "h"
     assert req.compatibility_hash == consumer._compat_hash
-    # dst_block_indices must match what _remote_encodings recorded — the
-    # producer writes to these indices and the NACK/ACK path frees them.
-    assert req.dst_block_indices == consumer._consumer._remote_encodings["h"][0]
-    assert len(req.dst_block_indices) == 1  # _BLOCK_SIZE / block_size_bytes = 1
+    pr = consumer._consumer._remote_encodings["h"]
+    assert pr.read_handle is None  # awaiting ack
+    assert len(pr.dst_indices) == 1
 
 
-def test_alloc_and_start_xfer_send_failure_frees_blocks_and_reraises(consumer):
-    fake_dealer = MagicMock()
-    fake_dealer.send_multipart.side_effect = RuntimeError("socket dead")
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=fake_dealer,
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-    )
+def test_start_read_uses_ensure_dealer_on_first_contact(consumer):
+    new_dealer = MagicMock()
+    with patch(
+        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.make_zmq_socket",
+        return_value=new_dealer,
+    ):
+        consumer._consumer._start_read("h", _info(), _BLOCK_SIZE)
 
-    free_before = list(consumer._region._free)
+    # DEALER created but NIXL registration deferred until the ack.
+    peer = consumer._consumer._transport._peer_pool[("host", 1234)]
+    assert peer.remote_read_handle is None
+    consumer._engine._nixl.add_remote_agent.assert_not_called()
+    new_dealer.send_multipart.assert_called_once()
+
+
+def test_start_read_send_failure_frees_blocks_and_reraises(consumer):
+    dealer = MagicMock()
+    dealer.send_multipart.side_effect = RuntimeError("socket dead")
+    _put_peer(consumer, zmq_dealer=dealer)
+
+    free_before = sorted(consumer._memory_context.region._free)
     with pytest.raises(RuntimeError, match="socket dead"):
-        consumer._consumer._alloc_and_start_xfer(
-            "h", _info(metadata=b"meta"), _BLOCK_SIZE
-        )
+        consumer._consumer._start_read("h", _info(), _BLOCK_SIZE)
 
-    # Blocks were returned to the pool; nothing recorded in _remote_encodings.
-    assert sorted(consumer._region._free) == sorted(free_before)
+    assert sorted(consumer._memory_context.region._free) == free_before
     assert "h" not in consumer._consumer._remote_encodings
 
 
-# ── _consumer_fifo_alloc ──────────────────────────────────────────────────────
+# ── _handle_ack (consumer) ────────────────────────────────────────────────────
 
 
-def test_consumer_fifo_alloc_succeeds_when_pool_has_space(consumer):
-    indices = consumer._consumer._fifo_alloc(3)
-    assert len(indices) == 3
+def test_handle_ack_ok_registers_fresh_and_starts_read(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+
+    ack = XferAck(
+        mm_hash="h",
+        status=XferStatus.OK,
+        src_block_indices=[3],
+        agent_metadata=b"fresh-meta",
+        mem_descriptor=_MEM_DESC,
+    )
+    consumer._consumer._handle_ack(addr, ack)
+
+    # The lone add_remote_agent is fed the ack's fresh metadata.
+    consumer._engine._nixl.add_remote_agent.assert_called_once_with(b"fresh-meta")
+    # READ issued; handle recorded.
+    op = consumer._engine._nixl.make_prepped_xfer.call_args[0][0]
+    assert op == "READ"
+    assert consumer._consumer._remote_encodings["h"].read_handle is not None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [XferStatus.NACK_MISSING, XferStatus.NACK_INCOMPAT, XferStatus.NACK_INTERNAL],
+)
+def test_handle_ack_nack_frees_and_tombstones(consumer, status):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer._handle_ack(addr, XferAck(mm_hash="h", status=status))
+
+    assert consumer._consumer._remote_encodings["h"] is None  # tombstone
+    assert len(consumer._memory_context.region._free) == free_before + 2
+    # A NACK never registers a remote agent.
+    consumer._engine._nixl.add_remote_agent.assert_not_called()
+
+
+def test_handle_ack_ignores_unknown_hash(consumer):
+    consumer._consumer._handle_ack(
+        ("host", 1234), XferAck(mm_hash="ghost", status=XferStatus.OK)
+    )
+    consumer._engine._nixl.add_remote_agent.assert_not_called()
+
+
+def test_handle_ack_duplicate_after_read_started_is_ignored(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(
+        addr, dst_indices=indices, read_handle="existing"
+    )
+
+    consumer._consumer._handle_ack(
+        addr, XferAck(mm_hash="h", status=XferStatus.OK, agent_metadata=b"m")
+    )
+
+    consumer._engine._nixl.make_prepped_xfer.assert_not_called()
+
+
+# ── drain: poll_responses + read polling (consumer) ───────────────────────────
+
+
+def _peer_with_ack(consumer, mm_hash, status, *, addr=("host", 1234), src=None):
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings[mm_hash] = _pending(addr, dst_indices=indices)
+    dealer = _dealer_returning([_ack_frames(mm_hash, status, src_block_indices=src)])
+    _put_peer(consumer, addr, zmq_dealer=dealer)
+    return indices
+
+
+def test_drain_ok_ack_starts_read(consumer):
+    _peer_with_ack(consumer, "h", XferStatus.OK, src=[1, 2])
+    consumer._consumer.drain()
+    pr = consumer._consumer._remote_encodings["h"]
+    assert pr is not None and pr.read_handle is not None  # reading
+
+
+def test_drain_nack_frees_and_tombstones(consumer):
+    _peer_with_ack(consumer, "h", XferStatus.NACK_MISSING)
+    consumer._consumer.drain()
+    assert consumer._consumer._remote_encodings.get("h") is None
+    assert set(consumer._memory_context.region._free) == set(range(_NUM_BLOCKS))
+
+
+def test_drain_completed_read_promotes_to_ready(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(
+        addr, dst_indices=indices, read_handle="rh"
+    )
+    consumer._engine._nixl.check_xfer_state.return_value = "DONE"
+
+    consumer._consumer.drain()
+
+    assert "h" in consumer._consumer._ready
+    consumer._engine._nixl.release_xfer_handle.assert_called_once_with("rh")
+
+
+def test_drain_read_failure_frees_and_tombstones(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(
+        addr, dst_indices=indices, read_handle="rh"
+    )
+    consumer._engine._nixl.check_xfer_state.return_value = "ERR"
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.drain()
+
+    assert consumer._consumer._remote_encodings["h"] is None
+    assert len(consumer._memory_context.region._free) == free_before + 1
+
+
+def test_drain_ack_timeout_frees_and_tombstones(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    # read_handle None + deadline in the past → ack timeout.
+    pr = _pending(addr, dst_indices=indices)
+    pr.deadline = time.monotonic() - 1.0
+    consumer._consumer._remote_encodings["h"] = pr
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.drain()
+
+    assert consumer._consumer._remote_encodings["h"] is None
+    assert len(consumer._memory_context.region._free) == free_before + 1
+
+
+def test_drain_drops_malformed_payload(consumer):
+    addr = ("host", 1234)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+    _put_peer(consumer, addr, zmq_dealer=_dealer_returning([[b"", b"\xff\xff\xff"]]))
+
+    consumer._consumer.drain()
+
+    # Decode error must not advance or free the read.
+    pr = consumer._consumer._remote_encodings["h"]
+    assert pr is not None and pr.read_handle is None
+
+
+# ── in-flight read timeout → quarantine (consumer) ────────────────────────────
+
+
+def test_read_timeout_quarantines_and_tombstones(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    indices = consumer._memory_context.region.alloc(1)
+    pr = _pending(addr, dst_indices=indices, read_handle="rh")
+    pr.deadline = time.monotonic() - 1.0  # read budget exhausted
+    consumer._consumer._remote_encodings["h"] = pr
+    consumer._engine._nixl.check_xfer_state.return_value = "PROC"  # still running
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.drain()
+
+    # Tombstoned for local encode, blocks NOT freed (still quarantined).
+    assert consumer._consumer._remote_encodings["h"] is None
+    assert len(consumer._memory_context.region._free) == free_before
+    assert len(consumer._consumer._quarantine) == 1
+
+
+def test_drain_quarantine_frees_on_terminal(consumer):
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._quarantine.append(QuarantinedRead(indices, "rh"))
+    consumer._engine._nixl.check_xfer_state.return_value = "DONE"
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.drain()
+
+    assert consumer._consumer._quarantine == []
+    consumer._engine._nixl.release_xfer_handle.assert_called_once_with("rh")
+    assert len(consumer._memory_context.region._free) == free_before + 2
+
+
+def test_drain_quarantine_keeps_proc(consumer):
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._quarantine.append(QuarantinedRead(indices, "rh"))
+    consumer._engine._nixl.check_xfer_state.return_value = "PROC"
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.drain()
+
+    assert len(consumer._consumer._quarantine) == 1
+    assert len(consumer._memory_context.region._free) == free_before
+
+
+# ── register_source (consumer transport) ──────────────────────────────────────
+
+
+def test_register_source_first_contact_adds_agent(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    peer = consumer._consumer._transport.register_source(addr, b"meta", _MEM_DESC)
+    consumer._engine._nixl.add_remote_agent.assert_called_once_with(b"meta")
+    assert peer.nixl_metadata_bytes == b"meta"
+    assert peer.remote_read_handle is not None
+
+
+def test_register_source_reuses_on_metadata_match(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    consumer._consumer._transport.register_source(addr, b"meta", _MEM_DESC)
+    consumer._consumer._transport.register_source(addr, b"meta", _MEM_DESC)
+    consumer._engine._nixl.add_remote_agent.assert_called_once()
+
+
+def test_register_source_metadata_change_reregisters(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr)
+    consumer._consumer._transport.register_source(addr, b"old", _MEM_DESC)
+    consumer._consumer._transport.register_source(addr, b"new", _MEM_DESC)
+    consumer._engine._nixl.remove_remote_agent.assert_called_once()
+    peer = consumer._consumer._transport._peer_pool[addr]
+    assert peer.nixl_metadata_bytes == b"new"
+
+
+# ── consumer _fifo_alloc ──────────────────────────────────────────────────────
 
 
 def test_consumer_fifo_alloc_evicts_loaded_in_insertion_order(consumer):
-    region = consumer._region
-    cold = region.alloc(_NUM_BLOCKS // 2)
-    hot = region.alloc(_NUM_BLOCKS // 2)
-    consumer._consumer._loaded["cold"] = cold
-    consumer._consumer._loaded["hot"] = hot
+    region = consumer._memory_context.region
+    consumer._consumer._loaded["cold"] = region.alloc(_NUM_BLOCKS // 2)
+    consumer._consumer._loaded["hot"] = region.alloc(_NUM_BLOCKS // 2)
 
     indices = consumer._consumer._fifo_alloc(1)
 
     assert len(indices) == 1
-    assert "cold" not in consumer._consumer._loaded  # FIFO: oldest evicted first
+    assert "cold" not in consumer._consumer._loaded
     assert "hot" in consumer._consumer._loaded
 
 
 def test_consumer_fifo_alloc_protects_pending_reload(consumer):
-    """Bug regression: _consumer_fifo_alloc must NOT evict a _loaded entry
-    whose mm_hash is in _pending_reload — the worker is about to copy
-    those blocks this step. Without protection, build_connector_meta step
-    (c) would silently drop the request from meta.loads."""
-    region = consumer._region
-    full = region.alloc(_NUM_BLOCKS)  # exhaust the pool
-    consumer._consumer._loaded["A"] = full
+    region = consumer._memory_context.region
+    consumer._consumer._loaded["A"] = region.alloc(_NUM_BLOCKS)
     consumer._consumer._pending_reload.add("A")
-
     with pytest.raises(AllocationError):
         consumer._consumer._fifo_alloc(1)
-
-    # Both the cache entry AND the underlying block indices survive.
     assert "A" in consumer._consumer._loaded
-    assert consumer._consumer._loaded["A"] == full
-
-
-def test_consumer_fifo_alloc_evicts_unprotected_when_others_protected(consumer):
-    region = consumer._region
-    cold = region.alloc(_NUM_BLOCKS // 2)
-    hot = region.alloc(_NUM_BLOCKS // 2)
-    consumer._consumer._loaded["cold"] = cold
-    consumer._consumer._loaded["hot"] = hot
-    consumer._consumer._pending_reload.add("hot")
-
-    indices = consumer._consumer._fifo_alloc(1)
-
-    assert len(indices) == 1
-    assert "hot" in consumer._consumer._loaded  # protected, survived
-    assert "cold" not in consumer._consumer._loaded  # evicted to satisfy alloc
 
 
 # ── build_connector_meta (consumer) ───────────────────────────────────────────
 
 
 def test_consumer_build_meta_promotes_ready_to_loads_and_loaded(consumer):
-    indices = consumer._region.alloc(2)
-    consumer._consumer._remote_encodings["h"] = (indices, ("host", 1234))
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings["h"] = _pending(
+        dst_indices=indices, read_handle="rh"
+    )
     consumer._consumer._ready.add("h")
 
     meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert meta.loads["h"] == indices
-    assert consumer._consumer._loaded["h"] == indices  # cached for future re-serve
-    assert consumer._consumer._ready == set()  # drained
-    assert "h" not in consumer._consumer._remote_encodings  # popped
+    assert consumer._consumer._loaded["h"] == indices
+    assert consumer._consumer._ready == set()
+    assert "h" not in consumer._consumer._remote_encodings
 
 
 def test_consumer_build_meta_re_emits_pending_reload(consumer):
-    """Cache hit: mm_hash already in _loaded, requested again this step →
-    re-emit the same block indices in meta.loads without new transfer."""
-    indices = consumer._region.alloc(1)
+    indices = consumer._memory_context.region.alloc(1)
     consumer._consumer._loaded["h"] = indices
     consumer._consumer._pending_reload.add("h")
-    free_before = len(consumer._region._free)
+    free_before = len(consumer._memory_context.region._free)
 
     meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
-    assert meta.loads["h"] is indices  # identity: same list object from _loaded
-    assert consumer._consumer._pending_reload == set()  # cleared after build
-    assert consumer._consumer._loaded["h"] is indices  # still cached for next time
-    # No new transfer was started — the reload path serves from the mmap
-    # cache without allocating blocks or sending a XferReq.
-    assert "h" not in consumer._consumer._remote_encodings
-    assert len(consumer._region._free) == free_before  # pool untouched
+    assert meta.loads["h"] is indices
+    assert consumer._consumer._pending_reload == set()
+    assert len(consumer._memory_context.region._free) == free_before
 
 
 def test_consumer_build_meta_drops_stale_ready(consumer):
-    """A mm_hash in _ready but with no _remote_encodings entry must be
-    dropped quietly (e.g., a NACK raced with an OK ack)."""
-    consumer._consumer._ready.add("h")
-    # _remote_encodings does NOT have "h"
-
+    consumer._consumer._ready.add("h")  # no _remote_encodings entry
     meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
-
     assert "h" not in meta.loads
     assert "h" not in consumer._consumer._ready
-    assert "h" not in consumer._consumer._loaded
 
 
 # ── ensure_cache_available (consumer) ─────────────────────────────────────────
 
 
 def test_ensure_returns_true_when_no_announcements(consumer):
-    """Empty params → no consumer involvement → admit immediately."""
     req = _request_for(_feature("h"))
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
 
 
 def test_ensure_skips_already_computed_feature(consumer):
-    """A feature whose mm_position is already covered by num_computed_tokens
-    is not the consumer's concern; admit even if announced."""
     params = {"h": _info()}
     req = _request_for(_feature("h", length=1, offset=0), params=params)
-    # offset+length=1 ≤ num_computed_tokens=1 → skipped
     assert consumer.ensure_cache_available(req, num_computed_tokens=1) is True
 
 
 def test_ensure_skips_unannounced_feature(consumer):
-    """Feature has no entry in announced params → fall through to local
-    encode (admit, no transfer kicked off)."""
     params = {"other": _info()}
     req = _request_for(_feature("h"), params=params)
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
@@ -942,88 +942,59 @@ def test_ensure_skips_unannounced_feature(consumer):
 
 
 def test_ensure_falls_through_on_size_mismatch(consumer):
-    """A producer that announces the wrong size_bytes for a feature should not
-    be trusted — fall through to local encode."""
     params = {"h": _info(size_bytes=_BLOCK_SIZE * 99)}
     req = _request_for(_feature("h", length=1), params=params)
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
     assert "h" not in consumer._consumer._remote_encodings
 
 
-def test_ensure_defers_when_already_in_remote_encodings(consumer):
-    """Transfer already in flight from a previous step → defer this step."""
-    consumer._consumer._remote_encodings["h"] = ([0], ("host", 1234))
-    params = {"h": _info()}
-    req = _request_for(_feature("h"), params=params)
+def test_ensure_defers_when_already_in_flight(consumer):
+    consumer._consumer._remote_encodings["h"] = _pending(dst_indices=[0])
+    req = _request_for(_feature("h"), params={"h": _info()})
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is False
 
 
-def test_ensure_admits_when_already_loaded_and_marks_pending_reload(consumer):
-    """Cache hit on _loaded → admit AND mark for re-serve in build_meta."""
-    consumer._consumer._loaded["h"] = [0]
-    params = {"h": _info()}
-    req = _request_for(_feature("h"), params=params)
+def test_ensure_consumes_nack_tombstone(consumer):
+    consumer._consumer._remote_encodings["h"] = None  # tombstone
+    req = _request_for(_feature("h"), params={"h": _info()})
+    assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
+    assert "h" not in consumer._consumer._remote_encodings  # consumed
 
+
+def test_ensure_admits_when_already_loaded_and_marks_pending_reload(consumer):
+    consumer._consumer._loaded["h"] = [0]
+    req = _request_for(_feature("h"), params={"h": _info()})
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
     assert "h" in consumer._consumer._pending_reload
 
 
-def test_ensure_admits_when_just_arrived(consumer):
-    """mm_hash in _ready (arrived but not yet handed to worker): _loaded
-    miss but has_cache_item True → no _pending_reload, no defer."""
-    consumer._consumer._remote_encodings["h"] = ([0], ("host", 1234))
-    consumer._consumer._ready.add("h")
-    params = {"h": _info()}
-    req = _request_for(_feature("h"), params=params)
-
-    assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
-    assert "h" not in consumer._consumer._pending_reload  # not yet in _loaded
-
-
-def test_ensure_starts_xfer_for_uncached_announced_feature(consumer):
-    fake_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=fake_dealer,
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-    )
-    params = {"h": _info(metadata=b"meta")}
-    req = _request_for(_feature("h"), params=params)
+def test_ensure_starts_read_for_uncached_announced_feature(consumer):
+    dealer = MagicMock()
+    _put_peer(consumer, zmq_dealer=dealer)
+    req = _request_for(_feature("h"), params={"h": _info()})
 
     result = consumer.ensure_cache_available(req, num_computed_tokens=0)
 
-    assert result is False  # pending — kicked off a transfer
+    assert result is False  # deferred — kicked off a read
     assert "h" in consumer._consumer._remote_encodings
-    fake_dealer.send_multipart.assert_called_once()
+    dealer.send_multipart.assert_called_once()
 
 
 def test_ensure_alloc_failure_falls_through_to_local_encode(consumer, caplog_vllm):
-    """If allocation fails (region exhausted by protected entries), log and
-    fall through; do not propagate AllocationError."""
-    consumer._consumer._loaded["protected"] = consumer._region.alloc(_NUM_BLOCKS)
-    consumer._consumer._pending_reload.add("protected")
-
-    fake_dealer = MagicMock()
-    consumer._consumer._transport._peer_pool[("host", 1234)] = ConsumerPeer(
-        zmq_dealer=fake_dealer,
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
+    consumer._consumer._loaded["protected"] = consumer._memory_context.region.alloc(
+        _NUM_BLOCKS
     )
-    params = {"new": _info(metadata=b"meta")}
-    req = _request_for(_feature("new"), params=params)
+    consumer._consumer._pending_reload.add("protected")
+    _put_peer(consumer)
+    req = _request_for(_feature("new"), params={"new": _info()})
 
-    # Must NOT raise — falls through to local encode for "new".
     with caplog_vllm.at_level(logging.ERROR):
         result = consumer.ensure_cache_available(req, num_computed_tokens=0)
 
-    # Operator-visible diagnostic must have fired.
     assert any(
         "new" in r.message for r in caplog_vllm.records if r.levelno == logging.ERROR
     )
-    # "new" was not transferred; "protected" still safe.
     assert "new" not in consumer._consumer._remote_encodings
-    assert "protected" in consumer._consumer._loaded
-    # The "new" feature fell through; pending stays False for that one.
     assert result is True
 
 
@@ -1041,10 +1012,128 @@ def test_has_cache_item_true_for_ready(consumer):
 
 
 def test_has_cache_item_false_for_in_flight(consumer):
-    """A request mid-transfer is NOT yet a cache hit — the consumer still
-    needs to wait on the ack before serving."""
-    consumer._consumer._remote_encodings["h"] = ([0], ("host", 1234))
+    consumer._consumer._remote_encodings["h"] = _pending(dst_indices=[0])
     assert consumer.has_cache_item("h") is False
+
+
+# ── on_peer_down (consumer) ───────────────────────────────────────────────────
+
+
+def test_on_peer_down_awaiting_ack_frees_and_retries(consumer):
+    addr = ("host", 1234)
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+    _put_peer(consumer, addr, nixl_agent_name="agent")
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.on_peer_down(addr)
+
+    # Forgotten (not tombstoned) so the next ensure retries; blocks freed.
+    assert "h" not in consumer._consumer._remote_encodings
+    assert len(consumer._memory_context.region._free) == free_before + 2
+    assert addr not in consumer._consumer._transport._peer_pool
+
+
+def test_on_peer_down_in_flight_quarantines_and_retries(consumer):
+    addr = ("host", 1234)
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["h"] = _pending(
+        addr, dst_indices=indices, read_handle="rh"
+    )
+    _put_peer(consumer, addr, nixl_agent_name="agent")
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.on_peer_down(addr)
+
+    assert "h" not in consumer._consumer._remote_encodings  # forgotten → retry
+    assert (
+        len(consumer._memory_context.region._free) == free_before
+    )  # NOT freed (quarantined)
+    assert len(consumer._consumer._quarantine) == 1
+
+
+def test_on_peer_down_preserves_ready_entries(consumer):
+    addr = ("host", 1234)
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+    consumer._consumer._ready.add("h")
+    _put_peer(consumer, addr, nixl_agent_name="agent")
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer.on_peer_down(addr)
+
+    assert len(consumer._memory_context.region._free) == free_before  # not freed
+    assert "h" in consumer._consumer._remote_encodings  # left for promotion
+
+
+def test_on_peer_down_ignores_other_peer_entries(consumer):
+    dead, alive = ("dead", 1), ("alive", 2)
+    di = consumer._memory_context.region.alloc(1)
+    ai = consumer._memory_context.region.alloc(1)
+    consumer._consumer._remote_encodings["d"] = _pending(dead, dst_indices=di)
+    consumer._consumer._remote_encodings["a"] = _pending(alive, dst_indices=ai)
+    _put_peer(consumer, dead, nixl_agent_name="agent-dead")
+
+    consumer._consumer.on_peer_down(dead)
+
+    assert "d" not in consumer._consumer._remote_encodings
+    assert consumer._consumer._remote_encodings["a"].addr == alive
+
+
+def test_on_peer_down_removes_remote_agent(consumer):
+    addr = ("host", 1234)
+    _put_peer(consumer, addr, nixl_agent_name="agent-77")
+    consumer._consumer.on_peer_down(addr)
+    consumer._engine._nixl.remove_remote_agent.assert_called_once_with("agent-77")
+    assert addr not in consumer._consumer._transport._peer_pool
+
+
+def test_on_peer_down_tolerates_unknown_addr(consumer):
+    consumer._consumer.on_peer_down(("ghost", 9999))  # must not raise
+
+
+# ── poll_dead_peers wiring (consumer) ─────────────────────────────────────────
+
+
+def test_drain_triggers_on_peer_down_on_disconnect_event(consumer):
+    addr = ("host", 1234)
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._remote_encodings["h"] = _pending(addr, dst_indices=indices)
+    _put_peer(consumer, addr, nixl_agent_name="agent", zmq_monitor=MagicMock())
+    free_before = len(consumer._memory_context.region._free)
+
+    with patch(
+        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.recv_monitor_message",
+        return_value={"event": zmq.EVENT_DISCONNECTED},
+    ):
+        consumer._consumer.drain()
+
+    assert "h" not in consumer._consumer._remote_encodings  # forgotten → retry
+    assert len(consumer._memory_context.region._free) == free_before + 2
+    assert addr not in consumer._consumer._transport._peer_pool
+
+
+def test_poll_dead_peers_skips_monitor_none(consumer):
+    _put_peer(consumer, ("host", 1234), nixl_agent_name="agent")  # zmq_monitor None
+    assert consumer._consumer._transport.poll_dead_peers() == []
+
+
+# ── regression: stale metadata can never reach add_remote_agent ───────────────
+
+
+def test_dead_peer_never_calls_add_remote_agent(consumer):
+    """A request to a dead producer must fall back to local encode without
+    ever feeding metadata to add_remote_agent (the original crash path)."""
+    _put_peer(consumer)  # silent dealer — no XferAck ever arrives
+    req = _request_for(_feature("h"), params={"h": _info()})
+
+    # Kick off the read, then drain repeatedly past the ack timeout.
+    assert consumer.ensure_cache_available(req, num_computed_tokens=0) is False
+    consumer._consumer._remote_encodings["h"].deadline = time.monotonic() - 1.0
+    consumer._consumer.drain()
+
+    assert consumer._consumer._remote_encodings.get("h") is None  # tombstone
+    consumer._engine._nixl.add_remote_agent.assert_not_called()
 
 
 # ── shutdown ──────────────────────────────────────────────────────────────────
@@ -1056,70 +1145,16 @@ def test_shutdown_producer_stops_router_thread(producer):
     assert not producer._producer_transport._router_t.is_alive()
 
 
-def test_shutdown_producer_releases_in_flight_handles(producer):
-    handle = object()
-    producer._producer._in_flight["xid"] = (b"peer", "h", handle)
-
+def test_shutdown_producer_releases_pins(producer):
+    indices = _grant(producer, "h", n=1)
     producer.shutdown()
-
-    producer._engine._nixl.release_xfer_handle.assert_called_once_with(handle)
-    assert producer._producer._in_flight == {}
-
-
-def test_shutdown_producer_releases_remaining_handles_if_one_raises(producer):
-    """suppress(Exception) is per-item — first failure must not skip later handles."""
-    h1, h2 = object(), object()
-    producer._producer._in_flight["xid1"] = (b"peer", "a", h1)
-    producer._producer._in_flight["xid2"] = (b"peer", "b", h2)
-    producer._engine._nixl.release_xfer_handle.side_effect = [
-        RuntimeError("gone"),
-        None,
-    ]
-
-    producer.shutdown()
-
-    assert producer._engine._nixl.release_xfer_handle.call_count == 2
-    assert producer._producer._in_flight == {}
-
-
-def test_shutdown_producer_removes_remote_agents(producer):
-    producer._producer._remote_peers["c"] = ProducerPeer(
-        nixl_agent_name="remote-1", nixl_metadata_bytes=b"m", nixl_xfer_handle=1
-    )
-
-    producer.shutdown()
-
-    producer._engine._nixl.remove_remote_agent.assert_called_once_with("remote-1")
-    assert producer._producer._remote_peers == {}
-
-
-def test_shutdown_producer_removes_remaining_agents_if_one_raises(producer):
-    """try/except is per-item — first failure must not skip later agents."""
-    producer._producer._remote_peers["a"] = ProducerPeer(
-        nixl_agent_name="agent-1", nixl_metadata_bytes=b"m", nixl_xfer_handle=1
-    )
-    producer._producer._remote_peers["b"] = ProducerPeer(
-        nixl_agent_name="agent-2", nixl_metadata_bytes=b"m", nixl_xfer_handle=2
-    )
-    producer._engine._nixl.remove_remote_agent.side_effect = [
-        RuntimeError("gone"),
-        None,
-    ]
-
-    producer.shutdown()
-
-    assert producer._engine._nixl.remove_remote_agent.call_count == 2
-    assert producer._producer._remote_peers == {}
+    assert all(idx not in producer._memory_context.region._ref_count for idx in indices)
+    assert producer._producer._pinned_encodings == {}
 
 
 def test_shutdown_consumer_closes_all_dealers(consumer):
-    d1, d2 = MagicMock(), MagicMock()
-    consumer._consumer._transport._peer_pool[("h1", 1)] = ConsumerPeer(
-        zmq_dealer=d1, nixl_agent_name="a", nixl_metadata_bytes=b""
-    )
-    consumer._consumer._transport._peer_pool[("h2", 2)] = ConsumerPeer(
-        zmq_dealer=d2, nixl_agent_name="b", nixl_metadata_bytes=b""
-    )
+    d1 = _put_peer(consumer, ("h1", 1), nixl_agent_name="a").zmq_dealer
+    d2 = _put_peer(consumer, ("h2", 2), nixl_agent_name="b").zmq_dealer
 
     consumer.shutdown()
 
@@ -1128,213 +1163,15 @@ def test_shutdown_consumer_closes_all_dealers(consumer):
     assert consumer._consumer._transport._peer_pool == {}
 
 
-def test_shutdown_consumer_closes_remaining_dealers_if_one_raises(consumer):
-    """try/except is per-item — first failure must not skip later dealers."""
-    d1, d2 = MagicMock(), MagicMock()
-    d1.close.side_effect = RuntimeError("already closed")
-    consumer._consumer._transport._peer_pool[("h1", 1)] = ConsumerPeer(
-        zmq_dealer=d1, nixl_agent_name="a", nixl_metadata_bytes=b""
-    )
-    consumer._consumer._transport._peer_pool[("h2", 2)] = ConsumerPeer(
-        zmq_dealer=d2, nixl_agent_name="b", nixl_metadata_bytes=b""
-    )
-
+def test_shutdown_consumer_releases_quarantine(consumer):
+    indices = consumer._memory_context.region.alloc(1)
+    consumer._consumer._quarantine.append(QuarantinedRead(indices, "rh"))
     consumer.shutdown()
-
-    d2.close.assert_called_once_with(linger=0)
-    assert consumer._consumer._transport._peer_pool == {}
+    consumer._engine._nixl.release_xfer_handle.assert_any_call("rh")
+    assert consumer._consumer._quarantine == []
 
 
 def test_shutdown_calls_nixl_deregister_and_region_cleanup(consumer):
     consumer.shutdown()
     consumer._engine._nixl.deregister_memory.assert_called_once()
-    assert consumer._region._base is None
-
-
-# ── on_peer_down (consumer) ───────────────────────────────────────────────────
-
-
-def test_on_peer_down_tombstones_inflight_and_frees_blocks(consumer):
-    """Entries in-flight for the dead peer get tombstoned and their blocks freed."""
-    addr = ("host", 1234)
-    indices = consumer._region.alloc(2)
-    consumer._consumer._remote_encodings["h"] = (indices, addr)
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(), nixl_agent_name="agent", nixl_metadata_bytes=b"m"
-    )
-    free_before = len(consumer._region._free)
-
-    consumer._consumer.on_peer_down(addr)
-
-    assert consumer._consumer._remote_encodings["h"] is None
-    assert len(consumer._region._free) == free_before + 2
-    assert addr not in consumer._consumer._transport._peer_pool
-
-
-def test_on_peer_down_preserves_ready_entries(consumer):
-    """Entries already in _ready are NOT freed — the transfer completed."""
-    addr = ("host", 1234)
-    indices = consumer._region.alloc(2)
-    consumer._consumer._remote_encodings["h"] = (indices, addr)
-    consumer._consumer._ready.add("h")
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(), nixl_agent_name="agent", nixl_metadata_bytes=b"m"
-    )
-    free_before = len(consumer._region._free)
-
-    consumer._consumer.on_peer_down(addr)
-
-    assert len(consumer._region._free) == free_before  # blocks not freed
-    assert consumer._consumer._remote_encodings["h"] == (indices, addr)  # entry intact
-
-
-def test_on_peer_down_ignores_other_peer_entries(consumer):
-    """Entries belonging to a different peer are untouched."""
-    dead_addr = ("dead", 1)
-    alive_addr = ("alive", 2)
-    dead_indices = consumer._region.alloc(1)
-    alive_indices = consumer._region.alloc(1)
-    consumer._consumer._remote_encodings["h_dead"] = (dead_indices, dead_addr)
-    consumer._consumer._remote_encodings["h_alive"] = (alive_indices, alive_addr)
-    consumer._consumer._transport._peer_pool[dead_addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(), nixl_agent_name="agent-dead", nixl_metadata_bytes=b"m"
-    )
-
-    consumer._consumer.on_peer_down(dead_addr)
-
-    assert consumer._consumer._remote_encodings["h_dead"] is None
-    assert consumer._consumer._remote_encodings["h_alive"] == (
-        alive_indices,
-        alive_addr,
-    )
-
-
-def test_on_peer_down_calls_remove_remote_agent(consumer):
-    """The evicted peer's NIXL agent is removed."""
-    addr = ("host", 1234)
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(), nixl_agent_name="agent-77", nixl_metadata_bytes=b"m"
-    )
-
-    consumer._consumer.on_peer_down(addr)
-
-    consumer._engine._nixl.remove_remote_agent.assert_called_once_with("agent-77")
-    assert addr not in consumer._consumer._transport._peer_pool
-
-
-def test_on_peer_down_tolerates_unknown_addr(consumer):
-    """on_peer_down with an addr not in the pool must not raise."""
-    consumer._consumer.on_peer_down(("ghost", 9999))
-
-
-# ── poll_dead_peers (consumer) ────────────────────────────────────────────────
-
-
-def test_drain_acks_triggers_on_peer_down_on_disconnect_event(consumer):
-    """When a DEALER monitor fires EVENT_DISCONNECTED, drain_acks calls on_peer_down."""
-    addr = ("host", 1234)
-    indices = consumer._region.alloc(2)
-    consumer._consumer._remote_encodings["h"] = (indices, addr)
-    free_before = len(consumer._region._free)
-
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(),
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-        zmq_monitor=MagicMock(),
-    )
-
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.recv_monitor_message",
-        return_value={"event": zmq.EVENT_DISCONNECTED},
-    ):
-        consumer._consumer.drain_acks()
-
-    assert consumer._consumer._remote_encodings["h"] is None
-    assert len(consumer._region._free) == free_before + 2
-    assert addr not in consumer._consumer._transport._peer_pool
-
-
-def test_drain_acks_no_on_peer_down_when_monitor_empty(consumer):
-    """When the monitor has no events (zmq.Again), on_peer_down is not called."""
-    addr = ("host", 1234)
-    indices = consumer._region.alloc(1)
-    consumer._consumer._remote_encodings["h"] = (indices, addr)
-
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=_dealer_returning([]),
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-        zmq_monitor=MagicMock(),
-    )
-
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.recv_monitor_message",
-        side_effect=zmq.Again,
-    ):
-        consumer._consumer.drain_acks()
-
-    assert consumer._consumer._remote_encodings["h"] == (indices, addr)  # untouched
-    assert addr in consumer._consumer._transport._peer_pool
-
-
-def test_poll_dead_peers_returns_empty_for_monitor_none(consumer):
-    """Peers without a monitor socket (zmq_monitor=None) are skipped."""
-    addr = ("host", 1234)
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(),
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-        # zmq_monitor defaults to None
-    )
-
-    dead = consumer._consumer._transport.poll_dead_peers()
-
-    assert dead == []
-
-
-# ── metadata pre-check in _alloc_and_start_xfer (consumer) ───────────────────
-
-
-def test_alloc_xfer_metadata_mismatch_evicts_stale_peer(consumer):
-    """Stale peer is evicted via on_peer_down before the new peer is created."""
-    addr = ("host", 1234)
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(),
-        nixl_agent_name="old-agent",
-        nixl_metadata_bytes=b"old-meta",
-    )
-    stale_indices = consumer._region.alloc(1)
-    consumer._consumer._remote_encodings["stale-h"] = (stale_indices, addr)
-
-    new_dealer = MagicMock()
-    with patch(
-        "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.make_zmq_socket",
-        return_value=new_dealer,
-    ):
-        consumer._consumer._alloc_and_start_xfer(
-            "h", _info(metadata=b"new-meta"), _BLOCK_SIZE
-        )
-
-    assert consumer._consumer._remote_encodings["stale-h"] is None
-    consumer._engine._nixl.remove_remote_agent.assert_any_call("old-agent")
-    assert "h" in consumer._consumer._remote_encodings
-    assert (
-        consumer._consumer._transport._peer_pool[addr].nixl_metadata_bytes
-        == b"new-meta"
-    )
-
-
-def test_alloc_xfer_no_eviction_when_metadata_matches(consumer):
-    """When existing peer metadata matches, no eviction occurs."""
-    addr = ("host", 1234)
-    consumer._consumer._transport._peer_pool[addr] = ConsumerPeer(
-        zmq_dealer=MagicMock(),
-        nixl_agent_name="agent",
-        nixl_metadata_bytes=b"meta",
-    )
-
-    consumer._consumer._alloc_and_start_xfer("h", _info(metadata=b"meta"), _BLOCK_SIZE)
-
-    consumer._engine._nixl.remove_remote_agent.assert_not_called()
-    assert "h" in consumer._consumer._remote_encodings
+    assert consumer._memory_context.region._base is None

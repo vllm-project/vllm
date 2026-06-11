@@ -5,7 +5,9 @@
 from typing import Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    build_block_descs,
     deserialize_mem_descriptor,
+    serialize_mem_descriptor,
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.logger import init_logger
@@ -28,7 +30,15 @@ class NixlEngine:
     (or give each role its own agent); today nothing enforces it.
     """
 
-    def __init__(self, agent_name: str, num_threads: int = 1) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        base_ptr: int,
+        num_blocks: int,
+        block_size_bytes: int,
+        total_size_bytes: int,
+        num_threads: int = 1,
+    ) -> None:
         if NixlWrapper is None or nixl_agent_config is None:
             raise RuntimeError(
                 "ECCPUConnector requires NIXL; "
@@ -38,32 +48,24 @@ class NixlEngine:
             agent_name,
             nixl_agent_config(num_threads=num_threads, capture_telemetry=True),
         )
-        self._reg_descs: Any = None
-
-    def register_region(
-        self,
-        block_descs: list,
-        base_ptr: int,
-        total_size_bytes: int,
-    ) -> int:
-        """Register mmap region; return local_xfer_handle."""
+        block_descs = build_block_descs(base_ptr, num_blocks, block_size_bytes)
         reg_descs = self._nixl.get_reg_descs(
             [(base_ptr, total_size_bytes, 0, "")], _NIXL_DRAM
         )
         self._nixl.register_memory(reg_descs, backends=["UCX"])
         self._reg_descs = reg_descs
         xfer_descs = self._nixl.get_xfer_descs(block_descs, _NIXL_DRAM)
-        local_xfer_handle = self._nixl.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_descs)
-        return local_xfer_handle
+        self._local_xfer_handle = self._nixl.prep_xfer_dlist(
+            "NIXL_INIT_AGENT", xfer_descs
+        )
+        self._agent_metadata = self._nixl.get_agent_metadata()
+        self._mem_descriptor_bytes = serialize_mem_descriptor(block_descs)
 
     def deregister_memory(self) -> None:
         try:
             self._nixl.deregister_memory(self._reg_descs)
         except Exception:
             logger.warning("EC: deregister_memory failed", exc_info=True)
-
-    def get_agent_metadata(self) -> bytes:
-        return self._nixl.get_agent_metadata()
 
     def add_remote_source(
         self, metadata: bytes, mem_descriptor: bytes
@@ -92,7 +94,6 @@ class NixlEngine:
 
     def post_read(
         self,
-        local_xfer_handle: int,
         local_indices: list[int],
         remote_read_handle: int,
         remote_indices: list[int],
@@ -111,7 +112,7 @@ class NixlEngine:
             )
         handle = self._nixl.make_prepped_xfer(
             "READ",
-            local_xfer_handle,
+            self._local_xfer_handle,
             local_indices,
             remote_read_handle,
             remote_indices,

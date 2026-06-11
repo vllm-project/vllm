@@ -102,9 +102,7 @@ class ECSharedRegion:
         self._base: torch.Tensor | None = torch.frombuffer(
             memoryview(self.mmap_obj), dtype=torch.int8
         )
-        # Tracks whether `pin_memory()` succeeded; controls whether
-        # `cleanup()` needs to call cudaHostUnregister.
-        self._cuda_host_registered: bool = False
+        self.is_pinned: bool = False
 
         self.blocks: torch.Tensor = self._base.view(num_blocks, block_size_bytes)
 
@@ -198,10 +196,12 @@ class ECSharedRegion:
     def pin_memory(self) -> None:
         """Register the entire mmap as CUDA pinned memory for fast DMA.
 
-        Lifecycle method, called once at startup before any concurrent
-        access. Not under the lock.
+        Lifecycle method, called once per process at startup before any
+        concurrent access. Not under the lock. Each TP worker process owns
+        its own virtual address for the same shared physical pages, so every
+        process must register independently.
         """
-        if self._base is None:
+        if self._base is None or self.is_pinned:
             return
         result = torch.cuda.cudart().cudaHostRegister(
             self.base_ptr, self.total_size_bytes, 0
@@ -214,15 +214,15 @@ class ECSharedRegion:
             )
         else:
             logger.debug("cudaHostRegister %.2f MB", self.total_size_bytes / 1e6)
-            self._cuda_host_registered = True
+            self.is_pinned = True
 
     def cleanup(self) -> None:
         """Tear down the region. Lifecycle method; no concurrent access."""
-        if self._cuda_host_registered and self._base is not None:
+        if self.is_pinned and self._base is not None:
             result = torch.cuda.cudart().cudaHostUnregister(self.base_ptr)
             if result.value != 0:
                 logger.warning("cudaHostUnregister failed (code=%d)", result)
-            self._cuda_host_registered = False
+            self.is_pinned = False
         self.blocks = None  # type: ignore[assignment]
         self._base = None
         if self.mmap_obj:

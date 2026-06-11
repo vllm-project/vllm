@@ -1,26 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Wire types and connector metadata for the ECCPUConnector.
+"""Scheduler-side wire types for the ECCPUConnector.
 
-Three distinct kinds of payload live here:
-
-1. Peer-to-peer wire types exchanged between consumer and producer over
-   ZMQ (`XferReq`, `XferAck`) — msgspec Structs with explicit tags.
-2. A scheduler → worker per-step payload (`ECCPUConnectorMetadata`) that
-   lists which mm_hashes the worker should save (GPU → mmap) or load
-   (mmap → GPU) this step.
-3. A peer-compatibility fingerprint (`compute_ec_compatibility_hash`) sent
-   on every `XferReq` so a producer refuses to serve a mismatched peer.
+Two peer-to-peer message types exchanged between consumer and producer over
+ZMQ (`XferReq`, `XferAck`) — msgspec Structs with explicit tags — plus a
+peer-compatibility fingerprint (`compute_ec_compatibility_hash`) sent on
+every `XferReq` so a producer refuses to serve a mismatched peer.
 """
 
 import enum
 import hashlib
 import json
-from dataclasses import dataclass, field
 
 import msgspec
-
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 
 # Bump when the on-wire shape (XferReq/XferAck) changes in a
 # backward-incompatible way. Peers reject mismatched versions.
@@ -86,25 +78,6 @@ class XferAck(  # type: ignore[call-arg]
     src_block_indices: list[int] = []
     agent_metadata: bytes = b""
     mem_descriptor: bytes = b""
-
-
-@dataclass
-class ECCPUConnectorMetadata(ECConnectorMetadata):
-    """Per-step scheduler → worker payload for the ECCPUConnector.
-
-    Populated by `ECCPUScheduler.build_connector_meta`; consumed by
-    `ECCPUWorker` via the mixin's `bind_connector_metadata`.
-    """
-
-    # Producer role: mm_hashes the scheduler has just allocated CPU
-    # blocks for this step; the worker's save_caches copies
-    # encoder_cache[mm_hash] → mmap at these indices.
-    saves: dict[str, list[int]] = field(default_factory=dict)
-
-    # Consumer role: mm_hashes whose bytes have already landed in the
-    # local mmap (the consumer-initiated NIXL READ completed); the worker's
-    # start_load_caches copies mmap[block_indices] → GPU encoder_cache.
-    loads: dict[str, list[int]] = field(default_factory=dict)
 
 
 def compute_ec_compatibility_hash(

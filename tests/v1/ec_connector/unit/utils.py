@@ -8,13 +8,12 @@ Used by test_scheduler.py and test_scheduler_stress.py.
 import uuid
 from unittest.mock import MagicMock, Mock
 
-import pybase64
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.model import ModelConfig
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import ECRegionLayout
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import ECSharedRegion
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
@@ -29,14 +28,14 @@ _ELEMENT_SIZE = 2
 # ── layout ────────────────────────────────────────────────────────────────────
 
 
-def _make_layout() -> ECRegionLayout:
-    """Fresh ECRegionLayout backed by a real per-test mmap file."""
+def _make_layout() -> ECRegionContext:
+    """Fresh ECRegionContext backed by a real per-test mmap file."""
     region = ECSharedRegion(
         instance_id=str(uuid.uuid4()),
         num_blocks=_NUM_BLOCKS,
         block_size_bytes=_BLOCK_SIZE,
     )
-    return ECRegionLayout(
+    return ECRegionContext(
         region=region,
         dtype=torch.float16,
         hidden_dim=_HIDDEN_DIM,
@@ -58,6 +57,9 @@ def _make_nixl_mock() -> MagicMock:
     nixl.prep_xfer_dlist.return_value = 42
     nixl.check_xfer_state.return_value = "PROC"
     nixl.add_remote_agent.return_value = "remote-agent-1"
+    # Producer poll loop drains notifications each tick; default to none so
+    # `.values()` iteration is well-defined.
+    nixl.get_new_notifs.return_value = {}
     return nixl
 
 
@@ -100,12 +102,14 @@ def _info(
     peer_host: str = "host",
     peer_port: int = 1234,
     size_bytes: int = _BLOCK_SIZE,
-    metadata: bytes = b"meta",
 ) -> dict:
-    """Build the announcement-info dict the consumer expects from the producer."""
+    """Build the announcement-info dict the consumer expects from the producer.
+
+    Carries only the side-channel address and size; the producer's NIXL agent
+    metadata is fetched fresh on the XferAck, never announced here.
+    """
     return {
         "peer_host": peer_host,
         "peer_port": peer_port,
         "size_bytes": size_bytes,
-        "nixl_agent_metadata_b64": pybase64.b64encode(metadata).decode("ascii"),
     }

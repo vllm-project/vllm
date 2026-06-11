@@ -10,11 +10,13 @@ import msgspec
 import pytest
 import torch
 
+from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
+    setup_ec_region,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     build_block_descs,
     deserialize_mem_descriptor,
     serialize_mem_descriptor,
-    setup_ec_region,
 )
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     ECSharedRegion,
@@ -77,6 +79,9 @@ def _make_vllm_config(
     """Build a mock `VllmConfig` shaped enough for `setup_ec_region`."""
     cfg = MagicMock()
     cfg.model_config.dtype = dtype
+    # No vision config → _get_encoder_cache_hidden_dim falls back to
+    # get_inputs_embeds_size() rather than the deepstack branch.
+    cfg.model_config.hf_config = None
     cfg.model_config.get_inputs_embeds_size.return_value = hidden_dim
 
     if ec_transfer_config_present:

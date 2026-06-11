@@ -242,7 +242,7 @@ def test_wait_for_file_size_times_out_when_file_stays_empty(tmp_path):
 
 
 def test_pin_memory_success_sets_flag(region):
-    """When cudaHostRegister returns 0, _cuda_host_registered flips to True
+    """When cudaHostRegister returns 0, is_pinned flips to True
     and cleanup will correspondingly call cudaHostUnregister."""
     fake_cudart = MagicMock()
     success = MagicMock()
@@ -252,7 +252,7 @@ def test_pin_memory_success_sets_flag(region):
 
     with patch("torch.cuda.cudart", return_value=fake_cudart):
         region.pin_memory()
-        assert region._cuda_host_registered is True
+        assert region.is_pinned is True
         # cleanup must pair with cudaHostUnregister exactly once.
         region.cleanup()
         fake_cudart.cudaHostUnregister.assert_called_once()
@@ -270,7 +270,7 @@ def test_pin_memory_failure_leaves_flag_false():
 
         with patch("torch.cuda.cudart", return_value=fake_cudart):
             r.pin_memory()
-            assert r._cuda_host_registered is False
+            assert r.is_pinned is False
             # Now run cleanup with a fresh cudart spy and verify
             # cudaHostUnregister was NOT called.
             unregister_spy = MagicMock()
