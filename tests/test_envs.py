@@ -36,6 +36,25 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_deepseek_v4_sparse_mla_stats_path_env(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH", raising=False)
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    assert envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH is None
+
+    monkeypatch.setenv(
+        "VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH",
+        "/tmp/sparse_mla_stats",
+    )
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    assert envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH == "/tmp/sparse_mla_stats"
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
