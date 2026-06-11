@@ -266,6 +266,15 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    # Per-layer NaN counts from KV cache FP8 conversion. {layer_name: count}
+    kv_cache_nans_per_layer: dict[str, int] | None = None
+
+    # time.time() when the NaN counts were collected.
+    kv_cache_nan_timestamp: float = 0.0
+
+    # Layer name with the lowest index that had NaNs.
+    kv_cache_nan_first_layer: str | None = None
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 

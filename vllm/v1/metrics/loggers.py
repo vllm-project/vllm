@@ -539,6 +539,35 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 counter_corrupted_requests, per_engine_labelvalues
             )
 
+        self._debug_mla_cache = vllm_config.observability_config.debug_mla_cache
+        if self._debug_mla_cache:
+            kv_nan_labels = labelnames + ["layer", "phase"]
+            self.counter_kv_cache_nans = self._counter_cls(
+                name="vllm:kv_cache_nans",
+                documentation="NaN values detected in MLA KV cache FP8 conversion.",
+                labelnames=kv_nan_labels,
+            )
+            self._kv_nan_origin_published: dict[int, bool] = {
+                idx: False for idx in engine_indexes
+            }
+            self._kv_nan_first_seen_keys: set[tuple[int, str, str]] = set()
+            self.gauge_kv_nan_origin = self._gauge_cls(
+                name="vllm:kv_cache_nan_origin",
+                documentation=(
+                    "Set to 1 for the first (layer, phase) that introduced NaNs."
+                ),
+                labelnames=kv_nan_labels,
+                multiprocess_mode="mostrecent",
+            )
+            self.gauge_kv_nan_first_seen = self._gauge_cls(
+                name="vllm:kv_cache_nan_first_seen_timestamp",
+                documentation=(
+                    "Wall-clock time when NaN was first detected (seconds since epoch)."
+                ),
+                labelnames=kv_nan_labels,
+                multiprocess_mode="mostrecent",
+            )
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -1146,6 +1175,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )
+        if self._debug_mla_cache:
+            lv = self.per_engine_labelvalues[engine_idx]
+            for (layer, phase), count in iteration_stats.kv_cache_nans.items():
+                self.counter_kv_cache_nans.labels(*lv, layer, phase).inc(count)
+            for (layer, phase), ts in iteration_stats.kv_cache_nan_first_seen.items():
+                key = (engine_idx, layer, phase)
+                if key not in self._kv_nan_first_seen_keys:
+                    self._kv_nan_first_seen_keys.add(key)
+                    self.gauge_kv_nan_first_seen.labels(*lv, layer, phase).set(ts)
+            if (
+                not self._kv_nan_origin_published[engine_idx]
+                and iteration_stats.kv_cache_nan_origin is not None
+            ):
+                layer, phase = iteration_stats.kv_cache_nan_origin
+                self.gauge_kv_nan_origin.labels(*lv, layer, phase).set(1)
+                self._kv_nan_origin_published[engine_idx] = True
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )

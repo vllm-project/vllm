@@ -4562,6 +4562,15 @@ class GPUModelRunner(
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
+        if self.observability_config.debug_mla_cache:
+            kv_nans = self._collect_kv_cache_nans()
+            kv_nan_ts = time.time()
+            kv_nan_first = next(iter(kv_nans)) if kv_nans else None
+        else:
+            kv_nans = {}
+            kv_nan_ts = 0.0
+            kv_nan_first = None
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4574,6 +4583,9 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                kv_cache_nans_per_layer=kv_nans or None,
+                kv_cache_nan_timestamp=kv_nan_ts,
+                kv_cache_nan_first_layer=kv_nan_first,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5494,6 +5506,15 @@ class GPUModelRunner(
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def _collect_kv_cache_nans(self) -> dict[str, int]:
+        """Read and reset per-layer NaN counts from MLA attention layers."""
+        if not self._kv_nan_counters:
+            return {}
+        counts = torch.cat(list(self._kv_nan_counters.values())).tolist()
+        for t in self._kv_nan_counters.values():
+            t.zero_()
+        return {n: c for n, c in zip(self._kv_nan_counters, counts) if c > 0}
 
     def _get_nans_in_logits(
         self,
@@ -7206,6 +7227,13 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
         )
+        if self.observability_config.debug_mla_cache:
+            sfc = self.compilation_config.static_forward_context
+            self._kv_nan_counters = {
+                name: layer.num_kv_cache_nan_insertions
+                for name, layer in sfc.items()
+                if hasattr(layer, "num_kv_cache_nan_insertions")
+            }
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

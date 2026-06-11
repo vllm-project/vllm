@@ -76,6 +76,12 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    debug_mla_cache: bool = False
+    """Enable NaN detection in MLA KV cache FP8 conversion.
+    When enabled, the concat_and_cache_mla kernel tracks NaN insertions
+    and publishes per-layer counts as Prometheus metrics.
+    Can also be enabled via VLLM_DEBUG_MLA_CACHE=1."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -149,4 +155,12 @@ class ObservabilityConfig:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _apply_env_overrides(self):
+        import vllm.envs as envs
+
+        if envs.VLLM_DEBUG_MLA_CACHE:
+            self.debug_mla_cache = True
         return self
