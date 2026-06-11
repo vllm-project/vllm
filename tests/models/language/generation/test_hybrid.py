@@ -92,8 +92,15 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
+    extra_kwargs = {}
+    if model == "LiquidAI/LFM2-1.2B":
+        extra_kwargs["enable_chunked_prefill"] = True
+
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        **extra_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
