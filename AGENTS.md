@@ -105,6 +105,11 @@ The line length limit for Python code is 88 characters. If you are not sure, use
 
 Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
 
+### Comments and docstrings
+
+Comments and docstrings should be kept brief and to-the-point, in keeping with the general style used throughout the codebase.
+Excessively verbose comments in the code tend to get outdated fast and create unnecessary churn.
+
 ### Commit messages
 
 Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
