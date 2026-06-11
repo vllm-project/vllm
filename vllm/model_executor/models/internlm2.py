@@ -248,6 +248,13 @@ class InternLMDecoderLayer(nn.Module):
 
 @support_torch_compile
 class InternLM2Model(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".w1": ".gate_up_proj.0",
+            ".w3": ".gate_up_proj.1",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -308,15 +315,12 @@ class InternLM2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".w1": ".gate_up_proj.0",
-            ".w3": ".gate_up_proj.1",
-        }
-    )
-
     def __init__(
         self,
         *,
@@ -374,7 +378,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             self,
             skip_prefixes=(["output."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)
 
 
 @default_pooling_type(tok_pooling_type="ALL")

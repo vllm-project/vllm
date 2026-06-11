@@ -254,5 +254,8 @@ class JinaEmbeddingsV5Model(Qwen3ForCausalLM, VllmModelForPooling):
                         tensor = tensor + (lora_B @ lora_A) * scaling
                 yield name, tensor
 
-        loaded = self.model.load_weights(_merge_weights(weights))
+        loader = AutoWeightsLoader(self.model, ignore_unexpected_prefixes=["lm_head."])
+        loaded = loader.load_weights(
+            _merge_weights(weights), mapper=self.model.hf_to_vllm_mapper
+        )
         return {f"model.{name}" for name in loaded}

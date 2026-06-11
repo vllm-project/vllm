@@ -108,11 +108,6 @@ class EagleMistralModel(MistralModel):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Pretend embed_tokens is loaded; the actual weight is shared
-        # from the target model at runtime by `load_eagle_model`.
-        return super().load_weights(weights) | {"embed_tokens.weight"}
-
 
 class EagleMistralForCausalLM(MistralForCausalLM):
     mistral_mapping = MistralForCausalLM.mistral_mapping | {
@@ -166,3 +161,8 @@ class EagleMistralForCausalLM(MistralForCausalLM):
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Pretend embed_tokens is loaded; the actual weight is shared
+        # from the target model at runtime by `load_eagle_model`.
+        return super().load_weights(weights) | {"model.embed_tokens.weight"}

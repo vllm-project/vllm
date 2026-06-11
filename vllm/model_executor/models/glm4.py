@@ -48,7 +48,6 @@ from .llama import LlamaModel
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    WeightsMapper,
     maybe_prefix,
 )
 
@@ -235,16 +234,6 @@ class Glm4Model(LlamaModel):
 
 
 class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".q_proj": ".qkv_proj.q",
-            ".k_proj": ".qkv_proj.k",
-            ".v_proj": ".qkv_proj.v",
-            ".gate_proj": ".gate_up_proj.0",
-            ".up_proj": ".gate_up_proj.1",
-        }
-    )
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -299,11 +288,16 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
+        # Skip the speculative (MTP) layers, which are loaded by the
+        # draft model instead.
+        num_nextn_layers = getattr(self.config, "num_nextn_predict_layers", 0)
+        skip_prefixes += [
+            f"model.layers.{self.config.num_hidden_layers + i}."
+            for i in range(num_nextn_layers)
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights)
 
 
 def get_spec_layer_idx_from_weight_name(
