@@ -172,7 +172,18 @@ def _validate_video_source(path: str, model_config) -> None:
         if scheme == "file":
             local = Path(url2pathname(parsed.netloc + parsed.path))
         else:
+            # Bare local path (scheme==""): only the codec backend produces
+            # these, and they bypass MediaConnector by design (path-survival,
+            # see the design note below). MediaConnector itself only accepts
+            # explicit file:// URLs; here we additionally require the bare path
+            # to be absolute, because resolving a *relative* path against an
+            # ambiguous CWD before the confinement check is brittle and unsafe.
             local = Path(str(path))
+            if not local.is_absolute():
+                raise ValueError(
+                    f"Local video path {str(path)!r} must be absolute; "
+                    f"relative paths are not supported."
+                )
         allowed_root = Path(allowed_local).resolve()
         resolved = local.resolve()
         if resolved != allowed_root and allowed_root not in resolved.parents:
@@ -1545,9 +1556,17 @@ class LlavaOnevision2MultiModalProcessor(
                 if len(codec_video_paths) > 1
                 else codec_video_paths[0]
             )
-            call_kwargs["video_backend"] = "codec"
-            output = hf_processor(text=prompt, **mm_data, **call_kwargs)
-            data = output.data if isinstance(output, BatchFeature) else dict(output)
+            # Route through the base ``_call_hf_processor`` so float-tensor
+            # dtype postprocessing is applied automatically; inject
+            # ``video_backend="codec"`` via mm_kwargs so the wrapped processor
+            # dispatches to its codec branch.
+            output = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs={**mm_kwargs, "video_backend": "codec"},
+                tok_kwargs=tok_kwargs,
+            )
+            data = dict(output)
             return BatchFeature(
                 self._rename_codec_outputs_to_video(
                     data, codec_video_paths, hf_processor
@@ -1603,16 +1622,18 @@ class LlavaOnevision2MultiModalProcessor(
             merged_mm_data.pop("videos", None)
             merged_mm_data["images"] = flat_frames
 
-            # The image branch only accepts a small subset of kwargs.
-            frame_call_kwargs = {
-                k: v
-                for k, v in merged_kwargs.items()
-                if k in {"return_tensors", "padding", "max_pixels"}
-            }
-            output = hf_processor(
-                text=new_prompt, **merged_mm_data, **frame_call_kwargs
+            # Route through the base ``_call_hf_processor`` (applies float-tensor
+            # dtype postprocessing automatically). The wrapped processor's image
+            # branch ignores video/codec-only kwargs and does not forward extra
+            # **kwargs to the image processor, so passing the full merged kwarg
+            # set here is a no-op beyond return_tensors/padding.
+            output = super()._call_hf_processor(
+                prompt=new_prompt,
+                mm_data=merged_mm_data,
+                mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
-            data = output.data if isinstance(output, BatchFeature) else dict(output)
+            data = dict(output)
 
             # Re-tag image-series outputs as video-series so vLLM's
             # placeholder replacement (driven by <|video_pad|> runs) finds them.
@@ -1630,22 +1651,18 @@ class LlavaOnevision2MultiModalProcessor(
                 (len(per_video_timestamps),), dtype=torch.long
             )
 
-            postprocessed = self.info.ctx._postprocess_output(data)
-            return BatchFeature(postprocessed)
+            return BatchFeature(data)
 
         # ---- Image-only / text-only call --------------------------------
-        # No videos present: run the HF processor over the (possibly empty)
-        # image set directly. The image branch accepts only a small kwarg
-        # subset.
-        image_call_kwargs = {
-            k: v
-            for k, v in merged_kwargs.items()
-            if k in {"return_tensors", "padding", "max_pixels"}
-        }
-        output = hf_processor(text=prompt, **mm_data, **image_call_kwargs)
-        data = output.data if isinstance(output, BatchFeature) else dict(output)
-        postprocessed = self.info.ctx._postprocess_output(data)
-        return BatchFeature(postprocessed)
+        # No videos present: delegate to the base ``_call_hf_processor``, which
+        # runs the wrapped processor over the (possibly empty) image set and
+        # applies float-tensor dtype postprocessing automatically.
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
     def _rename_codec_outputs_to_video(
         self,
@@ -1702,7 +1719,10 @@ class LlavaOnevision2MultiModalProcessor(
         # frame_timestamps is required by the field-config schema; emit an
         # empty per-video list (frames-backend populates it, codec ignores it).
         data["frame_timestamps"] = _pack_timestamps([[] for _ in codec_video_paths])
-        return self.info.ctx._postprocess_output(data)
+        # The processor output was already dtype-postprocessed by the base
+        # ``_call_hf_processor`` at the call site; the fields added here are all
+        # int64 / empty float32 and need no further casting.
+        return data
 
     def _count_canvases_for_video(
         self,
