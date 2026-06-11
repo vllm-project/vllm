@@ -734,9 +734,17 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(
         RVVI(__riscv_vfmax_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
   }
+  FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
+    return FP32Vec16(
+        RVVI(__riscv_vfmax_vv_f32, LMUL_512)(reg, b.reg, elem_num));
+  }
   FP32Vec16 min(const FP32Vec16& b) const {
     return FP32Vec16(
         RVVI(__riscv_vfmin_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
+  }
+  FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
+    return FP32Vec16(
+        RVVI(__riscv_vfmin_vv_f32, LMUL_512)(reg, b.reg, elem_num));
   }
   FP32Vec16 abs() const {
     return FP32Vec16(RVVI(__riscv_vfabs_v_f32, LMUL_512)(reg, VEC_ELEM_NUM));
@@ -864,6 +872,27 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
         reg, 0.0f, VEC_ELEM_NUM);
     return FP32Vec16(
         RVVI3(__riscv_vfneg_v_f32, LMUL_512, _m)(mask, res, VEC_ELEM_NUM));
+  }
+};
+
+struct INT8Vec16 : public Vec<INT8Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  fixed_i8x16_t reg;
+
+  explicit INT8Vec16(const FP32Vec16& vec) {
+    auto i32_vec =
+        RVVI(__riscv_vfcvt_x_f_v_i32, LMUL_512)(vec.reg, VEC_ELEM_NUM);
+    auto i16_vec = RVVI(__riscv_vnclip_wx_i16, LMUL_256)(
+        i32_vec, 0, __RISCV_VXRM_RNU, VEC_ELEM_NUM);
+    reg = RVVI(__riscv_vnclip_wx_i8, LMUL_128)(i16_vec, 0, __RISCV_VXRM_RNU,
+                                               VEC_ELEM_NUM);
+  }
+
+  void save(int8_t* ptr) const {
+    RVVI(__riscv_vse8_v_i8, LMUL_128)(ptr, reg, VEC_ELEM_NUM);
+  }
+  void save(int8_t* ptr, int elem_num) const {
+    RVVI(__riscv_vse8_v_i8, LMUL_128)(ptr, reg, elem_num);
   }
 };
 
