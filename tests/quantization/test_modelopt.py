@@ -438,6 +438,97 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
+def _make_nvfp4_moe(quant_method: str):
+    """Build a ``ModelOptNvFp4FusedMoE`` with mocked backend selection."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            MagicMock(return_value=(MagicMock(), MagicMock())),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=False,
+        ),
+    ):
+        return ModelOptNvFp4FusedMoE(config, MagicMock())
+
+
+def _mock_nvfp4_moe_layer(num_experts: int = 8):
+    """Mock layer carrying healthy per-expert NVFP4 scale parameters."""
+    layer = MagicMock()
+    layer.w13_input_scale = torch.full((num_experts,), 0.01)
+    layer.w2_input_scale = torch.full((num_experts,), 0.02)
+    layer.w13_weight_scale_2 = torch.full((num_experts, 2), 0.03)
+    layer.w2_weight_scale_2 = torch.full((num_experts,), 0.04)
+    return layer
+
+
+class TestModelOptNvFp4MoEScaleValidation:
+    """Missing per-expert ckpt scale keys load as zeros; the 1/scale
+    inversion then produces inf global scales and silent NaN output for
+    tokens routed to those experts (issue #45212). Loading must fail
+    loudly instead, naming the parameter and expert ids.
+    """
+
+    def test_healthy_scales_pass(self):
+        moe = _make_nvfp4_moe("NVFP4")
+        moe._validate_loaded_expert_scales(_mock_nvfp4_moe_layer())
+
+    @pytest.mark.parametrize(
+        "param_name",
+        [
+            "w13_input_scale",
+            "w2_input_scale",
+            "w13_weight_scale_2",
+            "w2_weight_scale_2",
+        ],
+    )
+    def test_zero_scale_slots_rejected_with_expert_ids(self, param_name):
+        moe = _make_nvfp4_moe("NVFP4")
+        layer = _mock_nvfp4_moe_layer()
+        scale = getattr(layer, param_name).clone()
+        scale[2] = 0.0
+        scale[5] = 0.0
+        setattr(layer, param_name, scale)
+        with pytest.raises(ValueError, match=rf"{param_name}.*\[2, 5\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+    def test_nonfinite_scale_rejected(self):
+        moe = _make_nvfp4_moe("NVFP4")
+        layer = _mock_nvfp4_moe_layer()
+        layer.w2_input_scale[3] = float("inf")
+        with pytest.raises(ValueError, match=r"w2_input_scale.*\[3\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+    def test_w4a16_ignores_uninitialized_input_scales(self):
+        """Native W4A16 ckpts carry no input_scale at all; the params stay
+        uninitialized (zeros) and are never read — must not be rejected."""
+        moe = _make_nvfp4_moe("W4A16_NVFP4")
+        layer = _mock_nvfp4_moe_layer()
+        layer.w13_input_scale = torch.zeros(8)
+        layer.w2_input_scale = torch.zeros(8)
+        moe._validate_loaded_expert_scales(layer)
+
+    def test_w4a16_still_validates_weight_scales(self):
+        moe = _make_nvfp4_moe("W4A16_NVFP4")
+        layer = _mock_nvfp4_moe_layer()
+        layer.w2_weight_scale_2[0] = 0.0
+        with pytest.raises(ValueError, match=r"w2_weight_scale_2.*\[0\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+
 @pytest.mark.parametrize(
     "per_layer_algo, expected_linear_cls_name",
     [
