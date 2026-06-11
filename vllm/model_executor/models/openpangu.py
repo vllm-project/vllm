@@ -748,15 +748,14 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
             "type": "yarn",
             "rope_type": "deepseek_yarn",
         }
-        self.rope_interleaved = getattr(config, "rope_interleaved", True)
+        self.rope_interleave = getattr(config, "rope_interleave", True)
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            is_neox_style=(not self.rope_interleaved),
+            is_neox_style=(not self.rope_interleave),
         )
         self.param_sink_number = getattr(config, "param_sink_number", 0)
-        self.param_sink_with_value = getattr(config, "param_sink_with_value", False)
         # SWA
         layer_idx = extract_layer_index(prefix)
         is_dsa = hasattr(config, "index_topk") and (
@@ -779,7 +778,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=rope_parameters,
-                is_neox_style=(not self.rope_interleaved),
+                is_neox_style=(not self.rope_interleave),
             )
             self.indexer = PanguIndexer(
                 vllm_config,
@@ -882,26 +881,8 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                     "weight_loader": self.weight_loader,
                 },
             )
-            if self.param_sink_with_value:
-                self.param_sink_compressed_kv = torch.nn.Parameter(
-                    torch.empty(
-                        (
-                            self.param_sink_number,
-                            self.kv_lora_rank,
-                        ),
-                        device=current_platform.current_device(),
-                        dtype=config.torch_dtype,
-                    )
-                )
-                set_weight_attrs(
-                    self.param_sink_compressed_kv,
-                    {
-                        "output_dim": 1,
-                        "weight_loader": self.weight_loader,
-                    },
-                )
-            else:
-                self.param_sink_compressed_kv = torch.zeros(
+            self.param_sink_compressed_kv = torch.nn.Parameter(
+                torch.empty(
                     (
                         self.param_sink_number,
                         self.kv_lora_rank,
@@ -909,6 +890,14 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                     device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
+            )
+            set_weight_attrs(
+                self.param_sink_compressed_kv,
+                {
+                    "output_dim": 1,
+                    "weight_loader": self.weight_loader,
+                },
+            )
         # To enable dummy run with out weight
         self.post_weight_load()
 
@@ -1130,7 +1119,6 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         self.param_sink_number = getattr(config, "param_sink_number", 0)
-        self.param_sink_with_value = getattr(config, "param_sink_with_value", False)
         self.param_sink_scalar = getattr(config, "param_sink_scalar", None)
         self.param_sink_of_head_num = getattr(config, "param_sink_of_head_dim", False)
 
@@ -1211,27 +1199,8 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
                 },
             )
 
-            if self.param_sink_with_value:
-                self.param_sink_value = torch.nn.Parameter(
-                    torch.empty(
-                        (
-                            self.param_sink_number,
-                            self.num_kv_heads,
-                            self.v_channels,
-                        ),
-                        device=current_platform.current_device(),
-                        dtype=config.torch_dtype,
-                    )
-                )
-                set_weight_attrs(
-                    self.param_sink_value,
-                    {
-                        "output_dim": 1,
-                        "weight_loader": self.weight_loader,
-                    },
-                )
-            else:
-                self.param_sink_value = torch.zeros(
+            self.param_sink_value = torch.nn.Parameter(
+                torch.empty(
                     (
                         self.param_sink_number,
                         self.num_kv_heads,
@@ -1240,6 +1209,14 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
                     device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
+            )
+            set_weight_attrs(
+                self.param_sink_value,
+                {
+                    "output_dim": 1,
+                    "weight_loader": self.weight_loader,
+                },
+            )
         # To enable dummy run with out weight
         self.post_weight_load()
 
@@ -2150,4 +2127,8 @@ class PanguUltraMoEForCausalLM(OpenPanguMoEModel):
 
 
 class PanguProMoEV2ForCausalLM(OpenPanguMoEModel):
+    pass
+
+
+class OpenPanguV2ForCausalLM(OpenPanguMoEModel):
     pass
