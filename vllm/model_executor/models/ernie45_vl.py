@@ -471,17 +471,16 @@ class Ernie4_5_VisionTransformer(nn.Module):
         """Compute encoder metadata outside the CUDA graph.
 
         Splits the rotary embeddings, ``cu_seqlens`` and ``max_seqlen`` out of
-        :meth:`forward` so they can be precomputed on the host side and fed
-        into a captured graph through fixed buffers. Shared by the eager path,
-        CUDA graph capture and CUDA graph replay so the three stay numerically
-        identical.
+        `forward` so they can be precomputed on the host side and fed into a
+        captured graph through fixed buffers. Shared by the eager path, CUDA
+        graph capture and CUDA graph replay
 
         Args:
             grid_thw: Per-frame grid sizes as a ``[num_frames, 3]`` tensor or
                 an equivalent list of ``[t, h, w]``.
-            num_pad: Legacy ``cu_seqlens`` padding (eager path only).
-            max_batch_size: If set, pad ``cu_seqlens`` to this many sequences
-                so the CUDA graph replay buffer keeps a constant shape.
+            num_pad: Legacy ``cu_seqlens`` padding
+            max_batch_size: If set, pad ``cu_seqlens`` to ``max_batch_size + 1``
+                entries for a fixed graph buffer shape.
             max_seqlen_override: If set, use this value for ``max_seqlen``
                 instead of deriving it from ``cu_seqlens``. CUDA graph capture
                 bakes ``max_seqlen`` at capture time, so it must cover the
@@ -524,8 +523,8 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 )
 
         # max_seqlen is baked into the graph at capture time, so capture passes
-        # a worst-case override. compute_attn_mask_seqlen keeps it on CPU (it is
-        # consumed via .item()), avoiding a captured D2H copy.
+        # a worst-case override. compute_attn_mask_seqlen keeps it on CPU
+        # (consumed via .item()), avoiding a captured D2H copy.
         if max_seqlen_override is not None:
             max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
         else:
@@ -550,7 +549,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         hidden_states = self.patch_embed(hidden_states)
 
         if encoder_metadata is None:
-            # Eager path: compute metadata inline (unchanged behavior).
+            # Eager path: compute metadata inline
             encoder_metadata = self.prepare_encoder_metadata(
                 grid_thw, num_pad=num_pad, device=hidden_states.device
             )
@@ -1592,16 +1591,15 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            # Ernie consumes a single rotary freqs tensor (not cos/sin), so
-            # the buffer set is smaller than the Qwen3-VL reference.
+            # Ernie consumes a single rotary freqs tensor (not cos/sin)
             buffer_keys=[
                 "pixel_values",
                 "rotary_pos_emb",
                 "cu_seqlens",
                 "max_seqlen",
             ],
-            # Post-merge embeddings (produced in postprocess_encoder_output)
-            # are at the LM hidden dim; used only for DP gather sizing.
+            # Post-merge embeddings, produced in postprocess_encoder_output,
+            # are at the LM hidden dim, used only for DP gather sizing.
             out_hidden_size=self.config.hidden_size,
         )
 
@@ -1677,8 +1675,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         grid_config = [[1, m, per_mm_item_output * m] for _ in range(max_batch_size)]
 
         patch_embed = self.vision_model.patch_embed
-        # Ernie has no temporal_patch_size, so the flattened patch is just
-        # in_channels * patch_size**2.
         in_channels = patch_embed.in_channels
         patch_size = patch_embed.patch_size
         total_patches = sum(t * h * w for t, h, w in grid_config)
@@ -1688,7 +1684,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         )
 
         # max_seqlen is baked at capture: worst case is one item consuming the
-        # full budget -> seq_len = token_budget * spatial_merge_size**2.
+        # full budget - seq_len = token_budget * spatial_merge_size**2.
         metadata = self.vision_model.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
@@ -1717,13 +1713,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def encoder_cudagraph_forward(
         self, values: dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        # Graph captures the ViT only; the resampler runs in
+        # Graph captures the ViT only, and the resampler runs in
         # postprocess_encoder_output.
         pixel_values = values.pop("pixel_values")
         return self.vision_model(pixel_values, encoder_metadata=values)
 
     def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
-        # Eager fallback: run the full pipeline (ViT + resampler); the result
+        # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs).type(
             self.vision_model.dtype
