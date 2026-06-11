@@ -65,7 +65,6 @@ class RustToolParser(ToolParser):
         super().__init__(tokenizer, tools)
         self._parser: Any | None = None
         self._error: Exception | None = None
-        self._tool_call_ids: dict[int, str] = {}
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -130,7 +129,6 @@ class RustToolParser(ToolParser):
         """Reset parser state for a new request on a reused parser instance."""
         self._parser = self._new_parser()
         self._error = None
-        self._tool_call_ids.clear()
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
         self.current_tool_id = -1
@@ -156,8 +154,9 @@ class RustToolParser(ToolParser):
         self._ensure_tool_state(index)
 
         if name is not None:
-            tool_call_id = make_tool_call_id()
-            self._tool_call_ids[index] = tool_call_id
+            # Prefer the model-emitted ID surfaced by the Rust parser (e.g.
+            # Kimi K2) over a randomly generated one.
+            tool_call_id = self._get_parser().tool_call_id(index) or make_tool_call_id()
             self.prev_tool_call_arr[index] = {"name": name, "arguments": {}}
             self.current_tool_name_sent = True
 
@@ -203,19 +202,29 @@ class RustToolParser(ToolParser):
             return None
         return DeltaMessage(content=normal_text, tool_calls=tool_calls)
 
-    def _parse_complete(self, model_output: str) -> Any | None:
-        """Parse complete model output with a throwaway Rust parser instance."""
+    def _parse_complete(self, model_output: str) -> tuple[Any, dict[int, str]] | None:
+        """Parse complete model output with a throwaway Rust parser instance.
+
+        Returns the coalesced parser output along with any model-emitted tool
+        call IDs keyed by tool index.
+        """
         parser = self._new_parser()
         output = _rust_tool_parser_module().ToolParserOutput()
         try:
             parser.parse_into(model_output, output)
+            # finish() clears parser state, so snapshot model-emitted IDs first.
+            tool_call_ids = {
+                call.tool_index: tool_call_id
+                for call in output.calls
+                if (tool_call_id := parser.tool_call_id(call.tool_index)) is not None
+            }
             output.append(parser.finish())
         except Exception:
             logger.exception(
                 "Error parsing %s tool call output.", self.rust_parser_name
             )
             return None
-        return output.coalesce_calls()
+        return output.coalesce_calls(), tool_call_ids
 
     def extract_tool_calls(
         self,
@@ -233,13 +242,14 @@ class RustToolParser(ToolParser):
                 content=model_output,
             )
 
-        parsed = self._parse_complete(model_output)
-        if parsed is None:
+        parse_result = self._parse_complete(model_output)
+        if parse_result is None:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
                 content=model_output,
             )
+        parsed, tool_call_ids = parse_result
 
         tool_calls: list[ToolCall] = []
         self.prev_tool_call_arr.clear()
@@ -250,6 +260,8 @@ class RustToolParser(ToolParser):
                 continue
             tool_calls.append(
                 ToolCall(
+                    id=tool_call_ids.get(parsed_tool_call.tool_index)
+                    or make_tool_call_id(),
                     type="function",
                     function=FunctionCall(name=name, arguments=arguments),
                 )

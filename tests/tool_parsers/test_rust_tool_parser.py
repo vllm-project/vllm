@@ -32,6 +32,11 @@ class DeepSeekV4RustToolParser(RustToolParser):
     tool_call_start_token = TC_START
 
 
+class KimiK2RustToolParser(RustToolParser):
+    rust_parser_name = "KimiK2ToolParser"
+    tool_call_start_token = "<|tool_calls_section_begin|>"
+
+
 def sample_tools() -> list[ChatCompletionToolsParam]:
     return [
         ChatCompletionToolsParam(
@@ -240,6 +245,69 @@ def test_rust_tool_parser_adapter_ignores_midstream_empty_delta() -> None:
     assert names == [name for name, _ in EXPECTED_CALLS]
     for index, (_, arguments) in enumerate(EXPECTED_CALLS):
         assert json.loads(collect_streamed_arguments(deltas, index)) == arguments
+
+
+KIMI_EXPECTED_IDS = ["functions.get_weather:0", "functions.add:1"]
+
+
+def build_kimi_tool_call() -> str:
+    return (
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>"
+        '{"location": "SF", "date": "2024-01-16"}<|tool_call_end|>'
+        "<|tool_call_begin|>functions.add:1<|tool_call_argument_begin|>"
+        '{"x": 3, "y": 5}<|tool_call_end|>'
+        "<|tool_calls_section_end|>"
+    )
+
+
+def test_rust_tool_parser_adapter_complete_prefers_model_tool_call_ids() -> None:
+    tools = sample_tools()
+    parser = KimiK2RustToolParser(MOCK_TOKENIZER, tools=tools)
+
+    result = parser.extract_tool_calls(
+        "Let me check. " + build_kimi_tool_call(),
+        ChatCompletionRequest(messages=[], model="m", tools=tools),
+    )
+
+    assert result.tools_called
+    assert [tool_call.id for tool_call in result.tool_calls] == KIMI_EXPECTED_IDS
+    for tool_call, (name, arguments) in zip(result.tool_calls, EXPECTED_CALLS):
+        assert tool_call.function.name == name
+        assert json.loads(tool_call.function.arguments) == arguments
+
+
+def test_rust_tool_parser_adapter_streaming_prefers_model_tool_call_ids() -> None:
+    parser = KimiK2RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
+
+    deltas = parse_streaming(parser, build_kimi_tool_call(), chunk_size=5)
+
+    ids = [
+        tool_call.id
+        for delta in deltas
+        for tool_call in delta.tool_calls or []
+        if tool_call.id is not None
+    ]
+    assert ids == KIMI_EXPECTED_IDS
+    for index, (_, arguments) in enumerate(EXPECTED_CALLS):
+        assert json.loads(collect_streamed_arguments(deltas, index)) == arguments
+
+
+def test_rust_tool_parser_adapter_streaming_generates_ids_as_fallback() -> None:
+    # DeepSeekV4 never emits model tool call IDs, so the bridge mints them.
+    parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
+
+    deltas = parse_streaming(parser, build_tool_call(), chunk_size=5)
+
+    ids = [
+        tool_call.id
+        for delta in deltas
+        for tool_call in delta.tool_calls or []
+        if tool_call.function is not None and tool_call.function.name is not None
+    ]
+    assert len(ids) == len(EXPECTED_CALLS)
+    assert all(ids)
+    assert len(set(ids)) == len(ids)
 
 
 def test_rust_tool_parser_adapter_adjust_request_is_opaque() -> None:

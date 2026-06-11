@@ -38,7 +38,9 @@ macro_rules! tool_parser_factory {
 
 // Export a tool parser to Python by registering it here.
 tool_parser_factory! {
-    DeepSeekV4ToolParser, // for testing on Python side
+    // Below are the parsers just for testing purposes on Python side.
+    DeepSeekV4ToolParser,
+    KimiK2ToolParser,
 }
 
 #[pyclass(name = "Tool", module = "vllm._rust_tool_parser", skip_from_py_object)]
@@ -210,6 +212,10 @@ impl PyToolParser {
     fn preserve_special_tokens(&self) -> bool {
         self.0.preserve_special_tokens()
     }
+
+    fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
+        self.0.tool_call_id(tool_index)
+    }
 }
 
 #[pymodule]
@@ -344,6 +350,26 @@ mod tests {
             );
 
             assert_eq!(parser.reset(), "");
+            PyResult::Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn parser_exposes_model_emitted_tool_call_ids() {
+        with_python(|py| {
+            let tool = make_py_tool(py)?;
+            let mut parser = PyToolParser::new(py, "KimiK2ToolParser", vec![tool])?;
+
+            let input = "<|tool_calls_section_begin|>\
+                <|tool_call_begin|>functions.create_order:0<|tool_call_argument_begin|>\
+                {\"user_id\":42}<|tool_call_end|>\
+                <|tool_calls_section_end|>";
+            let mut output = PyToolParserOutput::new(py, "", None);
+            parser.parse_into_output(input, &mut output)?;
+
+            assert_eq!(parser.tool_call_id(0), Some("functions.create_order:0"));
+            assert_eq!(parser.tool_call_id(1), None);
             PyResult::Ok(())
         })
         .unwrap();
