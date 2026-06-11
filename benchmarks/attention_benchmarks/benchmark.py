@@ -164,6 +164,9 @@ def run_model_parameter_sweep(
 
                     pbar.update(1)
 
+    if base_config_args.get("ncu_profile"):
+        return all_results
+
     # Display sweep results - create separate table for each parameter value
     console.print("\n[bold green]Model Parameter Sweep Results:[/]")
     formatter = ResultsFormatter(console)
@@ -341,6 +344,9 @@ def run_parameter_sweep(
                         )
 
                     pbar.update(1)
+
+    if base_config_args.get("ncu_profile"):
+        return all_results
 
     # Display sweep results
     console.print("\n[bold green]Sweep Results:[/]")
@@ -772,6 +778,15 @@ def main():
     # Run benchmarks
     all_results = []
 
+    # Under ncu profiling the kernels run only to be captured by the profiler;
+    # timings are placeholder zeros, so the result tables and saved metrics are
+    # skipped. The Nsight Compute report (--ncu-output) holds the real data.
+    if args.ncu_profile:
+        console.print(
+            "[dim]ncu profiling enabled: result tables and saved metrics are "
+            "skipped (timings are placeholder zeros).[/]"
+        )
+
     # Handle special mode: decode_vs_prefill comparison
     if hasattr(args, "mode") and args.mode == "decode_vs_prefill":
         console.print("[yellow]Mode: Decode vs Prefill pipeline comparison[/]")
@@ -890,6 +905,9 @@ def main():
                         all_results.append(result)
 
                 pbar.update(1)
+
+        if args.ncu_profile:
+            return
 
         # Display decode vs prefill results
         console.print("\n[bold green]Decode vs Prefill Results:[/]")
@@ -1056,9 +1074,10 @@ def main():
 
                         pbar.update(1)
 
-            console.print("\n[bold green]Results:[/]")
-            formatter = ResultsFormatter(console)
-            formatter.print_table(decode_results, backends)
+            if not args.ncu_profile:
+                console.print("\n[bold green]Results:[/]")
+                formatter = ResultsFormatter(console)
+                formatter.print_table(decode_results, backends)
 
         # Run prefill backend comparison
         if prefill_backends:
@@ -1100,16 +1119,17 @@ def main():
 
                         pbar.update(1)
 
-            console.print("\n[bold green]Prefill Backend Results:[/]")
-            formatter = ResultsFormatter(console)
-            formatter.print_table(
-                prefill_results, prefill_backends, compare_to_fastest=True
-            )
+            if not args.ncu_profile:
+                console.print("\n[bold green]Prefill Backend Results:[/]")
+                formatter = ResultsFormatter(console)
+                formatter.print_table(
+                    prefill_results, prefill_backends, compare_to_fastest=True
+                )
 
         all_results = decode_results + prefill_results
 
-    # Save results
-    if all_results:
+    # Save results (skip ncu profiling runs: timings are placeholder zeros)
+    if all_results and not args.ncu_profile:
         formatter = ResultsFormatter(console)
         if args.output_csv:
             formatter.save_csv(all_results, args.output_csv)
