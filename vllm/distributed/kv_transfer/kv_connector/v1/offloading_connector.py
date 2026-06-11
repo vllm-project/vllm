@@ -184,9 +184,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return True
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None  # We only emit stats from the worker-side
-        return self.connector_worker.get_kv_connector_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+
+        # TODO(orozery): Remove once PR #43877 lands
+        if self.connector_worker is not None:
+            return OffloadingConnectorStats()
+
+        return None
 
     @classmethod
     def build_kv_connector_stats(
