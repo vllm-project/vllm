@@ -1537,10 +1537,7 @@ def test_rocm_mxfp4_moe_oracle(
 # -----------------------------------------------------------------------------
 # Gates the emulation path for both the fp8-activation scheme (e.g., `w_mxfp4_a_fp8`)
 # and the non-fp8 scheme (e.g., `w_mxfp4_a_mxfp4`, backward-compatibility guard)
-
-GPU_AVAILABLE = current_platform.is_cuda() or current_platform.is_rocm()
-
-
+# Gated to ROCm (the emulation backend's current target); remove if enabled elsewhere.
 @pytest.mark.parametrize(
     "ocp_mx_scheme",
     [
@@ -1551,9 +1548,7 @@ GPU_AVAILABLE = current_platform.is_cuda() or current_platform.is_rocm()
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("num_tokens,hidden_size,intermediate_size", [(16, 256, 256)])
-@pytest.mark.skipif(
-    not GPU_AVAILABLE, reason="emulation runs a bf16 Triton MoE on a CUDA/ROCm GPU"
-)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
 @pytest.mark.skipif(
     not QUARK_MXFP4_AVAILABLE,
     reason="amd-quark is required to dequantize MXFP4 weights for emulation",
