@@ -26,6 +26,8 @@ class StructuredOutputsWorker:
         )
         self.device = device
         self.copy_stream = torch.cuda.Stream()
+        self.bitmask_dma_event = torch.cuda.Event()
+        self.bitmask_dma_event.record()
 
     def apply_grammar_bitmask(
         self,
@@ -50,13 +52,15 @@ class StructuredOutputsWorker:
 
         num_masks = len(mapping)
 
-        # Copy bitmask into pinned staging buffer, then async DMA to GPU.
-        # The staging buffer decouples the engine's source lifetime from the async
-        # transfer, preventing races.
+        # Wait for the previous DMA to finish reading from the staging buffer
+        # before overwriting it.
+        self.bitmask_dma_event.synchronize()
+
         staging = self.grammar_bitmask_cpu[:num_masks]
         staging.copy_(torch.from_numpy(grammar_bitmask[:num_masks]))
         with torch.cuda.stream(self.copy_stream):
             bitmask = self.grammar_bitmask[:num_masks].copy_(staging, non_blocking=True)
+            self.bitmask_dma_event.record()
 
         # Asynchronously copy the mapping to GPU.
         with torch.cuda.stream(self.copy_stream):
