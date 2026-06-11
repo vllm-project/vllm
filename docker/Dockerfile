@@ -339,6 +339,10 @@ COPY build_rust.sh build_rust.sh
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
+# BuildKit can run this stage in parallel with csrc-build. Keep Rust on a
+# separate local sccache daemon while sharing the same remote cache backend.
+ENV SCCACHE_SERVER_PORT=4227
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
