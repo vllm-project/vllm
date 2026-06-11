@@ -794,13 +794,6 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
-            if self.eplb_config.use_async:
-                raise ValueError(
-                    "Elastic EP requires the pynccl communicator, which is "
-                    "incompatible with async EPLB due to NCCL multi-stream "
-                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
-                    "to use elastic EP."
-                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Elastic EP is not supported with pipeline parallelism "
