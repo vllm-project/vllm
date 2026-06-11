@@ -15,6 +15,7 @@ endif()
 #
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
+set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -109,6 +110,10 @@ else()
     if (ENABLE_ARM_BF16)
         set(ARM_BF16_FOUND ON)
         message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
+    endif()
+    if (ENABLE_RVV_BF16)
+        set(RVV_BF16_FOUND ON)
+        message(STATUS "RVV BF16 support enabled via VLLM_CPU_RVV_BF16 environment variable")
     endif()
 endif()
 
