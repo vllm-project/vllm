@@ -106,6 +106,15 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
+        from vllm.utils.mistral import is_mistral_tool_parser
+
+        if is_mistral_tool_parser(tool_parser_cls):
+            from vllm.parser.mistral import MistralParser
+
+            MistralParser.reasoning_parser_cls = reasoning_parser_cls
+            MistralParser.tool_parser_cls = tool_parser_cls
+            return MistralParser
+
         from vllm.parser.abstract_parser import DelegatingParser
 
         r_cls = reasoning_parser_cls

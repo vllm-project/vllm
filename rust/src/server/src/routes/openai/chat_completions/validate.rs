@@ -1,5 +1,6 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::token_ids::{validate_allowed_token_ids, validate_logit_bias};
 use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
@@ -169,6 +170,21 @@ fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), Ap
     Ok(())
 }
 
+/// Reject out-of-vocab token ids, mirroring the Python input processor:
+/// `allowed_token_ids` against the tokenizer vocab, `logit_bias` keys against the
+/// model vocab (skipped when the model size is unknown).
+pub(super) fn validate_token_id_ranges(
+    request: &ChatCompletionRequest,
+    tokenizer_vocab_size: usize,
+    model_vocab_size: Option<usize>,
+) -> Result<(), ApiError> {
+    validate_allowed_token_ids(request.allowed_token_ids.as_deref(), tokenizer_vocab_size)?;
+    validate_logit_bias(
+        request.logit_bias.as_ref(),
+        model_vocab_size.unwrap_or(usize::MAX),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -176,7 +192,7 @@ mod tests {
     use serde_json::json;
     use vllm_chat::ReasoningEffort;
 
-    use super::validate_request_compat;
+    use super::{validate_request_compat, validate_token_id_ranges};
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
@@ -186,6 +202,32 @@ mod tests {
 
     fn served(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn validate_token_id_ranges_rejects_oob_and_accepts_in_vocab() {
+        // allowed_token_ids are bounded by the tokenizer vocab
+        let mut request = base_request();
+        request.allowed_token_ids = Some(vec![5, 1_000_000]);
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
+        // logit_bias is bounded by the larger model vocab: an id between the two
+        // vocabs is valid and must not be rejected (the parity regression we fix)
+        let mut request = base_request();
+        request.logit_bias = Some(HashMap::from([("150".to_string(), 1.0)]));
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
+        // logit_bias beyond the model vocab -> reject
+        let mut request = base_request();
+        request.logit_bias = Some(HashMap::from([("1000000".to_string(), 1.0)]));
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
+        // all in-vocab -> accept
+        let mut request = base_request();
+        request.allowed_token_ids = Some(vec![5, 50]);
+        request.logit_bias = Some(HashMap::from([("50".to_string(), 1.0)]));
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
+        // unknown sizes -> skip
+        let mut request = base_request();
+        request.allowed_token_ids = Some(vec![1_000_000]);
+        assert!(validate_token_id_ranges(&request, usize::MAX, None).is_ok());
     }
 
     fn base_request() -> ChatCompletionRequest {
