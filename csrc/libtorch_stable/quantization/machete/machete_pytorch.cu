@@ -70,8 +70,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("machete_mm", TORCH_BOX(&mm));
 }
 
-// use CatchAll since supported_schedules has no tensor arguments
-STABLE_TORCH_LIBRARY_IMPL(_C, CatchAll, m) {
+STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, m) {
   m.impl("machete_supported_schedules", TORCH_BOX(&supported_schedules));
 }
 
