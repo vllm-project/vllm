@@ -145,6 +145,7 @@ def test_compile_correctness(
             all_args,
             all_envs,
             method=method if method != "generate" else "generate_close",
+            force_v1_runner=True,
         )
         all_envs.clear()
         all_args.clear()
@@ -158,4 +159,4 @@ def test_compile_correctness(
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
 
-    compare_all_settings(model, all_args, all_envs, method=method)
+    compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)

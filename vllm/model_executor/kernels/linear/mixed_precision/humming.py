@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Humming GEMM as a mixed-precision WNA16Int linear kernel."""
+
+import torch
+
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import _has_module
+
+from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+
+class HummingLinearKernel(MPLinearKernel):
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
+    @classmethod
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda():
+            return False, "Humming is only supported on CUDA"
+        if not _has_module("humming"):
+            return False, "Humming is not installed"
+        if c.has_g_idx:
+            return False, "Humming does not support act-order (g_idx)"
+        if c.zero_points:
+            return False, "Humming linear kernel only supports symmetric weights"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_linear_layer_to_humming_standard,
+            prepare_humming_layer,
+        )
+
+        name_map = {"weight": self.w_q_name, "weight_scale": self.w_s_name}
+        group_size = self.config.group_size
+        quant_config = {
+            "quant_method": "humming",
+            "dtype": "int" + str(self.config.weight_type.size_bits),
+            "group_size": 0 if group_size == -1 else group_size,
+        }
+
+        convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
+        prepare_humming_layer(layer, quant_config)
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        from humming.layer import HummingMethod
+
+        flatten_inputs = x.view(-1, x.size(-1))
+        output = HummingMethod.forward_layer(
+            layer=layer,
+            inputs=flatten_inputs,
+            compute_config=layer.compute_config,
+        )
+        return output.view(*x.shape[:-1], output.size(-1))

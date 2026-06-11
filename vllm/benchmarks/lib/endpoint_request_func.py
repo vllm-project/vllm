@@ -66,7 +66,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str | list[str]
+    prompt: str | list[str] | list[dict[str, Any]]
     api_url: str
     prompt_len: int
     output_len: int
@@ -268,8 +268,6 @@ def _get_chat_content(
     request_func_input: RequestFuncInput,
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
-    text_contents = [{"type": "text", "text": request_func_input.prompt}]
-
     mm_contents = []
     if request_func_input.multi_modal_content:
         mm_content = request_func_input.multi_modal_content
@@ -282,10 +280,58 @@ def _get_chat_content(
                 "multi_modal_content must be a dict or list[dict] for openai-chat"
             )
 
+    prompt = request_func_input.prompt
+    if (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict) and isinstance(item.get("type"), str)
+            for item in prompt
+        )
+    ):
+        if mm_position == "first":
+            return mm_contents + prompt
+
+        return prompt + mm_contents
+
+    text_contents = [{"type": "text", "text": prompt}]
+
     if mm_position == "first":
         return mm_contents + text_contents
 
     return text_contents + mm_contents
+
+
+def _is_chat_messages(prompt: Any) -> bool:
+    return (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("role"), str)
+            and isinstance(item.get("content"), (str, list))
+            for item in prompt
+        )
+    )
+
+
+def _get_chat_messages(
+    request_func_input: RequestFuncInput,
+    mm_position: Literal["first", "last"] = "last",
+) -> list[dict[str, Any]]:
+    prompt = request_func_input.prompt
+    if _is_chat_messages(prompt):
+        return prompt
+
+    return [
+        {
+            "role": "user",
+            "content": _get_chat_content(
+                request_func_input,
+                mm_position=mm_position,
+            ),
+        }
+    ]
 
 
 async def async_request_openai_chat_completions(
@@ -297,15 +343,13 @@ async def async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
@@ -608,15 +652,13 @@ async def async_request_openai_embeddings_chat(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         # Many embedding models have short context length,
         # this is to avoid dropping some of the requests.
         "truncate_prompt_tokens": -1,

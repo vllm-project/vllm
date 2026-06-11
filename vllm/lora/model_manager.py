@@ -14,10 +14,11 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
-from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (
@@ -30,7 +31,7 @@ from vllm.lora.utils import (
     process_packed_modules_mapping,
     replace_submodule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
     is_pooling_model,
@@ -101,7 +102,6 @@ class LoRAModelManager:
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
         self.vocab_size = vocab_size
-        self.packed_modules_mapping = process_packed_modules_mapping(self.model)
 
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
@@ -109,10 +109,30 @@ class LoRAModelManager:
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
         is_moe = is_moe_model(self.model)
-        self._is_3d_moe_model = is_moe and self.model.is_3d_moe_weight
+        self._is_moe = is_moe
+
+        # When the engine is started with enable_mixed_moe_lora_format=True
+        # we force the universal 2D wrapper (FusedMoEWithLoRA) regardless of
+        # the model's 3D flag, so 2D and 3D adapters can coexist.
+        self._enable_mixed_moe_lora_format = (
+            is_moe and lora_config.enable_mixed_moe_lora_format
+        )
+        self._is_3d_moe_model = (
+            self._is_moe
+            and self.model.is_3d_moe_weight
+            and not self._enable_mixed_moe_lora_format
+        )
+        self.packed_modules_mapping = process_packed_modules_mapping(
+            self.model, force_2d_moe=self._enable_mixed_moe_lora_format
+        )
         self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
+        self._use_ep = bool(
+            vllm_config and vllm_config.parallel_config.enable_expert_parallel
+        )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
+
+        self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
         self.model.lora_manager = self
 
@@ -360,6 +380,8 @@ class LoRAModelManager:
             #  - given an input 'x' return ''
             return module_name.rpartition(".")[0]
 
+        wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
@@ -390,9 +412,26 @@ class LoRAModelManager:
                 )
                 continue
 
+            existing_wrapper = wrapped_by_id.get(id(module))
+            if existing_wrapper is not None and "lm_head" not in module_name:
+                # Same underlying module was already wrapped under another
+                # path (e.g. a MoE gate held both directly on the block and
+                # inside the MoE runner). The adapter targets the canonical
+                # path (`mlp.gate`); rewire the alias attribute
+                # (`runner.gate`) to the SAME wrapper so the forward path
+                # through the alias still applies LoRA, but do NOT add a
+                # second entry to self.modules — otherwise `activate_adapter`
+                # would call `reset_lora` on the alias and wipe the weights
+                # just set under the canonical name,  because the alias can't
+                # load LoRA weights due to name mismatch.
+                parent = self.model.get_submodule(_parent_module(module_name))
+                # reference
+                setattr(parent, module_name.rpartition(".")[-1], existing_wrapper)
+                continue
+
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            if isinstance(module, FusedMoE):
+            if isinstance(module, MoERunner):
                 # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
@@ -410,6 +449,9 @@ class LoRAModelManager:
                     self.model.config,
                 ),
             )
+            if isinstance(new_module, BaseLayerWithLoRA):
+                wrapped_by_id[id(module)] = new_module
+                wrapped_by_id[id(new_module)] = new_module
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
@@ -562,7 +604,16 @@ class LoRAModelManager:
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
+                n_slices = getattr(module, "n_slices", len(replacements))
+                if module.__class__.__name__ == "FusedMoEWithLoRA":
+                    replacements = replacements[
+                        : len(module.lora_a_stacked) // self.lora_slots
+                    ]
                 subloras: list[LoRALayerWeights | None] = []
+                # HACK: overrides replacements for qkvz = qkv + z case.
+                # Any better methods to handle this case?
+                if n_slices != len(replacements):
+                    replacements = [f"slice_{i}" for i in range(n_slices)]
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
@@ -672,15 +723,21 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
+            # For 2D FusedMoE modules with EP, narrow the per-expert
+            # sub-module list to this rank's owned experts so pack_moe
+            # produces a tensor sized to local_num_experts directly.
+            packed_module_names = new_module_names
+            if module_name.endswith(".experts"):
+                new_module_names = self._restrict_to_local_experts(
+                    module_name, new_module_names
+                )
             replacement_loras: list[LoRALayerWeights | None] = []
-            replaced_module: set[str] = set()
             has_replacement = False
             for r in new_module_names:
                 lora = self._get_lora_layer_weights(lora_model, r)
                 replacement_loras.append(lora)
                 if lora:
                     has_replacement = True
-                    replaced_module.add(r)
             if not has_replacement:
                 continue
             for i in range(len(replacement_loras)):
@@ -706,8 +763,11 @@ class LoRAModelManager:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                     replacement_loras
                 )
-            # Remove the modules that have been replaced.
-            for module in replaced_module:
+            # Drop every candidate sub-module, including non-local expert
+            # entries that were loaded but did not contribute to the
+            # packed result. Without this they would keep extra CPU
+            # memory alive after pack_moe.
+            for module in packed_module_names:
                 lora_model.loras.pop(module, None)
 
         for lora in lora_model.loras.values():
@@ -716,6 +776,17 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
+            elif isinstance(module, FusedMoEWithLoRA):
+                # When mixed mode is enabled the universal 2D wrapper has to
+                # absorb both 2D and 3D-format adapters. 3D-format adapters
+                # need to be split into per-(w1, w2, w3) tensors before the
+                # 2D set_lora can copy them into the stacked buffers.
+                if self._enable_mixed_moe_lora_format and getattr(
+                    lora_model, "is_3d_lora_weight", False
+                ):
+                    self._convert_3d_to_2d_moe_lora(lora_model, module, module_name)
+                else:
+                    self._slice_moe_lora_ep(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -762,23 +833,33 @@ class LoRAModelManager:
             assert gate_up_proj_lora is not None
             assert down_proj_lora is not None
             if self._is_3d_moe_model:
-                num_experts = module.w13_lora_a_stacked[0].shape[1]
+                local_num_experts = module.w13_lora_a_stacked[0].shape[1]
+                # The checkpoint holds weights for all global experts, but
+                # each EP rank owns only local_num_experts. Reshape against
+                # the adapter's actual expert count, then slice this rank's
+                # owned expert range before it gets copied into the local
+                # stacked buffer. For non-EP (local == global) this is a
+                # no-op slice.
+                global_num_experts = module.global_num_experts
+                ep_rank = module.ep_rank
+                expert_start = ep_rank * local_num_experts
+                expert_end = expert_start + local_num_experts
 
                 # (num_experts,rank,input_size)
                 gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
-                    num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
                 down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
-                    num_experts, -1, down_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
 
                 # (output_size,rank,num_experts)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                    gate_up_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
                 down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                    down_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    down_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
 
                 # (num_experts,output_size,rank)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
@@ -827,6 +908,201 @@ class LoRAModelManager:
 
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
+
+    def _convert_3d_to_2d_moe_lora(
+        self,
+        lora_model: LoRAModel,
+        module: FusedMoEWithLoRA,
+        module_name: str,
+    ) -> None:
+        """Convert a 3D-format MoE LoRA checkpoint into the 2D pack layout
+        that `FusedMoEWithLoRA.set_lora` expects.
+
+        On disk the 3D PEFT layout stores two flat tensor pairs per layer:
+          - `{module}.base_layer.lora_{A,B}`: gate_up_proj, with shapes
+                `(rank * num_experts, hidden)` / `(intermediate * 2,
+                rank * num_experts)`
+          - `{module}.lora_{A,B}`: down_proj, with shapes
+                `(rank * num_experts, intermediate)` / `(hidden,
+                rank * num_experts)`
+        The 2D wrapper expects three stacked per-expert tensors,
+        `[w1, w2, w3]`, with `(num_experts, rank, in)` for lora_a and
+        `(num_experts, out, rank)` for lora_b. In the 3D layout w1
+        (gate_proj) and w3 (up_proj) share the rank-r intermediate
+        representation, so both halves use the same lora_a tensor.
+
+        Only invoked when `enable_mixed_moe_lora_format=True` and the
+        source LoRARequest declares `is_3d_lora_weight=True`.
+        """
+        gate_up_proj_lora = self._get_lora_layer_weights(
+            lora_model, module_name + ".base_layer"
+        )
+        down_proj_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if gate_up_proj_lora is None or down_proj_lora is None:
+            # Either the adapter omits the experts entirely or the file
+            # layout differs from what this path supports; leave the entry
+            # untouched so set_lora can raise a clear error if needed.
+            return
+
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
+        expert_start = ep_rank * local_num_experts
+        expert_end = expert_start + local_num_experts
+
+        # Reshape and EP-slice into per-expert 3D tensors. This mirrors
+        # `_stack_moe_lora_weights`; for non-EP runs the slice is a no-op.
+        gate_up_a = gate_up_proj_lora.lora_a.reshape(
+            global_num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+        )[expert_start:expert_end].contiguous()
+        gate_up_b = (
+            gate_up_proj_lora.lora_b.reshape(
+                gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
+            )[..., expert_start:expert_end]
+            .permute(2, 0, 1)
+            .contiguous()
+        )
+        down_a = down_proj_lora.lora_a.reshape(
+            global_num_experts, -1, down_proj_lora.lora_a.shape[-1]
+        )[expert_start:expert_end].contiguous()
+        down_b = (
+            down_proj_lora.lora_b.reshape(
+                down_proj_lora.lora_b.shape[0], -1, global_num_experts
+            )[..., expert_start:expert_end]
+            .permute(2, 0, 1)
+            .contiguous()
+        )
+
+        # Split the fused gate_up_proj output dim into separate w1 / w3
+        # halves. GPT-OSS interleaves them along the output dim, all other
+        # 3D MoE checkpoints we know about concatenate them.
+        intermediate_x2 = gate_up_b.shape[1]
+        if intermediate_x2 % 2 != 0:
+            raise ValueError(
+                "Expected gate_up_proj LoRA-B output dim to be 2 * intermediate, "
+                f"got {intermediate_x2}."
+            )
+        intermediate = intermediate_x2 // 2
+        base_arch = self.model.config.architectures[0]
+        if base_arch == "GptOssForCausalLM":
+            w1_b = gate_up_b[:, ::2, :].contiguous()
+            w3_b = gate_up_b[:, 1::2, :].contiguous()
+        else:
+            w1_b = gate_up_b[:, :intermediate, :].contiguous()
+            w3_b = gate_up_b[:, intermediate:, :].contiguous()
+
+        # In the 3D layout w1 and w3 share the same rank-r mid
+        # representation, so they reuse the same lora_a tensor. The 2D
+        # wrapper's set_lora copies whatever it gets here into independent
+        # per-slice buffers, so the sharing is purely a CPU-side memory
+        # optimization and does not affect numerics.
+        down_proj_lora.lora_a = [gate_up_a, down_a, gate_up_a]
+        down_proj_lora.lora_b = [w1_b, down_b, w3_b]
+        # Drop the redundant base_layer entry to avoid double pin_memory
+        # and to keep the activation path looking up only the wrapper key.
+        lora_model.loras.pop(module_name + ".base_layer", None)
+
+    def _slice_moe_lora_ep(
+        self,
+        lora_model: LoRAModel,
+        module: FusedMoEWithLoRA,
+        module_name: str,
+    ) -> None:
+        """Slice the cached LoRA tensors down to this rank's local experts.
+
+        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
+        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
+        is active each rank only owns local_num_experts; without this slice
+        the CPU LoRAModel keeps the full global weight and set_lora has to
+        re-slice on every activation.
+
+        With the load-time / pack-time slicing in
+        ``_restrict_to_local_experts``, the stacked tensors already match
+        ``local_num_experts`` and the inner branch becomes a no-op. The
+        guard remains so checkpoints that bypassed the pre-slicing (e.g.
+        ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
+        still get sliced here.
+        """
+        if not module.use_ep:
+            return
+        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if module_lora is None or not isinstance(module_lora.lora_a, list):
+            return
+
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
+        expert_start = ep_rank * local_num_experts
+        expert_end = expert_start + local_num_experts
+
+        new_lora_a: list[torch.Tensor | None] = []
+        new_lora_b: list[torch.Tensor | None] = []
+        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
+            if a is not None and b is not None and a.shape[0] == global_num_experts:
+                a = a[expert_start:expert_end].contiguous()
+                b = b[expert_start:expert_end].contiguous()
+            new_lora_a.append(a)
+            new_lora_b.append(b)
+        module_lora.lora_a = new_lora_a
+        module_lora.lora_b = new_lora_b
+
+    def _restrict_to_local_experts(
+        self, module_name: str, new_module_names: list[str]
+    ) -> list[str]:
+        """Narrow a flat expert-major sub-module list to this rank's experts.
+
+        ``new_module_names`` is produced by
+        ``fused_moe_make_expert_params_mapping`` and is ordered
+        ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
+        entries per expert instead of 3). When the module is a 2D
+        ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
+        contiguous block of experts owned by this rank so the downstream
+        ``pack_moe`` call only consumes local weights and produces a
+        tensor sized to ``local_num_experts`` directly.
+
+        Returns the original list unchanged for non-MoE modules, the 3D
+        MoE path (handled separately by ``_stack_moe_lora_weights``),
+        modules without EP, or layouts we cannot cleanly partition.
+        """
+        module = self.modules.get(module_name)
+        if not isinstance(module, FusedMoEWithLoRA):
+            return new_module_names
+        if isinstance(module, FusedMoE3DWithLoRA):
+            return new_module_names
+        if not getattr(module, "use_ep", False):
+            return new_module_names
+        global_num_experts = module.global_num_experts
+        local_num_experts = module.local_num_experts
+        ep_rank = module.ep_rank
+        if global_num_experts <= 0 or len(new_module_names) % global_num_experts != 0:
+            return new_module_names
+        per_expert = len(new_module_names) // global_num_experts
+        start = ep_rank * local_num_experts * per_expert
+        end = start + local_num_experts * per_expert
+        return new_module_names[start:end]
+
+    def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
+        """
+        Per-rank slicing metadata for 2D FusedMoE LoRA modules.
+        """
+        if not self._use_ep or not self._is_moe:
+            return None
+        module = next(
+            (
+                m
+                for m in self.modules.values()
+                if isinstance(m, FusedMoEWithLoRA)
+                and not isinstance(m, FusedMoE3DWithLoRA)
+            ),
+            None,
+        )
+        if module is None:
+            return None
+        return MoEEPLoadSpec(
+            ep_rank=module.ep_rank,
+            local_num_experts=module.local_num_experts,
+            global_num_experts=module.global_num_experts,
+        )
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
