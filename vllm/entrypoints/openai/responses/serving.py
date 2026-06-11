@@ -86,6 +86,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
+    build_response_output_items,
     construct_input_messages,
     construct_tool_dicts,
     extract_function_tool_names,
@@ -190,6 +191,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -1028,19 +1030,23 @@ class OpenAIServingResponses(OpenAIServing):
                 top_logprobs=request.top_logprobs,
             )
 
-        # Use parser to extract and create response output items
+        # Use parser to extract reasoning, content, and tool calls
         if self.parser:
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             parser = self.parser(
                 tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
             )
-            return parser.extract_response_outputs(
-                model_output=final_output.text,
-                model_output_token_ids=final_output.token_ids,
-                request=request,
+            reasoning, content, tool_calls = parser.parse(
+                final_output.text,
+                request,
                 enable_auto_tools=self.enable_auto_tools,
-                tool_call_id_type=self.tool_call_id_type,
+            )
+            return build_response_output_items(
+                reasoning=reasoning,
+                content=content,
+                tool_calls=tool_calls,
                 logprobs=logprobs,
+                tool_call_id_type=self.tool_call_id_type,
             )
 
         # Fallback when no parser is configured

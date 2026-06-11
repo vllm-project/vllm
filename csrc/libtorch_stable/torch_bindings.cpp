@@ -27,13 +27,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 #endif
 
 #ifndef USE_ROCM
@@ -246,6 +245,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
+
+  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
+  ops.def(
+      "mxfp8_experts_quant("
+      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
+      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
+  ops.def(
+      "cutlass_mxfp8_grouped_mm("
+      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
 
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
@@ -562,9 +577,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
-#ifndef USE_ROCM
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
 
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
