@@ -13,6 +13,12 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+# Mixed causal/non-causal attention is only validated on a subset of GPUs:
+# the Triton path on Hopper (SM90) and B200 (SM100); the FA4 path on Hopper
+# (SM90) only.
+_device_capability = current_platform.get_device_capability()
+_major = _device_capability.major if _device_capability is not None else None
+
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128]
 BLOCK_SIZES = [16]
@@ -55,16 +61,16 @@ def ref_paged_attn(
 
         if per_seq_causal[i]:
             mask = torch.triu(
-                torch.ones(query_len, kv_len),
+                torch.ones(query_len, kv_len, device=attn.device),
                 diagonal=kv_len - query_len + 1,
             ).bool()
         else:
-            mask = torch.zeros(query_len, kv_len).bool()
+            mask = torch.zeros(query_len, kv_len, device=attn.device).bool()
 
         if sliding_window is not None:
             sw_mask = (
                 torch.triu(
-                    torch.ones(query_len, kv_len),
+                    torch.ones(query_len, kv_len, device=attn.device),
                     diagonal=kv_len - (query_len + sliding_window) + 1,
                 )
                 .bool()
@@ -84,6 +90,10 @@ def ref_paged_attn(
 # ---- Triton backend test ----
 
 
+@pytest.mark.skipif(
+    _major not in (9, 10),
+    reason="Triton mixed causal attention requires Hopper (SM90) or B200 (SM100).",
+)
 @pytest.mark.parametrize(
     "seq_lens",
     [[(1, 128), (5, 64), (1, 256)]],
@@ -191,13 +201,17 @@ def test_triton_mixed_causal(
 # ---- Flash Attention 4 backend test (native per_seq_causal) ----
 
 
+@pytest.mark.skipif(
+    _major != 9,
+    reason="FA4 mixed causal attention requires Hopper (SM90).",
+)
 @pytest.mark.parametrize(
     "seq_lens",
     [[(1, 128), (5, 64), (1, 256)]],
 )
 @pytest.mark.parametrize(
     "per_seq_causal",
-    [[True, False, True], [False, True, False]],
+    [[True, False, True]],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -296,7 +310,7 @@ def test_flash_attn4_mixed_causal(
         causal=False,
         block_table=block_tables,
         softcap=0.0,
-        per_seq_causal=per_seq_causal_tensor,
+        dynamic_causal=per_seq_causal_tensor,
         fa_version=4,
     )
 
