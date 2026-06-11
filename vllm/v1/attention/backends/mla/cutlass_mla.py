@@ -54,10 +54,6 @@ class CutlassMLABackend(MLACommonBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # sm100_cutlass_mla_decode reads the page-dim stride from the
-            # cache tensor, so the cross-layer (block-major) layout is
-            # supported: physical (num_blocks, num_layers, block_size,
-            # head_size).
             return (1, 0, 2, 3)
         return (0, 1, 2)
 

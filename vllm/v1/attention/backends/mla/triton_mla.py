@@ -62,10 +62,6 @@ class TritonMLABackend(MLACommonBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # The triton decode kernel addresses pages via the cache's
-            # page-dim stride, so the cross-layer (block-major) layout is
-            # supported: physical (num_blocks, num_layers, block_size,
-            # head_size).
             return (1, 0, 2, 3)
         return (0, 1, 2)
 
