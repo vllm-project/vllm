@@ -275,13 +275,10 @@ class StructuredOutputManager:
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for token in itertools.chain(req_tokens, (-1,)):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
-                    if token < 0:
-                        # Honor the -1 padding contract — never advance the
-                        # grammar or assert acceptance on a negative/padding
-                        # token (doing so triggers a fatal AssertionError under
-                        # MTP spec decode).
+                    if token == -1:
+                        # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if apply_bitmask and token >= 0 and not grammar.is_terminated():
+                    if apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
