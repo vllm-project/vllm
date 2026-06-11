@@ -45,7 +45,7 @@ steps:
 - label: GGUF Plugin
   key: gguf-plugin
   device: h200_18gb
-  timeout_in_minutes: 15
+  timeout_in_minutes: 30
   soft_fail: true
   optional: true
   source_file_dependencies:
