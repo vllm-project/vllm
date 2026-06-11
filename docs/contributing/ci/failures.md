@@ -69,7 +69,8 @@ ANSI codes:
 # All failed jobs in a PR's latest build (current branch's PR if omitted):
 .buildkite/scripts/ci-fetch-log.sh --pr <PR>
 
-# All failed jobs in a build:
+# All failed jobs in a build (--soft also includes soft-failed jobs;
+# --all fetches every finished job):
 .buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>"
 
 # One job — `gh pr checks` URLs (#<job_uuid>) and web UI URLs (?sid=) both

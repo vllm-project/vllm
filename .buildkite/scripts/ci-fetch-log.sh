@@ -2,12 +2,14 @@
 # Fetch vLLM Buildkite CI logs (public; no login required).
 #
 # Usage:
-#   ci-fetch-log.sh --pr [<PR>]               all failed jobs in the PR's latest
-#                                             build (current branch if omitted)
-#   ci-fetch-log.sh <buildkite_url> [output]  builds/<N> -> all failed jobs;
-#                                             #<job_uuid> / ?sid=<id> -> that job
+#   ci-fetch-log.sh [--soft|--all] --pr [<PR>]  failed jobs in the PR's latest
+#                                               build (current branch if omitted)
+#   ci-fetch-log.sh [--soft|--all] <build_url>  failed jobs in that build
+#   ci-fetch-log.sh <job_url> [output]          one job; both #<job_uuid> and
+#                                               ?sid=<id> URL forms work
 #   ci-fetch-log.sh <build> <job_uuid> [output]
 #
+# --soft also fetches soft-failed jobs; --all fetches every finished job.
 # Saves each log as ci-<build>-<job-name>.log (ANSI/timestamps stripped) and
 # prints "<file>\t<job name>" per job. [output] is single-job only; "-"
 # streams to stdout. Existing files are kept; CI_FETCH_LOG_FORCE=1 refetches.
@@ -20,7 +22,7 @@ UA="vllm-ci-fetch-log"
 UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -30,6 +32,16 @@ die() {
 }
 
 BUILD="" JOB="" SID="" OUT=""
+SCOPE="failed"
+
+while :; do
+    case "${1:-}" in
+    --soft) SCOPE="soft" ;;
+    --all) SCOPE="all" ;;
+    *) break ;;
+    esac
+    shift
+done
 
 case "${1:-}" in
 --pr)
@@ -128,11 +140,19 @@ if [ -n "$JOB" ]; then
     exit 0
 fi
 
-# Build-wide mode: fetch every finished, hard-failed job.
+# Build-wide mode: fetch finished jobs matching $SCOPE.
 [ -z "$OUT" ] || die "[output_file] is only valid when fetching a single job."
 
-SOFT=$(awk -F'\t' '$3 == "True" && $4 == "True"' "$JOBS_TSV" | wc -l)
-[ "$SOFT" -eq 0 ] || echo "Skipping ${SOFT} soft-failed job(s)." >&2
+case "$SCOPE" in
+failed) FILTER='$3 == "True" && $4 == "False" && $5 == "True"' ;;
+soft) FILTER='$3 == "True" && $5 == "True"' ;;
+all) FILTER='$5 == "True"' ;;
+esac
+
+if [ "$SCOPE" = "failed" ]; then
+    SOFT=$(awk -F'\t' '$3 == "True" && $4 == "True"' "$JOBS_TSV" | wc -l)
+    [ "$SOFT" -eq 0 ] || echo "Skipping ${SOFT} soft-failed job(s); use --soft to include them." >&2
+fi
 
 FOUND=0
 EMITTED=" "
@@ -151,8 +171,8 @@ while IFS=$'\t' read -r job_id _ _ _ _ slug name; do
         continue
     fi
     printf '%s\t%s\n' "$out" "$name"
-done < <(awk -F'\t' '$3 == "True" && $4 == "False" && $5 == "True"' "$JOBS_TSV")
+done < <(awk -F'\t' "$FILTER" "$JOBS_TSV")
 
 if [ "$FOUND" -eq 0 ]; then
-    echo "No (hard-)failed jobs in build ${BUILD}." >&2
+    echo "No matching jobs in build ${BUILD} (scope: ${SCOPE})." >&2
 fi
