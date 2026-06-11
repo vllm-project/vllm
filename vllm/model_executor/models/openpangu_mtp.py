@@ -17,7 +17,7 @@
 # limitations under the License.
 
 # Adapted from
-# vllm.models.deepseek_v2
+# https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
 from collections.abc import Iterable
 
 import torch
