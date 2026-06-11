@@ -450,6 +450,7 @@ class FlashInferBackend(AttentionBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if kv_cache_dtype == "nvfp4" and device_capability.major != 10:
