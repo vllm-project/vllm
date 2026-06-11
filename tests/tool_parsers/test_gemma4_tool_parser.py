@@ -728,3 +728,197 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+    def test_streaming_multiple_tool_calls_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Multiple tool calls arriving in the same delta must all be parsed.
+
+        Regression test for: Gemma4 parser does not support multiple
+        function calls within a single delta chunk.
+        """
+        # Build chunks using STRING_DELIM to avoid quote issues
+        sd = '<|"|>'
+        chunks = [
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}<tool_call|>'
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect all tool call deltas
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                all_tool_calls.extend(delta.tool_calls)
+
+        # Should have detected both tool calls
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )
+
+    def test_streaming_four_tool_calls_with_interleaved_text_in_single_delta(
+        self, parser, mock_request
+    ):
+        """One chunk contains 4 tool calls with plain text interspersed.
+
+        This tests the parser's ability to handle:
+        1. Multiple (4) tool calls in a single delta
+        2. Plain text appearing before, between, and after tool calls
+        """
+        sd = '<|"|>'
+        chunk = (
+            "Here are the results:\n"
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}<tool_call|>'
+            "Weather info above.\n"
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}<tool_call|>'
+            f'<|tool_call>call:get_temp{{location:{sd}Paris{sd}}}<tool_call|>'
+            "Text between calls 3 and 4.\n"
+            f'<|tool_call>call:get_humidity{{location:{sd}Tokyo{sd}}}<tool_call|>'
+            "Final text."
+        )
+        chunks = [chunk]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect all tool call deltas and content deltas separately
+        all_tool_calls = []
+        all_content = []
+        for delta, _ in results:
+            if delta:
+                if delta.tool_calls:
+                    all_tool_calls.extend(delta.tool_calls)
+                if delta.content:
+                    all_content.append(delta.content)
+
+        # Verify all 4 tool calls were detected
+        assert len(all_tool_calls) >= 4, (
+            f"Expected at least 4 tool calls, got {len(all_tool_calls)}"
+        )
+
+        # Verify function names
+        names = []
+        for tc in all_tool_calls:
+            func = tc.function if isinstance(tc.function, dict) else tc.function
+            if isinstance(func, dict):
+                name = func.get("name")
+            else:
+                name = getattr(func, "name", None)
+            if name:
+                names.append(name)
+
+        assert "get_weather" in names, f"get_weather not found in {names}"
+        assert "get_time" in names, f"get_time not found in {names}"
+        assert "get_temp" in names, f"get_temp not found in {names}"
+        assert "get_humidity" in names, f"get_humidity not found in {names}"
+
+        # Verify content was also captured (plain text)
+        content_str = "".join(all_content)
+        assert "Here are the results:" in content_str or len(content_str) > 0, (
+            f"Expected some content text, got: {content_str}"
+        )
+
+    def test_streaming_text_between_tool_calls_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Text before and between tool calls must be emitted as content.
+
+        Regression test for PR #43037 issue 3:
+        content extraction logic loses text appearing before or between
+        tool call tags.
+        """
+        sd = '<|"|>'
+        # One chunk with text before, between, and after tool calls
+        chunks = [
+            f"Let me help:\n"
+            f'<|tool_call>call:f1{{location:{sd}London{sd}}}<tool_call|>'
+            f"Result for f1:\n"
+            f'<|tool_call>call:f2{{location:{sd}Paris{sd}}}<tool_call|>'
+            f"Final result."
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect content and tool calls
+        all_content = []
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta:
+                if delta.content:
+                    all_content.append(delta.content)
+                if delta.tool_calls:
+                    all_tool_calls.extend(delta.tool_calls)
+
+        # Verify tool calls
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )
+
+        # Verify ALL text segments were captured as content
+        content_str = "".join(all_content)
+        assert "Let me help:" in content_str, (
+            f"Text before tool call missing: {content_str}"
+        )
+        assert "Result for f1:" in content_str, (
+            f"Text between tool calls missing: {content_str}"
+        )
+        assert "Final result." in content_str, (
+            f"Text after tool call missing: {content_str}"
+        )
+
+    def test_streaming_multiple_tool_calls_sequential(
+        self, parser, mock_request
+    ):
+        """Multiple tool calls arriving sequentially across chunks."""
+        sd = '<|"|>'
+        chunks = [
+            f'<|tool_call>call:get_weather{{location:{sd}London{sd}}}',
+            "<tool_call|>",
+            f'<|tool_call>call:get_time{{location:{sd}London{sd}}}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        all_tool_calls = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                all_tool_calls.extend(delta.tool_calls)
+
+        assert len(all_tool_calls) >= 2, (
+            f"Expected at least 2 tool calls, got {len(all_tool_calls)}"
+        )
+
+    def test_streaming_filename_suffix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """File extensions split across chunks must not be dropped."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+
+    def test_streaming_string_prefix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """String values split after the first character must be preserved."""
+        chunks = [
+            "<|tool_call>",
+            "call:spawn_agent{",
+            'subagent_type:<|"|>e',
+            'xplore<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"subagent_type": "explore"}
