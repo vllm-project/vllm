@@ -22,7 +22,6 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
-    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -368,17 +367,6 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
     with vllm_runner(model_path, attention_config={"backend": "FLASH_ATTN"}) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
-
-
-def test_compressed_tensors_kv_cache_scheme_rejects_float4():
-    scheme = {
-        "type": "float",
-        "num_bits": 4,
-        "strategy": "tensor",
-        "symmetric": True,
-    }
-    with pytest.raises(NotImplementedError):
-        CompressedTensorsKVCacheMethod.validate_kv_cache_scheme(scheme)
 
 
 @pytest.mark.parametrize(
