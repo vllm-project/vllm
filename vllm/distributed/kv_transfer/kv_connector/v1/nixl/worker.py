@@ -71,6 +71,7 @@ from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -423,6 +424,7 @@ class NixlConnectorWorker:
         # NOTE (NickLucche) models with multiple backends are not supported yet
         self.attn_backends = get_current_attn_backends(vllm_config)
         self.backend_name = self.attn_backends[0].get_name()
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
@@ -848,6 +850,7 @@ class NixlConnectorWorker:
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
+        tq_tensor_size_bytes = None
 
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
@@ -895,8 +898,15 @@ class NixlConnectorWorker:
             # `page_size` accounts for physical blocks, st KVCache is always
             # [`num_blocks` * `page_size`]
             curr_tensor_size_bytes = num_blocks * physical_page_size
-            if tensor_size_bytes is None:
-                tensor_size_bytes = curr_tensor_size_bytes
+            # Track baseline sizes separately for TQ and non-TQ layers,
+            # since TQ packs K+V into a single region with a different
+            # size than standard FA's separate K/V regions.
+            if isinstance(layer_spec, TQFullAttentionSpec):
+                if tq_tensor_size_bytes is None:
+                    tq_tensor_size_bytes = curr_tensor_size_bytes
+            else:
+                if tensor_size_bytes is None:
+                    tensor_size_bytes = curr_tensor_size_bytes
 
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
@@ -940,9 +950,21 @@ class NixlConnectorWorker:
                 if not self.use_mla:
                     # Different kv cache shape is not supported by HeteroTP.
                     # This must also hold true for Mamba-like models.
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All kv cache tensors must have the same size"
-                    )
+                    # TQ layers pack K+V into a single region with a
+                    # different size than standard FA's separate K/V
+                    # regions, so validate each type independently.
+                    if isinstance(layer_spec, TQFullAttentionSpec):
+                        assert (
+                            tq_tensor_size_bytes == curr_tensor_size_bytes
+                        ), (
+                            "All TQ kv cache tensors must have the same size"
+                        )
+                    else:
+                        assert (
+                            tensor_size_bytes == curr_tensor_size_bytes
+                        ), (
+                            "All kv cache tensors must have the same size"
+                        )
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
                 self.device_id = max(cache.get_device(), 0)
@@ -1527,8 +1549,12 @@ class NixlConnectorWorker:
                 "Use HND layout on the prefill side."
             )
 
-        # Block len can only vary across layers when using MLA.
-        remote_block_len = nixl_agent_meta.block_lens[0]
+        # Block len can only vary across layers when using MLA or TurboQuant
+        has_tq_mixed_block_lens = (
+            self.kv_cache_dtype.startswith("turboquant_")
+            and len(set(nixl_agent_meta.block_lens)) > 1
+        )
+
         if self.use_mla or self.transfer_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
             # TODO (ZhanqiuHu): For mamba models, validate FA and mamba
@@ -1541,36 +1567,43 @@ class NixlConnectorWorker:
                     ), "KV cache sizes must match between P and D when replicated"
         else:
             # When MLA is not used, this is a list of the same block length
-            for block_len in nixl_agent_meta.block_lens:
-                assert block_len == remote_block_len, (
-                    "All remote layers must have the same block size"
-                )
+            if has_tq_mixed_block_lens:
+                remote_block_lens = nixl_agent_meta.block_lens
+                local_block_lens = self.block_len_per_layer
+            else:
+                remote_block_lens = [nixl_agent_meta.block_lens[0]]
+                local_block_lens = [self.block_len_per_layer[0]]
+                for block_len in nixl_agent_meta.block_lens:
+                    assert block_len == remote_block_lens[0], (
+                        "All remote layers must have the same block size"
+                    )
 
             # HMA hybrid models (mamba+attention) pad block_len to
             # max(attn_page, mamba_page), so the linear tp_ratio scaling
             # assumption only holds for pure-attention models.
-            if not self._has_mamba:
-                if tp_ratio > 0:
-                    assert (
-                        remote_block_len
-                        == (self.block_len_per_layer[0] * tp_ratio) // block_size_ratio
-                    ), (
-                        "Remote P worker KV layer cache must be of shape [2, N,"
-                        " local_kv_heads*tp_ratio, page_size, head_dim] and "
-                        "same dtype."
-                    )
-                else:
-                    assert block_size_ratio == 1, (
-                        "Different local/remote block sizes are not supported"
-                        " when P TP > D TP."
-                    )
-                    assert remote_block_len == self.block_len_per_layer[0] // (
-                        -tp_ratio
-                    ), (
-                        "Remote P worker KV layer cache must be of shape [2, N,"
-                        " local_kv_heads/tp_ratio, page_size, head_dim] and "
-                        "same dtype."
-                    )
+            for local_block_len, remote_block_len in zip(local_block_lens, remote_block_lens):
+                if not self._has_mamba:
+                    if tp_ratio > 0:
+                        assert (
+                            remote_block_len
+                            == (local_block_len * tp_ratio) // block_size_ratio
+                        ), (
+                            "Remote P worker KV layer cache must be of shape [2, N,"
+                            " local_kv_heads*tp_ratio, page_size, head_dim] and "
+                            "same dtype."
+                        )
+                    else:
+                        assert block_size_ratio == 1, (
+                            "Different local/remote block sizes are not supported"
+                            " when P TP > D TP."
+                        )
+                        assert remote_block_len == local_block_len // (
+                            -tp_ratio
+                        ), (
+                            "Remote P worker KV layer cache must be of shape [2, N,"
+                            " local_kv_heads/tp_ratio, page_size, head_dim] and "
+                            "same dtype."
+                        )
 
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
