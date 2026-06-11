@@ -430,6 +430,9 @@ class NixlBaseConnectorScheduler:
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
 
+    def has_pending_push_work(self) -> bool:
+        return False
+
     ############################################################
     # Abstract methods that subclasses must implement
     ############################################################

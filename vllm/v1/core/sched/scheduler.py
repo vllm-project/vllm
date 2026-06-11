@@ -2009,6 +2009,19 @@ class Scheduler(SchedulerInterface):
         )
         return len(self.requests) > num_in_queues
 
+    def has_requests(self) -> bool:
+        # Override the interface default to also keep the engine alive while a
+        # connector still has pending push work (e.g. push-mode WRITE transfers
+        # in flight after all "live" requests have finished). Without this hook
+        # the engine would quiesce before the connector can drain completions.
+        # TODO: replace with a more general mechanism for connectors to keep
+        # the scheduler alive.
+        return (
+            self.has_unfinished_requests()
+            or self.has_finished_requests()
+            or (self.connector is not None and self.connector.has_pending_push_work())
+        )
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:

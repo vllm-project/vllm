@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
     NixlBaseConnector,
     NixlConnector,
     NixlPullConnector,
+    NixlPushConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
@@ -23,6 +24,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
     NixlPullConnectorWorker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+    NixlPushConnectorScheduler,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+    NixlPushConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
@@ -48,4 +55,7 @@ __all__ = [
     "NixlPullConnector",
     "NixlPullConnectorScheduler",
     "NixlPullConnectorWorker",
+    "NixlPushConnector",
+    "NixlPushConnectorScheduler",
+    "NixlPushConnectorWorker",
 ]
