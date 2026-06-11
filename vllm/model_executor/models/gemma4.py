@@ -1486,6 +1486,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
+                    # Skip if name doesn't exist in params_dict (e.g., individual
+                    # expert weights that should have been handled above)
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
