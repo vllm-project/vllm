@@ -23,6 +23,12 @@ R = TypeVar("R")
 P = ParamSpec("P")
 
 
+def _reset_offloader_for_recompile() -> None:
+    from vllm.model_executor.offloader.base import get_offloader
+
+    get_offloader().reset_runtime_state()
+
+
 @contextmanager
 def _compilation_context() -> Generator[None, None, None]:
     """Context manager for compilation settings.
@@ -344,3 +350,4 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         compile_prefix=model._compile_prefix,
         is_encoder=model._is_encoder,
     )
+    _reset_offloader_for_recompile()
