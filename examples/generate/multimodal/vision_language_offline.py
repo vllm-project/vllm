@@ -1528,6 +1528,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
         tokenizer_mode="mistral",
         config_format="mistral",
         load_format="mistral",
+        ignore_patterns=["consolidated.safetensors", "model*.safetensors"],
         max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=2,
