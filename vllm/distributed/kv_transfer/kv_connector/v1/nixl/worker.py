@@ -95,11 +95,13 @@ class NixlConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
-        num_ssm_regions = (
-            len(self.block_len_per_layer) * self._ssm_regions_per_layer
-            if self._has_mamba
-            else 0
-        )
+        num_ssm_regions = 0
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
+            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+            num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -272,11 +274,6 @@ class NixlConnectorWorker:
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
-        # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-        # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
-        self._ssm_regions_per_layer: int = 0
-        if self._conv_decomp is not None:
-            self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
