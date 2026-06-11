@@ -1556,14 +1556,11 @@ class NixlConnectorWorker:
         assert remote_info.remote_tp_size == remote_tp_size
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
-        try:
-            block_size_ratio = self.transfer_topo.block_size_ratio(
-                nixl_agent_meta.block_size
-            )
-        except AssertionError:
-            # Heterogeneous TP with non-divisible block sizes (e.g. hybrid
-            # MLA+GDN).  Use 1 as a safe fallback for validation checks.
-            block_size_ratio = 1
+        # Heterogeneous TP with non-divisible block sizes (e.g. hybrid
+        # MLA+GDN) falls back to 1 inside block_size_ratio.
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            nixl_agent_meta.block_size
+        )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         # MLA models do not need to handle kv replication.
@@ -1928,12 +1925,9 @@ class NixlConnectorWorker:
 
             # post processing for heteroblocksize
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
-            try:
-                block_size_ratio = self.transfer_topo.block_size_ratio(
-                    remote_info.remote_block_size
-                )
-            except AssertionError:
-                block_size_ratio = 1
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                remote_info.remote_block_size
+            )
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
@@ -2325,12 +2319,9 @@ class NixlConnectorWorker:
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        try:
-            block_size_ratio = self.transfer_topo.block_size_ratio(
-                remote_info.remote_block_size
-            )
-        except AssertionError:
-            block_size_ratio = 1
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
             assert not self._is_hma_required
