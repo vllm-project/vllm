@@ -1287,7 +1287,6 @@ class StatLoggerManager:
         enable_default_loggers: bool = True,
         aggregate_engine_logging: bool = False,
         client_count: int = 1,
-        client_index: int = 0,
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
@@ -1295,18 +1294,16 @@ class StatLoggerManager:
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
-            if client_count > 1 and client_index > 0:
-                # Non-primary servers stay silent to avoid duplicate output.
-                pass
+            if client_count > 1:
+                logger.warning(
+                    "AsyncLLM created with api_server_count=%d > 1; "
+                    "disabling stats logging to avoid incomplete or misleading "
+                    "stats (each server only sees a subset of traffic). "
+                    "Use Prometheus metrics for accurate aggregated stats, or "
+                    "set VLLM_USE_RUST_FRONTEND=1 to avoid this limitation.",
+                    client_count,
+                )
             else:
-                if client_count > 1:
-                    logger.info(
-                        "Multiple API servers detected (api_server_count=%d); "
-                        "stats logging is enabled on server 0 only. "
-                        "Reported stats reflect approximately 1/%d of total traffic.",
-                        client_count,
-                        client_count,
-                    )
                 default_logger_factory = (
                     AggregatedLoggingStatLogger
                     if aggregate_engine_logging
