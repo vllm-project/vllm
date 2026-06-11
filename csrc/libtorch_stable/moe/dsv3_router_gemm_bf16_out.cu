@@ -18,13 +18,10 @@
  * limitations under the License.
  */
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <cstdint>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
-
-#include "dsv3_router_gemm_utils.h"
 
 // Custom FMA implementation using PTX assembly instructions
 __device__ __forceinline__ void fma(float2& d, float2 const& a, float2 const& b,
