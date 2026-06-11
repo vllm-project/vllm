@@ -311,6 +311,11 @@ class TritonAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
+            # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
+            # per-(token, head) scale fits inline after the quantized data;
+            # the backend extracts data[:head_size] and scale[head_size:] via
+            # typed views (see _ensure_scale_caches).  INT4 packs two values
+            # per byte, so the data occupies only head_size // 2 bytes.
             from vllm.utils.torch_utils import (
                 STR_DTYPE_TO_TORCH_DTYPE,
                 get_dtype_size,
