@@ -115,6 +115,18 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: torch.Tensor | None = None,
+    ):
+        self._raise_if_dora_unsupported(
+            lora_magnitude_vector, "fully sharded LoRA"
+        )
+        super().set_lora(index, lora_a, lora_b)
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)
 

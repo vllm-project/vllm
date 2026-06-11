@@ -20,6 +20,7 @@ from vllm.model_executor.layers.linear import (
     QuantizeMethodBase,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -82,6 +83,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+        self._dora_active_slots: set[int] = set()
 
     def _init_lora_stream_context(self) -> None:
         if not self._enable_aux_cuda_stream:
@@ -159,6 +161,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             dtype=torch.bool,
             device=self.device,
         )
+        self._dora_active_slots.clear()
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
@@ -167,6 +170,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_b_stacked[s_index][index] = 0
         self.dora_scale_stacked[index] = 1
         self.dora_enabled_stacked[index] = False
+        self._dora_active_slots.discard(index)
+
+    @staticmethod
+    def _raise_if_dora_unsupported(
+        lora_magnitude_vector: torch.Tensor | None,
+        feature: str,
+    ) -> None:
+        if lora_magnitude_vector is not None:
+            raise NotImplementedError(f"DoRA is not supported for {feature}.")
 
     def set_lora(
         self,
@@ -219,6 +231,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             raise NotImplementedError("DoRA currently only supports TP=1.")
         if self.n_slices != 1:
             raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
+        if not isinstance(self.base_layer.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError("DoRA is not supported for quantized layers.")
         if not hasattr(self.base_layer, "weight"):
             raise NotImplementedError(
                 "DoRA requires access to the unquantized base layer weight."
@@ -248,30 +262,99 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             non_blocking=True,
         )
         self.dora_enabled_stacked[index] = True
+        self._dora_active_slots.add(index)
+
+    def _get_dora_token_mask(
+        self,
+        num_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_lora_indices = self.punica_wrapper.token_lora_indices[:num_tokens]
+        has_adapter = token_lora_indices >= 0
+        safe_token_lora_indices = torch.where(
+            has_adapter, token_lora_indices, torch.zeros_like(token_lora_indices)
+        )
+        has_dora = has_adapter & self.dora_enabled_stacked[safe_token_lora_indices]
+        return token_lora_indices, has_dora
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         # is_forward_context_available for tower modules
-        if self._enable_aux_cuda_stream and is_forward_context_available():
+        if (
+            self._enable_aux_cuda_stream
+            and is_forward_context_available()
+            and not self._dora_active_slots
+        ):
             output_size = sum(self.output_slices)
             return torch.ops.vllm.lora_linear_async(
                 self.layer_name, output_size, x, bias
             )
-        else:
-            return self._apply_sync(x, bias)
+        return self._apply_sync(x, bias)
 
     def _apply_sync(
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)
-        return self._apply_lora_to_output(x, output)
+        return self._apply_lora_to_output(x, output, bias_was_added=bias is not None)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
         base_output = self.base_layer(x)
         output = base_output[0] if isinstance(base_output, tuple) else base_output
-        return self._apply_lora_to_output(x, output)
+        bias_was_added = self.bias is not None and not self.base_layer.skip_bias_add
+        return self._apply_lora_to_output(x, output, bias_was_added=bias_was_added)
+
+    def _apply_standard_lora(
+        self,
+        x: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+        )
+        if current_platform.can_update_inplace():
+            return output
+        assert lora_output is not None
+        return lora_output
+
+    def _compute_lora_delta(
+        self,
+        x: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        lora_delta = torch.zeros_like(output)
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
+            lora_delta,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            add_inputs=False,
+        )
+        if current_platform.can_update_inplace():
+            return lora_delta
+        assert lora_output is not None
+        return lora_output
+
+    def _apply_dora_scale(
+        self,
+        output: torch.Tensor,
+        token_lora_indices: torch.Tensor,
+        has_dora: torch.Tensor,
+    ) -> torch.Tensor:
+        dora_scale = self.dora_scale_stacked[token_lora_indices[has_dora]]
+        output[has_dora] = output[has_dora] * dora_scale.to(dtype=output.dtype)
+        return output
 
     def _apply_lora_to_output(
-        self, x: torch.Tensor, output: torch.Tensor
+        self,
+        x: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        bias_was_added: bool = False,
     ) -> torch.Tensor:
         original_shape = output.shape if output.ndim == 3 else None
 
@@ -282,11 +365,25 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
-        )
-        if not current_platform.can_update_inplace():
-            output = lora_output
+        if self._dora_active_slots:
+            token_lora_indices, has_dora = self._get_dora_token_mask(x.shape[0])
+            if has_dora.any().item():
+                if not current_platform.is_cuda_alike():
+                    raise NotImplementedError("DoRA currently only supports CUDA.")
+                if bias_was_added:
+                    raise NotImplementedError(
+                        "DoRA currently only supports linear layers without "
+                        "an added bias in the base output."
+                    )
+
+                # DoRA needs the unscaled base-plus-LoRA value before applying
+                # the per-output magnitude scale for DoRA tokens only.
+                output.add_(self._compute_lora_delta(x, output))
+                output = self._apply_dora_scale(output, token_lora_indices, has_dora)
+            else:
+                output = self._apply_standard_lora(x, output)
+        else:
+            output = self._apply_standard_lora(x, output)
 
         # Reshape the flattened output back to its original shape,
         # as some MM encoders cannot handle flattened inputs.
