@@ -2223,7 +2223,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        # Ampere (SM80/SM86): NVFP4 routed experts run via Marlin W4A16, and FP8
+        # weight-only dense layers run via MarlinFP8 (W8A16, compute in
+        # bf16/fp16). FP8 MoE, if present, also routes to Marlin because
+        # TritonExperts gates its FP8 schemes behind supports_fp8() (cc>=89).
+        # None of these paths require native FP8 tensor cores, so SM80 is
+        # sufficient.
+        return 80
 
     @classmethod
     def override_quantization_method(
