@@ -80,16 +80,6 @@ else:
 
 logger = init_logger(__name__)
 
-
-def is_cumem_allocator_available() -> bool:
-    try:
-        from vllm.device_allocator.cumem import cumem_available
-    except ImportError:
-        return False
-
-    return cumem_available
-
-
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -145,14 +135,12 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
-    - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
     [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
     `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
-    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
-    `qwen_vl`, …)."""
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -245,9 +233,10 @@ class ModelConfig:
     temperature and top_k/top_p.
     """
     use_fp64_gumbel: bool = False
-    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
-    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
-    of significantly lower kernel throughput on most GPUs."""
+    """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
+    equivalent exponential-race sampling. FP64 preserves lower-tail sampling
+    events that fp32 uniform/exponential draws can truncate, at the cost of
+    significantly lower throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -537,12 +526,15 @@ class ModelConfig:
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")
-            if not self.enable_cumem_allocator:
+            if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
                 logger.info_once(
                     "Enabling cumem allocator because sleep mode requires it."
                 )
                 self.enable_cumem_allocator = True
-        if self.enable_cumem_allocator and not is_cumem_allocator_available():
+        if (
+            self.enable_cumem_allocator
+            and not current_platform.is_cumem_allocator_available()
+        ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
@@ -624,8 +616,6 @@ class ModelConfig:
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "QwenVLForConditionalGeneration":
-                self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
@@ -791,7 +781,7 @@ class ModelConfig:
                 f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
                 "Please provide a valid tokenizer path or HuggingFace model ID."
             )
-        if not isinstance(self.max_model_len, int):
+        if not isinstance(self.max_model_len, int) or self.max_model_len < 1:
             raise ValueError(
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
@@ -1028,7 +1018,6 @@ class ModelConfig:
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "deepseek_v4_fp8",
-                "cpu_awq",
                 "humming",
                 "gguf",
             ]
