@@ -476,8 +476,18 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-    assert target_probs.is_contiguous()
+    # Avoid materializing the full [num_tokens, vocab_size] target_probs tensor.
+    # The random rejection kernel reconstructs probabilities as
+    # exp(logit - logsumexp(row)) at the point of use. This is algebraically
+    # identical to softmax in exact arithmetic and keeps normalization after
+    # temperature/top-k/top-p constraints.
+    #
+    # Use a one-pass Triton producer instead of torch.logsumexp here. ATen
+    # logsumexp may materialize full-row temporaries, which defeats the point
+    # of avoiding target_probs.
+    BLOCK_SIZE: tl.constexpr = 8192
+    target_lse = compute_target_lse(target_logits, vocab_size, BLOCK_SIZE)
+    assert target_lse.is_contiguous()
 
     # Precompute one Philox seed per speculative token. Lazy recovery keeps the
     # same exponential-race distribution as the eager helper while generating
@@ -489,10 +499,6 @@ def rejection_sample(
         device,
     )
 
-    # Triton tile size for vocab reduction during lazy recovery.
-    # Kept large to reduce loop iterations but still fit in SRAM.
-    BLOCK_SIZE: tl.constexpr = 8192
-
     # Rejection sampling for random sampling requests.
     assert uniform_probs is not None
     rejection_random_sample_kernel[(batch_size,)](
@@ -500,7 +506,8 @@ def rejection_sample(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        target_lse,
         bonus_token_ids,
         recovery_seeds,
         uniform_probs,
@@ -773,6 +780,69 @@ def sample_recovered_tokens(
     return recovered_token_ids
 
 
+def compute_target_lse(
+    target_logits: torch.Tensor,
+    vocab_size: int,
+    block_size: int,
+) -> torch.Tensor:
+    """Compute per-row logsumexp without materializing target probabilities."""
+    if target_logits.is_cuda and HAS_TRITON:
+        target_lse = torch.empty(
+            (target_logits.shape[0],),
+            dtype=torch.float32,
+            device=target_logits.device,
+        )
+        target_lse_kernel[(target_logits.shape[0],)](
+            target_logits,
+            target_lse,
+            vocab_size,
+            BLOCK_SIZE=block_size,
+            num_warps=8,
+        )
+        return target_lse
+    return torch.logsumexp(target_logits, dim=-1)
+
+
+@triton.jit
+def target_lse_kernel(
+    target_logits_ptr,  # [num_tokens, vocab_size]
+    target_lse_ptr,  # [num_tokens]
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+
+    m = tl.full((), float("-inf"), tl.float32)
+    s = tl.full((), 0.0, tl.float32)
+    for v in range(0, vocab_size, BLOCK_SIZE):
+        vocab_offset = v + tl.arange(0, BLOCK_SIZE)
+        vocab_mask = vocab_offset < vocab_size
+        logits = tl.load(
+            target_logits_ptr + row * vocab_size + vocab_offset,
+            mask=vocab_mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        tile_max = tl.max(logits, axis=0)
+        new_m = tl.maximum(m, tile_max)
+        # If all visited tiles are -inf so far, new_m is -inf. Avoid forming
+        # -inf - -inf in either branch; masked contributions should be zero.
+        finite_new_m = tl.where(new_m > float("-inf"), new_m, 0.0)
+        old_scale = tl.where(
+            m > float("-inf"),
+            tl.exp2((m - finite_new_m) * 1.4426950408889634),
+            0.0,
+        )
+        tile_contrib = tl.where(
+            logits > float("-inf"),
+            tl.exp2((logits - finite_new_m) * 1.4426950408889634),
+            0.0,
+        )
+        s = s * old_scale + tl.sum(tile_contrib, axis=0)
+        m = new_m
+
+    tl.store(target_lse_ptr + row, m + tl.log(s))
+
+
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
@@ -849,7 +919,8 @@ def rejection_random_sample_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
+    target_logits_ptr,  # [num_tokens, vocab_size]
+    target_lse_ptr,  # [num_tokens]
     bonus_token_ids_ptr,  # [batch_size]
     recovery_seeds_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
@@ -878,6 +949,7 @@ def rejection_random_sample_kernel(
             token_idx = start_idx + pos
             draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
             uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+            target_lse = tl.load(target_lse_ptr + token_idx)
             if SYNTHETIC_MODE:
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
                 accepted = uniform_prob < rate
@@ -888,9 +960,10 @@ def rejection_random_sample_kernel(
                     draft_prob = tl.load(
                         draft_probs_ptr + token_idx * vocab_size + draft_token_id
                     )
-                target_prob = tl.load(
-                    target_probs_ptr + token_idx * vocab_size + draft_token_id
+                target_logit = tl.load(
+                    target_logits_ptr + token_idx * vocab_size + draft_token_id
                 )
+                target_prob = tl.exp(target_logit - target_lse)
                 # NOTE(woosuk): While the draft probability should never be 0,
                 # we check it to avoid NaNs. If it happens to be 0, we reject.
                 accepted = draft_prob > 0 and target_prob / draft_prob >= uniform_prob
@@ -921,16 +994,14 @@ def rejection_random_sample_kernel(
                     vocab_offset = v + tl.arange(0, BLOCK_SIZE)
                     vocab_mask = vocab_offset < vocab_size
 
-                    target_prob_v = tl.load(
-                        target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                    target_logit_v = tl.load(
+                        target_logits_ptr + token_idx * vocab_size + vocab_offset,
                         mask=vocab_mask,
-                        other=0.0,
+                        other=float("-inf"),
                     )
-                    target_for_argmax = tl.where(
-                        vocab_mask, target_prob_v, float("-inf")
-                    )
+                    target_prob_v = tl.exp(target_logit_v - target_lse)
                     local_fallback_max, local_fallback_id = tl.max(
-                        target_for_argmax, axis=0, return_indices=True
+                        target_logit_v, axis=0, return_indices=True
                     )
                     if local_fallback_max > fallback_max:
                         fallback_max = local_fallback_max
