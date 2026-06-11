@@ -176,11 +176,15 @@ struct MacheteKernelTemplate {
       torch::stable::Tensor const& A,  // MxK matrix
       torch::stable::Tensor const& B,  // KxN prepacked matrix
       torch::stable::Tensor& D,        // MxN matrix
-      std::optional<torch::stable::Tensor> const& maybe_g_scales,  // scale_KxN
-      std::optional<torch::stable::Tensor> const& maybe_g_zeros,   // scale_KxN
+      std::optional<torch::stable::Tensor> const&
+          maybe_g_scales,  // scale_KxN matrix
+      std::optional<torch::stable::Tensor> const&
+          maybe_g_zeros,  // scale_KxN matrix
       std::optional<int64_t> maybe_group_size,
-      std::optional<torch::stable::Tensor> const& maybe_ch_scales,   // len N
-      std::optional<torch::stable::Tensor> const& maybe_tok_scales)  // len M
+      std::optional<torch::stable::Tensor> const&
+          maybe_ch_scales,  // len N vector
+      std::optional<torch::stable::Tensor> const&
+          maybe_tok_scales)  // len M vector
   {
     static_assert(!with_group_zeropoints || with_group_scales);
 
