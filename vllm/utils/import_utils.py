@@ -82,7 +82,28 @@ def import_triton_kernels():
         )
 
 
-def import_from_path(module_name: str, file_path: str | os.PathLike):
+def import_plugin(plugin_path: str) -> ModuleType | None:
+    """
+    Import a user-defined plugin.
+
+    Plugin can be either:
+    * a module in site-packages
+    * a Python file specified by its path
+    """
+    try:
+        return importlib.import_module(plugin_path)
+    except ModuleNotFoundError:
+        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
+        try:
+            return import_from_path(module_name, plugin_path)
+        except Exception:
+            logger.exception(
+                "Failed to load module '%s' from %s.", module_name, plugin_path
+            )
+            return None
+
+
+def import_from_path(module_name: str, file_path: str | os.PathLike) -> ModuleType:
     """
     Import a Python file according to its file path.
 
