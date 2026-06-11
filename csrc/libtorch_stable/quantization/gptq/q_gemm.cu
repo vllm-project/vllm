@@ -54,7 +54,7 @@ __host__ __forceinline__ hipblasStatus_t __compat_hipblasHgemm(
 
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
                                          const half2 g_result) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -62,7 +62,7 @@ __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
 }
 
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -72,7 +72,7 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
                                          const half2 g_result,
                                          const half qs_h) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -82,7 +82,7 @@ __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr,
 __forceinline__ __device__ half2 dot22_16(half2 (&dq)[8], const half* a_ptr,
                                           const half2 g_result,
                                           const half qs_h) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -92,7 +92,7 @@ __forceinline__ __device__ half2 dot22_16(half2 (&dq)[8], const half* a_ptr,
 __forceinline__ __device__ half2 dot22_32(half2 (&dq)[16], const half* a_ptr,
                                           const half2 g_result,
                                           const half qs_h) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -102,7 +102,7 @@ __forceinline__ __device__ half2 dot22_32(half2 (&dq)[16], const half* a_ptr,
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr,
                                            const float g_result,
                                            const float qs_f) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -114,7 +114,7 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr,
 __forceinline__ __device__ float dot22_16_f(half2 (&dq)[8], const half* a_ptr,
                                             const float g_result,
                                             const float qs_f) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -126,7 +126,7 @@ __forceinline__ __device__ float dot22_16_f(half2 (&dq)[8], const half* a_ptr,
 __forceinline__ __device__ float dot22_32_f(half2 (&dq)[16], const half* a_ptr,
                                             const float g_result,
                                             const float qs_f) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -161,7 +161,7 @@ __forceinline__ __device__ half dot22_8_h(half2 (&dq)[4], const half* a_ptr,
 __forceinline__ __device__ half dot22_16_h(half2 (&dq)[8], const half* a_ptr,
                                            const half g_result,
                                            const half qs_h) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -172,7 +172,7 @@ __forceinline__ __device__ half dot22_16_h(half2 (&dq)[8], const half* a_ptr,
 __forceinline__ __device__ half dot22_32_h(half2 (&dq)[16], const half* a_ptr,
                                            const half g_result,
                                            const half qs_h) {
-  half2 result = {};
+  half2 result = half2{};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -1237,7 +1237,7 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
     }
     for (int m = 0; m < b_end; m++) {
 #ifndef USE_ROCM
-      res2 = {};
+      res2 = half2{};
 #else
       res2.x = __half_as_ushort(__float2half(0));
       res2.y = __half_as_ushort(__float2half(0));
@@ -1329,7 +1329,7 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
     }
     for (int m = 0; m < b_end; m++) {
 #ifndef USE_ROCM
-      res2 = {};
+      res2 = half2{};
 #else
       res2.x = __half_as_ushort(__float2half(0));
       res2.y = __half_as_ushort(__float2half(0));
