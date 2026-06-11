@@ -1660,11 +1660,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # Note(simon): this is done in CPU because of downstream's
                 # of `to_list`.
                 chunk_starts = (
-                    torch.arange(num_chunks, dtype=torch.int32)
+                    torch.arange(num_chunks, dtype=torch.int32, pin_memory=True)
                     .unsqueeze(1)
                     .expand(-1, num_prefills)
-                    * max_context_chunk
-                ).pin_memory()
+                    .multiply_(max_context_chunk)
+                )
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
@@ -1722,11 +1722,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         * self.dcp_local_block_size
                     )
                     local_chunk_starts = (
-                        torch.arange(num_chunks, dtype=torch.int32)
+                        torch.arange(num_chunks, dtype=torch.int32, pin_memory=True)
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
-                        * padded_local_max_context_chunk_across_ranks
-                    ).pin_memory()
+                        .multiply_(padded_local_max_context_chunk_across_ranks)
+                    )
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts

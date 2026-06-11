@@ -8,7 +8,6 @@ import os
 import tempfile
 from typing import TYPE_CHECKING
 
-import numpy as np
 import regex as re
 import torch
 from cachetools import LRUCache
@@ -81,11 +80,13 @@ def apply_grammar_bitmask(
     out_indices = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask = np.full(
-        shape=(logits.shape[0], grammar_bitmask.shape[1]),
-        fill_value=-1,
-        dtype=grammar_bitmask.dtype,
+    sorted_bitmask_tensor = torch.full(
+        (logits.shape[0], grammar_bitmask.shape[1]),
+        -1,
+        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
+        pin_memory=True,
     )
+    sorted_bitmask = sorted_bitmask_tensor.numpy()
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
         num_spec_tokens = len(spec_tokens.get(req_id, ()))
@@ -96,10 +97,8 @@ def apply_grammar_bitmask(
                 out_indices.append(bitmask_index)
         cumulative_index += 1 + num_spec_tokens
 
-    # Copy async to device as tensor.
-    grammar_bitmask = torch.from_numpy(sorted_bitmask).to(
-        logits.device, non_blocking=True
-    )
+    # Copy async to device.
+    grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
 
     # If the length of out indices and the logits have the same shape
     # we don't need to pass indices to the kernel,

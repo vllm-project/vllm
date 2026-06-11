@@ -2770,21 +2770,30 @@ class GPUModelRunner(
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True
+        cu_num_draft_tokens = (
+            torch.from_numpy(cu_num_draft_tokens)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
         )
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True
+        cu_num_sampled_tokens = (
+            torch.from_numpy(cu_num_sampled_tokens)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
         )
-        logits_indices = torch.from_numpy(logits_indices).to(
-            self.device, non_blocking=True
+        logits_indices = (
+            torch.from_numpy(logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
         )
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True
+        target_logits_indices = (
+            torch.from_numpy(target_logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
         )
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True
+        bonus_logits_indices = (
+            torch.from_numpy(bonus_logits_indices)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
         )
 
         # Compute the draft token ids.
@@ -3089,7 +3098,7 @@ class GPUModelRunner(
 
         mm_embeds = list[torch.Tensor]()
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu", pin_memory=True
         )
 
         req_start_idx = 0
@@ -3470,7 +3479,7 @@ class GPUModelRunner(
             token_ids_idx_np = np.nonzero(is_token_ids)[0]
             # Some tokens ids may need to become embeds
             if token_ids_idx_np.size > 0:
-                token_ids_idx = torch.from_numpy(token_ids_idx_np)
+                token_ids_idx = torch.from_numpy(token_ids_idx_np).pin_memory()
                 token_ids_idx = token_ids_idx.to(self.device, non_blocking=True)
                 token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
@@ -5418,9 +5427,9 @@ class GPUModelRunner(
                 continue
 
             num_prompt_tokens = len(request.prompt_token_ids)
-            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
-                self.device, non_blocking=True
-            )
+            prompt_token_ids = torch.tensor(
+                request.prompt_token_ids, pin_memory=True
+            ).to(self.device, non_blocking=True)
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = request.in_progress_prompt_logprobs_cpu

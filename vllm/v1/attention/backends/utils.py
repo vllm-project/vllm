@@ -364,8 +364,12 @@ def make_local_attention_virtual_batches(
     # tensor first, which recovers perf.
     # Upload the index tensors to the block_table's device up-front so that the
     # fancy indexing below doesn't implicitly force a synchronous H2D copy.
-    batch_indices_torch = torch.from_numpy(batch_indices).to(device, non_blocking=True)
-    block_indices_torch = torch.from_numpy(block_indices).to(device, non_blocking=True)
+    batch_indices_torch = (
+        torch.from_numpy(batch_indices).pin_memory().to(device, non_blocking=True)
+    )
+    block_indices_torch = (
+        torch.from_numpy(block_indices).pin_memory().to(device, non_blocking=True)
+    )
 
     # Save as a lambda so we can return this for update_block_table
     make_block_table = lambda block_table: block_table[
@@ -379,8 +383,10 @@ def make_local_attention_virtual_batches(
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
-        query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
-        seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
+        query_start_loc=query_start_loc_cpu.pin_memory().to(
+            device=device, non_blocking=True
+        ),
+        seq_lens=seq_lens_cpu.pin_memory().to(device=device, non_blocking=True),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -823,7 +829,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M] = {}
         nums_dict[BLOCK_M]["nums"] = nums
         nums_dict[BLOCK_M]["tot"] = nums.sum().item()
-        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums)).pin_memory()
         nums_dict[BLOCK_M]["mlist"] = mlist
         mlist_len = len(nums_dict[BLOCK_M]["mlist"])
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
@@ -831,7 +837,7 @@ def compute_causal_conv1d_metadata(
         offsetlist = []  # type: ignore
         for idx, num in enumerate(nums):
             offsetlist.extend(range(num))
-        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=True)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
         if batch_ptr is None:

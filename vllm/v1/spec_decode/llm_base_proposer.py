@@ -1128,11 +1128,15 @@ class SpecDecodeBaseProposer:
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
         token_indices_np = token_offsets + old_query_start_locs_expanded
-        token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
+        token_indices = (
+            torch.from_numpy(token_indices_np)
+            .pin_memory()
+            .to(device, non_blocking=True)
+        )
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
-            seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
+            seq_lens=new_seq_lens_cpu.pin_memory().to(device, non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             _seq_lens_cpu=new_seq_lens_cpu,
             _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
