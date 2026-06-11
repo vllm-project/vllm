@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
 
@@ -6,9 +7,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.models import deepseek_v2 as deepseek_mod
 from vllm.model_executor.models import mistral_large_3_eagle as eagle_mod
-from vllm.config.compilation import CompilationMode
 
 
 class DummyPPGroup:
@@ -59,8 +60,9 @@ class DummyDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def make_vllm_config(*, model_type="mistral3", qk_nope_head_dim=128,
-                     qk_rope_head_dim=64):
+def make_vllm_config(
+    *, model_type="mistral3", qk_nope_head_dim=128, qk_rope_head_dim=64
+):
     hf_config = SimpleNamespace(
         model_type=model_type,
         first_k_dense_replace=0,
