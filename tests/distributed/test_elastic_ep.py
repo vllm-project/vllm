@@ -77,6 +77,8 @@ def _base_serve_args(use_async_eplb: bool = False) -> list[str]:
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
         "0",
+        "--eplb-config.use_async",
+        "false",
         "--data-parallel-backend",
         "ray",
         "--data-parallel-size",

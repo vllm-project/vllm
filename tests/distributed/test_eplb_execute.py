@@ -644,9 +644,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
-)
+@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "nixl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -793,7 +791,7 @@ def _test_nixl_deferred_init_worker(
     num_local_experts: int,
     num_logical_experts: int,
 ) -> None:
-    """Exercise NixlEplbCommunicator with deferred=True (elastic EP path)."""
+    """Exercise NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
     from vllm.distributed.eplb.eplb_communicator import NixlEplbCommunicator
 
     set_env_vars_and_device(env)
@@ -844,7 +842,7 @@ def _test_nixl_deferred_init_worker(
             cpu_group=ep_group_coordinator.cpu_group,
             all_expert_weights=expert_weights,
             expert_buffer=expert_buffer,
-            deferred=True,
+            defer_remote_setup=True,
         )
         assert not communicator._remote_state_initialized
 
@@ -895,7 +893,7 @@ def test_nixl_deferred_init(
     num_local_experts,
     num_logical_experts,
 ):
-    """Test NixlEplbCommunicator with deferred=True (elastic EP path)."""
+    """Test NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
 
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")

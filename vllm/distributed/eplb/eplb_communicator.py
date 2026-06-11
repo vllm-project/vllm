@@ -246,8 +246,20 @@ class NixlEplbCommunicator(EplbCommunicator):
         cpu_group: ProcessGroup,
         all_expert_weights: Sequence[Sequence[torch.Tensor]],
         expert_buffer: Sequence[torch.Tensor],
-        deferred: bool = False,
+        defer_remote_setup: bool = False,
     ) -> None:
+        """Create a NIXL-backed EPLB communicator.
+
+        Args:
+            cpu_group: CPU process group for metadata exchange.
+            all_expert_weights: Expert weight tensors for all MoE layers.
+            expert_buffer: Pre-allocated receive buffer tensors.
+            defer_remote_setup: If True, postpone the collective
+                all-gather of NIXL agent metadata until the first
+                ``set_transfer_context`` call.  Required for elastic EP
+                where ranks join asynchronously and cannot participate
+                in collectives at construction time.
+        """
         assert all_expert_weights, (
             "NixlEplbCommunicator requires non-empty all_expert_weights."
         )
@@ -305,7 +317,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         self._cuda_device_id = int(self._device.index or 0)
         self._remote_state_initialized = False
         self._init_step("buffers", self._init_registered_buffers)
-        if deferred:
+        if defer_remote_setup:
             logger.info_once("NIXL EPLB: deferring remote agent setup (elastic EP).")
         else:
             self._init_remote_state()
@@ -645,7 +657,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
-    backend: str | None,
+    backend: str,
     expert_weights: Sequence[Sequence[torch.Tensor]],
     expert_buffer: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
@@ -670,9 +682,6 @@ def create_eplb_communicator(
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
     """
-    if backend is None:
-        backend = "torch_nccl"
-
     first_layer = expert_weights[0] if expert_weights else []
     tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
     torch_group = (
@@ -720,7 +729,7 @@ def create_eplb_communicator(
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless:
         if backend == "nixl":
-            pass  # handled below with deferred=True
+            pass  # handled below with defer_remote_setup=True
         elif backend not in ("torch_nccl", "pynccl"):
             raise ValueError(
                 f"Elastic EP requires 'torch_nccl', 'pynccl', or 'nixl' "
@@ -750,7 +759,7 @@ def create_eplb_communicator(
                 cpu_group=group_coordinator.cpu_group,
                 all_expert_weights=expert_weights,
                 expert_buffer=expert_buffer,
-                deferred=is_stateless,
+                defer_remote_setup=is_stateless,
             )
         except Exception as exc:
             raise RuntimeError(
