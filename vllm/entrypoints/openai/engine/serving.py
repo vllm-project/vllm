@@ -28,6 +28,8 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
+    UsageInfo,
+    build_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -149,6 +151,11 @@ class OpenAIServing(BeamSearchOnlineMixin):
         vllm_config = getattr(engine_client, "vllm_config", None)
         kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         self.has_kv_connector = kv_transfer_config is not None
+        self.enable_prefix_caching = (
+            bool(vllm_config.cache_config.enable_prefix_caching)
+            if vllm_config is not None
+            else False
+        )
 
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
@@ -162,6 +169,26 @@ class OpenAIServing(BeamSearchOnlineMixin):
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
+
+    def make_usage_info(
+        self,
+        *,
+        enable_prompt_tokens_details: bool,
+        num_cached_tokens: int | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> UsageInfo:
+        return UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=build_prompt_tokens_details(
+                enable_prompt_tokens_details=enable_prompt_tokens_details,
+                enable_prefix_caching=self.enable_prefix_caching,
+                num_cached_tokens=num_cached_tokens,
+                prompt_tokens=prompt_tokens,
+            ),
+        )
 
     @staticmethod
     def create_error_response(

@@ -41,10 +41,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
-    PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
-    UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
@@ -516,10 +514,11 @@ class OpenAIServingChat(OpenAIServing):
 
                         # if continuous usage stats are requested, add it
                         if include_continuous_usage:
-                            chunk.usage = UsageInfo(
+                            chunk.usage = self.make_usage_info(
+                                enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                                num_cached_tokens=num_cached_tokens,
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
-                                total_tokens=num_prompt_tokens,
                             )
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -552,10 +551,11 @@ class OpenAIServingChat(OpenAIServing):
                                     model=model_name,
                                 )
                                 if include_continuous_usage:
-                                    chunk.usage = UsageInfo(
+                                    chunk.usage = self.make_usage_info(
+                                        enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                                        num_cached_tokens=num_cached_tokens,
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
-                                        total_tokens=num_prompt_tokens,
                                     )
 
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -759,10 +759,11 @@ class OpenAIServingChat(OpenAIServing):
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
+                        chunk.usage = self.make_usage_info(
+                            enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                            num_cached_tokens=num_cached_tokens,
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens + completion_tokens,
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
@@ -772,15 +773,12 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
+                final_usage = self.make_usage_info(
+                    enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                    num_cached_tokens=num_cached_tokens,
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
-                    )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -792,16 +790,17 @@ class OpenAIServingChat(OpenAIServing):
                     system_fingerprint=self.system_fingerprint,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True
+                    exclude_unset=True, exclude_none=False
                 )
                 yield f"data: {final_usage_data}\n\n"
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
-            request_metadata.final_usage_info = UsageInfo(
+            request_metadata.final_usage_info = self.make_usage_info(
+                enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                num_cached_tokens=num_cached_tokens,
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
-                total_tokens=num_prompt_tokens + num_completion_tokens,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -1119,15 +1118,12 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )
-        usage = UsageInfo(
+        usage = self.make_usage_info(
+            enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+            num_cached_tokens=final_res.num_cached_tokens,
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
 
         request_metadata.final_usage_info = usage
 
