@@ -6,13 +6,29 @@ Tests the image source handling and tool_result content parsing in
 AnthropicServingMessages._convert_anthropic_to_openai_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
-blocks echoed back by Anthropic clients.
+blocks echoed back by Anthropic clients, and streaming conversion in
+``message_stream_converter``.
 """
+
+import json
+from unittest.mock import MagicMock
+
+import pytest
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    UsageInfo,
+)
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -775,3 +791,208 @@ class TestInlineSystemMessageInMessagesArray:
         assert result.messages[0]["role"] == "system"
         assert result.messages[0]["content"] == "Top-level prompt.Inline hint."
         assert result.messages[1]["role"] == "user"
+
+
+# ======================================================================
+# Streaming conversion: message_stream_converter
+# ======================================================================
+
+
+def _make_stream_converter():
+    obj = MagicMock(spec=AnthropicServingMessages)
+    obj.stop_reason_map = {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+    }
+    obj.message_stream_converter = (
+        AnthropicServingMessages.message_stream_converter.__get__(obj)
+    )
+    return obj
+
+
+def _parse_sse_events(raw_events: list[str]) -> list[tuple[str, dict]]:
+    results = []
+    for raw in raw_events:
+        headers = dict(
+            line.split(": ", 1) for line in raw.strip().split("\n") if ": " in line
+        )
+        if "event" in headers and "data" in headers:
+            results.append((headers["event"], json.loads(headers["data"])))
+    return results
+
+
+def _make_stream_chunk(
+    *,
+    delta: DeltaMessage | None = None,
+    finish_reason: str | None = None,
+    choices: list[ChatCompletionResponseStreamChoice] | None = None,
+    usage: UsageInfo | None = None,
+) -> str:
+    if choices is None:
+        choices = [
+            ChatCompletionResponseStreamChoice(
+                index=0,
+                delta=delta or DeltaMessage(),
+                finish_reason=finish_reason,
+            )
+        ]
+    chunk = ChatCompletionStreamResponse(
+        id="chatcmpl-test",
+        created=0,
+        model="test-model",
+        choices=choices,
+        usage=usage,
+    )
+    return f"data: {chunk.model_dump_json()}"
+
+
+def _tc(*, args, id=None, name=None):
+    return DeltaToolCall(
+        index=0,
+        id=id,
+        function=DeltaFunctionCall(name=name, arguments=args),
+    )
+
+
+class TestMessageStreamConverterToolUseContentBuffering:
+    """Regression test for tool_use arguments being silently dropped.
+
+    With speculative decoding or multi-token prediction, a single delta
+    can carry both the final tool_call argument fragment and trailing
+    content.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_use_args_not_dropped_when_content_in_same_chunk(
+        self,
+    ):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[
+                        _tc(id="call_abc123", name="read_file", args=""),
+                    ]
+                )
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[
+                        _tc(args='{"path":"/tmp/f"'),
+                    ]
+                )
+            )
+            # BUG TRIGGER: final tool_call args and trailing content in
+            # one delta, as happens with spec decoding / multi-token
+            # prediction where multiple tokens land in a single chunk.
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    content="\nOkay",
+                    tool_calls=[_tc(args="}")],
+                )
+            )
+            yield _make_stream_chunk(finish_reason="tool_calls")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=10,
+                    total_tokens=30,
+                    completion_tokens=20,
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+
+        assert events[0][0] == "message_start"
+
+        arg_fragments = [
+            data["delta"]["partial_json"]
+            for _, data in events
+            if data.get("delta", {}).get("type") == "input_json_delta"
+        ]
+        full_args = "".join(arg_fragments)
+        assert full_args == '{"path":"/tmp/f"}'
+
+        text_deltas = [
+            data["delta"]["text"]
+            for _, data in events
+            if data.get("delta", {}).get("type") == "text_delta"
+        ]
+        assert text_deltas == ["\nOkay"]
+
+        block_starts = [
+            (data["content_block"]["type"], data.get("index"))
+            for ev_type, data in events
+            if ev_type == "content_block_start"
+        ]
+        assert block_starts[0] == ("tool_use", 0)
+        assert block_starts[1] == ("text", 1)
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == "tool_use"
+
+        assert events[-1][0] == "message_stop"
+
+    @pytest.mark.asyncio
+    async def test_buffered_content_flushed_on_done_without_usage_chunk(self):
+        """Content buffered during tool_use must be emitted even if the
+        stream jumps straight from finish_reason to [DONE], skipping the
+        empty-choices usage chunk."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=10, total_tokens=10),
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[
+                        _tc(id="call_xyz", name="get_weather", args=""),
+                    ]
+                )
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[_tc(args='{"city":"NYC"}')],
+                )
+            )
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="\nDone"),
+                finish_reason="tool_calls",
+            )
+            # No empty-choices usage chunk — go straight to [DONE].
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+
+        text_deltas = [
+            data["delta"]["text"]
+            for _, data in events
+            if data.get("delta", {}).get("type") == "text_delta"
+        ]
+        assert text_deltas == ["\nDone"]
+
+        block_starts = [
+            data["content_block"]["type"]
+            for ev_type, data in events
+            if ev_type == "content_block_start"
+        ]
+        assert "tool_use" in block_starts
+        assert "text" in block_starts
+
+        assert events[-1][0] == "message_stop"
