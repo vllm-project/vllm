@@ -3,7 +3,6 @@
 
 import asyncio
 import io
-import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -22,7 +21,6 @@ from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -40,9 +38,7 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
-    DeltaToolCall,
     ErrorResponse,
     FunctionCall,
     PromptTokenUsageInfo,
@@ -57,16 +53,18 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
-from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.reasoning import ReasoningParser
@@ -74,7 +72,7 @@ from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
-from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
+from vllm.utils.mistral import is_mistral_tool_parser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -158,13 +156,6 @@ class OpenAIServingChat(OpenAIServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
-        if self.use_harmony:
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
-            )
-
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
@@ -368,6 +359,14 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        parser: Parser | None = None
+        if self.parser_cls is not None:
+            parser = self.parser_cls(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -377,7 +376,6 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
-                reasoning_parser,
                 chat_template_kwargs=chat_template_kwargs,
             )
 
@@ -389,7 +387,7 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            reasoning_parser,
+            parser,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -406,7 +404,6 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        reasoning_parser: ReasoningParser | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -426,42 +423,17 @@ class OpenAIServingChat(OpenAIServing):
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
-        is_mistral_grammar_path = request._grammar_from_tool_parser
-
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
             tool_choice_function_name = None
 
-        # Determine whether tools are in use with "auto" tool choice
-        tool_choice_auto = (
-            not tool_choice_function_name
-            and self._should_stream_with_auto_tool_parsing(request)
-        )
-
-        all_previous_token_ids: list[list[int]] | None
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
         else:
             history_tool_call_cnt = 0
 
-        # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
-
-        # Only one of these will be used, thus previous_texts and
-        # all_previous_token_ids will not be used twice in the same iteration.
-        if (
-            is_mistral_grammar_path
-            or tool_choice_auto
-            or tool_choice_function_name
-            or request.tool_choice == "required"
-            or reasoning_parser
-        ):
-            all_previous_token_ids = [[] for _ in range(num_choices)]
-            reasoning_end_arr = [False] * num_choices
-            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
-        else:
-            all_previous_token_ids = None
 
         try:
             if self.parser_cls is not None:
@@ -593,18 +565,6 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     parser = parsers[i]
-                    tool_parser = parser.tool_parser if parser is not None else None
-
-                    if (
-                        reasoning_parser
-                        and res.prompt_token_ids
-                        and prompt_is_reasoning_end_arr[i] is None
-                    ):
-                        # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
-                        )
                     if finish_reason_sent[i]:
                         continue
 
@@ -657,27 +617,6 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_message: DeltaMessage | None
 
-                    # just update previous_texts and previous_token_ids
-                    if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
-                        or tool_choice_function_name
-                        or request.tool_choice == "required"
-                        or reasoning_parser
-                    ):
-                        assert previous_texts is not None
-                        assert all_previous_token_ids is not None
-                        previous_text = previous_texts[i]
-                        previous_token_ids = all_previous_token_ids[i]
-                        current_text = previous_text + delta_text
-                        # avoid the None + list error.
-                        if previous_token_ids:
-                            current_token_ids = previous_token_ids + as_list(
-                                output.token_ids
-                            )
-                        else:
-                            current_token_ids = as_list(output.token_ids)
-
                     if self.use_harmony:
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
@@ -688,41 +627,13 @@ class OpenAIServingChat(OpenAIServing):
                             )
                         )
                         harmony_tools_streamed[i] |= tools_streamed_flag
-                    # Mistral grammar path: combined reasoning + tool streaming
-                    elif is_mistral_grammar_path:
-                        from vllm.tool_parsers.mistral_tool_parser import (
-                            MistralToolParser,
-                        )
-
-                        assert tool_parser is not None
-                        assert isinstance(tool_parser, MistralToolParser)
-                        assert reasoning_end_arr is not None
-                        output_token_ids = as_list(output.token_ids)
-                        result = tool_parser.extract_maybe_reasoning_and_tool_streaming(
-                            reasoning_parser=reasoning_parser,
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            output_token_ids=output_token_ids,
-                            reasoning_ended=reasoning_end_arr[i],
-                            prompt_is_reasoning_end=(prompt_is_reasoning_end_arr[i]),
-                            request=request,
-                        )
-                        delta_message = result.delta_message
-                        reasoning_end_arr[i] = result.reasoning_ended
-                        current_text = result.current_text
-                        current_token_ids = result.current_token_ids
-                        if result.tools_called:
-                            tools_streamed[i] = True
-
                     elif parser is not None:
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
                             delta_token_ids=as_list(output.token_ids),
                             request=request,
                             prompt_token_ids=res.prompt_token_ids,
+                            finished=output.finish_reason is not None,
                         )
                         if delta_message and delta_message.tool_calls:
                             tools_streamed[i] = True
@@ -730,22 +641,7 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    # update the previous values for the next iteration
-                    if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
-                        or tool_choice_function_name
-                        or request.tool_choice == "required"
-                        or reasoning_parser
-                    ) and not self.use_harmony:
-                        assert previous_texts is not None
-                        assert all_previous_token_ids is not None
-                        previous_texts[i] = current_text
-                        all_previous_token_ids[i] = current_token_ids
-                    else:
-                        # Update for comprehensive logging even in simple case
-                        assert previous_texts is not None
-                        previous_texts[i] += delta_text
+                    previous_texts[i] += delta_text
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
@@ -813,81 +709,13 @@ class OpenAIServingChat(OpenAIServing):
                         # finish_reason='error' indicates a retryable error
                         self._raise_if_error(output.finish_reason, request_id)
 
-                        # check to make sure we haven't "forgotten" to stream
-                        #   any tokens that were generated but previously
-                        #   matched by partial json parsing
-                        # only happens if we are NOT using structured outputs
-                        index = 0
-                        auto_tools_called = False
-                        if tool_parser:
-                            auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
-                            index = (
-                                len(tool_parser.prev_tool_call_arr) - 1
-                                if auto_tools_called
-                                else 0
-                            )
-                        should_check = (
-                            self._should_check_for_unstreamed_tool_arg_tokens(
-                                delta_message, output
-                            )
-                        )
-                        # only check if there are any tool calls
-                        # detected by partial parsing
-                        if should_check and tool_parser and auto_tools_called:
-                            latest_delta_len = 0
-                            if (
-                                isinstance(
-                                    delta_message.tool_calls[0].function,
-                                    DeltaFunctionCall,
-                                )
-                            ) and isinstance(
-                                delta_message.tool_calls[0].function.arguments, str
-                            ):
-                                latest_delta_len = len(
-                                    delta_message.tool_calls[0].function.arguments
-                                )
-
-                            # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON.
-                            # Tool parsers (e.g. Qwen3Coder) store
-                            # arguments as a JSON string in
-                            # prev_tool_call_arr. Calling json.dumps()
-                            # on an already-serialized string would
-                            # double-serialize it (e.g. '{"k":1}' becomes
-                            # '"{\\"k\\":1}"'), which then causes the
-                            # replace() below to fail and append the
-                            # entire double-serialized string as a
-                            # spurious final delta.
-                            args = tool_parser.prev_tool_call_arr[index].get(
-                                "arguments", {}
-                            )
-                            if isinstance(args, str):
-                                expected_call = args
-                            else:
-                                expected_call = json.dumps(args, ensure_ascii=False)
-
-                            # get what we've streamed so far for arguments
-                            # for the current tool
-                            actual_call = tool_parser.streamed_args_for_tool[index]
-                            if latest_delta_len > 0:
-                                actual_call = actual_call[:-latest_delta_len]
-
-                            # check to see if there's anything left to stream
-                            remaining_call = expected_call.replace(actual_call, "", 1)
-                            # set that as a delta message
-                            delta_message = self._create_remaining_args_delta(
-                                delta_message, remaining_call, index
-                            )
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if (
-                            auto_tools_called
-                            or (tools_streamed[i] and not tool_choice_function_name)
-                            or (self.use_harmony and harmony_tools_streamed[i])
+                        if (tools_streamed[i] and not tool_choice_function_name) or (
+                            self.use_harmony and harmony_tools_streamed[i]
                         ):
                             finish_reason_ = "tool_calls"
                         else:
@@ -1012,7 +840,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        reasoning_parser: ReasoningParser | None = None,
+        parser: Parser | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1121,54 +949,22 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
-            if reasoning_parser:
-                # If the reasoning parser is enabled,
-                # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+            if parser is not None:
+                reasoning, content, tool_calls = parser.parse(
+                    output.text,
+                    request,
+                    enable_auto_tools=self.enable_auto_tools,
                 )
                 if not request.include_reasoning:
                     reasoning = None
             else:
                 reasoning = None
                 content = output.text
+                tool_calls = []
 
             auto_tools_called = False
-            # if auto tools are not enabled, and a named tool choice using
-            #   outlines is not being used
-            tool_calls, content = self._parse_tool_calls_from_content(
-                request=request,
-                tokenizer=tokenizer,
-                content=content,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_parser_cls=self.tool_parser,
-            )
-            if is_mistral_tokenizer(tokenizer):
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 
-                tool_call_class: type[ToolCall] = MistralToolCall
-            else:
-                tool_call_class = ToolCall
-
-            use_mistral_tool_parser = request._grammar_from_tool_parser
-            if use_mistral_tool_parser:
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
-
-                tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
-                    tool_calls
-                )
-                if tool_call_items:
-                    auto_tools_called = (
-                        request.tool_choice is None or request.tool_choice == "auto"
-                    )
-                message = ChatMessage(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content,
-                    tool_calls=tool_call_items,
-                )
-
-            elif (not self.enable_auto_tools or not self.tool_parser) and (
+            if (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
@@ -1178,70 +974,42 @@ class OpenAIServingChat(OpenAIServing):
                 request.tool_choice
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
-                tool_call_class_items = []
+                tool_call_items = []
                 tool_calls = tool_calls or []
-                for idx, tc in enumerate(tool_calls):
-                    # Use native ID if available (e.g., Kimi K2),
-                    # otherwise generate ID with correct id_type
-                    if tc.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tc.id, function=tc)
+                for tc in tool_calls:
+                    if not tc.id:
+                        tc.id = make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tc.name,
+                            idx=history_tool_call_cnt,
                         )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(tool_call_class(function=tc))
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tc)
-                            )
+                    tool_call_items.append(ToolCall(id=tc.id, function=tc))
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
-                    content="",
-                    tool_calls=tool_call_class_items,
+                    content=content or "",
+                    tool_calls=tool_call_items,
                 )
 
             elif request.tool_choice and request.tool_choice == "required":
-                tool_call_class_items = []
+                tool_call_items = []
                 tool_calls = tool_calls or []
-                for idx, tool_call in enumerate(tool_calls):
-                    # Use native ID if available,
-                    # otherwise generate ID with correct id_type
-                    if tool_call.id:
-                        tool_call_class_items.append(
-                            tool_call_class(id=tool_call.id, function=tool_call)
+                for tool_call in tool_calls:
+                    if not tool_call.id:
+                        tool_call.id = make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tool_call.name,
+                            idx=history_tool_call_cnt,
                         )
-                    else:
-                        # Generate ID using the correct format (kimi_k2 or random),
-                        # but leave it to the class if it's Mistral to preserve
-                        # 9-char IDs
-                        if is_mistral_tokenizer(tokenizer):
-                            tool_call_class_items.append(
-                                tool_call_class(function=tool_call)
-                            )
-                        else:
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
-                            )
-                            tool_call_class_items.append(
-                                tool_call_class(id=generated_id, function=tool_call)
-                            )
+                    tool_call_items.append(
+                        ToolCall(id=tool_call.id, function=tool_call)
+                    )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
-                    content="",
-                    tool_calls=tool_call_class_items,
+                    content=content or "",
+                    tool_calls=tool_call_items,
                     reasoning=reasoning,
                 )
 
@@ -1257,34 +1025,17 @@ class OpenAIServingChat(OpenAIServing):
                 and self.enable_auto_tools
                 and self.tool_parser
             ):
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
                     tool_call_items = []
-                    for idx, tc in enumerate(tool_calls):
-                        # Use native ID if available (e.g., Kimi K2),
-                        # otherwise generate ID with correct id_type
-                        if tc.id:
-                            tool_call_items.append(
-                                tool_call_class(id=tc.id, function=tc)
+                    for tc in tool_calls:
+                        if not tc.id:
+                            tc.id = make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tc.name,
+                                idx=history_tool_call_cnt,
                             )
-                        else:
-                            # Generate ID using the correct format (kimi_k2 or random),
-                            # but leave it to the class if it's Mistral to preserve
-                            # 9-char IDs
-                            if is_mistral_tokenizer(tokenizer):
-                                tool_call_items.append(tool_call_class(function=tc))
-                            else:
-                                generated_id = make_tool_call_id(
-                                    id_type=self.tool_call_id_type,
-                                    func_name=tc.name,
-                                    idx=history_tool_call_cnt,
-                                )
-                                tool_call_items.append(
-                                    tool_call_class(id=generated_id, function=tc)
-                                )
+                        tool_call_items.append(ToolCall(id=tc.id, function=tc))
                         history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
@@ -1294,18 +1045,10 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 else:
-                    # FOR NOW make it a chat message; we will have to detect
-                    # the type to make it later.
-                    ret_content = content
-
-                    # try to use content return from tool parser first,
-                    # tool parser may do some modify for the content.
-                    if content and len(content) > 0:
-                        ret_content = content
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
-                        content=ret_content,
+                        content=content,
                     )
 
             # undetermined case that is still important to handle
@@ -1527,72 +1270,3 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
-
-    def _should_stream_with_auto_tool_parsing(self, request: ChatCompletionRequest):
-        """
-        Utility function to check if streamed tokens should go through the tool
-        call parser that was configured.
-
-        We only want to do this IF user-provided tools are set, a tool parser
-        is configured, "auto" tool choice is enabled, and the request's tool
-        choice field indicates that "auto" tool choice should be used.
-        """
-        return (
-            request.tools
-            and self.tool_parser
-            and self.enable_auto_tools
-            and request.tool_choice in ["auto", None]
-        )
-
-    def _should_check_for_unstreamed_tool_arg_tokens(
-        self,
-        delta_message: DeltaMessage | None,
-        output: CompletionOutput,
-    ) -> bool:
-        """
-        Check to see if we should check for unstreamed tool arguments tokens.
-        This is only applicable when auto tool parsing is enabled, the delta
-        is a tool call with arguments.
-        """
-
-        return bool(
-            # if there is a delta message that includes tool calls which
-            # include a function that has arguments
-            output.finish_reason is not None
-            and self.enable_auto_tools
-            and self.tool_parser
-            and delta_message
-            and delta_message.tool_calls
-            and delta_message.tool_calls[0]
-            and delta_message.tool_calls[0].function
-            and delta_message.tool_calls[0].function.arguments is not None
-        )
-
-    @staticmethod
-    def _create_remaining_args_delta(
-        delta_message: DeltaMessage,
-        remaining_call: str,
-        index: int,
-    ) -> DeltaMessage:
-        """
-        Create a delta message for remaining tool arguments, preserving
-        id/type/name from the original delta.
-        """
-        original_tc = next(
-            (tc for tc in delta_message.tool_calls if tc.index == index),
-            None,
-        )
-        original_fn = original_tc.function if original_tc else None
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=index,
-                    id=original_tc.id if original_tc else None,
-                    type=original_tc.type if original_tc else None,
-                    function=DeltaFunctionCall(
-                        name=original_fn.name if original_fn else None,
-                        arguments=remaining_call,
-                    ),
-                )
-            ]
-        )

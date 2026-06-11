@@ -53,7 +53,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = None
+    max_num_scheduled_tokens: int | None = Field(default=None, ge=0)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -175,12 +175,13 @@ class SchedulerConfig:
 
             return Scheduler
 
-        # This warning can be removed once the Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
+        # The first half of this warning can be removed once the Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that implement it
         logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is "
-            "not public and compatibility may not be maintained.",
+            "Using custom scheduler class %s. This scheduler interface is not public "
+            "and compatibility may not be maintained. If you have subclassed Scheduler "
+            "instead of AsyncScheduler, you will see degraded performance due to async "
+            "scheduling being disabled.",
             self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):
