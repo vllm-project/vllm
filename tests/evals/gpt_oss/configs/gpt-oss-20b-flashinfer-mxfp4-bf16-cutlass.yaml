@@ -3,4 +3,4 @@
 model_name: "openai/gpt-oss-20b"
 metric_threshold: 0.568
 reasoning_effort: "low"
-server_args: "--tensor-parallel-size 2 --moe-backend marlin --linear-backend marlin"
+server_args: "--tensor-parallel-size 2 --moe-backend flashinfer_cutlass"
