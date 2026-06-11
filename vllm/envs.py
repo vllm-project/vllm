@@ -1701,6 +1701,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
     ),
     # Supported options:
+    # - "flashinfer-cutedsl": use flashinfer cutedsl GEMM backend
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
@@ -1719,6 +1720,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_NVFP4_GEMM_BACKEND",
             None,
             [
+                "flashinfer-cutedsl",
                 "flashinfer-b12x",
                 "flashinfer-cudnn",
                 "flashinfer-trtllm",

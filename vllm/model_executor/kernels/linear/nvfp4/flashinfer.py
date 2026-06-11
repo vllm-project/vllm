@@ -20,6 +20,72 @@ from vllm.utils.flashinfer import (
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
+class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
+    """NVFP4 GEMM via FlashInfer's cutedsl backend."""
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_device_capability_family(100):
+            return False, "FlashInfer cutedsl requires sm_10x"
+        if not has_flashinfer():
+            return False, "FlashInfer required"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # cutedsl uses the same swizzled + padded layout as cutlass.
+        layer.weight_scale = torch.nn.Parameter(
+            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        )
+        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+            layer.weight.data
+        )
+        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        layer.weights_padding_cols = weights_padding_cols
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output_size = layer.output_size_per_partition
+        output_dtype = x.dtype
+        output_shape = [*x.shape[:-1], output_size]
+
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x,
+            layer.input_global_scale_inv,
+            is_sf_swizzled_layout=True,
+            backend="flashinfer-cutedsl",
+        )
+
+        x_fp4 = pad_nvfp4_activation_for_cutlass(
+            x_fp4, getattr(layer, "weights_padding_cols", 0)
+        )
+
+        out = flashinfer_scaled_fp4_mm(
+            x_fp4,
+            layer.weight,
+            x_blockscale,
+            layer.weight_scale,
+            layer.alpha,
+            output_dtype,
+            backend="cute-dsl",
+        )
+
+        out = slice_nvfp4_output(out, output_size)
+
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)
+
+
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 

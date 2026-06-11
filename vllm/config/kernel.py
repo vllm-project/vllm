@@ -140,6 +140,7 @@ LinearBackend = Literal[
     "auto",
     "cutlass",
     "flashinfer_cutlass",
+    "flashinfer_cutedsl",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "marlin",
@@ -195,6 +196,7 @@ class KernelConfig:
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "marlin": Use Marlin kernels
