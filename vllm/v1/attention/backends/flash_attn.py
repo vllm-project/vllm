@@ -865,7 +865,7 @@ class FlashAttentionImpl(AttentionImpl):
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
-                    causal = False
+                    causal = True
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],

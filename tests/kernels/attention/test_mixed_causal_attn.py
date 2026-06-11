@@ -211,7 +211,7 @@ def test_triton_mixed_causal(
 )
 @pytest.mark.parametrize(
     "per_seq_causal",
-    [[True, False, True]],
+    [[True, False, True], [False, True, False]],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -307,7 +307,8 @@ def test_flash_attn4_mixed_causal(
         seqused_k=seqused_k,
         max_seqlen_k=max(kv_lens),
         softmax_scale=scale,
-        causal=False,
+        # The kernel must be compiled causal for `dynamic_causal` to take effect.
+        causal=True,
         block_table=block_tables,
         softcap=0.0,
         dynamic_causal=per_seq_causal_tensor,
