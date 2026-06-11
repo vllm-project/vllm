@@ -275,8 +275,8 @@ class StructuredOutputManager:
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 if self.vllm_config.model_config.is_diffusion and req_tokens:
-                    # Diffusion LLMs produce don't sample a token every step so dont
-                    # append a placeholder.
+                    # Diffusion LLMs don't sample a bonus token after the
+                    # scheduled positions, so don't append the -1 placeholder.
                     token_iter: Iterable[int] = req_tokens
                 else:
                     token_iter = itertools.chain(req_tokens, (-1,))

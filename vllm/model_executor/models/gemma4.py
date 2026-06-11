@@ -631,11 +631,6 @@ class Gemma4DecoderLayer(nn.Module):
         self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
             config, "use_second_mlp_block", False
         )
-        self.router_uses_prenormed_input = getattr(
-            config,
-            "router_uses_prenormed_input",
-            False,
-        )
         if self.enable_moe_block:
             self.router = Gemma4Router(
                 config,
@@ -731,10 +726,7 @@ class Gemma4DecoderLayer(nn.Module):
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
-            if self.router_uses_prenormed_input:
-                router_logits = self.router(hidden_states_2)
-            else:
-                router_logits = self.router(residual)
+            router_logits = self.router(residual)
             hidden_states_2 = self.moe(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 

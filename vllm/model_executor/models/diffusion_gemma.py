@@ -181,11 +181,6 @@ class DiffusionGemmaForConditionalGeneration(
         self.config = config
         self.model_dtype = vllm_config.model_config.dtype
 
-        # DiffusionGemma feeds raw (non-prenormed) input to the MoE router,
-        # matching the HF decoder which does router(residual) not
-        # router(pre_norm(residual)).
-        text_config.router_uses_prenormed_input = False
-
         # DiffusionGemma's full-attention layers have NO v_proj — V is
         # computed from k_proj's output (`value_states = key_states` before
         # k_norm in `DiffusionGemmaDecoderTextAttention.forward`). This is
@@ -1007,6 +1002,16 @@ class DiffusionGemmaModelState(ModelState):
         self._causal_buf[:actual_num_reqs] = self.diffusion_states.is_encoder_phase[
             slots
         ]
+        # Prefill chunks must always use causal attention. is_encoder_phase is
+        # flipped to False the moment a prefill step runs, so for a prompt that
+        # spans multiple chunks (prompt longer than max_num_batched_tokens) the
+        # later chunks would otherwise be processed bidirectionally, corrupting
+        # the prompt KV. Force causal for any request still prefilling; denoise
+        # vs commit (is_encoder_phase) only applies once prefill is complete.
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np).to(
+            self._causal_buf.device, non_blocking=True
+        )
+        self._causal_buf[:actual_num_reqs] |= is_prefilling
         if actual_num_reqs < num_reqs:
             self._causal_buf[actual_num_reqs:num_reqs] = False
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
@@ -1102,6 +1107,12 @@ class DiffusionSampler:
                 "DiffusionGemma does not support repetition/frequency/presence "
                 "penalties; ignoring them for this request."
             )
+        # Purge any stale logprobs stashed under this slot by a prior request
+        # that was aborted between its converging denoise and commit steps.
+        # remove_request does not reach the sampler, so the slot's _pending
+        # entry can survive until the slot is reused — clear it here so the
+        # new request never pops the dead request's logprobs.
+        self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:

@@ -858,7 +858,7 @@ class FlashAttentionImpl(AttentionImpl):
                     mm_aux = [mm_prefix_ranges]
 
                 dynamic_causal = None
-                if is_dynamic_causal:
+                if isinstance(causal, torch.Tensor):
                     if self.vllm_flash_attn_version != 4:
                         raise NotImplementedError(
                             "Per-sequence causal requires FA4. Current version: "
