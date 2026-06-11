@@ -792,6 +792,14 @@ def get_model_params(config):
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
+    elif architecture == "KimiVLForConditionalGeneration":
+        # Kimi-VL wraps a DeepseekV3-family text backbone in a vision-language
+        # outer config; the MoE fields live on the inner text_config.
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
     elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
