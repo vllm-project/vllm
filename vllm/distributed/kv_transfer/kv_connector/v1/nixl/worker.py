@@ -1007,8 +1007,7 @@ class NixlConnectorWorker:
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
-        assert len(self.block_len_per_layer) == len(seen_base_addresses)
-        assert len(self._region_is_mla) == len(self.block_len_per_layer)
+        assert len(self.block_len_per_layer) == len(seen_base_addresses) == len(self._region_is_mla)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
