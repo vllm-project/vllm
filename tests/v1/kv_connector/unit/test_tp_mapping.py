@@ -120,7 +120,6 @@ class TestMambaPlanSplitHandles:
             source_ranks_per_group=(fa_readers, ssm_readers),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 0},
-            rank_offset_factor=0,
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
