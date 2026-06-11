@@ -75,6 +75,15 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+
+        # Set use_mha so DeepseekV2DecoderLayer.forward can read it
+        # when called via super().forward().
+        qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
+        qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
+        self.use_mha = config.model_type == "deepseek" or all(
+            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
+        )
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
