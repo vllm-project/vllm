@@ -386,6 +386,8 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        self.tool_call_ids: dict[int, str] = {}
+        self.tool_names: dict[int, str] = {}
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -628,6 +630,11 @@ class Gemma4ToolParser(ToolParser):
         # Step 1: Send function name (once)
         if not self.current_tool_name_sent and func_name:
             self.current_tool_name_sent = True
+            tool_call_id = make_tool_call_id()
+            # Store id and name for re-emission in subsequent chunks
+            # (required for strict clients like @ai-sdk/OpenCode)
+            self.tool_call_ids[self.current_tool_id] = tool_call_id
+            self.tool_names[self.current_tool_id] = func_name
             self.prev_tool_call_arr[self.current_tool_id] = {
                 "name": func_name,
                 "arguments": {},
@@ -637,7 +644,7 @@ class Gemma4ToolParser(ToolParser):
                     DeltaToolCall(
                         index=self.current_tool_id,
                         type="function",
-                        id=make_tool_call_id(),
+                        id=tool_call_id,
                         function=DeltaFunctionCall(
                             name=func_name,
                             arguments="",
@@ -680,13 +687,21 @@ class Gemma4ToolParser(ToolParser):
                 self.streamed_args_for_tool[self.current_tool_id] = final_args_json
                 self.prev_tool_call_arr[self.current_tool_id]["arguments"] = final_args
 
+                # Re-emit id, type, and function.name for strict clients
+                # (e.g., @ai-sdk/OpenCode) that validate every chunk
+                tool_call_id = self.tool_call_ids.get(self.current_tool_id, "")
+                function_name = self.tool_names.get(self.current_tool_id, "")
+
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_id,
-                            function=DeltaFunctionCall(arguments=diff).model_dump(
-                                exclude_none=True
-                            ),
+                            id=tool_call_id,
+                            type="function",
+                            function=DeltaFunctionCall(
+                                name=function_name,
+                                arguments=diff,
+                            ).model_dump(exclude_none=True),
                         )
                     ]
                 )
@@ -776,13 +791,21 @@ class Gemma4ToolParser(ToolParser):
             self.streamed_args_for_tool[self.current_tool_id] = safe_json
             self.prev_tool_call_arr[self.current_tool_id]["arguments"] = current_args
 
+            # Re-emit id, type, and function.name for strict clients
+            # (e.g., @ai-sdk/OpenCode) that validate every chunk
+            tool_call_id = self.tool_call_ids.get(self.current_tool_id, "")
+            function_name = self.tool_names.get(self.current_tool_id, "")
+
             return DeltaMessage(
                 tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
-                        function=DeltaFunctionCall(arguments=diff).model_dump(
-                            exclude_none=True
-                        ),
+                        id=tool_call_id,
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name=function_name,
+                            arguments=diff,
+                        ).model_dump(exclude_none=True),
                     )
                 ]
             )
