@@ -7017,6 +7017,10 @@ class GPUModelRunner(
                 # There may be a last group for layers without kv cache.
                 continue
             kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+            if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                # Use storage_block_size as the kernel block size for groups
+                # that apply compression on block size (e.g. DeepSeek V4).
+                kernel_block_size = kv_cache_spec.storage_block_size
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
@@ -7026,19 +7030,13 @@ class GPUModelRunner(
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
-                        kv_cache_spec.block_size // kernel_block_size
+                        kv_cache_spec.storage_block_size // kernel_block_size
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    # For MLA with compression, storage_block_size != block_size
-                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                        shape_block_size = kv_cache_spec.storage_block_size
-                    else:
-                        shape_block_size = kernel_block_size
-
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
-                        shape_block_size,
+                        kernel_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
