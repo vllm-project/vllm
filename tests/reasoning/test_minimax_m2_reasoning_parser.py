@@ -228,3 +228,41 @@ def test_reasoning(
     else:
         content = parser.extract_content_ids(output)
         assert content == []
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("output_text", "reasoning_text"),
+    [
+        pytest.param(
+            SIMPLE_REASONING["output"],
+            SIMPLE_REASONING["reasoning"],
+            id="reasoning-before-end-token",
+        ),
+        pytest.param(
+            NO_END_TOKEN["output"],
+            NO_END_TOKEN["output"],
+            id="all-tokens-are-reasoning-before-end-token",
+        ),
+        pytest.param(
+            SHORTEST_REASONING_NO_STREAMING["output"],
+            "",
+            id="end-token-first-means-no-reasoning-tokens",
+        ),
+    ],
+)
+def test_count_reasoning_tokens(
+    output_text: str,
+    reasoning_text: str,
+    minimax_m2_tokenizer,
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        minimax_m2_tokenizer
+    )
+
+    output_ids = minimax_m2_tokenizer.encode(output_text, add_special_tokens=False)
+    reasoning_ids = minimax_m2_tokenizer.encode(
+        reasoning_text, add_special_tokens=False
+    )
+
+    assert parser.count_reasoning_tokens(output_ids) == len(reasoning_ids)
