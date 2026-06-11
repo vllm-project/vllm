@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import async_tensor_h2d, is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,7 +30,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+    get_kv_cache_layout,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -88,40 +91,6 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
-
-    @staticmethod
-    def compute_mm_prefix_range_tensor(
-        mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
-        num_seqs: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        """Convert mm_prefix_range dict to padded tensor for Triton kernel.
-
-        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
-        Empty ranges have start==end==0, which kernel skips via is_valid check.
-        """
-        if mm_prefix_range is None:
-            return None
-
-        # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
-        range_lists = [
-            mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
-        ]
-
-        # Return None if all ranges are trivial (only (0,0) placeholders)
-        if all(r == [(0, 0)] for r in range_lists):
-            return None
-
-        # Build on CPU first then move to GPU in a single H2D transfer
-        max_ranges = max(len(r) for r in range_lists)
-        # Pad all sequences to the same number of ranges
-        padded = []
-        for r in range_lists:
-            padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
-            padded.append(padded_r)
-        # Build on pinned CPU memory so the H2D transfer is non-blocking.
-        padded = async_tensor_h2d(padded, dtype=torch.int32, device=device)
-        return padded.view(num_seqs, max_ranges, 2)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -215,6 +184,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TritonAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -261,6 +231,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
+
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if mm_ranges is not None:
+            attn_metadata.mm_prefix_range = mm_ranges
+            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
+                mm_ranges, num_reqs, seq_lens.device
+            )
+
         return attn_metadata
 
 
@@ -342,8 +320,8 @@ class TritonAttentionBackend(AttentionBackend):
         elif cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
         elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
-            return (1, 2, 4, 0, 3, 5)
+            # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
+            return (1, 4, 0, 2, 3, 5)
         elif cache_layout == "HND":
             stride_order = (0, 1, 3, 2, 4)
         else:

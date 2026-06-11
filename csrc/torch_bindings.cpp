@@ -1,4 +1,7 @@
-#include "cache.h"
+// Provides torch::Tensor for ops.h (previously included transitively via
+// cache.h, which is no longer included here after cache ops moved to
+// _C_stable_libtorch).
+#include <torch/all.h>
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
@@ -29,170 +32,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
+#ifdef USE_ROCM
+  // TODO: Remove this once we upgrade to torch 2.11.
+  // ROCm still uses torch 2.10,
+  // So we still need to use unstable torch ABI for now.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
   ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
            &get_cuda_view_from_cpu_tensor);
-
-  // Attention ops
-  // Compute the attention between an input query and the cached
-  // keys/values using PagedAttention.
-  ops.def(
-      "paged_attention_v1("
-      "    Tensor! out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-  ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
-
-  // PagedAttention V2.
-  ops.def(
-      "paged_attention_v2("
-      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
-      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-  ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
-
-  // Merge attn states
-  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
-  // can be used to combine partial attention results (in the split-KV case)
-  ops.def(
-      "merge_attn_states("
-      "    Tensor! output,"
-      "    Tensor!? output_lse,"
-      "    Tensor prefix_output,"
-      "    Tensor prefix_lse,"
-      "    Tensor suffix_output,"
-      "    Tensor suffix_lse,"
-      "    int!? prefill_tokens_with_context,"
-      "    Tensor? output_scale=None) -> ()");
-  ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
+#endif
 
   // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-           &silu_and_mul_per_block_quant);
-
-  // Layernorm
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm", torch::kCUDA, &rms_norm);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
-
-  // Function for fused QK Norm and RoPE
-  ops.def(
-      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
-      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
-      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids, "
-      "int forced_token_heads_per_warp=-1) -> ()");
-  ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
-
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
-  // kernel launch.
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
-      "Tensor! q, Tensor kv, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "float eps, int cache_block_size) -> ()");
-  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
-           &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
-
-  // Apply repetition penalties to logits in-place
-  ops.def(
-      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
-      "Tensor output_mask, Tensor repetition_penalties) -> ()");
-  ops.impl("apply_repetition_penalties_", torch::kCUDA,
-           &apply_repetition_penalties_);
-
-  // Optimized top-k per row operation
-  ops.def(
-      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, int numRows, int stride0, "
-      "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
-
-  ops.def(
-      "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, "
-      "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
-
-  ops.def(
-      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
-      "Tensor workspace, int k, int max_seq_len) -> ()");
-  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
-
-  // Layernorm-quant
-  // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def(
-      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
-      "Tensor scale, float epsilon) -> "
-      "()");
-  ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
-           &rms_norm_static_fp8_quant);
-
-  // In-place fused Add and RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! residual, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
-           &fused_add_rms_norm_static_fp8_quant);
-
-  // Fused Layernorm + Quant kernels
-  ops.def(
-      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual) -> ()");
-  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
-           &rms_norm_dynamic_per_token_quant);
-
-  // Fused Layernorm + Block quant kernels
-  ops.def(
-      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
-      "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed) -> ()");
-  ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
-
-  // Rotary embedding
-  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def(
-      "rotary_embedding(Tensor positions, Tensor! query,"
-      "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox, int "
-      "rope_dim_offset=0, bool inverse=False) -> ()");
-  ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
+  // kernel launch. Registered in _C_stable_libtorch (incl. the FlashInfer V4
+  // full-cache bf16/fp8 variants).
 
   // Quantization ops
 #ifndef USE_ROCM
@@ -274,183 +131,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // conditionally compiled so impl registrations are in source file
 
 #endif
-
-#ifndef USE_ROCM
-  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
-  ops.def(
-      "mxfp8_experts_quant("
-      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
-      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
-      " -> ()");
-  // conditionally compiled so impl registration is in source file
-
-  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
-  ops.def(
-      "cutlass_mxfp8_grouped_mm("
-      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
-      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
-      " -> ()");
-  // conditionally compiled so impl registration is in source file
-
-#endif
-
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int null_block_id,"
-      "int block_size,"
-      "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token,"
-      "Tensor? initial_state_idx,"
-      "Tensor? cu_chunk_seqlen,"
-      "Tensor? last_chunk_indices) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-#ifndef USE_ROCM
-  ops.def(
-      "minimax_allreduce_rms("
-      "Tensor input,"
-      "Tensor norm_weight,"
-      "Tensor workspace,"
-      "int rank,"
-      "int nranks,"
-      "float eps) -> Tensor");
-  ops.impl("minimax_allreduce_rms", torch::kCUDA, &minimax_allreduce_rms);
-  ops.def(
-      "minimax_allreduce_rms_qk("
-      "Tensor qkv,"
-      "Tensor norm_weight_q,"
-      "Tensor norm_weight_k,"
-      "Tensor workspace,"
-      "int q_size,"
-      "int kv_size,"
-      "int rank,"
-      "int nranks,"
-      "float eps) -> (Tensor, Tensor)");
-  ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
-
-  //  conditionally compiled so impl in source file
-#endif
 }
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
-  // Cache ops
-  // Swap in (out) the cache blocks from src to dst.
-  cache_ops.def(
-      "swap_blocks(Tensor src, Tensor! dst,"
-      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
-  cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
+#ifdef USE_ROCM
+TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
+  // Quick Reduce all-reduce kernels (ROCm-only; stays on legacy _C).
+  custom_ar.def(
+      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
+      "cast_bf2half) -> ()");
+  custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
 
-  // Batch swap: submit all block copies in a single driver call.
-  cache_ops.def(
-      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
-      "                  Tensor sizes,"
-      "                  bool is_src_access_order_any=False) -> ()");
-  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
+  custom_ar.def("init_custom_qr", &init_custom_qr);
+  custom_ar.def("qr_destroy", &qr_destroy);
+  custom_ar.def("qr_get_handle", &qr_get_handle);
 
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache(Tensor key, Tensor value,"
-      "                  Tensor! key_cache, Tensor! value_cache,"
-      "                  Tensor slot_mapping,"
-      "                  str kv_cache_dtype,"
-      "                  Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
+  custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
+  custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
 
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache_flash(Tensor key, Tensor value,"
-      "                        Tensor! key_cache,"
-      "                        Tensor! value_cache,"
-      "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype,"
-      "                        Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
-                 &reshape_and_cache_flash);
-
-  // Concat kv_c and k_pe and cache them.
-  cache_ops.def(
-      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
-      "                     Tensor! kv_cache,"
-      "                     Tensor slot_mapping,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
-
-  // Rotate Q and K, then write to kv cache for MLA
-  cache_ops.def(
-      "concat_and_cache_mla_rope_fused("
-      "                     Tensor positions,"
-      "                     Tensor! q_pe,"
-      "                     Tensor! k_pe,"
-      "                     Tensor kv_c,"
-      "                     Tensor cos_sin_cache,"
-      "                     bool is_neox,"
-      "                     Tensor slot_mapping,"
-      "                     Tensor! kv_cache,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor kv_cache_scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla_rope_fused", torch::kCUDA,
-                 &concat_and_cache_mla_rope_fused);
-
-  // Convert the key and value cache to fp8 data type.
-  cache_ops.def(
-      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
-      "str kv_cache_dtype) -> ()");
-  cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
-
-  // Gather cache blocks from src_cache to dst, dequantizing from
-  // src_cache's dtype to dst's dtype if necessary.
-  cache_ops.def(
-      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
-      "                               Tensor block_table, Tensor cu_seq_lens, "
-      "                               Tensor token_to_seq, "
-      "                               int num_tokens, "
-      "                               str kv_cache_dtype, "
-      "                               Tensor scale, Tensor? seq_starts) -> ()");
-  cache_ops.impl("gather_and_maybe_dequant_cache", torch::kCUDA,
-                 &gather_and_maybe_dequant_cache);
-
-  cache_ops.def(
-      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
-      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
-  cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
-
-  cache_ops.def(
-      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
-      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
-      "batch_size) -> ()");
-  cache_ops.impl("cp_gather_and_upconvert_fp8_kv_cache", torch::kCUDA,
-                 &cp_gather_and_upconvert_fp8_kv_cache);
-
-  cache_ops.def(
-      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
-      "slot_mapping, "
-      "int quant_block_size, str kv_cache_dtype) -> ()");
-  cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
-                 &indexer_k_quant_and_cache);
-
-  cache_ops.def(
-      "concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
-  cache_ops.impl("concat_mla_q", torch::kCUDA, &concat_mla_q);
-
-  cache_ops.def(
-      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
-      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
-  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
-                 &cp_gather_indexer_k_quant_cache);
+  custom_ar.def("qr_max_size", &qr_max_size);
 }
 
+// TODO: Remove this once ROCm upgrade to torch 2.11.
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   // Cuda utils
-
   // Gets the specified device attribute.
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
   cuda_utils.impl("get_device_attribute", &get_device_attribute);
@@ -461,49 +164,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
                   &get_max_shared_memory_per_block_device_attribute);
 }
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
-  // Custom all-reduce kernels
-  custom_ar.def(
-      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
-      "int rank, bool fully_connected) -> int");
-  custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
-  custom_ar.def(
-      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
-      "int reg_buffer_sz_bytes) -> ()");
-  custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
-
-  custom_ar.def("dispose", &dispose);
-  custom_ar.def("meta_size", &meta_size);
-
-  custom_ar.def("register_buffer", &register_buffer);
-  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
-  custom_ar.def("register_graph_buffers", &register_graph_buffers);
-
-  custom_ar.def("allocate_shared_buffer_and_handle",
-                &allocate_shared_buffer_and_handle);
-  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int", &open_mem_handle);
-  custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
-
-  custom_ar.def("free_shared_buffer", &free_shared_buffer);
-#ifdef USE_ROCM
-  // Quick Reduce all-reduce kernels
-  custom_ar.def(
-      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
-      "cast_bf2half) -> ()");
-  custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
-
-  custom_ar.def("init_custom_qr", &init_custom_qr);
-  custom_ar.def("qr_destroy", &qr_destroy);
-
-  custom_ar.def("qr_get_handle", &qr_get_handle);
-
-  custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
-  custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
-
-  // Max input size in bytes
-  custom_ar.def("qr_max_size", &qr_max_size);
 #endif
-}
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

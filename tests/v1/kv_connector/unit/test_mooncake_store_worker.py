@@ -28,6 +28,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     ReqMeta,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
+    MooncakeStoreConnectorStats,
+)
 
 
 def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
@@ -74,6 +77,7 @@ def _make_store_sending_thread(
 def _make_store_recving_thread(
     store: MagicMock,
     *,
+    tp_rank: int = 0,
     disk_offload_buffer_budget_bytes: int | None = None,
 ) -> mooncake_store_worker.KVCacheStoreRecvingThread:
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
@@ -93,7 +97,7 @@ def _make_store_recving_thread(
         store=store,
         token_databases=[token_database],
         block_size=16,
-        tp_rank=0,
+        tp_rank=tp_rank,
         ready_event=threading.Event(),
         coord=coord,
         disk_offload_buffer_budget_bytes=disk_offload_buffer_budget_bytes,
@@ -130,7 +134,6 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
         block_ids=([0, 1],),
         block_hashes=block_hashes,
         can_save=True,
-        original_block_size=16,
     )
 
 
@@ -280,94 +283,6 @@ def test_get_configured_preferred_segment_rejects_empty_override():
         rdma_utils.get_configured_preferred_segment({"preferred_segment": "  "})
 
 
-def test_get_configured_worker_rnic_prefers_explicit_device_name(monkeypatch):
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep139s0"
-    )
-
-
-def test_get_configured_worker_rnic_selects_device_from_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 1,
-    )
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0,rocep140s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep140s0"
-    )
-
-
-def test_get_configured_worker_rnic_warns_and_returns_empty_for_rdma_with_no_device(
-    caplog, monkeypatch
-):
-    """No device configured + protocol=rdma → emit a clear warning and return ""
-    so the C++ side handles auto-selection. There is no Python-side fallback."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("No RDMA devices specified" in r.message for r in warnings), (
-        f"expected fallback warning, got {[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_silent_for_tcp_with_no_device(caplog, monkeypatch):
-    """protocol=tcp + no device → return "" silently (no RDMA, no warning)."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="tcp",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert not any("RDMA" in r.message for r in warnings), (
-        "did not expect RDMA warning for tcp protocol, got "
-        f"{[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_rejects_short_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 2,
-    )
-    with pytest.raises(ValueError, match="does not cover local GPU 2"):
-        rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="rocep139s0,rocep140s0",
-        )
-
-
 class _ReplicaDesc:
     def __init__(self, tier: str):
         self.tier = tier
@@ -417,6 +332,24 @@ def test_store_sending_thread_skips_request_during_cpu_pressure():
     assert store.batch_put_from_multi_buffers.call_count == 3
 
 
+def test_store_sending_thread_records_mooncake_metrics():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+    stats = MooncakeStoreConnectorStats()
+    thread._record_operation_cb = stats.record_operation
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert len(stats.data["save_exists"]) == 1
+    assert stats.data["save_exists"][0]["num_keys"] == 2
+    assert len(stats.data["save_put"]) == 1
+    assert stats.data["save_put"][0]["num_bytes"] == 512
+    assert stats.data["save_put"][0]["status"] == "ok"
+
+
 def test_store_sending_thread_only_skips_on_no_available_handle():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -437,6 +370,96 @@ def test_store_sending_thread_only_skips_on_no_available_handle():
     thread._handle_request(_make_store_req("req-a", [b"a2", b"a3"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 2
+
+
+def test_store_sending_thread_releases_pin_on_batch_is_exist_failure():
+    # `batch_is_exist` raising must still decrement `stored_requests` so the
+    # scheduler can drop `delay_free_blocks` and release the pinned GPU blocks.
+    store = MagicMock()
+    store.batch_is_exist.side_effect = RuntimeError("mooncake down")
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-a")
+    with pytest.raises(RuntimeError):
+        thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert thread.stored_requests["req-a"] == 0
+    store.batch_put_from_multi_buffers.assert_not_called()
+
+
+def test_store_sending_thread_releases_pin_on_batch_put_failure():
+    # `batch_put_from_multi_buffers` raising is logged (not re-raised), and the
+    # pin must still be released through the finally block.
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.side_effect = RuntimeError("rdma error")
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert thread.stored_requests["req-a"] == 0
+
+
+def test_store_recving_thread_reports_failed_block_ids():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -5, -7]
+    thread = _make_store_recving_thread(store)
+
+    thread._handle_request(
+        _make_load_req(
+            "req-a",
+            [b"a0", b"a1", b"a2"],
+            token_len=48,
+        )
+    )
+
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {1, 2}
+    assert thread.get_and_clear_block_ids_with_load_errors() == set()
+
+
+def test_store_recving_thread_reports_failed_block_ids_after_rotation():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -5, 256]
+    thread = _make_store_recving_thread(store, tp_rank=1)
+
+    thread._handle_request(
+        _make_load_req(
+            "req-a",
+            [b"a0", b"a1", b"a2"],
+            token_len=48,
+        )
+    )
+
+    assert thread.get_and_clear_block_ids_with_load_errors() == {2}
+
+
+def test_store_recving_thread_reports_all_attempted_blocks_on_exception():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = RuntimeError("boom")
+    thread = _make_store_recving_thread(store)
+
+    thread._handle_request(
+        _make_load_req(
+            "req-a",
+            [b"a0", b"a1", b"a2"],
+            token_len=48,
+        )
+    )
+
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+
+
+def test_store_worker_get_block_ids_with_load_errors_delegates_to_recv_thread():
+    recv_thread = MagicMock()
+    recv_thread.get_and_clear_block_ids_with_load_errors.return_value = {3, 4}
+    w = _make_bare_worker()
+    w.kv_recv_thread = recv_thread
+
+    assert w.get_block_ids_with_load_errors() == {3, 4}
+    recv_thread.get_and_clear_block_ids_with_load_errors.assert_called_once_with()
 
 
 def test_store_sending_thread_passes_replicate_config_when_preferred_segment_set():
@@ -548,6 +571,29 @@ def test_recv_thread_logs_tier_summary_when_enabled(monkeypatch, caplog_vllm):
     )
 
 
+def test_recv_thread_records_partial_failure_metrics(monkeypatch):
+    monkeypatch.delenv("VLLM_MOONCAKE_STORE_TIER_LOG", raising=False)
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -10]
+    thread = _make_store_recving_thread(store, disk_offload_buffer_budget_bytes=None)
+    stats = MooncakeStoreConnectorStats()
+    thread._record_operation_cb = stats.record_operation
+
+    req = _make_load_req(
+        "req-a",
+        [b"a0", b"a1"],
+        token_len=32,
+    )
+
+    thread._handle_request(req)
+
+    assert len(stats.data["load_get"]) == 1
+    assert stats.data["load_get"][0]["num_keys"] == 2
+    assert stats.data["load_get"][0]["num_bytes"] == 512
+    assert stats.data["load_get"][0]["status"] == "partial_failure"
+    assert stats.data["load_get"][0]["num_failed_keys"] == 1
+
+
 def test_recv_thread_uses_ratio_scaled_budget_for_first_pass_split():
     store = MagicMock()
     store.batch_get_into_multi_buffers.side_effect = [
@@ -638,6 +684,7 @@ def test_recv_thread_stops_after_first_failing_disk_offload_sub_batch():
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 1
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1}
 
 
 def test_recv_thread_skips_split_when_budget_holds_all_keys():
@@ -667,21 +714,26 @@ def test_recv_thread_skips_split_when_budget_holds_all_keys():
 
 
 def test_recv_thread_reports_unsplittable_key_larger_than_budget():
+    # Non-zero tp_rank exercises the rotation: the oversized key may not sit
+    # at the original request's first block. Every block must still be marked
+    # invalid, since none are loaded.
     store = MagicMock()
     thread = _make_store_recving_thread(
         store,
+        tp_rank=2,
         disk_offload_buffer_budget_bytes=_DISK_OFFLOAD_BUDGET_TOO_SMALL,
     )
 
     req = _make_load_req(
         "req-a",
-        [b"a0"],
-        token_len=16,
+        [b"a0", b"a1", b"a2"],
+        token_len=48,
     )
 
     thread._handle_request(req)
 
     assert store.batch_get_into_multi_buffers.call_count == 0
+    assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
@@ -829,7 +881,6 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
             block_ids=([0, 1, 2],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
-            original_block_size=16,
         )
     )
 
@@ -869,7 +920,6 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
             block_ids=([0, 1],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
-            original_block_size=64,
         )
     )
 
@@ -947,7 +997,6 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
             block_ids=([0, 1], list(range(8))),
             block_hashes=hs,
             can_save=True,
-            original_block_size=32,
         )
     )
 
@@ -961,6 +1010,84 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     assert len(swa_keys) == 2
     swa_hashes = {k.rsplit("@", 1)[-1] for k in swa_keys}
     assert swa_hashes == {hs[3].hex(), hs[7].hex()}
+
+
+def test_store_sending_thread_kv_events_use_group_chunk_metadata():
+    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+
+    full_spec = FullAttentionSpec(
+        block_size=32, num_kv_heads=8, head_size=64, dtype=None
+    )
+    swa_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=8,
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        scheduler_block_size=32,
+        hash_block_size=8,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([512])
+    db_swa = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=8,
+    )
+    db_swa.set_kv_caches_base_addr([0x2000])
+    db_swa.set_block_len([128])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_swa],
+        block_size=32,
+    )
+    thread.enable_kv_event = True
+
+    hs = [bytes([i + 1]) * 4 for i in range(4)]
+    thread.add_stored_request("r0")
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([0], list(range(4))),
+            block_hashes=hs,
+            can_save=True,
+            token_ids=list(range(32)),
+        )
+    )
+
+    full_event, swa_event = thread.get_kv_events()
+    assert full_event.group_idx == 0
+    assert full_event.block_size == 32
+    assert full_event.token_ids == list(range(32))
+    assert full_event.block_hashes == [
+        maybe_convert_block_hash(BlockHash(b"".join(hs)))
+    ]
+
+    assert swa_event.group_idx == 1
+    assert swa_event.block_size == 8
+    assert swa_event.token_ids == list(range(24, 32))
+    assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
 def _auto_set_ready_event(*args, **kwargs):
@@ -1025,6 +1152,8 @@ def _make_bare_worker(
 
     worker.disk_offload_buffer_budget_bytes = None
     worker.store_replicate_config = SimpleNamespace()
+    worker._kv_connector_stats_lock = threading.Lock()
+    worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
     spec = FullAttentionSpec(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
@@ -1373,3 +1502,59 @@ def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
     assert w.store_replicate_config.preferred_segment == ""
     # No disk budget — enable_offload was absent (defaults to False).
     assert w.disk_offload_buffer_budget_bytes is None
+
+
+# ---------------------------------------------------------------------------
+# Stats/metrics tests (PR-35 port)
+# ---------------------------------------------------------------------------
+
+
+def test_mooncake_store_stats_aggregate_reduce():
+    stats = MooncakeStoreConnectorStats()
+    stats.record_operation("save_put", 0.01, 2, num_bytes=128)
+    other = MooncakeStoreConnectorStats()
+    other.record_operation(
+        "save_put",
+        0.03,
+        1,
+        num_bytes=64,
+        status="error",
+        num_failed_keys=1,
+    )
+
+    reduced = stats.aggregate(other).reduce()
+
+    assert reduced["save_put_count"] == 2
+    assert reduced["save_put_total_keys"] == 3
+    assert reduced["save_put_total_bytes"] == 192
+    assert reduced["save_put_failed_keys"] == 1
+    assert reduced["save_put_error_count"] == 1
+
+
+def test_worker_get_kv_connector_stats_resets_after_read():
+    worker = _make_bare_worker()
+    worker._record_kv_connector_operation(
+        "save_put",
+        0.01,
+        2,
+        num_bytes=128,
+    )
+
+    stats = worker.get_kv_connector_stats()
+
+    assert isinstance(stats, MooncakeStoreConnectorStats)
+    assert stats.data["save_put"][0]["num_bytes"] == 128
+    assert worker.get_kv_connector_stats() is None
+
+
+def test_lookup_records_mooncake_metrics():
+    worker = _make_bare_worker()
+    worker.store.batch_is_exist.return_value = [1, 1]
+
+    result = worker.lookup(32, [b"a0", b"a1"])
+    stats = worker.get_kv_connector_stats()
+
+    assert result == 32
+    assert isinstance(stats, MooncakeStoreConnectorStats)
+    assert len(stats.data["lookup_exists"]) == 1
+    assert stats.data["lookup_exists"][0]["num_keys"] == 2

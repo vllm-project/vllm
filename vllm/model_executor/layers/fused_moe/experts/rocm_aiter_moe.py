@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -54,7 +53,7 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-aiter_topK_meta_data = None
+aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -246,6 +245,7 @@ def rocm_aiter_fused_experts(
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -340,6 +340,16 @@ def rocm_aiter_fused_experts(
             moe_config.intermediate_size_per_partition
             - moe_config.intermediate_size_per_partition_unpadded
         )
+        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
+        # dispatch (currently pinned to v0.1.13.post1):
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
+        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
+        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
+        hidden_pad = hidden_pad // 128 * 128
+        intermediate_pad = (
+            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+        )
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -357,10 +367,11 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=hidden_pad // 128 * 128,
-            intermediate_pad=intermediate_pad // 64 * 64 * 2,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
+            moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
         )
 
 
@@ -440,9 +451,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
-    def supports_expert_map(self):
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -504,6 +512,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
         # avoid redundant copy when output is a view of the result
         if (
@@ -513,7 +522,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.is_contiguous()
             and result.is_contiguous()
             and output._base is None
-            and disable_inplace()
         ):
             output.set_(result)
         else:

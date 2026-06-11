@@ -49,6 +49,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
+from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -103,7 +104,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import group_and_batch_mm_kwargs
+from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -151,6 +152,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -186,6 +188,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
@@ -501,7 +504,10 @@ class GPUModelRunner(
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
         # Sampler
-        self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+        )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -547,6 +553,7 @@ class GPUModelRunner(
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
+                | Step3p5MTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -581,6 +588,8 @@ class GPUModelRunner(
                 )
             elif self.speculative_config.use_gemma4_mtp():
                 self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_step3p5_mtp():
+                self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -887,7 +896,7 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
-        self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -992,15 +1001,23 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
-    def _get_mamba_copy_bufs(self) -> mamba_utils.MambaCopyBuffers:
-        if self._mamba_copy_bufs is None:
-            self._mamba_copy_bufs = mamba_utils.MambaCopyBuffers.create(
-                self.max_num_reqs,
-                self.kv_cache_config,
-                self.model.get_mamba_state_copy_func(),
-                self._make_buffer,
+    def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
+        # Only reachable on the ``mamba_cache_mode == "align"`` path.
+        # The postprocess sub-object is additionally gated on spec
+        # decode + hybrid model.
+        assert self.cache_config.mamba_cache_mode == "align"
+        if self._mamba_bufs is None:
+            self._mamba_bufs = mamba_utils.MambaBuffers.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=self.kv_cache_config,
+                copy_funcs=self.model.get_mamba_state_copy_func(),
+                make_buffer=self._make_buffer,
+                device=self.device,
+                with_postprocess_align=(
+                    self.speculative_config is not None and self.model_config.is_hybrid
+                ),
             )
-        return self._mamba_copy_bufs
+        return self._mamba_bufs
 
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
@@ -1071,11 +1088,11 @@ class GPUModelRunner(
     def _init_kv_zero_meta(self) -> None:
         """One-time precomputation for _zero_block_ids.
 
-        Delegates to KVBlockZeroer.init_meta with the runner's state.
         Called from gpu_worker.py outside the CuMem pool context.
         """
-        self._kv_block_zeroer = KVBlockZeroer(self.device, self.pin_memory)
-        self._kv_block_zeroer.init_meta(
+        self._kv_block_zeroer = KVBlockZeroer(
+            self.device,
+            self.pin_memory,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
@@ -1489,21 +1506,32 @@ class GPUModelRunner(
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
-        # TODO: Remove .cpu() sync to enable fully async for hybrid model;
-        # Use num_computed_tokens.gpu instead of req.num_computed_tokens to
-        # support aligned mamba cache mode.
         # Count the number of accepted tokens for each sequence.
         # Valid tokens are contiguous from position 0, so counting non-(-1)
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        is_align = self.cache_config.mamba_cache_mode == "align"
-        if is_align:
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        if self.cache_config.mamba_cache_mode == "align":
+            # Fused GPU postprocess: state copies + per-request accepted-token
+            # update without CPU-GPU sync. The metadata
+            # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
+            # pre-staged to GPU buffers in _prepare_inputs.
+            mamba_utils.postprocess_mamba_align_gpu(
+                bufs=self._get_mamba_bufs(),
+                num_reqs=num_reqs,
+                num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+                num_accepted_tokens_cpu_tensor=(
+                    self.input_batch.num_accepted_tokens_cpu_tensor
+                ),
+                input_batch=self.input_batch,
+                kv_cache_config=self.kv_cache_config,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+            )
+
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
@@ -1511,23 +1539,16 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
-        mamba_utils.postprocess_mamba(
-            scheduler_output,
-            self.kv_cache_config,
-            self.cache_config,
-            self.input_batch,
-            self.requests,
-            self.mamba_state_idx,
-            self.num_spec_tokens,
-            num_reqs,
-            forward_context=(
-                self.compilation_config.static_forward_context if is_align else None
-            ),
-            mamba_state_copy_funcs=(
-                self.model.get_mamba_state_copy_func() if is_align else None
-            ),
-            copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
-        )
+            if self.cache_config.mamba_cache_mode == "all":
+                mamba_utils.postprocess_mamba_all(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.input_batch,
+                    self.requests,
+                    self.mamba_state_idx,
+                    self.num_spec_tokens,
+                    num_reqs,
+                )
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -1857,9 +1878,8 @@ class GPUModelRunner(
         SpecDecodeMetadata | None,
     ]:
         """
-        :return: tuple[
-            logits_indices, spec_decode_metadata,
-        ]
+        Returns:
+            tuple[logits_indices, spec_decode_metadata]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2184,7 +2204,8 @@ class GPUModelRunner(
         slot_mappings: dict[int, torch.Tensor] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
-        :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
+        Returns:
+            tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
@@ -2256,11 +2277,38 @@ class GPUModelRunner(
         # Used by mamba backends to distinguish actual decodes from
         # short extends.
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        # Zero out padded rows so stale data from condense() doesn't
+        # misclassify padding as prefill in CUDA graph mode.
+        is_prefilling[num_reqs:] = False
 
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
+
+        # Compute mm_prefix bidirectional ranges before building
+        # attention metadata so builders handle them during build().
+        # Ranges exceeding sliding_window are skipped to prevent
+        # early tokens from attending across the entire image span.
+        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+        if self.is_mm_prefix_lm:
+            req_doc_ranges = {}
+            hf_text_config = self.model_config.hf_text_config
+            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
+            for req_id in self.input_batch.req_ids:
+                image_doc_ranges = []
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    if mm_feature.modality == "audio":
+                        continue
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    for r in img_doc_range:
+                        if _bidi_sw is not None and (r[1] - r[0] + 1) > _bidi_sw:
+                            continue
+                        image_doc_ranges.append(r)
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                req_doc_ranges[req_idx] = image_doc_ranges
 
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -2278,6 +2326,7 @@ class GPUModelRunner(
             causal=True,
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
+            mm_req_doc_ranges=req_doc_ranges,
         )
 
         if self.dcp_world_size > 1:
@@ -2413,7 +2462,11 @@ class GPUModelRunner(
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+                self.drafter.set_per_group_attn_metadata(
+                    kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
+                )
+            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
@@ -2425,34 +2478,6 @@ class GPUModelRunner(
 
                 else:
                     _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
-
-        if self.is_mm_prefix_lm:
-            req_doc_ranges = {}
-
-            # Gemma4 bidi: skip ranges that exceed the sliding
-            # window. When image tokens > sliding_window, bidi causes
-            # early image tokens to attend to the entire image
-            # (e.g. 6 → 1092 targets), degrading spatial precision.
-            # Per-range filtering keeps bidi for small images/video
-            # frames while skipping oversized images.
-            hf_text_config = self.model_config.hf_text_config
-            _bidi_sw = getattr(hf_text_config, "sliding_window", None)
-
-            for req_id in self.input_batch.req_ids:
-                image_doc_ranges = []
-                req_state = self.requests[req_id]
-                for mm_feature in req_state.mm_features:
-                    pos_info = mm_feature.mm_position
-                    img_doc_range = pos_info.extract_embeds_range()
-                    for r in img_doc_range:
-                        if _bidi_sw is not None and (r[1] - r[0] + 1) > _bidi_sw:
-                            continue
-                        image_doc_ranges.append(r)
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                req_doc_ranges[req_idx] = image_doc_ranges
-
-            # Set mm_prefix_range for all attention metadata
-            self._set_mm_prefix_range_for_metadata(attn_metadata, req_doc_ranges)
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -2473,9 +2498,11 @@ class GPUModelRunner(
         num_common_prefix_blocks: list[int],
     ) -> list[list[int]] | None:
         """
-        :return: Optional[cascade_attn_prefix_lens]
-            cascade_attn_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
-            None if we should not use cascade attention
+        Returns:
+            Optional[cascade_attn_prefix_lens]
+                cascade_attn_prefix_lens is 2D:
+                ``[kv_cache_group_id][attn_group_idx]``,
+                None if we should not use cascade attention
         """
 
         use_cascade_attn = False
@@ -3076,22 +3103,17 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
-            for mm_feature in req_state.mm_features:
+            mm_features = req_state.mm_features
+            lo, hi = get_mm_features_in_window(
+                mm_features,
+                start=num_computed_tokens,
+                end=num_computed_tokens + num_scheduled_tokens,
+            )
+            for i in range(lo, hi):
+                mm_feature = mm_features[i]
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
-
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(
@@ -3165,6 +3187,44 @@ class GPUModelRunner(
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
+
+    def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
+        """Apply sparse flat-index patches directly to existing model params."""
+        model = self.get_model()
+        for patch in patches:
+            param = model.get_parameter(patch.name)
+            if not param.data.is_contiguous():
+                raise NotImplementedError(
+                    "Sparse weight updates currently require contiguous params: "
+                    f"{patch.name}"
+                )
+
+            if patch.indices.dtype != torch.int32:
+                raise ValueError(
+                    "Sparse weight updates currently require int32 indices: "
+                    f"{patch.name}"
+                )
+            if patch.indices.ndim != 1 or patch.values.ndim != 1:
+                raise ValueError(
+                    f"Sparse weight patches must be 1D flattened updates: {patch.name}"
+                )
+            if patch.indices.numel() != patch.values.numel():
+                raise ValueError(
+                    "`indices` and `values` must have matching lengths for "
+                    f"{patch.name}"
+                )
+            if patch.values.dtype != param.dtype:
+                raise ValueError(
+                    f"Sparse values dtype {patch.values.dtype} does not match "
+                    f"parameter dtype {param.dtype} for {patch.name}"
+                )
+
+            flat_param = param.data.view(-1)
+            flat_param.index_copy_(
+                0,
+                patch.indices.to(device=flat_param.device, dtype=torch.long),
+                patch.values.to(device=flat_param.device),
+            )
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
@@ -4098,6 +4158,7 @@ class GPUModelRunner(
                 if deferred_state_corrections_fn:
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
+                mamba_bufs = self._get_mamba_bufs()
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
@@ -4107,7 +4168,7 @@ class GPUModelRunner(
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
-                    self._get_mamba_copy_bufs(),
+                    mamba_bufs.preprocess,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -4117,6 +4178,21 @@ class GPUModelRunner(
                     self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                 )
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                # Stage per-request inputs for the fused postprocess kernel
+                # only when that kernel will actually run. The kernel is
+                # gated on spec-decode + hybrid (see MambaBuffers.create);
+                # without it, ``mamba_bufs.postprocess_align`` is None and
+                # the staging buffers don't exist.
+                if mamba_bufs.postprocess_align is not None:
+                    mamba_utils.stage_postprocess_inputs_to_gpu(
+                        mamba_bufs.postprocess_align,
+                        scheduler_output,
+                        self.input_batch.req_ids,
+                        num_reqs,
+                        self.requests,
+                        self.mamba_state_idx,
+                    )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -4219,7 +4295,6 @@ class GPUModelRunner(
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
-                    hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
 
@@ -4285,6 +4360,21 @@ class GPUModelRunner(
 
         return None
 
+    def _input_fits_in_drafter(
+        self, common_attn_metadata: CommonAttentionMetadata | None
+    ) -> bool:
+        if common_attn_metadata is None:
+            return False
+        assert self.speculative_config is not None
+        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
+        num_drafter_query_tokens = self.num_spec_tokens + (
+            1 if self.speculative_config.use_dflash() else 0
+        )
+        return (
+            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -4295,17 +4385,9 @@ class GPUModelRunner(
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
-            if not kv_connector_output:
-                return None  # type: ignore[return-value]
-
             # In case of PP with kv transfer, we need to pass through the
             # kv_connector_output
-            if kv_connector_output.is_empty():
-                return EMPTY_MODEL_RUNNER_OUTPUT
-
-            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            output.kv_connector_output = kv_connector_output
-            return output
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Unpack ephemeral state.
         (
@@ -4372,9 +4454,8 @@ class GPUModelRunner(
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
             # Decide whether to run the drafter or zero out draft tokens.
-            input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                <= self.effective_drafter_max_model_len
+            input_fits_in_drafter = self._input_fits_in_drafter(
+                spec_decode_common_attn_metadata
             )
             use_gpu_toks = (
                 spec_config.use_eagle()
@@ -5151,6 +5232,11 @@ class GPUModelRunner(
             and not self.parallel_config.use_ubatching
         ):
             self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+            drafter = getattr(self, "drafter", None)
+            if drafter is not None and hasattr(drafter, "model"):
+                drafter.model = BreakableCUDAGraphWrapper(
+                    drafter.model, self.vllm_config
+                )
         elif (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
@@ -5235,11 +5321,12 @@ class GPUModelRunner(
         """
         Reload weights from a weights iterator or from disk
 
-        :param weights_iterator: weights to load into model
-        :param weights_path: path to load weights from if weights_iterator is not
-            provided. Use path of original model if neither is provided.
-        :param is_checkpoint_format: set to False if weights have already been processed
-            into kernel format (repacking, renaming, etc.)
+        Args:
+            weights_iterator: weights to load into model
+            weights_path: path to load weights from if weights_iterator is not
+                provided. Use path of original model if neither is provided.
+            is_checkpoint_format: set to False if weights have already been
+                processed into kernel format (repacking, renaming, etc.)
         """
         # TODO(@kylesayrs): generalize to all runners and loaders
         # argument validation
@@ -5701,6 +5788,9 @@ class GPUModelRunner(
                     num_scheduled_tokens, self.query_pos.np
                 )
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
+                    cum_num_tokens[-1]
+                )
                 self.query_start_loc.copy_to_gpu()
 
                 # Sync block table CPU->GPU so cleared rows from
@@ -6152,6 +6242,7 @@ class GPUModelRunner(
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
+        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
 
@@ -6190,11 +6281,21 @@ class GPUModelRunner(
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
+        if current_platform.is_rocm():
+            # Drop captured graphs before distributed teardown. On ROCm, delayed
+            # graph destruction can surface HSA faults in the next engine startup.
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
+        if current_platform.is_rocm():
+            gc.collect()
+            torch.accelerator.empty_cache()
+            torch.accelerator.synchronize()
 
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
@@ -6231,6 +6332,42 @@ class GPUModelRunner(
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
     @torch.inference_mode()
+    def _create_encoder_cudagraph_manager(self) -> "EncoderCudaGraphManager | None":
+        if not (
+            self.compilation_config.cudagraph_mm_encoder and self.supports_mm_inputs
+        ):
+            return None
+
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper, because
+        # @runtime_checkable Protocol isinstance() checks do not work through
+        # __getattr__ forwarding.
+        from vllm.model_executor.models.interfaces import (
+            SupportsEncoderCudaGraph,
+            supports_encoder_cudagraph,
+        )
+        from vllm.v1.worker.encoder_cudagraph import (
+            EncoderCudaGraphManager,
+        )
+
+        raw_model = self.get_model()
+        if not supports_encoder_cudagraph(raw_model):
+            return None
+
+        return EncoderCudaGraphManager(
+            vllm_config=self.vllm_config,
+            device=self.device,
+            dtype=self.dtype,
+            model=cast(SupportsEncoderCudaGraph, raw_model),
+        )
+
+    @torch.inference_mode()
+    def _maybe_init_encoder_cudagraph_manager(self) -> None:
+        if self.encoder_cudagraph_manager is None:
+            self.encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
+            if self.encoder_cudagraph_manager is not None:
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
@@ -6238,24 +6375,40 @@ class GPUModelRunner(
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        # Use a temporary manager for memory profiling. The persistent manager
+        # is initialized later so it does not keep profiling-only graph state.
+        encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
 
-        total_graphs = sum(len(descs) for _, descs in capture_descs)
+        decoder_graphs = sum(len(descs) for _, descs in capture_descs)
+        encoder_graphs = (
+            encoder_cudagraph_manager.get_num_graphs_to_capture()
+            if encoder_cudagraph_manager is not None
+            else 0
+        )
+        total_graphs = decoder_graphs + encoder_graphs
         if total_graphs == 0:
             logger.debug("No CUDA graphs will be captured, skipping profiling")
             self._cleanup_profiling_kv_cache()
             return 0
 
-        logger.info(
-            "Profiling CUDA graph memory: %s",
-            ", ".join(
+        graph_groups = [
+            *(
                 f"{mode.name}={len(descs)} (largest={descs[0].num_tokens})"
                 for mode, descs in capture_descs
                 if descs
             ),
-        )
+        ]
+        if encoder_graphs > 0:
+            graph_groups.append(
+                f"ENCODER={encoder_graphs} "
+                f"(largest={encoder_cudagraph_manager.token_budgets[-1]})"
+            )
+
+        logger.info("Profiling CUDA graph memory: %s", ", ".join(graph_groups))
 
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
+        encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
         all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
             BreakableCUDAGraphWrapper._all_instances
@@ -6264,73 +6417,98 @@ class GPUModelRunner(
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
-        set_cudagraph_capturing_enabled(True)
-        with self._freeze_gc(), graph_capture(device=self.device):
-            shared_memory_estimate = {}
-            per_graph_estimate = {}
-            torch.accelerator.synchronize()
-            torch.accelerator.empty_cache()
+        shared_memory_estimate = {}
+        per_graph_estimate = {}
+        encoder_memory_estimate = 0
 
-            for mode, descs in capture_descs:
-                profile_descs = descs[:2]
-                mem_samples: list[int] = []
+        # Cleanup-only guard: CUDA graph capture errors should still propagate
+        # because encoder graph capture is opt-in.
+        try:
+            set_cudagraph_capturing_enabled(True)
+            with self._freeze_gc(), graph_capture(device=self.device):
+                torch.accelerator.synchronize()
+                torch.accelerator.empty_cache()
 
-                for i, desc in enumerate(profile_descs):
-                    mem_before = torch.cuda.mem_get_info()[0]
-                    self._warmup_and_capture(
-                        desc,
-                        cudagraph_runtime_mode=mode,
-                        profile_seq_lens=(
-                            min(
-                                self.max_model_len,
-                                self.max_num_tokens // desc.num_tokens,
-                            )
-                            if mode == CUDAGraphMode.FULL and i == 0
-                            else None
-                        ),
+                for mode, descs in capture_descs:
+                    profile_descs = descs[:2]
+                    mem_samples: list[int] = []
+
+                    for i, desc in enumerate(profile_descs):
+                        mem_before = torch.cuda.mem_get_info()[0]
+                        self._warmup_and_capture(
+                            desc,
+                            cudagraph_runtime_mode=mode,
+                            profile_seq_lens=(
+                                min(
+                                    self.max_model_len,
+                                    self.max_num_tokens // desc.num_tokens,
+                                )
+                                if mode == CUDAGraphMode.FULL and i == 0
+                                else None
+                            ),
+                        )
+                        torch.accelerator.synchronize()
+                        free_after = torch.cuda.mem_get_info()[0]
+                        mem_samples.append(mem_before - free_after)
+
+                    first_capture = mem_samples[0]
+                    # Use at least 1 MiB per graph for driver overhead
+                    per_graph = max(
+                        mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )
+
+                    shared_memory_estimate[mode] = first_capture
+                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+
+                    logger.debug(
+                        "Estimated %s CUDA graph memory: "
+                        "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
+                        mode.name,
+                        first_capture / (1 << 20),
+                        len(descs),
+                        per_graph / (1 << 20),
+                    )
+
+                if encoder_cudagraph_manager is not None:
+                    mem_before = torch.cuda.mem_get_info()[0]
+                    encoder_cudagraph_manager.capture(graph_pool=encoder_profiling_pool)
                     torch.accelerator.synchronize()
                     free_after = torch.cuda.mem_get_info()[0]
-                    mem_samples.append(mem_before - free_after)
+                    encoder_memory_estimate = max(mem_before - free_after, 0)
 
-                first_capture = mem_samples[0]
-                # Use at least 1 MiB per graph for driver overhead
-                per_graph = max(mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20)
-
-                shared_memory_estimate[mode] = first_capture
-                per_graph_estimate[mode] = per_graph * (len(descs) - 1)
-
-                logger.debug(
-                    "Estimated %s CUDA graph memory: "
-                    "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
-                    mode.name,
-                    first_capture / (1 << 20),
-                    len(descs),
-                    per_graph / (1 << 20),
-                )
-
-        set_cudagraph_capturing_enabled(False)
-        CUDAGraphWrapper.clear_all_graphs()
-        BreakableCUDAGraphWrapper.clear_all_graphs()
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
-        )
-        for instance in all_wrappers:
-            if id(instance) in original_pools:
-                instance.graph_pool = original_pools[id(instance)]
-        for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
-            key_set.clear()
-        self.cudagraph_dispatcher.keys_initialized = False
-        self.maybe_remove_all_loras(self.lora_config)
-        self._cleanup_profiling_kv_cache()
-        compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+                    logger.debug(
+                        "Estimated encoder CUDA graph memory: %.2f MiB for %d graphs",
+                        encoder_memory_estimate / (1 << 20),
+                        encoder_graphs,
+                    )
+        finally:
+            set_cudagraph_capturing_enabled(False)
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            if encoder_cudagraph_manager is not None:
+                encoder_cudagraph_manager.clear()
+            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+                BreakableCUDAGraphWrapper._all_instances
+            )
+            for instance in all_wrappers:
+                if id(instance) in original_pools:
+                    instance.graph_pool = original_pools[id(instance)]
+            for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
+                key_set.clear()
+            self.cudagraph_dispatcher.keys_initialized = False
+            self.maybe_remove_all_loras(self.lora_config)
+            self._cleanup_profiling_kv_cache()
+            compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
         # FULL and PIECEWISE graphs share the global pool at runtime and are
         # never replayed concurrently, so the pool overlays their memory.
         # Take the max to avoid double-counting the overlap.
-        total_estimate = max(shared_memory_estimate.values()) + sum(
+        decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
             per_graph_estimate.values()
         )
+        # Encoder graphs use a manager-local pool at runtime, separate from the
+        # decoder pool, so add their estimate instead of overlaying it.
+        total_estimate = decoder_estimate + encoder_memory_estimate
         logger.info(
             "Estimated CUDA graph memory: %.2f GiB total",
             total_estimate / (1 << 30),
@@ -6348,31 +6526,7 @@ class GPUModelRunner(
             return 0
 
         # Initialize encoder CUDA graph manager if enabled.
-        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
-        # because @runtime_checkable Protocol isinstance() checks do not
-        # work through __getattr__ forwarding.
-        if (
-            self.compilation_config.cudagraph_mm_encoder
-            and self.supports_mm_inputs
-            and self.encoder_cudagraph_manager is None
-        ):
-            from vllm.model_executor.models.interfaces import (
-                SupportsEncoderCudaGraph,
-                supports_encoder_cudagraph,
-            )
-            from vllm.v1.worker.encoder_cudagraph import (
-                EncoderCudaGraphManager,
-            )
-
-            raw_model = self.get_model()
-            if supports_encoder_cudagraph(raw_model):
-                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
-                    vllm_config=self.vllm_config,
-                    device=self.device,
-                    dtype=self.dtype,
-                    model=cast(SupportsEncoderCudaGraph, raw_model),
-                )
-                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+        self._maybe_init_encoder_cudagraph_manager()
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -6399,7 +6553,8 @@ class GPUModelRunner(
 
             # Capture encoder CUDA graphs if enabled
             if self.encoder_cudagraph_manager is not None:
-                self.encoder_cudagraph_manager.capture()
+                encoder_graph_pool = current_platform.graph_pool_handle()
+                self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -6525,8 +6680,21 @@ class GPUModelRunner(
         assert len(self.attn_groups) == 0, "Attention backends are already initialized"
 
         class AttentionGroupKey(NamedTuple):
+            """Deduplication key for attention groups within a KV cache group.
+
+            Splits on per-rank ``num_heads_q`` in addition to backend + spec
+            so layers with different Q-head counts (e.g. a spec-decode draft
+            with fewer attention heads than its target) get separate metadata
+            builders. The builders' scratch (e.g. ``softmax_segm_*`` in
+            ``triton_attn``, ``num_qo_heads`` in FlashInfer) is sized by
+            ``num_heads_q`` and assumes uniformity within the group; see
+            ``get_num_attention_heads_from_layers`` in
+            ``vllm/v1/attention/backends/utils.py``.
+            """
+
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
+            num_heads_q: int
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -6555,9 +6723,16 @@ class GPUModelRunner(
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-                key = (full_cls_name, layer_kv_cache_spec)
+                # Non-Attention layer types (e.g. Mamba1, ShortConv) do not
+                # expose ``num_heads``; fall back to 0 so they cluster as
+                # before. Such layers never coexist with Attention in a
+                # single KV cache group (different KVCacheSpec), so the
+                # fallback can never spuriously merge them with attention
+                # layers.
+                num_heads_q = getattr(layers[layer_name], "num_heads", 0)
+                key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
                 attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec
+                    attn_backend, layer_kv_cache_spec, num_heads_q
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -6570,11 +6745,11 @@ class GPUModelRunner(
             kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
+            for key, layer_names in attn_backends_map.items():
                 attn_group = AttentionGroup(
-                    attn_backend,
+                    key.attn_backend,
                     layer_names,
-                    kv_cache_spec,
+                    key.kv_cache_spec,
                     kv_cache_group_id,
                 )
 
@@ -6710,46 +6885,6 @@ class GPUModelRunner(
             self.reorder_batch_threshold = None
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
-
-    def _set_mm_prefix_range_for_metadata(
-        self,
-        attn_metadata: Any,
-        req_doc_ranges: dict[int, list[tuple[int, int]]],
-    ) -> None:
-        """Set mm_prefix_range for all attention metadata objects.
-
-        This method handles both list and non-list attention metadata,
-        computing mm_prefix_range_tensor once and sharing it across all
-        metadata objects to avoid redundant host-to-device transfers.
-        """
-        from vllm.v1.attention.backends.triton_attn import (
-            TritonAttentionMetadata,
-        )
-
-        # Get all metadata objects from either list or dict structure
-        metadata_list = []
-        if isinstance(attn_metadata, list):
-            for ub_metadata in attn_metadata:
-                metadata_list.extend(ub_metadata.values())
-        else:
-            metadata_list.extend(attn_metadata.values())
-
-        # Set mm_prefix_range for all metadata and compute tensor once
-        shared_tensor = None
-        for metadata in metadata_list:
-            metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-
-            # Only compute tensor for TritonAttentionMetadata
-            if isinstance(metadata, TritonAttentionMetadata):
-                if shared_tensor is None:
-                    shared_tensor = (
-                        TritonAttentionMetadata.compute_mm_prefix_range_tensor(
-                            req_doc_ranges,
-                            metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
-                            metadata.seq_lens.device,  # type: ignore[attr-defined]
-                        )
-                    )
-                metadata.mm_prefix_range_tensor = shared_tensor
 
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -7114,7 +7249,7 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self._mamba_copy_bufs = None
+        self._mamba_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
@@ -7217,13 +7352,13 @@ class GPUModelRunner(
         self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe.layer import MoERunner
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
 
         for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
+            if isinstance(module, MoERunner) and isinstance(module.router, BaseRouter):
                 layer_id = module.layer_id
 
                 def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):

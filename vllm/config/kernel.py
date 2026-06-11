@@ -128,6 +128,7 @@ MoEBackend = Literal[
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
+    "flashinfer_b12x",
     "marlin",
     "humming",
     "triton_unfused",
@@ -141,6 +142,7 @@ LinearBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
+    "flashinfer_b12x",
     "marlin",
     "triton",
     "deep_gemm",
@@ -178,6 +180,8 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
+      (RTX Pro 6000 / DGX Spark)
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
@@ -194,6 +198,7 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
+    - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
