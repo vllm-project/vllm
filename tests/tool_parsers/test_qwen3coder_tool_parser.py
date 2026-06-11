@@ -47,7 +47,7 @@ def qwen3_xml_tool_parser(qwen3_tokenizer, sample_tools):
     return Qwen3XMLToolParser(qwen3_tokenizer, tools=sample_tools)
 
 
-@pytest.fixture(params=["xml"])
+@pytest.fixture(params=["original", "xml"])
 def qwen3_tool_parser_parametrized(qwen3_tool_parser, qwen3_xml_tool_parser, request):
     """Parameterized fixture that provides both parser types for testing"""
     if request.param == "original":

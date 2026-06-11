@@ -104,6 +104,7 @@ class Qwen3CoderToolParser(ToolParser):
     def _reset_streaming_state(self):
         """Reset all streaming state."""
         self.current_tool_index = 0
+        self.num_seen_function_calls = 0
         self.is_tool_call_started = False
         self.header_sent = False
         self.current_tool_id = None
@@ -231,6 +232,47 @@ class Qwen3CoderToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    def _find_all_indices(
+        self, current_text: str, needle: str, annotation: str
+    ) -> list[tuple[int, str]]:
+        indices = []
+        idx = 0
+        while True:
+            idx = current_text.find(needle, idx)
+            if idx == -1:
+                break
+            indices.append((idx, annotation))
+            idx += len(needle)
+        return indices
+
+    def _collect_tool_start_indices(self, current_text: str) -> list[int]:
+        tool_call_starts = self._find_all_indices(
+            current_text, self.tool_call_start_token, "s"
+        )
+        tool_call_ends = self._find_all_indices(
+            current_text, self.tool_call_end_token, "e"
+        )
+        function_starts = self._find_all_indices(
+            current_text, self.tool_call_prefix, "f"
+        )
+        combined_indices = sorted(
+            tool_call_starts + tool_call_ends + function_starts, key=lambda x: x[0]
+        )
+        # handle nested tool calls in case we have malformed current_text
+        open_tool_calls = 0
+        starts: list[int] = []
+        for idx in combined_indices:
+            if idx[1] == "s":
+                open_tool_calls += 1
+                starts.append(idx[0])
+            elif idx[1] == "e" and open_tool_calls > 0:
+                open_tool_calls -= 1
+            elif idx[1] == "f" and open_tool_calls == 0:
+                # only add function starts that are not inside a tool call
+                starts.append(idx[0])
+
+        return starts
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -312,6 +354,20 @@ class Qwen3CoderToolParser(ToolParser):
                     if content_before:
                         return DeltaMessage(content=content_before)
                 return None
+            # Check if there's a function call that hasn't been seen before: if
+            # it appears here, it means that it has showed up without preceding
+            # tool_call token
+            elif (
+                current_text.count(self.tool_call_prefix) > self.num_seen_function_calls
+            ):
+                self.is_tool_call_started = True
+                if self.tool_call_prefix in delta_text:
+                    content_before = delta_text[
+                        : delta_text.index(self.tool_call_prefix)
+                    ]
+                    if content_before:
+                        return DeltaMessage(content=content_before)
+                return None
             else:
                 # Check if we're between tool calls - skip whitespace
                 if (
@@ -323,23 +379,8 @@ class Qwen3CoderToolParser(ToolParser):
                 # Normal content, no tool call
                 return DeltaMessage(content=delta_text)
 
-        # Check if we're between tool calls (waiting for next one)
-        # Count tool calls we've seen vs processed
-        tool_starts_count = current_text.count(self.tool_call_start_token)
-        if self.current_tool_index >= tool_starts_count:
-            # We're past all tool calls, shouldn't be here
-            return None
-
-        # We're in a tool call, find the current tool call portion
-        # Need to find the correct tool call based on current_tool_index
-        tool_start_positions: list[int] = []
-        idx = 0
-        while True:
-            idx = current_text.find(self.tool_call_start_token, idx)
-            if idx == -1:
-                break
-            tool_start_positions.append(idx)
-            idx += len(self.tool_call_start_token)
+        # Use merged wrapped/non-wrapped starts.
+        tool_start_positions = self._collect_tool_start_indices(current_text)
 
         if self.current_tool_index >= len(tool_start_positions):
             # No more tool calls to process yet
@@ -369,6 +410,7 @@ class Qwen3CoderToolParser(ToolParser):
                     self.current_tool_id = self._generate_tool_call_id()
                     self.header_sent = True
                     self.in_function = True
+                    self.num_seen_function_calls += 1
 
                     # Always append — each tool call is a separate
                     # invocation even if the function name is the same
