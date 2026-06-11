@@ -5,6 +5,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
+from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -13,8 +14,9 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 
 
 class PromptLogprobsWorker:
-    def __init__(self, max_num_reqs: int):
+    def __init__(self, max_num_reqs: int, logprobs_mode: LogprobsMode = "raw_logprobs"):
         self.max_num_reqs = max_num_reqs
+        self.logprobs_mode = logprobs_mode
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -76,11 +78,13 @@ class PromptLogprobsWorker:
             num_computed_tokens,
             all_token_ids,
         )
+        # Compute the prompt logprobs.
         prompt_token_ids, prompt_logprobs, prompt_ranks = (
             compute_prompt_logprobs_with_chunking(
                 prompt_logprobs_token_ids,
                 hidden_states[: input_batch.num_tokens],
                 logits_fn,
+                self.logprobs_mode,
                 max_num_prompt_logprobs,
             )
         )
@@ -205,7 +209,8 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
-    num_prompt_logprobs: int,
+    logprobs_mode: LogprobsMode = "raw_logprobs",
+    num_prompt_logprobs: int = -1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
@@ -218,19 +223,44 @@ def compute_prompt_logprobs_with_chunking(
         end_idx = start_idx + CHUNK_SIZE
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
         prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        requested_num_prompt_logprobs = (
-            prompt_logits.shape[-1]
-            if num_prompt_logprobs == -1
-            else num_prompt_logprobs
-        )
-        prompt_logprobs = compute_topk_logprobs(
-            prompt_logits,
-            requested_num_prompt_logprobs,
-            prompt_token_ids[start_idx:end_idx],
-        )
-        token_ids.append(prompt_logprobs.logprob_token_ids)
-        logprobs.append(prompt_logprobs.logprobs)
-        ranks.append(prompt_logprobs.selected_token_ranks)
+
+        # Check if we need to use the new logprobs_mode approach or the legacy approach
+        if num_prompt_logprobs == -1:
+            # New approach: respect logprobs_mode for full token vocabulary logprobs
+            # NOTE: For prompt logprobs, there is no "processing" step
+            # (no penalties, temperature, etc.), so "processed" and "raw"
+            # variants are equivalent. We respect logprobs_mode to return
+            # either log_softmax values or raw logits as requested.
+            chunk_token_ids = prompt_token_ids[start_idx:end_idx]
+            if logprobs_mode in ("raw_logits", "processed_logits"):
+                values = prompt_logits.to(torch.float32)
+            else:
+                values = torch.nn.functional.log_softmax(
+                    prompt_logits, dim=-1, dtype=torch.float32
+                )
+
+            token_ids_unsqueezed = chunk_token_ids.unsqueeze(-1)
+            token_logprobs = values.gather(-1, token_ids_unsqueezed)
+            token_ranks = (values >= token_logprobs).sum(-1)
+
+            token_ids.append(chunk_token_ids)
+            logprobs.append(token_logprobs)
+            ranks.append(token_ranks)
+        else:
+            # Legacy approach: use compute_topk_logprobs for specific number of top logprobs
+            requested_num_prompt_logprobs = (
+                prompt_logits.shape[-1]
+                if num_prompt_logprobs == -1
+                else num_prompt_logprobs
+            )
+            prompt_logprobs = compute_topk_logprobs(
+                prompt_logits,
+                requested_num_prompt_logprobs,
+                prompt_token_ids[start_idx:end_idx],
+            )
+            token_ids.append(prompt_logprobs.logprob_token_ids)
+            logprobs.append(prompt_logprobs.logprobs)
+            ranks.append(prompt_logprobs.selected_token_ranks)
 
     token_ids = torch.cat(token_ids, dim=0) if len(token_ids) > 1 else token_ids[0]
     logprobs = torch.cat(logprobs, dim=0) if len(logprobs) > 1 else logprobs[0]
