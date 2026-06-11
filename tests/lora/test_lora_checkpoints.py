@@ -5,37 +5,26 @@ import pytest
 
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.utils import parse_fine_tuned_lora_name
+from vllm.lora.utils import get_supported_lora_modules, parse_fine_tuned_lora_name
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
-lora_lst = ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"]
-BAICHUAN_LORA_MODULES = [
-    "W_pack",
-    "o_proj",
-    "gate_up_proj",
-    "down_proj",
-]
 
-
-@pytest.mark.parametrize("lora_name", lora_lst)
+@pytest.mark.parametrize(
+    "lora_name",
+    ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"],
+)
 def test_load_checkpoints(
     lora_name,
     baichuan_lora_files,
     baichuan_zero_lora_files,
     baichuan_regex_lora_files,
     chatglm3_lora_files,
+    baichuan_dummy_model,
 ):
-    packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-
-    expected_lora_lst: list[str] = []
-    for module in BAICHUAN_LORA_MODULES:
-        if module in packed_modules_mapping:
-            expected_lora_lst.extend(packed_modules_mapping[module])
-        else:
-            expected_lora_lst.append(module)
-    expected_lora_modules = set(expected_lora_lst)
+    expected_lora_modules = set(get_supported_lora_modules(baichuan_dummy_model))
+    weights_mapper = BaiChuanBaseForCausalLM.hf_to_vllm_mapper
     if lora_name == "baichuan7B":
         peft_helper = PEFTHelper.from_local_dir(
             baichuan_lora_files, max_position_embeddings=4096
@@ -49,6 +38,7 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             model_vocab_size=64000,
+            weights_mapper=weights_mapper,
         )
     elif lora_name == "baichuan7B-zero":
         # Test that the target_modules contain prefix
@@ -64,6 +54,7 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             model_vocab_size=64000,
+            weights_mapper=weights_mapper,
         )
     elif lora_name == "baichuan7B-zero-regex":
         # Test that the `target_modules` in the form of regular expressions,
@@ -78,6 +69,7 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             model_vocab_size=64000,
+            weights_mapper=weights_mapper,
         )
     else:
         # For the baichuan7B model, load chatglm3-6b's LoRA,
@@ -97,22 +89,16 @@ def test_load_checkpoints(
             )
 
 
-def test_lora_weights_mapping(baichuan_lora_files):
-    packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-
-    expected_lora_lst: list[str] = []
-    for module in BAICHUAN_LORA_MODULES:
-        if module in packed_modules_mapping:
-            expected_lora_lst.extend(packed_modules_mapping[module])
-        else:
-            expected_lora_lst.append(module)
-    expected_lora_modules = set(expected_lora_lst)
+def test_lora_weights_mapping(baichuan_lora_files, baichuan_dummy_model):
+    expected_lora_modules = set(get_supported_lora_modules(baichuan_dummy_model))
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
         },
         orig_to_new_substr={
             ".layers.": ".baichuan_layers.",
+            ".gate_proj": ".gate_up_proj.0",
+            ".up_proj": ".gate_up_proj.1",
         },
     )
     peft_helper = PEFTHelper.from_local_dir(
