@@ -706,6 +706,7 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                local_prefix_cache_queried = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -739,13 +740,6 @@ class Scheduler(SchedulerInterface):
                         # The per-group lookup does not detect an uncached shared
                         # prefix, so there is no junction to pin in this path.
                         request.shared_prefix_boundary = 0
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
                     else:
                         (
                             new_computed_blocks,
@@ -756,6 +750,9 @@ class Scheduler(SchedulerInterface):
                             # if no uncached shared prefix was detected.
                             request.shared_prefix_boundary,
                         ) = self.kv_cache_manager.get_computed_blocks(request)
+                    # The cached-token branch above ran a local prefix cache
+                    # lookup; it is recorded later, once the request is admitted.
+                    local_prefix_cache_queried = True
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -950,6 +947,19 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                # Record the local prefix cache lookup now that the request is
+                # admitted (KV allocation succeeded; this includes the async
+                # remote-KV wait path below). A request that queries the cache
+                # but is not admitted this step (failed KV allocation, an
+                # encoder/mamba budget break, or a connector/mm-prefetch skip)
+                # is retried later and would otherwise be counted again,
+                # inflating the local hit rate -- mirroring the connector
+                # prefix cache stats recorded below.
+                if local_prefix_cache_queried:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request, num_new_local_computed_tokens
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
