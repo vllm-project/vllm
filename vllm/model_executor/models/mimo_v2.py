@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.mxfp4 import MiMoV2Mxfp4Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -51,7 +52,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVBackend,
 )
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import EagleModelMixin, MixtureOfExperts, SupportsEagle3, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -164,13 +165,26 @@ class MiMoV2MoE(nn.Module):
             torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
         )
 
+        # MiMo V2 Pro checkpoints store attention weights as fp8 while MoE
+        # experts are stored as MXFP4. Fp8Config intentionally drops
+        # store_dtype, so inspect the raw HF quantization_config before
+        # constructing the expert module.
+        hf_quant_config = getattr(config, "quantization_config", None)
+        if isinstance(hf_quant_config, dict):
+            store_dtype = hf_quant_config.get("store_dtype")
+        else:
+            store_dtype = getattr(hf_quant_config, "store_dtype", None)
+        expert_quant_config = (
+            MiMoV2Mxfp4Config() if store_dtype == "mxfp4" else quant_config
+        )
+
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
+            quant_config=expert_quant_config,
             prefix=f"{prefix}.experts",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
@@ -442,7 +456,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class MiMoV2Model(nn.Module):
+class MiMoV2Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -493,7 +507,7 @@ class MiMoV2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -505,10 +519,14 @@ class MiMoV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -516,6 +534,9 @@ class MiMoV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
 
         return hidden_states
 
@@ -554,6 +575,22 @@ class MiMoV2Model(nn.Module):
                 continue
             if "mtp" in name:
                 continue
+
+            if self.quant_config is not None:
+                cache_scale_name = self.quant_config.get_cache_scale(name)
+                if cache_scale_name is not None and cache_scale_name in params_dict:
+                    param = params_dict[cache_scale_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+
+                    kv_scale = loaded_weight
+                    if kv_scale.dim() > 0 and kv_scale.numel() > 1:
+                        kv_scale = kv_scale.view(-1)[0]
+
+                    weight_loader(param, kv_scale)
+                    loaded_params.add(cache_scale_name)
+                    continue
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
@@ -653,7 +690,7 @@ class MiMoV2Model(nn.Module):
         return loaded_params
 
 
-class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, SupportsEagle3, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -689,6 +726,13 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

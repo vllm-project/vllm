@@ -33,7 +33,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
-
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         # Positions covers both context states + query states
@@ -267,11 +266,24 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_context = self._dflash_num_context
 
         # Pre-insert context KVs directly into cache
-        self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states,  # Shape is already [num_context, hidden_size]
-            self._context_positions_buffer[:num_context],
-            self._context_slot_mapping_buffer[:num_context],
-        )
+        context_slot_mapping = self._context_slot_mapping_buffer[:num_context]
+        valid_context = context_slot_mapping >= 0
+        if valid_context.all():
+            context_states = self._dflash_hidden_states
+            context_positions = self._context_positions_buffer[:num_context]
+        else:
+            context_states = self._dflash_hidden_states[valid_context]
+            context_positions = self._context_positions_buffer[:num_context][
+                valid_context
+            ]
+            context_slot_mapping = context_slot_mapping[valid_context]
+
+        if context_states.shape[0] > 0:
+            self.model.precompute_and_store_context_kv(
+                context_states,
+                context_positions,
+                context_slot_mapping,
+            )
         return (
             dict(
                 input_ids=self.input_ids[:num_input_tokens],

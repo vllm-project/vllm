@@ -523,6 +523,7 @@ def copy_and_expand_dflash_inputs_kernel(
         valid_ctx_end = ctx_end - num_rejected
     else:
         valid_ctx_end = ctx_end
+    num_valid_ctx = valid_ctx_end - ctx_start
     last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
     query_pos = last_pos + 1 + query_off
 
@@ -536,14 +537,17 @@ def copy_and_expand_dflash_inputs_kernel(
 
     # --- Slot mapping (block_table lookup for all positions) ---
     block_num = positions // block_size
-    # # Clamp block_number to avoid OOB when position is at max
-    block_num = tl.minimum(block_num, block_table_stride - 1)
+    is_valid_ctx = j < num_valid_ctx
+    has_context_slot = is_ctx & is_valid_ctx & (block_num < block_table_stride)
+    has_query_slot = is_query & (block_num < block_table_stride)
+    has_slot = has_context_slot | has_query_slot
     block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_num,
-        mask=in_bounds,
+        mask=has_slot,
         other=0,
     ).to(tl.int64)
     slot = block_id * block_size + (positions % block_size)
+    slot = tl.where(has_slot, slot, -1)
     tl.store(out_context_slot_mapping_ptr + ctx_pos_out, slot, mask=is_ctx)
     tl.store(out_query_slot_mapping_ptr + query_out, slot, mask=is_query)
 
