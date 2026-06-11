@@ -57,9 +57,6 @@ class FlashAttnMLABackend(MLACommonBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # FA3 addresses paged KV via k_batch_stride = kcache.stride(0),
-            # so the cross-layer (block-major) layout is supported: physical
-            # (num_blocks, num_layers, block_size, head_size).
             return (1, 0, 2, 3)
         return (0, 1, 2)
 
