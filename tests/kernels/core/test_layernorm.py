@@ -90,7 +90,9 @@ def test_rms_norm(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
 def test_fused_rms_norm_quant(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
@@ -101,6 +103,13 @@ def test_fused_rms_norm_quant(
     device: str,
     strided_input: bool,
 ) -> None:
+    if (
+        dtype != wt_dtype
+        and dtype in (torch.half, torch.bfloat16)
+        and wt_dtype in (torch.half, torch.bfloat16)
+    ):
+        pytest.skip()
+
     set_random_seed(seed)
     torch.set_default_device(device)
 
@@ -134,7 +143,7 @@ def test_fused_rms_norm_quant(
         x_unfused_base = x_base.clone()
         x_unfused = x_unfused_base[..., :hidden_size]
         assert x_unfused.is_contiguous() != strided_input
-        x_unfused, _ = rms_layer.forward_native(x_unfused, residual)
+        x_unfused, residual = rms_layer.forward_native(x_unfused, residual)
         torch.ops._C.static_scaled_fp8_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
         )
