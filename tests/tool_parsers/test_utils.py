@@ -6,6 +6,8 @@ import pytest
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
+    resolve_tool_dicts,
+    resolve_tool_schema,
 )
 
 
@@ -212,3 +214,383 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestResolveToolSchema:
+    """Tests for resolve_tool_schema (pre-template $ref + anyOf resolution)."""
+
+    def test_simple_ref_resolution(self):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Address": {
+                    "type": "object",
+                    "properties": {
+                        "street": {"type": "string"},
+                        "city": {"type": "string"},
+                    },
+                }
+            },
+            "properties": {
+                "home_address": {"$ref": "#/$defs/Address"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "$defs" not in result
+        addr = result["properties"]["home_address"]
+        assert addr["type"] == "object"
+        assert "street" in addr["properties"]
+        assert "city" in addr["properties"]
+
+    def test_nested_ref_resolution(self):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Inner": {
+                    "type": "object",
+                    "properties": {"val": {"type": "integer"}},
+                },
+                "Outer": {
+                    "type": "object",
+                    "properties": {"inner": {"$ref": "#/$defs/Inner"}},
+                },
+            },
+            "properties": {
+                "data": {"$ref": "#/$defs/Outer"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "$defs" not in result
+        inner = result["properties"]["data"]["properties"]["inner"]
+        assert inner["type"] == "object"
+        assert inner["properties"]["val"]["type"] == "integer"
+
+    def test_ref_in_array_items(self):
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Item": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                }
+            },
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/Item"},
+                }
+            },
+        }
+        result = resolve_tool_schema(schema)
+        item_schema = result["properties"]["items"]["items"]
+        assert item_schema["type"] == "object"
+        assert "name" in item_schema["properties"]
+
+    def test_anyof_nullable_flattened(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "page": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": 10,
+                }
+            },
+        }
+        result = resolve_tool_schema(schema)
+        page = result["properties"]["page"]
+        assert page["type"] == "integer"
+        assert "anyOf" not in page
+        assert page["default"] == 10
+
+    def test_oneof_nullable_flattened(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "oneOf": [{"type": "integer"}, {"type": "null"}],
+                }
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert result["properties"]["count"]["type"] == "integer"
+        assert "oneOf" not in result["properties"]["count"]
+
+    def test_anyof_complex_not_flattened(self):
+        """anyOf with multiple non-null types should be left alone."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "integer"},
+                        {"type": "null"},
+                    ]
+                }
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "anyOf" in result["properties"]["value"]
+
+    def test_anyof_with_constraints_not_flattened(self):
+        """anyOf where the non-null variant has extra keys like enum."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["active", "inactive"]},
+                        {"type": "null"},
+                    ]
+                }
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "anyOf" in result["properties"]["status"]
+
+    def test_no_mutation_of_original(self):
+        schema: dict[str, object] = {
+            "type": "object",
+            "$defs": {
+                "Foo": {"type": "string"},
+            },
+            "properties": {
+                "bar": {"$ref": "#/$defs/Foo"},
+            },
+        }
+        resolve_tool_schema(schema)  # type: ignore[arg-type]
+        assert "$defs" in schema
+        props = schema["properties"]
+        assert isinstance(props, dict)
+        assert "$ref" in props["bar"]
+
+    def test_remote_ref_left_unresolved(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "ext": {"$ref": "https://evil.com/schema.json"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert result["properties"]["ext"]["$ref"] == "https://evil.com/schema.json"
+
+    def test_missing_def_left_unresolved(self):
+        schema = {
+            "type": "object",
+            "$defs": {},
+            "properties": {
+                "x": {"$ref": "#/$defs/Missing"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "$ref" in result["properties"]["x"]
+
+    def test_circular_ref_does_not_crash(self):
+        """A self-referencing $def should hit the depth limit, not infinite loop."""
+        schema = {
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "child": {"$ref": "#/$defs/Node"},
+                    },
+                },
+            },
+            "properties": {
+                "root": {"$ref": "#/$defs/Node"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert result["properties"]["root"]["type"] == "object"
+
+    def test_schema_without_refs_unchanged(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+            },
+            "required": ["name"],
+        }
+        result = resolve_tool_schema(schema)
+        assert result == schema
+
+    def test_definitions_key_supported(self):
+        """Older schemas use 'definitions' instead of '$defs'."""
+        schema = {
+            "type": "object",
+            "definitions": {
+                "Color": {"type": "string", "enum": ["red", "blue"]},
+            },
+            "properties": {
+                "fav": {"$ref": "#/$defs/Color"},
+            },
+        }
+        result = resolve_tool_schema(schema)
+        assert "definitions" not in result
+
+    def test_pydantic_v2_style_schema(self):
+        """Full Pydantic v2 schema like the one in issue #39108."""
+        schema = {
+            "type": "object",
+            "$defs": {
+                "SearchField": {
+                    "type": "object",
+                    "required": ["field"],
+                    "properties": {
+                        "field": {"type": "string"},
+                        "value": {"title": "Value", "default": None},
+                    },
+                },
+                "SearchInput": {
+                    "type": "object",
+                    "properties": {
+                        "fields": {
+                            "type": "array",
+                            "items": {"$ref": "#/$defs/SearchField"},
+                            "default": [],
+                        },
+                        "search_all": {"type": "boolean", "default": False},
+                    },
+                },
+            },
+            "required": ["input_model"],
+            "properties": {
+                "input_model": {"$ref": "#/$defs/SearchInput"},
+                "page_size": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": 10,
+                },
+                "page_number": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": 0,
+                },
+            },
+        }
+        result = resolve_tool_schema(schema)
+
+        assert "$defs" not in result
+
+        inp = result["properties"]["input_model"]
+        assert inp["type"] == "object"
+        assert inp["properties"]["search_all"]["type"] == "boolean"
+
+        fields_items = inp["properties"]["fields"]["items"]
+        assert fields_items["type"] == "object"
+        assert "field" in fields_items["properties"]
+
+        assert result["properties"]["page_size"]["type"] == "integer"
+        assert "anyOf" not in result["properties"]["page_size"]
+        assert result["properties"]["page_number"]["type"] == "integer"
+
+
+class TestResolveToolDicts:
+    """Tests for resolve_tool_dicts (batch tool dict resolution)."""
+
+    def test_resolves_function_parameters(self):
+        tool_dicts = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search items",
+                    "parameters": {
+                        "type": "object",
+                        "$defs": {
+                            "Query": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                },
+                            }
+                        },
+                        "properties": {
+                            "query": {"$ref": "#/$defs/Query"},
+                        },
+                    },
+                },
+            }
+        ]
+        result = resolve_tool_dicts(tool_dicts)
+        params = result[0]["function"]["parameters"]
+        assert "$defs" not in params
+        assert params["properties"]["query"]["type"] == "object"
+
+    def test_does_not_mutate_original(self):
+        tool_dicts: list[dict[str, object]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "f",
+                    "parameters": {
+                        "type": "object",
+                        "$defs": {"X": {"type": "string"}},
+                        "properties": {"a": {"$ref": "#/$defs/X"}},
+                    },
+                },
+            }
+        ]
+        resolve_tool_dicts(tool_dicts)  # type: ignore[arg-type]
+        func = tool_dicts[0]["function"]
+        assert isinstance(func, dict)
+        assert "$defs" in func["parameters"]
+
+    def test_tool_without_parameters(self):
+        tool_dicts = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "noop",
+                    "description": "Does nothing",
+                },
+            }
+        ]
+        result = resolve_tool_dicts(tool_dicts)
+        assert result[0]["function"]["name"] == "noop"
+        assert "parameters" not in result[0]["function"]
+
+    def test_multiple_tools(self):
+        tool_dicts = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "tool_a",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x": {
+                                "anyOf": [
+                                    {"type": "integer"},
+                                    {"type": "null"},
+                                ]
+                            }
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "tool_b",
+                    "parameters": {
+                        "type": "object",
+                        "$defs": {
+                            "Cfg": {
+                                "type": "object",
+                                "properties": {"v": {"type": "string"}},
+                            }
+                        },
+                        "properties": {"config": {"$ref": "#/$defs/Cfg"}},
+                    },
+                },
+            },
+        ]
+        result = resolve_tool_dicts(tool_dicts)
+        assert (
+            result[0]["function"]["parameters"]["properties"]["x"]["type"] == "integer"
+        )
+        assert (
+            result[1]["function"]["parameters"]["properties"]["config"]["type"]
+            == "object"
+        )
