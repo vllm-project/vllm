@@ -978,6 +978,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FP4_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
+    set(NVFP4_SCALED_MM_ENTRY_SRC
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu")
     set(SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
@@ -988,7 +990,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       list(APPEND SRCS
         "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu")
-      list(APPEND VLLM_GPU_FLAGS "-DENABLE_MXFP4_EXPERTS_QUANT=1")
+      set_source_files_properties(${NVFP4_SCALED_MM_ENTRY_SRC}
+        PROPERTIES COMPILE_DEFINITIONS ENABLE_MXFP4_EXPERTS_QUANT=1)
     else()
       message(STATUS
         "Not building mxfp4_experts_quant as CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
