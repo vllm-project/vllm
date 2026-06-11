@@ -663,6 +663,42 @@ class TestDeviceIds:
         args = EngineArgs(model="m", device_ids=[0, 1])
         assert args._resolve_device_ids() == [4, 5]
 
+    def test_device_ids_with_uuid_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids support UUID CVD values resolved by the platform."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "GPU-abcd1234,GPU-ef567890")
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
+    def test_device_ids_with_uuid_args_resolve_to_physical_ids(self, monkeypatch):
+        """UUID --device-ids are resolved to physical IDs immediately."""
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(lambda cls, device_id: {"GPU-abcd1234": 4}[device_id]),
+        )
+
+        args = EngineArgs(model="m", device_ids=["GPU-abcd1234"])
+        assert args._resolve_device_ids() == [4]
+
+    def test_device_ids_reject_mixed_integer_and_uuid_args(self):
+        """--device-ids must not mix CVD indices and UUIDs."""
+        args = EngineArgs(model="m", device_ids=[0, "GPU-abcd1234"])
+        with pytest.raises(ValueError, match="must not mix"):
+            args._resolve_device_ids()
+
     def test_no_device_ids(self):
         """No --device-ids returns None."""
         args = EngineArgs(model="m")
@@ -674,6 +710,15 @@ class TestDeviceIds:
         EngineArgs.add_cli_args(parser)
         parsed = parser.parse_args(["--model", "m", "--device-ids", "0,2,4"])
         assert parsed.device_ids == [0, 2, 4]
+
+    def test_cli_parsing_uuid(self):
+        """--device-ids parses comma-separated UUID strings from CLI."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(
+            ["--model", "m", "--device-ids", "GPU-abcd1234,GPU-ef567890"]
+        )
+        assert parsed.device_ids == ["GPU-abcd1234", "GPU-ef567890"]
 
     def test_assigned_physical_gpu_ids_are_physical_with_cvd(self, monkeypatch):
         """assigned_physical_gpu_ids are already physical and not composed with CVD."""
@@ -687,3 +732,23 @@ class TestDeviceIds:
         assert current_platform.device_id_to_physical_device_id(1) == 5
         assert current_platform.logical_device_id_to_visible_device_id(0) == 0
         assert current_platform.logical_device_id_to_visible_device_id(1) == 1
+
+    def test_assigned_physical_gpu_ids_map_to_visible_uuid_cvd(self, monkeypatch):
+        """Physical IDs map back to visible ordinals when CVD uses UUIDs."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [5])
+        monkeypatch.setenv(
+            current_platform.device_control_env_var,
+            "GPU-abcd1234,GPU-ef567890",
+        )
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 1

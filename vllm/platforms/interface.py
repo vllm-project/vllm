@@ -256,6 +256,17 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        """Map one device-control env entry to an integer physical device ID."""
+        try:
+            return int(device_id)
+        except ValueError as e:
+            raise ValueError(
+                f"{cls.device_control_env_var} contains non-integer device ID "
+                f"{device_id!r}, which is not supported by {cls.device_name}."
+            ) from e
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         if _assigned_physical_gpu_ids is not None:
             if device_id >= len(_assigned_physical_gpu_ids):
@@ -275,7 +286,7 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            return cls.device_control_id_to_physical_device_id(physical_device_id)
         else:
             return device_id
 
@@ -294,7 +305,8 @@ class Platform:
             return physical_device_id
 
         visible_physical_device_ids = [
-            int(physical_id) for physical_id in device_control_env.split(",")
+            cls.device_control_id_to_physical_device_id(physical_id)
+            for physical_id in device_control_env.split(",")
         ]
         if physical_device_id not in visible_physical_device_ids:
             raise RuntimeError(

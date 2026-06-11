@@ -463,7 +463,7 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
-    device_ids: list[int] | None = None
+    device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -975,9 +975,12 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--device-ids",
-            type=lambda s: [int(x) for x in s.split(",")],
+            type=lambda s: [
+                int(device_id) if device_id.isdigit() else device_id
+                for device_id in s.split(",")
+            ],
             default=None,
-            help="Comma-separated physical GPU device IDs to use "
+            help="Comma-separated physical GPU device IDs or UUIDs to use "
             '(e.g. --device-ids "2,3,5,7"). Avoids setting '
             "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
             "visibility for GPU-NIC affinity and DeepGEMM.",
@@ -1714,20 +1717,30 @@ class EngineArgs:
         if not self.device_ids:
             return None
         ids = self.device_ids
+        if all(isinstance(i, str) for i in ids):
+            return [
+                current_platform.device_control_id_to_physical_device_id(i) for i in ids
+            ]
+        if any(isinstance(i, str) for i in ids):
+            raise ValueError("--device-ids must not mix integer IDs and UUIDs")
+        int_ids = cast(list[int], ids)
         # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
         # --device-ids values as indices into the CVD-visible set.
         cvd = os.environ.get(current_platform.device_control_env_var)
         if cvd:
-            cvd_ids = [int(x) for x in cvd.split(",")]
-            for i in ids:
+            cvd_ids = [
+                current_platform.device_control_id_to_physical_device_id(x)
+                for x in cvd.split(",")
+            ]
+            for i in int_ids:
                 if i >= len(cvd_ids):
                     raise ValueError(
                         f"--device-ids index {i} is out of range for "
                         f"{current_platform.device_control_env_var}"
                         f"={cvd} ({len(cvd_ids)} devices visible)"
                     )
-            return [cvd_ids[i] for i in ids]
-        return ids
+            return [cvd_ids[i] for i in int_ids]
+        return int_ids
 
     def create_engine_config(
         self,
