@@ -168,6 +168,7 @@ jobs:
         tests/quantization/test_hip_w4a16_kernel.py
         tests/rocm/aiter/test_fused_qk_norm_mrope_kvcache.py
         tests/kernels/test_wvsplitk_fused_silu.py
+        tests/models/multimodal/processing/test_openvla.py
 
   test-kernels-performance:
     name: test-kernels (performance)
