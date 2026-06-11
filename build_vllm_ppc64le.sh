@@ -121,8 +121,6 @@ try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
 try_install_from_devpi "torch==${TORCH_VERSION}"
 try_install_from_devpi "torchvision==${TORCHVISION_VERSION}"
 
-
-
 echo "========== Installing SymPy =========="
 uv pip install \
     --extra-index-url "$IBM_DEVPI_URL" \
@@ -157,12 +155,20 @@ rm -rf "${TEMP_BUILD_DIR}"
 # Xgrammar
 ########################################
 uv pip install \
-    scikit-build-core \
+   "scikit-build-core==0.11.6" \
+   "pyproject-metadata<0.8" \
+    pathspec \
+    packaging \
+    distro \
+   "setuptools<70" \
+    setuptools_scm \
     cmake \
     ninja \
     pybind11 \
-    nanobind \
-    apache-tvm-ffi>=0.1.9
+    nanobind
+uv pip install apache-tvm-ffi==0.1.12 \
+  --no-build-isolation \
+  --no-cache
 
 TEMP_BUILD_DIR=$(mktemp -d)
 
@@ -195,7 +201,7 @@ uv build \
     --out-dir "${WHEEL_DIR}" \
     --no-build-isolation
 
-uv pip install "${WHEEL_DIR}"/xgrammar*.whl
+uv pip install "${WHEEL_DIR}"/xgrammar*.whl -v
 
 popd
 
@@ -235,7 +241,7 @@ uv pip install "${WHEEL_DIR}"/*.whl \
 
 sed -i.bak -e 's/.*torch.*//g' pyproject.toml requirements/*.txt
 
-uv pip install "setuptools==77.0.3" --no-build-isolation
+uv pip install "setuptools>=78.1.1" --no-build-isolation
 
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig
 

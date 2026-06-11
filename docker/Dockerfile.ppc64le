@@ -61,7 +61,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export DNNL_ARCH_OPT_FLAGS="-mcpu=power10 -mtune=power10" && \
     export C_INCLUDE_PATH=/usr/local/include:$C_INCLUDE_PATH && \
     export CPLUS_INCLUDE_PATH=/usr/local/include:$CPLUS_INCLUDE_PATH && \
-    uv pip install 'setuptools==77.0.3' && \
+    uv pip install 'setuptools>=78.1.1' && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/OpenBLAS/lib/:/usr/local/lib64:/usr/local/lib && \
     export LIBGOMP=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/ppc64le-redhat-linux/14/libgomp.so && \
 
@@ -100,7 +100,7 @@ ENV LD_LIBRARY_PATH=${PCP_DIR}/usr/lib64:${PCP_DIR}/usr/lib:${VIRTUAL_ENV}/lib64
 ENV UV_LINK_MODE=copy
 ARG VLLM_VERSION="0.22.1"
 ENV UV_EXTRA_INDEX_URL=https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/
-ENV UV_INDEX_STRATEGY=unsafe-best-match
+ENV UV_INDEX_STRATEGY=first-match
 
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -132,7 +132,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
     # --offline will ensure wheels are picked from uv cache and nothing is pulled from pypi/built from source
     # vllm wheel should be present in /wheelsdir/ ( at least for ppc64le - and transitive dependencies in uv cache )
-    HOME=/root uv pip install /wheelsdir/*.whl 
+    HOME=/root uv pip install \
+    	--index-strategy unsafe-best-match \
+    	/wheelsdir/*.whl
 
 ENV LD_PRELOAD=/usr/lib64/libtcmalloc.so.4
 
