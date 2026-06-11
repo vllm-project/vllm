@@ -3,6 +3,9 @@
 
 import pytest
 
+from vllm import SamplingParams
+from vllm.config.structured_outputs import StructuredOutputsConfig
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
@@ -104,3 +107,19 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+@pytest.mark.parametrize(
+    "structured_outputs",
+    [StructuredOutputsParams(json_object=False), StructuredOutputsParams(json="")],
+)
+def test_degenerate_structured_outputs_rejected(structured_outputs):
+    # json_object=False and an empty json schema pass the `is not None`
+    # exclusivity check but have no key in get_structured_output_key, so they
+    # must be rejected during request validation (-> 400) rather than reaching
+    # and crashing the engine.
+    params = SamplingParams(structured_outputs=structured_outputs)
+    with pytest.raises(ValueError):
+        params._validate_structured_outputs(
+            StructuredOutputsConfig(), tokenizer=object()
+        )
