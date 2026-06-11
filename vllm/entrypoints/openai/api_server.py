@@ -13,7 +13,7 @@ import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -321,6 +321,13 @@ async def init_app_state(
     set_enable_structured_outputs_in_reasoning(
         vllm_config.structured_outputs_config.enable_in_reasoning
     )
+
+    if args.tool_call_parser is not None:
+        from vllm.parser.metrics import init_parser_metrics
+
+        init_parser_metrics(
+            model_name=cast(str, vllm_config.model_config.served_model_name)
+        )
 
     if supported_tasks is None:
         warnings.warn(
