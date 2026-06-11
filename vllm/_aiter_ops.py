@@ -439,6 +439,29 @@ def _rocm_aiter_fused_topk_fake(
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
 _AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
+_AITER_HAS_FUSED_QK_NORM_ROPE_CACHE: bool | None = None
+
+
+def check_aiter_fused_qk_norm_rope_cache() -> bool:
+    """Check if aiter provides ``fused_qkv_split_qk_norm_rope_cache``.
+
+    The kernel is required by ``fuse_qk_norm_rope_kvcache``; if it is not
+    bundled with the installed AITER, the fusion replacement crashes at
+    first invocation. Callers (e.g. ``enable_qk_norm_rope_kvcache``)
+    should disable the fusion when this returns False so that the auto-
+    enable chain stays image-aware.
+    """
+    global _AITER_HAS_FUSED_QK_NORM_ROPE_CACHE
+    if _AITER_HAS_FUSED_QK_NORM_ROPE_CACHE is None:
+        try:
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (  # noqa: F401
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+
+            _AITER_HAS_FUSED_QK_NORM_ROPE_CACHE = True
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            _AITER_HAS_FUSED_QK_NORM_ROPE_CACHE = False
+    return _AITER_HAS_FUSED_QK_NORM_ROPE_CACHE
 
 
 def check_aiter_fused_qk_rmsnorm() -> bool:
@@ -2413,6 +2436,52 @@ class rocm_aiter_ops:
 
         gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
         return y
+
+    @staticmethod
+    def triton_qk_norm_rope_kvcache(
+        qkv: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        positions: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        is_neox: bool,
+        attn_output_gate: bool,
+        rms_norm_eps: float,
+        k_scale: torch.Tensor | None,
+        v_scale: torch.Tensor | None,
+        kv_cache_layout: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (
+            fused_qkv_split_qk_norm_rope_cache,
+        )
+
+        return fused_qkv_split_qk_norm_rope_cache(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos=cos,
+            sin=sin,
+            positions=positions,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+            qh=num_heads,
+            kvh=num_kv_heads,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            attn_output_gate=attn_output_gate,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            eps=rms_norm_eps,
+            kv_cache_layout=kv_cache_layout,
+        )
 
     @staticmethod
     def triton_rope_and_cache(
