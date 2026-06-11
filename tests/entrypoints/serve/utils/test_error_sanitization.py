@@ -61,18 +61,21 @@ class TestAffectedModulesUseSanitize:
     """Verify that affected modules call sanitize_message (source-level)."""
 
     @pytest.mark.parametrize(
-        "filepath",
+        "module",
         [
-            "vllm/entrypoints/anthropic/api_router.py",
-            "vllm/entrypoints/anthropic/serving.py",
-            "vllm/entrypoints/speech_to_text/realtime/connection.py",
+            "vllm.entrypoints.anthropic.api_router",
+            "vllm.entrypoints.anthropic.serving",
+            "vllm.entrypoints.speech_to_text.realtime.connection",
         ],
     )
-    def test_module_calls_sanitize_message(self, filepath: str):
+    def test_module_calls_sanitize_message(self, module: str):
+        import importlib.util
         from pathlib import Path
 
-        source = Path(filepath).read_text()
-        assert "sanitize_message" in source, (
-            f"{filepath} does not call sanitize_message"
+        spec = importlib.util.find_spec(module)
+        assert spec is not None and spec.origin is not None, (
+            f"Cannot locate module {module}"
         )
+        source = Path(spec.origin).read_text()
+        assert "sanitize_message" in source, f"{module} does not call sanitize_message"
         assert "import" in source and "sanitize_message" in source
