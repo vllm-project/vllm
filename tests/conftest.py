@@ -1226,10 +1226,6 @@ class VllmRunner:
         req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
-    def reward(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
-        return [req_output.outputs.data for req_output in req_outputs]
-
     def score(
         self,
         text_1: list[str] | str,
