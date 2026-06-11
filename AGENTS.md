@@ -109,14 +109,10 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 
 Follow these rules for all code changes in this repository:
 
-- Minimize comments; be concise; code should be self-explanatory and self-documenting.
-- Comments should be useful, for example, comments that remind the reader about some global context that is non-obvious and can't be inferred locally.
-- Don't make trivial (1-2 LOC) helper functions that are only used once unless it significantly improves code readability.
-- Match existing code style and architectural patterns.
-- Assume the reader has familiarity with vLLM. They may not be the expert on the code that is being read, but they should have some experience in the area.
-- ASCII only in newly added code comments. Do not introduce Unicode characters (e.g., smart quotes, em dashes, arrows, non-ASCII letters) in new comments. Leave preexisting Unicode in untouched comments alone; only enforce this for comments you are adding or rewriting.
-
-If uncertain, choose the simpler, more concise implementation.
+- Try to match existing code style.
+- Code should be self-documenting and self-explanatory.
+- Keep comments and docstrings minimal and concise.
+- Assume the reader is familiar with vLLM.
 
 ### Commit messages
 
