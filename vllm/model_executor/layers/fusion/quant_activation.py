@@ -16,6 +16,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 @dataclass
 class QuantizedActivation:
+    """``quant_key`` defines the exact layout of ``data`` and ``scale``, beyond
+    what ``QuantKey`` itself encodes: for ``kNvfp4Dynamic``, ``data`` is packed
+    fp4 (two values per byte) and ``scale`` is the blockscale tensor in swizzled
+    SF layout (``is_sf_swizzled_layout=True``). Producers must match the layout
+    the consumer kernel expects; a mismatched layout passes the key check."""
+
     data: torch.Tensor
     scale: torch.Tensor
     orig_dtype: torch.dtype

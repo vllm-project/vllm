@@ -79,7 +79,7 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         """The activation quant key this kernel can consume pre-quantized.
 
         Manual fusion uses this to decide whether to hoist activation quant
-        out of ``apply_weights`` into a fused [some operations] + quant kernel.
+        out of ``apply_weights`` into an upstream fused op + quant kernel.
         Return ``None`` when the kernel needs in-kernel quantization (custom
         padding/swizzling, dynamic scales, etc.). A non-``None`` key requires
         ``apply_weights`` to consume the activation via ``as_quantized_activation``.
@@ -149,6 +149,9 @@ class FP8ScaledMMLinearKernel(
             assert x_data.dtype == fp8_dtype
         else:
             assert isinstance(x, torch.Tensor)
+            # Pre-quantized input must arrive as a QuantizedActivation; a plain
+            # fp8 tensor here would silently pair with the wrong scale.
+            assert x.dtype != fp8_dtype
             x_data = x
             orig_shape, orig_dtype = x.shape, x.dtype
 
@@ -157,7 +160,7 @@ class FP8ScaledMMLinearKernel(
         out_dtype = orig_dtype if maybe_out_dtype is None else maybe_out_dtype
 
         x_2d_q = x_2d
-        if x_data.dtype != fp8_dtype:
+        if qa is None:
             x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
         return self.apply_scaled_mm(
             A=x_2d_q,
