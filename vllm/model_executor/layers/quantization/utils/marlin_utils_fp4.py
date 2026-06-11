@@ -11,9 +11,15 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
+    marlin_pad_dim,
+    marlin_pad_qweight,
+    marlin_pad_scales,
+    marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_quant_input,
+    marlin_repacked_nk,
+    marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
 from vllm.platforms import current_platform
@@ -165,8 +171,16 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
+    # Recover (possibly tile-padded) GEMM extents from the packed weight.
+    padded_n, padded_k = marlin_repacked_nk(weight, num_bits=4)
+    reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
+
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0),
+        n=padded_n,
+        k=padded_k,
+        device=input.device,
+        dtype=input.dtype,
     )
 
     inputs = reshaped_x
@@ -194,12 +208,13 @@ def apply_fp4_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float4_e2m1f,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
-        size_k=size_k,
+        size_n=padded_n,
+        size_k=padded_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
 
+    output = marlin_unpad_output(output, size_n, padded_n)
     return output.reshape(out_shape)
 
 
@@ -217,6 +232,7 @@ def prepare_fp4_layer_for_marlin(
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
+    padded_n, padded_k = marlin_padded_nk(part_size_n, part_size_k, group_size)
     param_dtype = layer.params_dtype
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
@@ -230,13 +246,14 @@ def prepare_fp4_layer_for_marlin(
     # Repack weights to marlin format
     perm = torch.empty(0, dtype=torch.int, device=device)
     qweight = layer.weight.view(torch.int32).T.contiguous()
+    qweight = marlin_pad_qweight(qweight, part_size_n, part_size_k, padded_n, padded_k)
 
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     marlin_qweight = ops.gptq_marlin_repack(
         b_q_weight=qweight,
         perm=perm,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_k,
+        size_n=padded_n,
         num_bits=4,
         is_a_8bit=is_a_8bit,
     )
@@ -250,10 +267,13 @@ def prepare_fp4_layer_for_marlin(
         weight_scale = weight_scale.view(torch.float8_e8m0fnu)
 
     weight_scale = weight_scale.to(param_dtype)
+    weight_scale = marlin_pad_scales(
+        weight_scale, part_size_n, part_size_k, padded_n, padded_k, group_size
+    )
     weight_scale = marlin_permute_scales(
         s=weight_scale,
-        size_k=part_size_k,
-        size_n=part_size_n,
+        size_k=padded_k,
+        size_n=padded_n,
         group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
@@ -280,7 +300,7 @@ def prepare_fp4_layer_for_marlin(
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
-        bias = marlin_permute_bias(layer.bias)
+        bias = marlin_permute_bias(marlin_pad_dim(layer.bias, part_size_n, padded_n))
         layer.bias = torch.nn.Parameter(bias, requires_grad=False)
 
     return
