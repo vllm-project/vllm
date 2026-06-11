@@ -861,9 +861,10 @@ class NixlConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
-            cache_list = self.transfer_topo.get_transfer_cache_regions(
-                cache_or_caches, layer_spec
-            )
+            # K and V are packed into one tensor per layer, and Mamba layers
+            # expose a single combined conv/ssm page tensor, so each layer
+            # registers as a single region.
+            cache_list = [cache_or_caches]
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = (
@@ -872,8 +873,6 @@ class NixlConnectorWorker:
                 else layer_spec.page_size_bytes
                 // self._physical_blocks_per_logical_kv_block
             )
-            # For when registering multiple tensors eg K/V in separate regions.
-            physical_page_size = physical_page_size // len(cache_list)
             if self.transfer_topo._cross_layers_blocks:
                 # When cross-layers blocks are used, multiply by number of layers
                 physical_page_size = physical_page_size * len(
