@@ -18,9 +18,14 @@
  * limitations under the License.
  */
 #include "moeTopKFuncs.cuh"
-#include <c10/cuda/CUDAStream.h>
-#include <torch/all.h>
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+
+#include "libtorch_stable/torch_utils.h"
+
 #include <cmath>
+#include <tuple>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda/std/limits>
@@ -1001,38 +1006,40 @@ INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t, SCORING_NONE);
 }  // end namespace moe
 }  // namespace vllm
 
-std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
-    torch::Tensor const& scores, int64_t n_group, int64_t topk_group,
+std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
+    torch::stable::Tensor const& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    torch::Tensor const& bias, int64_t scoring_func = 0) {
-  auto data_type = scores.scalar_type();
-  auto bias_type = bias.scalar_type();
-  auto input_size = scores.sizes();
-  int64_t num_tokens = input_size[0];
-  int64_t num_experts = input_size[1];
-  TORCH_CHECK(input_size.size() == 2, "scores must be a 2D Tensor");
-  TORCH_CHECK(n_group > 0, "n_group must be positive");
-  TORCH_CHECK(topk > 0, "topk must be positive");
-  TORCH_CHECK(topk_group > 0, "topk_group must be positive");
-  TORCH_CHECK(topk_group <= n_group, "topk_group must be <= n_group");
-  TORCH_CHECK(num_experts % n_group == 0,
-              "num_experts should be divisible by n_group");
-  TORCH_CHECK(n_group <= 32,
-              "n_group should be smaller than or equal to 32 for now");
-  TORCH_CHECK(topk <= 32, "topk should be smaller than or equal to 32 for now");
-  TORCH_CHECK(topk <= topk_group * (num_experts / n_group),
-              "topk must be <= topk_group * (num_experts / n_group)");
-  TORCH_CHECK(scoring_func == vllm::moe::SCORING_NONE ||
-                  scoring_func == vllm::moe::SCORING_SIGMOID,
-              "scoring_func must be SCORING_NONE (0) or SCORING_SIGMOID (1)");
+    torch::stable::Tensor const& bias, int64_t scoring_func = 0) {
+  const auto data_type = scores.scalar_type();
+  const auto bias_type = bias.scalar_type();
+  STD_TORCH_CHECK(scores.dim() == 2, "scores must be a 2D Tensor");
+  const int64_t num_tokens = scores.size(0);
+  const int64_t num_experts = scores.size(1);
+  STD_TORCH_CHECK(n_group > 0, "n_group must be positive");
+  STD_TORCH_CHECK(topk > 0, "topk must be positive");
+  STD_TORCH_CHECK(topk_group > 0, "topk_group must be positive");
+  STD_TORCH_CHECK(topk_group <= n_group, "topk_group must be <= n_group");
+  STD_TORCH_CHECK(num_experts % n_group == 0,
+                  "num_experts should be divisible by n_group");
+  STD_TORCH_CHECK(n_group <= 32,
+                  "n_group should be smaller than or equal to 32 for now");
+  STD_TORCH_CHECK(topk <= 32,
+                  "topk should be smaller than or equal to 32 for now");
+  STD_TORCH_CHECK(topk <= topk_group * (num_experts / n_group),
+                  "topk must be <= topk_group * (num_experts / n_group)");
+  STD_TORCH_CHECK(
+      scoring_func == vllm::moe::SCORING_NONE ||
+          scoring_func == vllm::moe::SCORING_SIGMOID,
+      "scoring_func must be SCORING_NONE (0) or SCORING_SIGMOID (1)");
 
   // Always output float32 for topk_values (eliminates Python-side conversion)
-  torch::Tensor topk_values = torch::empty(
-      {num_tokens, topk}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-  torch::Tensor topk_indices = torch::empty(
-      {num_tokens, topk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+  auto topk_values = torch::stable::new_empty(
+      scores, {num_tokens, topk}, torch::headeronly::ScalarType::Float);
+  auto topk_indices = torch::stable::new_empty(
+      scores, {num_tokens, topk}, torch::headeronly::ScalarType::Int);
 
-  auto stream = c10::cuda::getCurrentCUDAStream(scores.get_device());
+  const cudaStream_t stream =
+      get_current_cuda_stream(scores.get_device_index());
   auto const sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);
 
 #define LAUNCH_KERNEL_SF(T, BiasT, IdxT)                                      \
@@ -1057,7 +1064,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
             routed_scaling_factor, false, stream);                            \
         break;                                                                \
       default:                                                                \
-        throw std::invalid_argument("Unsupported scoring_func");              \
+        STD_TORCH_CHECK(false, "Unsupported scoring_func");                   \
         break;                                                                \
     }                                                                         \
   } while (0)
@@ -1065,17 +1072,18 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
 #define LAUNCH_KERNEL(T, IdxT)                                         \
   do {                                                                 \
     switch (bias_type) {                                               \
-      case torch::kFloat16:                                            \
+      case torch::headeronly::ScalarType::Half:                        \
         LAUNCH_KERNEL_SF(T, half, IdxT);                               \
         break;                                                         \
-      case torch::kFloat32:                                            \
+      case torch::headeronly::ScalarType::Float:                       \
         LAUNCH_KERNEL_SF(T, float, IdxT);                              \
         break;                                                         \
-      case torch::kBFloat16:                                           \
+      case torch::headeronly::ScalarType::BFloat16:                    \
         LAUNCH_KERNEL_SF(T, __nv_bfloat16, IdxT);                      \
         break;                                                         \
       default:                                                         \
-        throw std::invalid_argument(                                   \
+        STD_TORCH_CHECK(                                               \
+            false,                                                     \
             "Invalid bias dtype, only supports float16, float32, and " \
             "bfloat16");                                               \
         break;                                                         \
@@ -1083,22 +1091,22 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
   } while (0)
 
   switch (data_type) {
-    case torch::kFloat16:
+    case torch::headeronly::ScalarType::Half:
       // Handle Float16
       LAUNCH_KERNEL(half, int32_t);
       break;
-    case torch::kFloat32:
+    case torch::headeronly::ScalarType::Float:
       // Handle Float32
       LAUNCH_KERNEL(float, int32_t);
       break;
-    case torch::kBFloat16:
+    case torch::headeronly::ScalarType::BFloat16:
       // Handle BFloat16
       LAUNCH_KERNEL(__nv_bfloat16, int32_t);
       break;
     default:
       // Handle other data types
-      throw std::invalid_argument(
-          "Invalid dtype, only supports float16, float32, and bfloat16");
+      STD_TORCH_CHECK(
+          false, "Invalid dtype, only supports float16, float32, and bfloat16");
       break;
   }
 #undef LAUNCH_KERNEL
