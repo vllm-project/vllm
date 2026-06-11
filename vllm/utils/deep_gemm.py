@@ -286,15 +286,6 @@ def _lazy_init() -> None:
     DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
-def configure_deep_gemm() -> None:
-    """Eagerly initialize DeepGEMM so process-global settings (PDL, JIT
-    cache dir) are applied before profile_run / warmup / CUDA graph
-    capture. Safe to call when DeepGEMM is unsupported — it becomes a
-    no-op.
-    """
-    _lazy_init()
-
-
 def get_num_sms() -> int:
     _lazy_init()
     dg = _import_deep_gemm()
@@ -615,7 +606,6 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
-    "configure_deep_gemm",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",
