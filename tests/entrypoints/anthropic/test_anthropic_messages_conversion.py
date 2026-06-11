@@ -7,12 +7,22 @@ AnthropicServingMessages._convert_anthropic_to_openai_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients.
+
+Also covers cache usage computation in ``_compute_cache_usage``.
 """
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    _compute_cache_usage,
+    _get_cached_tokens,
+)
+from vllm.entrypoints.openai.engine.protocol import (
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -635,6 +645,106 @@ class TestThinkingBlockConversion:
         # Redacted thinking is ignored, normal thinking still becomes reasoning.
         assert asst.get("reasoning") == "Thinking..."
         assert asst.get("content") == "Hi!"
+
+
+# ======================================================================
+# Cache usage computation
+# ======================================================================
+
+
+class TestGetCachedTokens:
+    """Tests for _get_cached_tokens helper."""
+
+    def test_none_usage(self):
+        assert _get_cached_tokens(None) is None
+
+    def test_no_prompt_tokens_details(self):
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        assert _get_cached_tokens(usage) is None
+
+    def test_cached_tokens_present(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        assert _get_cached_tokens(usage) == 80
+
+    def test_cached_tokens_zero(self):
+        """Zero cached tokens should return 0, not None."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        assert _get_cached_tokens(usage) == 0
+
+    def test_cached_tokens_none_in_details(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=None),
+        )
+        assert _get_cached_tokens(usage) is None
+
+
+class TestComputeCacheUsage:
+    """Tests for _compute_cache_usage helper.
+
+    Anthropic defines: total_input = input_tokens + cache_read + cache_creation
+    vLLM's prompt_tokens is the total.
+    """
+
+    def test_no_cache_info(self):
+        """When cache info is unavailable, return raw prompt_tokens."""
+        input_tokens, cache_read, cache_creation = _compute_cache_usage(100, None)
+        assert input_tokens == 100
+        assert cache_read is None
+        assert cache_creation is None
+
+    def test_cache_hit(self):
+        """When cache is hit, input_tokens excludes cached tokens."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        input_tokens, cache_read, cache_creation = _compute_cache_usage(100, usage)
+        assert input_tokens == 20  # 100 - 80
+        assert cache_read == 80
+        assert cache_creation == 0
+
+    def test_zero_cached_tokens(self):
+        """Zero cached tokens should still set cache_creation to 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        input_tokens, cache_read, cache_creation = _compute_cache_usage(100, usage)
+        assert input_tokens == 100  # 100 - 0
+        assert cache_read == 0
+        assert cache_creation == 0
+
+    def test_all_tokens_cached(self):
+        """When all tokens are cached, input_tokens should be 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=100),
+        )
+        input_tokens, cache_read, cache_creation = _compute_cache_usage(100, usage)
+        assert input_tokens == 0
+        assert cache_read == 100
+        assert cache_creation == 0
+
+    def test_no_prompt_tokens_details(self):
+        """UsageInfo without prompt_tokens_details returns no cache info."""
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        input_tokens, cache_read, cache_creation = _compute_cache_usage(100, usage)
+        assert input_tokens == 100
+        assert cache_read is None
+        assert cache_creation is None
 
 
 class TestInlineSystemMessageInMessagesArray:

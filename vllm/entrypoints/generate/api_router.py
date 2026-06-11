@@ -168,7 +168,9 @@ async def init_generate_state(
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            # Always enable prompt tokens details for Anthropic API
+            # to populate cache_read_input_tokens / cache_creation_input_tokens.
+            enable_prompt_tokens_details=True,
             enable_force_include_usage=args.enable_force_include_usage,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
