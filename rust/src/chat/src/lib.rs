@@ -140,6 +140,16 @@ impl ChatLlm {
         self
     }
 
+    /// Tokenizer vocabulary size.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.text.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size, else `None`.
+    pub fn model_vocab_size(&self) -> Option<usize> {
+        self.text.model_vocab_size()
+    }
+
     /// Expose the underlying text facade for raw text-generation routes such as
     /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {

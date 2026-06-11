@@ -175,12 +175,13 @@ class SchedulerConfig:
 
             return Scheduler
 
-        # This warning can be removed once the Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
+        # The first half of this warning can be removed once the Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that implement it
         logger.warning_once(
-            "Using custom scheduler class %s. This scheduler interface is "
-            "not public and compatibility may not be maintained.",
+            "Using custom scheduler class %s. This scheduler interface is not public "
+            "and compatibility may not be maintained. If you have subclassed Scheduler "
+            "instead of AsyncScheduler, you will see degraded performance due to async "
+            "scheduling being disabled.",
             self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):

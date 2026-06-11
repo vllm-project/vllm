@@ -16,6 +16,7 @@ from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -49,15 +50,6 @@ from .repo_utils import (
     with_retry,
 )
 
-try:
-    # Transformers v5
-    from transformers.configuration_utils import ALLOWED_ATTENTION_LAYER_TYPES
-except ImportError:
-    # Transformers v4
-    from transformers.configuration_utils import (
-        ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
-    )
-
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
 else:
@@ -68,9 +60,8 @@ MISTRAL_CONFIG_NAME = "params.json"
 logger = init_logger(__name__)
 
 if Version(version("transformers")) < Version("5.0.0"):
-    logger.warning(
-        "Support for Transformers v4 is deprecated. The Transformers v4 codepath will "
-        "become unmaintained in vLLM v0.22.0 and will be removed in vLLM v0.24.0. "
+    raise ImportError(
+        "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
         "Please upgrade to Transformers v5: pip install --upgrade transformers"
     )
 
@@ -159,7 +150,7 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
 
 
 @contextmanager
@@ -183,24 +174,21 @@ def _patch_hf_transformers_validate_rope():
     hf transformers (from v5 onwards)
     """
 
-    if Version(version("transformers")) >= Version("5.0.0"):
-        if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
-            return
+    if hasattr(PretrainedConfig.validate_rope, "__vllm_patched__"):
+        return
 
-        _original_validate_rope = PretrainedConfig.validate_rope
+    _original_validate_rope = PretrainedConfig.validate_rope
 
-        @wraps(_original_validate_rope)
-        def patched_validate_rope(self, *args, **kwargs):
-            ignore_keys_param = kwargs.pop("ignore_keys", None)
-            original_ignore_keys = self.ignore_keys_at_rope_validation
-            self.ignore_keys_at_rope_validation = (
-                original_ignore_keys or ignore_keys_param
-            )
-            result = _original_validate_rope(self, *args, **kwargs)
-            return result
+    @wraps(_original_validate_rope)
+    def patched_validate_rope(self, *args, **kwargs):
+        ignore_keys_param = kwargs.pop("ignore_keys", None)
+        original_ignore_keys = self.ignore_keys_at_rope_validation
+        self.ignore_keys_at_rope_validation = original_ignore_keys or ignore_keys_param
+        result = _original_validate_rope(self, *args, **kwargs)
+        return result
 
-        patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-        PretrainedConfig.validate_rope = patched_validate_rope
+    patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
+    PretrainedConfig.validate_rope = patched_validate_rope
 
 
 class HFConfigParser(ConfigParserBase):
@@ -493,39 +481,13 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
 
-    # Older custom models may use non-standard field names
-    # which need patching for both Transformers v4 and v5.
+    # Older custom models may use non-standard field names which need patching.
     names = ["rope_theta", "rotary_emb_base"]
     rope_theta = getattr_iter(config, names, None, warn=True)
     names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
     partial_rotary_factor = getattr_iter(config, names, None, warn=True)
-    ompe = getattr(config, "original_max_position_embeddings", None)
 
-    if Version(version("transformers")) < Version("5.0.0"):
-        # Transformers v4 installed, legacy config fields may be present.
-        if is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
-            # Loading nested rope_parameters (from Transformers v5) in Transformers v4.
-            # Skip legacy patching since it should already be in the correct format.
-            pass
-        else:
-            if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
-                config.rope_parameters = rope_scaling
-            if (
-                rope_theta is not None
-                or partial_rotary_factor is not None
-                or ompe is not None
-            ) and not getattr(config, "rope_parameters", None):
-                config.rope_parameters = {"rope_type": "default"}
-            # Patch legacy fields into rope_parameters
-            if rope_theta is not None:
-                config.rope_parameters["rope_theta"] = rope_theta
-            if partial_rotary_factor is not None:
-                config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-            if ompe is not None:
-                config.rope_parameters["original_max_position_embeddings"] = ompe
-            patch_legacy_rope_type(getattr(config, "rope_parameters", None))
-    elif rope_theta is not None or getattr(config, "rope_parameters", None):
-        # Transformers v5 installed
+    if rope_theta is not None or getattr(config, "rope_parameters", None):
         # Patch these fields in case they used non-standard names
         if rope_theta is not None:
             config.rope_theta = rope_theta
