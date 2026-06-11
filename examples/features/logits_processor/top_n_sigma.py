@@ -31,8 +31,6 @@ A batch is constructed with alternating requests that do and don't use
 top_n_sigma, demonstrating how the processor coexists with normal sampling.
 """
 
-from typing import Any
-
 import torch
 
 from vllm import LLM, SamplingParams
@@ -57,18 +55,13 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
 
     @classmethod
     def validate_params(cls, params: SamplingParams):
-        n_sigma: Any | None = params.extra_args and params.extra_args.get(
-            "top_n_sigma"
-        )
-        if n_sigma is not None:
-            if not isinstance(n_sigma, (int, float)):
-                raise ValueError(
-                    f"top_n_sigma must be a number, got {type(n_sigma)}"
-                )
-            if n_sigma <= 0:
-                raise ValueError(
-                    f"top_n_sigma must be positive, got {n_sigma}"
-                )
+        n_sigma = (params.extra_args or {}).get("top_n_sigma")
+        if n_sigma is not None and (
+            not isinstance(n_sigma, (int, float)) or n_sigma <= 0
+        ):
+            raise ValueError(
+                f"top_n_sigma must be a positive number, got {n_sigma!r}"
+            )
 
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
@@ -83,7 +76,7 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
     def update_state(self, batch_update: BatchUpdate | None):
         def extract_n_sigma(params: SamplingParams) -> float | None:
             self.validate_params(params)
-            return params.extra_args and params.extra_args.get("top_n_sigma")
+            return (params.extra_args or {}).get("top_n_sigma")
 
         process_dict_updates(
             self.req_info,
@@ -119,18 +112,19 @@ class TopNSigmaLogitsProcessor(LogitsProcessor):
 
         # Skip rows with NaN/Inf or all-equal logits (std == 0)
         finite_mask = torch.isfinite(selected_logits).all(dim=-1)
-        nonzero_std_mask = selected_logits.std(dim=-1) != 0
+        std_all = selected_logits.std(dim=-1)
+        nonzero_std_mask = std_all != 0
         process_mask = finite_mask & nonzero_std_mask
+
+        logits_to_process = selected_logits[process_mask]
+
+        if logits_to_process.numel() == 0:
+            return logits
 
         rows_to_process = rows[process_mask]
         n_sigmas_to_process = n_sigmas[process_mask]
-        logits_to_process = selected_logits[process_mask]
-
-        if rows_to_process.numel() == 0:
-            return logits
-
         max_logits = logits_to_process.max(dim=-1, keepdim=True).values
-        std_logits = logits_to_process.std(dim=-1, keepdim=True)
+        std_logits = std_all[process_mask].unsqueeze(-1)
 
         thresholds = max_logits - n_sigmas_to_process.unsqueeze(-1) * std_logits
         logits_to_process[logits_to_process < thresholds] = float("-inf")
@@ -155,7 +149,7 @@ sampling_params_list = [
         temperature=0.8, max_tokens=20, extra_args={"top_n_sigma": 2.0}
     ),
     # Without top_n_sigma: normal sampling for comparison
-    SamplingParams(temperature=0.8, max_tokens=20),
+    SamplingParams(temperature=1.0, max_tokens=20),
     # With top_n_sigma=1.0: more aggressive filtering
     SamplingParams(
         temperature=0.8, max_tokens=20, extra_args={"top_n_sigma": 1.0}
@@ -167,7 +161,7 @@ sampling_params_list = [
 
 def main():
     llm = LLM(
-        model="/jiangdingfeng/zy/vllm0/Qwen2.5-0.5B-Instruct",
+        model="facebook/opt-125m",
         logits_processors=[TopNSigmaLogitsProcessor],
     )
     # Ordered by config: [s0_p0, s0_p1, ..., s1_p0, s1_p1, ...]
@@ -176,10 +170,10 @@ def main():
 
     outputs = llm.generate(all_prompts, all_params)
     config_labels = [
-        "top_n_sigma=2.0",
-        "baseline (no filter)",
-        "top_n_sigma=1.0",
-        "baseline (no filter)",
+        "top_n_sigma=2.0 (temp=0.8)",
+        "baseline temp=1.0 (no filter)",
+        "top_n_sigma=1.0 (temp=0.8)",
+        "baseline temp=0.8 (no filter)",
     ]
     n_prompts = len(prompts)
 
