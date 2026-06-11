@@ -254,6 +254,11 @@ def build_app(
     app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
+    if envs.VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE:
+        from vllm.entrypoints.serve.utils.server_utils import UnicodeFilterMiddleware
+
+        app.add_middleware(UnicodeFilterMiddleware)
+
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
@@ -267,11 +272,6 @@ def build_app(
 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
-
-    if envs.VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE:
-        from vllm.entrypoints.openai.server_utils import UnicodeFilterMiddleware
-
-        app.add_middleware(UnicodeFilterMiddleware)
 
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware

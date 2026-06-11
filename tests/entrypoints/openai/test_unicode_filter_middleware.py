@@ -10,8 +10,7 @@ echo app, so they do not require a vLLM engine.
 import httpx
 import pytest
 from fastapi import FastAPI, Request
-
-from vllm.entrypoints.openai.server_utils import UnicodeFilterMiddleware
+from vllm.entrypoints.serve.utils.server_utils import UnicodeFilterMiddleware
 
 # A few characters from the Unicode "Tags" block (U+E0020 - U+E007F)
 # that the middleware is supposed to strip.
