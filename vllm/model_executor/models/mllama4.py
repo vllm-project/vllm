@@ -52,7 +52,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_moe_expert_param_name,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -1021,6 +1024,7 @@ class Llama4ForConditionalGeneration(
                 and "scale" in name
                 and ".shared_expert" not in name
             ):
+                name = maybe_remap_moe_expert_param_name(name, params_dict)
                 if name in params_dict:
                     param = params_dict[name]
                     if (
