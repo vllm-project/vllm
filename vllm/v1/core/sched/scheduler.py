@@ -225,21 +225,6 @@ class Scheduler(SchedulerInterface):
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
 
-        # Maximum number of tokens that a request's num_computed_tokens can
-        # still be rolled back by draft-token rejection after this scheduler
-        # has observed it. Under async scheduling (and pipeline parallelism),
-        # up to (max_concurrent_batches - 1) steps are scheduled
-        # optimistically before their outputs are verified, each carrying at
-        # most num_spec_tokens draft tokens. Encoder outputs must be retained
-        # until a request's progress passes the end of their placeholder
-        # range by this margin; otherwise a rollback can rewind back into the
-        # range and the MM-embedding gather on the worker reads an
-        # already-evicted entry, crashing the engine with "Encoder cache
-        # miss" (https://github.com/vllm-project/vllm/issues/38551).
-        self.encoder_retention_margin = self.num_spec_tokens * (
-            vllm_config.max_concurrent_batches - 1
-        )
-
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -1766,8 +1751,8 @@ class Scheduler(SchedulerInterface):
                 # KVs have been calculated and cached already.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
             elif (
-                start_pos + num_tokens + self.encoder_retention_margin
-                <= request.num_computed_tokens
+                start_pos + num_tokens
+                <= request.num_computed_tokens - request.num_output_placeholders
             ):
                 # The encoder output is already processed and stored in the
                 # decoder's KV cache, and progress is far enough past the

@@ -4351,48 +4351,17 @@ def test_eagle3_mm_encoder_cache_with_shift():
     )
 
 
-def test_encoder_retention_margin_values(monkeypatch):
-    """The encoder retention margin must cover the maximum possible
-    rollback of num_computed_tokens from pending draft-token rejections:
-    num_spec_tokens per optimistically-scheduled in-flight step."""
-    # No speculative decoding: no rollback is possible.
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    assert scheduler.encoder_retention_margin == 0
-
-    # Sync scheduling (one batch in flight): rejections are applied to
-    # num_computed_tokens before encoder inputs are freed, so no margin
-    # is needed.
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        num_speculative_tokens=3,
-    )
-    assert scheduler.encoder_retention_margin == 0
-
-    # Async scheduling keeps one extra step in flight, scheduled
-    # optimistically with up to num_spec_tokens unverified draft tokens.
-    # Platform support for async scheduling varies (e.g. it is force-
-    # disabled on CPU), so emulate its effect on max_concurrent_batches.
-    monkeypatch.setattr(VllmConfig, "max_concurrent_batches", property(lambda self: 2))
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        num_speculative_tokens=3,
-    )
-    assert scheduler.encoder_retention_margin == 3
-
-
-def test_free_encoder_inputs_respects_spec_rollback_margin(monkeypatch):
+def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     """Regression test for issue #38551 (rollback path): under async
     scheduling with speculative decoding, num_computed_tokens is advanced
-    optimistically and can be rolled back by up to num_spec_tokens when
-    draft tokens are rejected. Freeing an encoder input as soon as
-    num_computed_tokens passes the end of its placeholder range allows a
-    later rollback to rewind back into the range, after which the worker's
-    MM-embedding gather reads an evicted entry and crashes the engine with
-    "Encoder cache miss". The scheduler must retain the input until
-    progress passes the range end by the maximum possible rollback."""
-    # Emulate async scheduling's effect (two batches in flight); the flag
-    # itself is platform-dependent and force-disabled on CPU.
-    monkeypatch.setattr(VllmConfig, "max_concurrent_batches", property(lambda self: 2))
+    optimistically and can be rolled back when in-flight draft tokens are
+    rejected. Freeing an encoder input as soon as num_computed_tokens passes
+    the end of its placeholder range allows a later rollback to rewind back
+    into the range, after which the worker's MM-embedding gather reads an
+    evicted entry and crashes the engine with "Encoder cache miss". The
+    scheduler must retain the input until the *confirmed* progress
+    (num_computed_tokens - num_output_placeholders) passes the range end, so
+    that no pending rejection can rewind into the range."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         num_speculative_tokens=3,
@@ -4411,20 +4380,27 @@ def test_free_encoder_inputs_respects_spec_rollback_margin(monkeypatch):
     manager.allocate(request, 0)
     mm_end = mm_start_pos + mm_length
 
-    # Progress exactly at the end of the MM range: the pre-fix condition
-    # would free here, but 3 in-flight draft tokens may still be rejected,
-    # rolling num_computed_tokens back inside the range.
-    request.num_computed_tokens = mm_end
+    # One optimistically-scheduled in-flight step advanced num_computed_tokens
+    # by 1 sampled + 3 draft tokens; none are confirmed yet, so all 4 are
+    # still output placeholders that a rejection could rewind.
+    request.num_output_placeholders = 4
+
+    # Optimistic progress reaches the end of the MM range, but the confirmed
+    # position (mm_end + 1 - 4) is still inside it: a rejection could rewind
+    # back into the range, so the entry must be retained.
+    request.num_computed_tokens = mm_end + 1
     scheduler._free_encoder_inputs(request)
     assert manager.get_cached_input_ids(request) == {0}
 
-    # Still within the rollback margin.
-    request.num_computed_tokens = mm_end + 2
-    scheduler._free_encoder_inputs(request)
-    assert manager.get_cached_input_ids(request) == {0}
-
-    # Past the margin: no pending rejection can rewind into the range.
+    # Confirmed position still inside the range.
     request.num_computed_tokens = mm_end + 3
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Confirmed position (mm_end + 4 - 4) now reaches the range end: even if
+    # every unconfirmed token is rejected, progress cannot rewind into the
+    # range, so the entry is freed.
+    request.num_computed_tokens = mm_end + 4
     scheduler._free_encoder_inputs(request)
     assert manager.get_cached_input_ids(request) == set()
 
@@ -4449,6 +4425,104 @@ def test_free_encoder_inputs_unchanged_without_spec_decode():
     request.num_computed_tokens = 150
     scheduler._free_encoder_inputs(request)
     assert manager.get_cached_input_ids(request) == set()
+
+
+def test_encoder_cache_retained_across_preemption_and_resume():
+    """Regression guard for issue #38551 (preemption path).
+
+    A request preempted under KV pressure resets num_computed_tokens to 0
+    and drops its encoder references (scheduler._preempt_request calls
+    encoder_cache_manager.free). Because that only moves the entry into
+    `freeable` (it is not evicted), the worker still holds it: the scheduler
+    must NOT report the mm_hash as freed. On resume, re-requesting the
+    encoder input must pull the still-cached entry back out of `freeable`
+    without scheduling a recompute, keeping the scheduler and worker
+    consistent. The spec-rollback retention margin does not gate this path,
+    so it is covered separately here."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_a"]],
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    mm_hash = request.mm_features[0].identifier
+
+    # Prefill scheduled and computed the encoder input; it is pinned.
+    manager.allocate(request, 0)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Preemption drops the request's encoder references (scheduler.py:
+    # _preempt_request -> encoder_cache_manager.free) and resets progress.
+    manager.free(request)
+    request.num_computed_tokens = 0
+    # The entry is now ref-free but only `freeable` (not evicted): the
+    # worker still holds it, so nothing must be reported as freed.
+    assert mm_hash in manager.cached
+    assert mm_hash in manager.freeable
+    assert manager.get_freed_mm_hashes() == []
+
+    # Resume re-requests the encoder output. The still-cached entry is pulled
+    # back out of `freeable` with no recompute and no worker-side free.
+    assert manager.check_and_update_cache(request, 0) is True
+    assert mm_hash not in manager.freeable
+    assert manager.get_cached_input_ids(request) == {0}
+    assert manager.get_freed_mm_hashes() == []
+
+
+def test_encoder_cache_recomputed_when_evicted_during_preemption():
+    """Companion to the retention case (issue #38551, preemption path).
+
+    If a preempted request's retained encoder entry IS evicted under memory
+    pressure before it resumes, the scheduler reports the mm_hash as freed
+    (so the worker drops it) and a resume must schedule a recompute rather
+    than assume the worker still holds it. check_and_update_cache must
+    return False so the encoder input is re-scheduled."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_a"]],
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    mm_hash = request.mm_features[0].identifier
+
+    manager.allocate(request, 0)
+    # Preemption drops references; the entry becomes freeable.
+    manager.free(request)
+    request.num_computed_tokens = 0
+    assert mm_hash in manager.freeable
+
+    # A new request with a different image hits memory pressure and evicts
+    # the freeable entry to make room.
+    other = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_b"]],
+        mm_positions=mm_positions,
+        req_ids=["1"],
+    )[0]
+    manager.num_free_slots = 50  # force eviction of the freeable entry
+    assert manager.can_allocate(
+        other, 0, encoder_compute_budget=10_000, num_embeds_to_schedule=0
+    )
+
+    # The evicted entry is reported to the worker, which drops it.
+    assert mm_hash not in manager.cached
+    assert manager.get_freed_mm_hashes() == [mm_hash]
+
+    # On resume the original request must recompute (cache miss is correct).
+    assert manager.check_and_update_cache(request, 0) is False
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
