@@ -69,6 +69,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
         self.start_token_id: int = start_token_id
         self.end_token_id: int = end_token_id
 
+    def get_boundary_token_ids(self) -> frozenset[int]:
+        return frozenset({self.start_token_id, self.end_token_id})
+
+    def get_transition_whitespace_token_ids(self) -> frozenset[int]:
+        transition: set[int] = set()
+        for text in ("\n", "\n\n", "\r\n", " ", "\t"):
+            token_id = self.vocab.get(text)
+            if token_id is not None:
+                transition.add(token_id)
+        return frozenset(transition)
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id

@@ -1522,8 +1522,11 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids
+                tokens = self.structured_output_manager.filter_tokens_for_fsm_advance(
+                    request, new_token_ids
+                )
+                if tokens and not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                    req_id, tokens
                 ):
                     logger.error(
                         "Unexpected: grammar rejected tokens %s for request %s. "

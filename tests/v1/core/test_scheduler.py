@@ -2558,6 +2558,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
+    scheduler.structured_output_manager.filter_tokens_for_fsm_advance.side_effect = (
+        lambda _request, token_ids: token_ids
+    )
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -2615,6 +2618,83 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert engine_core_output.request_id == request.request_id
     assert engine_core_output.new_token_ids == [123]
     assert engine_core_output.finish_reason == FinishReason.ERROR
+
+
+def test_structured_output_fsm_advance_filters_reasoning_boundary_tokens():
+    """Boundary tokens filtered before accept_tokens should not abort."""
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    scheduler = object.__new__(Scheduler)
+    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar.accept_tokens.return_value = True
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+
+    scheduler.perf_metrics = None
+    scheduler.connector = None
+    scheduler.structured_output_manager = Mock(spec=StructuredOutputManager)
+    scheduler.structured_output_manager.should_advance.return_value = True
+    scheduler.structured_output_manager.filter_tokens_for_fsm_advance.return_value = [
+        151644
+    ]
+    scheduler.requests = {request.request_id: request}
+    scheduler.running = [request]
+    scheduler.waiting = Mock()
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_event_publisher = Mock()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.vllm_config = Mock()
+    scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
+    scheduler.recompute_kv_load_failures = False
+    scheduler.make_stats = Mock(return_value=None)
+    scheduler.max_model_len = 128
+    scheduler._free_request = Mock()
+
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    boundary_tokens = [198, 248069, 151644]
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[boundary_tokens],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    scheduler.structured_output_manager.filter_tokens_for_fsm_advance.assert_called_once_with(
+        request, boundary_tokens
+    )
+    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        request.request_id, [151644]
+    )
+    assert request.status != RequestStatus.FINISHED_ERROR
+    assert request.status == RequestStatus.RUNNING
 
 
 @pytest.mark.parametrize(

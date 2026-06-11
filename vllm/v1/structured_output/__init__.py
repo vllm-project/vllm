@@ -33,6 +33,48 @@ else:
 logger = init_logger(__name__)
 
 
+def filter_reasoning_boundary_tokens(
+    token_ids: list[int],
+    reasoner: "ReasoningParser",
+) -> list[int]:
+    """Strip reasoning boundary tokens before advancing an xgrammar FSM.
+
+    When ``reasoning=False`` structural tags exclude thinking markers, tokens
+    such as ``</think>`` and adjacent whitespace must not be passed
+    to ``accept_tokens`` even if they appear in the same MTP-accepted batch as
+    valid suffix tokens (e.g. tool-call tokens).
+    """
+    end_id = getattr(reasoner, "end_token_id", None)
+    start_id = getattr(reasoner, "start_token_id", None)
+    transition_ids = reasoner.get_transition_whitespace_token_ids()
+
+    boundary_marker_ids = {tid for tid in (start_id, end_id) if tid is not None}
+    if not boundary_marker_ids or not any(
+        token in boundary_marker_ids for token in token_ids
+    ):
+        return token_ids
+
+    result: list[int] = []
+    i = 0
+    while i < len(token_ids):
+        token = token_ids[i]
+        if token in boundary_marker_ids:
+            i += 1
+            while i < len(token_ids) and token_ids[i] in transition_ids:
+                i += 1
+            continue
+        if token in transition_ids:
+            j = i
+            while j < len(token_ids) and token_ids[j] in transition_ids:
+                j += 1
+            if j < len(token_ids) and token_ids[j] in boundary_marker_ids:
+                i = j
+                continue
+        result.append(token)
+        i += 1
+    return result
+
+
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
@@ -277,12 +319,23 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                skip_advance = self._build_fsm_advance_skip_mask(
+                    request, list(req_tokens)
+                )
+                for token_index, token in enumerate(itertools.chain(req_tokens, (-1,))):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
+                    if (
+                        apply_bitmask
+                        and not grammar.is_terminated()
+                        and token != -1
+                        and (
+                            token_index >= len(skip_advance)
+                            or skip_advance[token_index]
+                        )
+                    ):
                         accepted = grammar.accept_tokens(req_id, [token])
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
@@ -368,6 +421,52 @@ class StructuredOutputManager:
                 return True
 
         return False
+
+    def _should_filter_reasoning_boundary_tokens(self, request: "Request") -> bool:
+        if self.enable_in_reasoning:
+            return False
+
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return False
+
+        structured_req = request.structured_output_request
+        if structured_req is None:
+            return False
+
+        return (
+            structured_req.structured_output_key[0]
+            == StructuredOutputOptions.STRUCTURAL_TAG
+        )
+
+    def filter_tokens_for_fsm_advance(
+        self, request: "Request", token_ids: list[int]
+    ) -> list[int]:
+        if not self._should_filter_reasoning_boundary_tokens(request):
+            return token_ids
+
+        reasoner = self._get_reasoner(request)
+        assert reasoner is not None
+        return filter_reasoning_boundary_tokens(token_ids, reasoner)
+
+    def _build_fsm_advance_skip_mask(
+        self, request: "Request", token_ids: list[int]
+    ) -> list[bool]:
+        if not token_ids or not self._should_filter_reasoning_boundary_tokens(request):
+            return [True] * len(token_ids)
+
+        reasoner = self._get_reasoner(request)
+        assert reasoner is not None
+        filtered = filter_reasoning_boundary_tokens(token_ids, reasoner)
+        advance_mask: list[bool] = []
+        filtered_index = 0
+        for token in token_ids:
+            if filtered_index < len(filtered) and token == filtered[filtered_index]:
+                advance_mask.append(True)
+                filtered_index += 1
+            else:
+                advance_mask.append(False)
+        return advance_mask
 
     def clear_backend(self) -> None:
         if self.backend is not None:

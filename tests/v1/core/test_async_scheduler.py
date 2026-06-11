@@ -272,6 +272,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
+    scheduler.structured_output_manager.filter_tokens_for_fsm_advance.side_effect = (
+        lambda _request, token_ids: token_ids
+    )
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
