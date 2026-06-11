@@ -63,6 +63,10 @@ class SchedulerConfig:
     max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
+    Under async scheduling, this limit applies to the number of sequences
+    scheduled for the current model execution step; requests may remain resident
+    in the scheduler while their async outputs are still in flight.
+
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
