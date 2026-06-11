@@ -32,8 +32,12 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             self._apply_chat_template, executor=self._executor
         )
 
-    def _apply_chat_template(self, *args, **kwargs):
-        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
+    def _apply_chat_template(self, conversation, messages, **kwargs):
+        return self.get_tokenizer().apply_chat_template(
+            conversation=conversation,
+            messages=messages,
+            **kwargs
+        )
 
     def render_messages(
         self,
