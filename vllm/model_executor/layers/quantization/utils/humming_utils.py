@@ -5,8 +5,6 @@ from typing import Any
 
 import regex as re
 import torch
-from humming.layer import HummingInputSchema, HummingMethod
-from humming.schema import BaseWeightSchema
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -16,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.utils.humming import BaseWeightSchema, HummingInputSchema, HummingMethod
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):

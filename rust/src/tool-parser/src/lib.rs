@@ -121,6 +121,12 @@ pub trait ToolParser: Send {
         false
     }
 
+    /// Return the parser-provided ID for a tool call by index, if the model
+    /// emitted one.
+    fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
+        None
+    }
+
     /// Feed one decoded text delta into the parser, appending committed output
     /// into `output`.
     ///
