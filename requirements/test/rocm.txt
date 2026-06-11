@@ -44,6 +44,7 @@ anyio==4.13.0
     #   watchfiles
 apache-tvm-ffi==0.1.10
     # via
+    #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
 arctic-inference==0.1.1
@@ -512,7 +513,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.2
+mistral-common==1.11.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

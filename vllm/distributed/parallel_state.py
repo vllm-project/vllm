@@ -227,6 +227,67 @@ def patched_fused_scaled_matmul_reduce_scatter_fake(
     return res
 
 
+def _platform_device_type() -> str:
+    """Return the device-type string (e.g. ``"cuda"``, ``"xpu"``, ``"cpu"``)
+    for the current platform, in the form expected by
+    ``torch.distributed.init_process_group(backend=...)``.
+    """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_cuda_alike():
+        return "cuda"
+    elif current_platform.is_xpu():
+        return "xpu"
+    elif current_platform.is_out_of_tree():
+        return current_platform.device_name
+    else:
+        return "cpu"
+
+
+def _device_backend_str(torch_distributed_backend: str | Backend) -> str:
+    """Normalize ``torch_distributed_backend`` to the ``"<device>:<backend>"``
+    format required by ``split_group``'s ``backend`` argument.
+
+    Accepts either a bare backend name (e.g. ``"nccl"``) or an already-prefixed
+    string (e.g. ``"cuda:nccl"``).
+    """
+    backend_str = str(torch_distributed_backend)
+    if ":" in backend_str:
+        return backend_str
+    return f"{_platform_device_type()}:{backend_str}"
+
+
+def _create_subgroups_split_group(
+    group_ranks: list[list[int]],
+    group_name: str,
+    torch_distributed_backend: str | Backend,
+) -> tuple[ProcessGroup, ProcessGroup]:
+    """Create the device + CPU subgroups for ``GroupCoordinator`` via
+    ``torch.distributed.split_group``.
+
+    ``split_group`` is collective on the parent group, so every parent rank
+    must enter with the same ``split_ranks`` definition. Each rank receives
+    the subgroup it belongs to.
+    """
+    device_backend_str = _device_backend_str(torch_distributed_backend)
+    self_device_group = torch.distributed.split_group(
+        split_ranks=group_ranks,
+        group_desc=f"{group_name}:device",
+        backend=device_backend_str,
+    )
+    # CPU subgroup: split_group requires the requested backend filter to
+    # include the parent's default device type (= the device the parent PG
+    # was bound to via ``device_id``), so a cpu-only filter is rejected.
+    # Include the device backend in the filter; only the gloo backend is
+    # actually used for CPU collectives on this group.
+    self_cpu_group = torch.distributed.split_group(
+        split_ranks=group_ranks,
+        group_desc=f"{group_name}:cpu",
+        backend=f"cpu:gloo,{device_backend_str}",
+    )
+    return self_device_group, self_cpu_group
+
+
 def patched_fused_scaled_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -335,26 +396,39 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
-        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
-
-        timeout = get_cpu_distributed_timeout_or_none()
-
-        for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
+        # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
+        # codepath. Default (False) preserves the legacy ``new_group`` path.
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+            self_device_group, self_cpu_group = _create_subgroups_split_group(
+                group_ranks, group_name, torch_distributed_backend
             )
-            # a group with `gloo` backend, to allow direct coordination between
-            # processes through the CPU.
-            with suppress_stdout():
-                cpu_group = torch.distributed.new_group(
-                    ranks, backend="gloo", timeout=timeout
+            for ranks in group_ranks:
+                if self.rank in ranks:
+                    self.ranks = ranks
+                    self.world_size = len(ranks)
+                    self.rank_in_group = ranks.index(self.rank)
+                    break
+        else:
+            from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+
+            timeout = get_cpu_distributed_timeout_or_none()
+
+            for ranks in group_ranks:
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend
                 )
-            if self.rank in ranks:
-                self.ranks = ranks
-                self.world_size = len(ranks)
-                self.rank_in_group = ranks.index(self.rank)
-                self_device_group = device_group
-                self_cpu_group = cpu_group
+                # a group with `gloo` backend, to allow direct coordination between
+                # processes through the CPU.
+                with suppress_stdout():
+                    cpu_group = torch.distributed.new_group(
+                        ranks, backend="gloo", timeout=timeout
+                    )
+                if self.rank in ranks:
+                    self.ranks = ranks
+                    self.world_size = len(ranks)
+                    self.rank_in_group = ranks.index(self.rank)
+                    self_device_group = device_group
+                    self_cpu_group = cpu_group
 
         assert self_cpu_group is not None
         assert self_device_group is not None
@@ -1348,6 +1422,62 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
+def _init_process_group_for_split_group(
+    *,
+    backend: str,
+    distributed_init_method: str,
+    world_size: int,
+    rank: int,
+    local_rank: int,
+    timeout: timedelta | None,
+) -> None:
+    """Initialize the default PG with both CPU (gloo) and device (e.g. nccl)
+    backends and an eager ``device_id`` binding so that subgroups can be
+    created via ``split_group`` (which requires the parent communicator to
+    be eagerly initialized). Falls back to ``gloo`` on CPU-only systems.
+    """
+    if torch.accelerator.is_available() and backend != "gloo":
+        init_backend = "cpu:gloo,cuda:nccl"
+        device_id: torch.device | None = torch.device(f"cuda:{local_rank}")
+    else:
+        init_backend = "gloo"
+        device_id = None
+    torch.distributed.init_process_group(
+        backend=init_backend,
+        init_method=distributed_init_method,
+        world_size=world_size,
+        rank=rank,
+        timeout=timeout,
+        device_id=device_id,
+    )
+
+
+def _validate_default_pg_for_split_group() -> None:
+    """When an external launcher (e.g. ``torchrun``) initialized the default
+    PG, ``GroupCoordinator`` cannot patch in additional backends or change
+    the eager-init behavior — ``split_group`` only selects subsets of an
+    existing parent. Validate that the parent has both ``device_id`` and a
+    CPU (gloo) backend, and emit a descriptive error pointing at the exact
+    init call to update otherwise.
+    """
+    default_pg = torch.distributed.distributed_c10d._get_default_group()
+    assert default_pg.bound_device_id is not None, (
+        "External launcher initialized the default process group "
+        "without device_id. vLLM requires the default PG to be device-"
+        "bound for split_group. Pass device_id=torch.device(f'cuda:"
+        "{local_rank}') to torch.distributed.init_process_group()."
+    )
+    try:
+        default_pg._get_backend(torch.device("cpu"))
+    except RuntimeError as e:
+        raise RuntimeError(
+            "External launcher initialized the default process group "
+            "without a CPU (gloo) backend. vLLM requires both CPU and "
+            "device backends. Pass backend='cpu:gloo,cuda:nccl' to "
+            "torch.distributed.init_process_group()."
+        ) from e
+
+
 def _init_elastic_ep_world(
     config, local_rank: int, backend: str, rank: int, world_size: int
 ) -> None:
@@ -1456,14 +1586,33 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
-        # this backend is used for WORLD
-        torch.distributed.init_process_group(
-            backend=backend,
-            init_method=distributed_init_method,
-            world_size=world_size,
-            rank=rank,
-            timeout=timeout,
-        )
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+            # split_group needs local_rank early to compute device_id for
+            # the eager init. local_rank is not available in torch
+            # ProcessGroup, see https://github.com/pytorch/pytorch/issues/122816
+            if local_rank == -1:
+                local_rank = (
+                    int(envs.LOCAL_RANK)
+                    if distributed_init_method == "env://"
+                    else rank
+                )
+            _init_process_group_for_split_group(
+                backend=backend,
+                distributed_init_method=distributed_init_method,
+                world_size=world_size,
+                rank=rank,
+                local_rank=local_rank,
+                timeout=timeout,
+            )
+        else:
+            # this backend is used for WORLD
+            torch.distributed.init_process_group(
+                backend=backend,
+                init_method=distributed_init_method,
+                world_size=world_size,
+                rank=rank,
+                timeout=timeout,
+            )
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
                 backend="gloo", timeout=timeout
@@ -1475,6 +1624,9 @@ def init_distributed_environment(
                 raise RuntimeError(
                     "Elastic EP is not yet supported with multi-node TP/PP"
                 )
+
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP and torch.accelerator.is_available():
+        _validate_default_pg_for_split_group()
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
@@ -1903,6 +2055,10 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    logger.debug(
+        "[shutdown] Distributed: cleanup start shutdown_ray=%s",
+        shutdown_ray,
+    )
     # Reset environment variable cache
     envs.disable_envs_cache()
 
@@ -1936,6 +2092,8 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
             logger.warning(
                 "torch._C._host_emptyCache() only available in Pytorch >=2.5"
             )
+
+    logger.debug_once("[shutdown] Distributed: cleanup complete")
 
 
 def in_the_same_node_as(
