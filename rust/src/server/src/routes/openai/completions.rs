@@ -31,6 +31,7 @@ use crate::routes::openai::completions::types::{
     CompletionStreamChoice, CompletionStreamResponse,
 };
 use crate::routes::openai::utils::types::LogProbs;
+use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
@@ -226,7 +227,18 @@ async fn completion_chunk_stream(
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
-    let mut continuous_usage = ContinuousUsage::new(include_continuous_usage);
+    let mut continuous_usage = ContinuousUsage::default();
+
+    /// Yield a chunk with optional continuous usage attached.
+    macro_rules! yield_chunk {
+        ($chunk:expr) => {{
+            let mut chunk = $chunk;
+            if include_continuous_usage {
+                chunk.usage = Some(continuous_usage.to_usage());
+            }
+            y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+        }};
+    }
 
     while let Some(next) = stream.next().await {
         match next {
@@ -245,10 +257,7 @@ async fn completion_chunk_stream(
                         }
                         first_chunk = false;
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(
-                        continuous_usage.attach_completion(chunk),
-                    ))
-                    .await;
+                    yield_chunk!(chunk);
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
                     let mut chunk =
@@ -257,10 +266,7 @@ async fn completion_chunk_stream(
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
-                    y.yield_ok(CompletionSseChunk::Chunk(
-                        continuous_usage.attach_completion(chunk),
-                    ))
-                    .await;
+                    yield_chunk!(chunk);
                 }
             }
             Ok(DecodedTextEvent::TextDelta {
@@ -290,10 +296,7 @@ async fn completion_chunk_stream(
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
-                y.yield_ok(CompletionSseChunk::Chunk(
-                    continuous_usage.attach_completion(chunk),
-                ))
-                .await;
+                yield_chunk!(chunk);
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
@@ -317,10 +320,7 @@ async fn completion_chunk_stream(
                         created,
                         finished.finish_reason,
                     )?;
-                    y.yield_ok(CompletionSseChunk::Chunk(
-                        continuous_usage.attach_completion(final_chunk),
-                    ))
-                    .await;
+                    yield_chunk!(final_chunk);
 
                     if include_usage {
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
@@ -399,47 +399,6 @@ fn usage_chunk(
     let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.usage = Some(usage);
     chunk
-}
-
-#[derive(Debug, Clone)]
-struct ContinuousUsage {
-    enabled: bool,
-    prompt_tokens: usize,
-    output_tokens: usize,
-}
-
-impl ContinuousUsage {
-    fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            prompt_tokens: 0,
-            output_tokens: 0,
-        }
-    }
-
-    fn set_prompt_tokens(&mut self, prompt_tokens: usize) {
-        self.prompt_tokens = prompt_tokens;
-    }
-
-    fn add_output_tokens(&mut self, output_tokens: usize) {
-        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
-    }
-
-    fn set_final_counts(&mut self, prompt_tokens: usize, output_tokens: usize) {
-        self.prompt_tokens = prompt_tokens;
-        self.output_tokens = output_tokens;
-    }
-
-    fn attach_completion(&self, mut chunk: CompletionStreamResponse) -> CompletionStreamResponse {
-        if self.enabled {
-            chunk.usage = Some(self.counts());
-        }
-        chunk
-    }
-
-    fn counts(&self) -> Usage {
-        Usage::from_counts(self.prompt_tokens, self.output_tokens, None)
-    }
 }
 
 /// Convert one chunk stream into OpenAI-style SSE events.
