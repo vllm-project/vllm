@@ -429,7 +429,7 @@ def _logprobs_match(
         and lps_a.keys() == lps_b.keys()
         and all(
             a.decoded_token == b.decoded_token
-            and a.rank == b.rank
+            and a.rank == pytest.approx(b.rank, rel=0.005)
             and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
             for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
         )

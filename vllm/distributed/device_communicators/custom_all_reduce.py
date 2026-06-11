@@ -40,11 +40,7 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     return True
 
 
-def is_weak_contiguous(inp: torch.Tensor):
-    return inp.is_contiguous() or (
-        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
-        == inp.numel() * inp.element_size()
-    )
+from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 
 class CustomAllreduce:

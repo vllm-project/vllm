@@ -47,6 +47,17 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
+        # Quark stores per-channel weight_scale as 1D [N]; reshape to [N, 1].
+        def _scale_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            *args,
+            **kwargs,
+        ):
+            if loaded_weight.dim() == 1:
+                loaded_weight = loaded_weight.unsqueeze(-1)
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
         self.kernel = init_int8_linear_kernel(
             is_channelwise=(self.qscheme == "per_channel"),
             is_static_input_scheme=(self.is_static_input_scheme is True),
@@ -69,15 +80,15 @@ class QuarkW8A8Int8(QuarkScheme):
         # WEIGHT SCALE
         if self.qscheme == "per_channel":
             weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes)), dtype=torch.float32),
+                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.float32),
                 output_dim=0,
-                weight_loader=weight_loader,
+                weight_loader=_scale_weight_loader,
             )
             ChannelQuantZPParameter = ChannelQuantScaleParameter
             weight_zero_point = ChannelQuantZPParameter(
-                data=torch.empty((sum(output_partition_sizes)), dtype=torch.int8),
+                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.int8),
                 output_dim=0,
-                weight_loader=weight_loader,
+                weight_loader=_scale_weight_loader,
             )
         else:
             assert self.qscheme == "per_tensor"

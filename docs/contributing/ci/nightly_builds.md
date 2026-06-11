@@ -136,10 +136,10 @@ When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
 3. **Selects compatible wheel** based on:
     - Package name (`vllm`)
     - Platform tag (architecture match)
-4. **Downloads and extracts** precompiled binaries from the wheel:
-    - C++ extension modules (`.so` files)
-    - Flash Attention Python modules
-    - Triton kernel Python files
+4. **Downloads and extracts** precompiled artifacts from the wheel:
+    - Native extension modules (`.so` files)
+    - The `vllm-rs` Rust frontend binary
+    - Flash Attention Python modules and Triton/FlashMLA Python files
 5. **Patches package_data** to include extracted files in the installation
 
 !!! note "What is the base commit?"

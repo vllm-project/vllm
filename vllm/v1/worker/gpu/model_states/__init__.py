@@ -13,10 +13,18 @@ def init_model_state(
     encoder_cache: EncoderCache | None,
     device: torch.device,
 ):
-    if "WhisperForConditionalGeneration" in vllm_config.model_config.architectures:
+    if (
+        "WhisperForConditionalGeneration" in vllm_config.model_config.architectures
+        or "CohereAsrForConditionalGeneration" in vllm_config.model_config.architectures
+    ):
         from vllm.v1.worker.gpu.model_states.whisper import WhisperModelState
 
         return WhisperModelState(vllm_config, model, encoder_cache, device)
+
+    if vllm_config.model_config.is_hybrid:
+        from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+
+        return MambaHybridModelState(vllm_config, model, encoder_cache, device)
 
     from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
