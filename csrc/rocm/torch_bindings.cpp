@@ -57,7 +57,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   rocm_ops.def(
       "swmmacGEMM(Tensor packed_b, Tensor in_a, "
-      "Tensor? in_bias, int CuCount) -> Tensor");
+      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
   rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
 
   // Custom attention op
