@@ -355,3 +355,37 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
                 "time they DEALER-connect. See PR #42585 / Ray-DP "
                 "multi-API-server regression."
             )
+
+
+def test_shutdown_skips_ray_cleanup_after_driver_disconnect(monkeypatch):
+    """Regression test for https://github.com/vllm-project/vllm/issues/45318.
+
+    When ``CoreEngineActorManager.shutdown()`` runs after Ray's atexit hook
+    has disconnected the driver (e.g. via a finalizer during interpreter
+    exit), calling ``ray.kill`` would auto-init a brand-new Ray job and fail
+    with ``ActorHandleNotFoundError``, burying the original error. The
+    shutdown must skip actor/placement-group cleanup in that state.
+    """
+    import threading
+
+    manager = CoreEngineActorManager.__new__(CoreEngineActorManager)
+    manager.manager_stopped = threading.Event()
+    manager.local_engine_actors = [object()]
+    manager.remote_engine_actors = [object()]
+    manager.created_placement_groups = [object()]
+
+    kills: list[Any] = []
+    removed: list[Any] = []
+    monkeypatch.setattr(ray, "kill", kills.append)
+    monkeypatch.setattr(ray.util, "remove_placement_group", removed.append)
+
+    # Driver already disconnected: no Ray calls may happen.
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    manager.shutdown()
+    assert manager.manager_stopped.is_set()
+    assert kills == [] and removed == []
+
+    # Driver still connected: normal cleanup proceeds.
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    manager.shutdown()
+    assert len(kills) == 2 and len(removed) == 1
