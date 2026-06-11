@@ -274,7 +274,13 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if self.vllm_config.model_config.is_diffusion and req_tokens:
+                    # Diffusion LLMs produce don't sample a token every step so dont
+                    # append a placeholder.
+                    token_iter: Iterable[int] = req_tokens
+                else:
+                    token_iter = itertools.chain(req_tokens, (-1,))
+                for token in token_iter:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
