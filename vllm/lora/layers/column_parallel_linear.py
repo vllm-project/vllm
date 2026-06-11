@@ -167,7 +167,10 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         if type(source_layer) is maybe_get_oot_by_class(ColumnParallelLinear):
             return True
         if isinstance(source_layer, maybe_get_oot_by_class(MergedColumnParallelLinear)):
-            if len(packed_modules_list) != 1:
+            if (
+                len(packed_modules_list) != 1
+                or source_layer.checkpoint_format == "sharded"
+            ):
                 return False
             # Exclude layers with 3+ output sizes - those are handled by
             # MergedColumnParallelLinearVariableSliceWithLoRA since this
@@ -347,7 +350,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         decorate: bool = True,
     ) -> bool:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
-        if not isinstance(source_layer, merged_cls) or len(packed_modules_list) != 2:
+        if (
+            not isinstance(source_layer, merged_cls)
+            or len(source_layer.output_sizes) != 2
+            or source_layer.checkpoint_format == "fused"
+        ):
             return False
 
         tp_size = getattr(source_layer, "tp_size", 1)
