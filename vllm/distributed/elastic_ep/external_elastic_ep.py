@@ -224,28 +224,10 @@ class ExternalElasticEPScaleCoordinator:
         )
 
     def _setup_reconfig_bootstrap(self) -> tuple[str, int]:
-        from vllm.distributed.utils import create_tcp_store
-        from vllm.utils.network_utils import get_open_ports_list
-
-        parallel_config = self.client.vllm_config.parallel_config
-        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
-        parallel_config.data_parallel_master_port = (
-            parallel_config._data_parallel_master_port_list.pop()
-        )
-
-        ip = parallel_config.data_parallel_master_ip
-        store = create_tcp_store(
-            ip,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
-        )
-        parallel_config._coord_store_port = store.port
-        self.reconfig_store_ref = store
         self.control_store_ref = getattr(self.client, "_coord_store", None)
-        self.client._coord_store = store
-        return ip, store.port
+        ip, coord_store_port = self.client._setup_elastic_ep_reconfig_bootstrap()
+        self.reconfig_store_ref = getattr(self.client, "_coord_store", None)
+        return ip, coord_store_port
 
     def _get_error(self, store: Any) -> str | None:
         error_key = self.key("error")
