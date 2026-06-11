@@ -203,6 +203,15 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         # RoPE
         q, k = self.rotary_emb(positions, q, k)
 
+        # Mirror Attention.forward: quant-query impls consume an fp8 q.
+        if (
+            self.kv_cache_dtype != self.dtype
+            and self.attn.impl.supports_quant_query_input
+        ):
+            q = torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                q, FP8_DTYPE, self.attn._q_scale
+            )[0]
+
         # Final views + KV cache update
         q = q.view(-1, self.num_heads, self.head_size)
         k = k.view(-1, self.num_kv_heads, self.head_size)
@@ -349,7 +358,13 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ATOL, RTOL = (2e-2, 2e-2) if enable_aiter_triton_rope else (1e-2, 1e-2)
         is_fp8_cache = model.kv_cache_dtype != dtype
 
-        torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
+        if q_fused.dtype == FP8_DTYPE:
+            # Quant-query path: both q are fp8; compare dequant within 1 fp8 ULP.
+            torch.testing.assert_close(
+                q_unfused.float(), q_fused.float(), atol=1.25e-1, rtol=1.25e-1
+            )
+        else:
+            torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
 
         if not is_fp8_cache:
             # The AITER PTS kernel populates k_out only for non-FP8 caches.

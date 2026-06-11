@@ -19,12 +19,13 @@ from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherRotaryEmbedding
-from .rms_quant_fusion import empty_bf16, empty_i64
+from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
@@ -124,6 +125,7 @@ class QkNormRopeKvCachePattern:
         layer: Attention,
         eps: float,
         is_neox: bool,
+        quant_query: bool,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -132,6 +134,7 @@ class QkNormRopeKvCachePattern:
         self.head_size_v = layer.head_size_v
         self.eps = eps
         self.is_neox = is_neox
+        self.quant_query = quant_query
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
@@ -152,7 +155,150 @@ class QkNormRopeKvCachePattern:
         q_weight = empty_bf16(1, self.head_size)
         k_weight = empty_bf16(1, self.head_size)
         cos_sin_cache = empty_bf16(L, self.head_size)
-        return [qkv, positions, q_weight, k_weight, cos_sin_cache]
+        inputs = [qkv, positions, q_weight, k_weight, cos_sin_cache]
+        if self.quant_query:
+            q_scale = empty_fp32(1)
+            inputs += [q_scale]
+        return inputs
+
+    def pattern_non_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+        q_flat = q_normed.view(-1, self.q_size)
+
+        k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+        k_flat = k_normed.view(-1, self.k_size)
+
+        q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
+
+        q_rope = q_rope.view(-1, self.num_heads, self.head_size)
+        k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        return dummy, q_rope, k_rope, v
+
+    def replacement_non_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_out = torch.empty(
+            qkv.shape[0],
+            self.num_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        k_out = torch.empty(
+            qkv.shape[0],
+            self.num_kv_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        results = auto_functionalized(
+            self.FUSED_OP,
+            q_out=q_out,
+            k_out=k_out,
+            qkv=qkv,
+            positions=positions,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            rms_norm_eps=self.eps,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+            layer_name=self.layer_name,
+        )
+        return results[0], results[1], results[2], v
+
+    def pattern_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
+        q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
+        q_flat = q_normed.view(-1, self.q_size)
+
+        k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
+        k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
+        k_flat = k_normed.view(-1, self.k_size)
+
+        q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
+        # Match the quant-query op Attention.forward inserts (fp8 KV + UNIFIED).
+        q_rope_fp8 = torch.ops.vllm.rocm_aiter_per_tensor_quant(
+            q_rope, current_platform.fp8_dtype(), q_scale
+        )[0]
+        q_rope_fp8 = q_rope_fp8.view(-1, self.num_heads, self.head_size)
+
+        k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size_v)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        return dummy, q_rope_fp8, k_rope, v
+
+    def replacement_fp8_quant_query(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_out = torch.empty(
+            qkv.shape[0],
+            self.num_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        k_out = torch.empty(
+            qkv.shape[0],
+            self.num_kv_heads,
+            self.head_size,
+            device=qkv.device,
+            dtype=qkv.dtype,
+        )
+        _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+        v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
+        results = auto_functionalized(
+            self.FUSED_OP,
+            q_out=q_out,
+            k_out=k_out,
+            qkv=qkv,
+            positions=positions,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            rms_norm_eps=self.eps,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+            layer_name=self.layer_name,
+        )
+        # Re-apply the quant on the kernel's bf16 q_out; fused op does not quant q.
+        q_fp8 = torch.ops.vllm.rocm_aiter_per_tensor_quant(
+            results[1].view(-1, self.q_size), current_platform.fp8_dtype(), q_scale
+        )[0]
+        q_fp8 = q_fp8.view(-1, self.num_heads, self.head_size)
+        return results[0], q_fp8, results[2], v
 
     @staticmethod
     def wrap_trace_fn(
@@ -174,72 +320,7 @@ class QkNormRopeKvCachePattern:
 
         view_to_reshape(gm)
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            qkv: torch.Tensor,
-            positions: torch.Tensor,
-            q_weight: torch.Tensor,
-            k_weight: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-
-            q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
-            q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
-            q_flat = q_normed.view(-1, self.q_size)
-
-            k_by_head = k.view(-1, self.k_size // self.head_size, self.head_size)
-            k_normed = vllm.ir.ops.rms_norm(k_by_head, k_weight, self.eps)
-            k_flat = k_normed.view(-1, self.k_size)
-
-            q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
-
-            q_rope = q_rope.view(-1, self.num_heads, self.head_size)
-            k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
-            v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
-            return dummy, q_rope, k_rope, v
-
-        def replacement(
-            qkv: torch.Tensor,
-            positions: torch.Tensor,
-            q_weight: torch.Tensor,
-            k_weight: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            q_out = torch.empty(
-                qkv.shape[0],
-                self.num_heads,
-                self.head_size,
-                device=qkv.device,
-                dtype=qkv.dtype,
-            )
-            k_out = torch.empty(
-                qkv.shape[0],
-                self.num_kv_heads,
-                self.head_size,
-                device=qkv.device,
-                dtype=qkv.dtype,
-            )
-            _, _, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-            v = v.view(qkv.shape[0], self.num_kv_heads, self.head_size_v)
-
-            results = auto_functionalized(
-                self.FUSED_OP,
-                q_out=q_out,
-                k_out=k_out,
-                qkv=qkv,
-                positions=positions,
-                q_weight=q_weight,
-                k_weight=k_weight,
-                rms_norm_eps=self.eps,
-                cos_sin_cache=cos_sin_cache,
-                is_neox=self.is_neox,
-                layer_name=self.layer_name,
-            )
-
-            return results[0], results[1], results[2], v
-
+    def _register(self, pattern, replacement, pm_pass) -> None:
         trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(
             pm.fwd_only,
             QkNormRopeKvCachePattern.fx_view_to_reshape,
@@ -266,6 +347,38 @@ class QkNormRopeKvCachePattern:
             pm_pass,
             search_fn_pattern=search_fn_pattern,
         )
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        # make_fx counts `self` in bound-method code params; wrap as plain fns.
+        # Distinct names per branch so mypy doesn't see one name, two signatures.
+        if self.quant_query:
+
+            def pattern_q(qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale):
+                return self.pattern_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
+                )
+
+            def replacement_q(
+                qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
+            ):
+                return self.replacement_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
+                )
+
+            self._register(pattern_q, replacement_q, pm_pass)
+        else:
+
+            def pattern_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+                return self.pattern_non_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                )
+
+            def replacement_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+                return self.replacement_non_fp8_quant_query(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                )
+
+            self._register(pattern_noq, replacement_noq, pm_pass)
 
 
 # ---------------------------------------------------------------------------
@@ -307,11 +420,13 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                 continue
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
-                    QkNormRopeKvCachePattern(
-                        layer=layer,
-                        eps=epsilon,
-                        is_neox=neox,
-                    ).register(self.patterns)
+                    for quant_q in [False, True]:
+                        QkNormRopeKvCachePattern(
+                            layer=layer,
+                            eps=epsilon,
+                            is_neox=neox,
+                            quant_query=quant_q,
+                        ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
