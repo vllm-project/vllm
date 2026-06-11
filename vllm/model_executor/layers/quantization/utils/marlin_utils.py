@@ -374,6 +374,47 @@ def marlin_zero_points(
     return zp
 
 
+def marlin_moe_permute_zero_points(
+    zp: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+) -> torch.Tensor:
+    """Permute standard MoE zero points into Marlin format.
+
+    Args:
+        zp: Unpacked zero points, shape (num_experts, num_groups, size_n).
+            Values should be integer zero point values (not packed).
+            num_groups = K // group_size.
+        size_k: Number of groups (K // group_size), NOT the original K.
+        size_n: Output feature dimension N (not packed).
+        num_bits: Quantization bit width (4 or 8).
+        is_a_8bit: Whether activations are 8-bit quantized.
+
+    Returns:
+        Marlin-formatted zero points, shape
+        (num_experts, num_groups, size_n // pack_factor) as int32.
+
+    The transformation per expert applies three steps:
+      1. Permute columns with scale_perm (not scale_perm_single) to match
+         the Marlin dequantization MMA layout.
+      2. Interleave columns for the dequantize code.
+      3. Pack multiple values into int32.
+    """
+    pack_factor = 32 // num_bits
+    num_experts = zp.shape[0]
+    # marlin_zero_points packs size_n values into size_n // pack_factor int32s
+    output = torch.empty(
+        (num_experts, size_k, size_n // pack_factor),
+        device=zp.device,
+        dtype=torch.int32,
+    )
+    for e in range(num_experts):
+        output[e] = marlin_zero_points(zp[e], size_k, size_n, num_bits, is_a_8bit)
+    return output
+
+
 def awq_to_marlin_zero_points(
     q_zp_packed: torch.Tensor,
     size_k: int,
