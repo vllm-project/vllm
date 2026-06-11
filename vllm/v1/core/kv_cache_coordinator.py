@@ -370,6 +370,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_eagle_pop: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -643,7 +644,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = use_eagle and (idx not in eagle_verified) and (not skip_eagle_pop)
+                drop_eagle_block = (
+                    use_eagle
+                    and (idx not in eagle_verified)
+                    and (not skip_eagle_pop)
+                )
 
                 _max_length = curr_hit_length
                 if drop_eagle_block:

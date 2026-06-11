@@ -223,7 +223,9 @@ class KVCacheManager:
         is_prefill_phase = request.num_output_tokens == 0
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes, max_cache_hit_length, skip_eagle_pop=is_prefill_phase
+                request.block_hashes,
+                max_cache_hit_length,
+                skip_eagle_pop=is_prefill_phase,
             )
         )
 

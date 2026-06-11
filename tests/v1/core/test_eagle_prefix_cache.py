@@ -185,7 +185,7 @@ class TestEaglePrefixCachePrefillPhase:
         num_blocks = 100
         
         # Short prompt: 100 tokens (less than 1 block)
-        prompt_tokens = list(range(100))
+        prompt_tokens: list[int] = list(range(100))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -246,7 +246,7 @@ class TestEaglePrefixCachePrefillPhase:
         num_blocks = 100
         
         # Medium prompt: 32 tokens = 2 full blocks
-        prompt_tokens = list(range(32))
+        prompt_tokens: list[int] = list(range(32))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -309,7 +309,7 @@ class TestEaglePrefixCachePrefillPhase:
         num_blocks = 100
         
         # Long prompt: 16000 tokens ~ 10.4 blocks
-        prompt_tokens = list(range(16000))
+        prompt_tokens: list[int] = list(range(16000))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -364,7 +364,7 @@ class TestEaglePrefixCachePrefillPhase:
         block_size = 16
         num_blocks = 100
         
-        prompt_tokens = list(range(32))
+        prompt_tokens: list[int] = list(range(32))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -424,7 +424,7 @@ class TestHybridModelsWithEagle:
         num_blocks = 200
         
         # Short prompt: 100 tokens
-        prompt_tokens = list(range(100))
+        prompt_tokens: list[int] = list(range(100))
         
         kv_cache_config = make_kv_cache_config_hybrid_with_eagle(
             block_size=block_size,
@@ -479,7 +479,7 @@ class TestHybridModelsWithEagle:
         num_blocks = 200
         
         # Long prompt: 16000 tokens
-        prompt_tokens = list(range(16000))
+        prompt_tokens: list[int] = list(range(16000))
         
         kv_cache_config = make_kv_cache_config_hybrid_with_eagle(
             block_size=block_size,
@@ -537,7 +537,7 @@ class TestEaglePrefixCacheEdgeCases:
         block_size = 16
         num_blocks = 100
         
-        prompt_tokens = []
+        prompt_tokens: list[int] = []
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -570,7 +570,7 @@ class TestEaglePrefixCacheEdgeCases:
         block_size = 16
         num_blocks = 100
         
-        prompt_tokens = [0]
+        prompt_tokens: list[int] = [0]
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -616,7 +616,7 @@ class TestEaglePrefixCacheEdgeCases:
         num_blocks = 100
         
         # Exactly 2 blocks
-        prompt_tokens = list(range(32))
+        prompt_tokens: list[int] = list(range(32))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -672,7 +672,7 @@ class TestEaglePrefixCacheEdgeCases:
         block_size = 16
         num_blocks = 100
         
-        prompt_tokens = list(range(32))
+        prompt_tokens: list[int] = list(range(32))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
@@ -724,7 +724,7 @@ class TestPrefixCachingDisabledWithEagle:
         block_size = 16
         num_blocks = 100
         
-        prompt_tokens = list(range(32))
+        prompt_tokens: list[int] = list(range(32))
         
         kv_cache_config = make_kv_cache_config_with_eagle(
             block_size=block_size,
