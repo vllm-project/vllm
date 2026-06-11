@@ -686,7 +686,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
-    # (`hf`, `deepseek_v32`, `deepseek_v4`, `qwen_vl`, …). The `fastokens`
+    # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
