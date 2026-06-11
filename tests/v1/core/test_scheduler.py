@@ -4351,6 +4351,106 @@ def test_eagle3_mm_encoder_cache_with_shift():
     )
 
 
+def test_encoder_retention_margin_values(monkeypatch):
+    """The encoder retention margin must cover the maximum possible
+    rollback of num_computed_tokens from pending draft-token rejections:
+    num_spec_tokens per optimistically-scheduled in-flight step."""
+    # No speculative decoding: no rollback is possible.
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    assert scheduler.encoder_retention_margin == 0
+
+    # Sync scheduling (one batch in flight): rejections are applied to
+    # num_computed_tokens before encoder inputs are freed, so no margin
+    # is needed.
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    assert scheduler.encoder_retention_margin == 0
+
+    # Async scheduling keeps one extra step in flight, scheduled
+    # optimistically with up to num_spec_tokens unverified draft tokens.
+    # Platform support for async scheduling varies (e.g. it is force-
+    # disabled on CPU), so emulate its effect on max_concurrent_batches.
+    monkeypatch.setattr(VllmConfig, "max_concurrent_batches", property(lambda self: 2))
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    assert scheduler.encoder_retention_margin == 3
+
+
+def test_free_encoder_inputs_respects_spec_rollback_margin(monkeypatch):
+    """Regression test for issue #38551 (rollback path): under async
+    scheduling with speculative decoding, num_computed_tokens is advanced
+    optimistically and can be rolled back by up to num_spec_tokens when
+    draft tokens are rejected. Freeing an encoder input as soon as
+    num_computed_tokens passes the end of its placeholder range allows a
+    later rollback to rewind back into the range, after which the worker's
+    MM-embedding gather reads an evicted entry and crashes the engine with
+    "Encoder cache miss". The scheduler must retain the input until
+    progress passes the range end by the maximum possible rollback."""
+    # Emulate async scheduling's effect (two batches in flight); the flag
+    # itself is platform-dependent and force-disabled on CPU.
+    monkeypatch.setattr(VllmConfig, "max_concurrent_batches", property(lambda self: 2))
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_start_pos = 50
+    mm_length = 100
+    mm_positions = [
+        [PlaceholderRange(offset=mm_start_pos, length=mm_length)],
+    ]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length + 100,
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+    mm_end = mm_start_pos + mm_length
+
+    # Progress exactly at the end of the MM range: the pre-fix condition
+    # would free here, but 3 in-flight draft tokens may still be rejected,
+    # rolling num_computed_tokens back inside the range.
+    request.num_computed_tokens = mm_end
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Still within the rollback margin.
+    request.num_computed_tokens = mm_end + 2
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Past the margin: no pending rejection can rewind into the range.
+    request.num_computed_tokens = mm_end + 3
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == set()
+
+
+def test_free_encoder_inputs_unchanged_without_spec_decode():
+    """Without speculative decoding, encoder inputs are freed as soon as
+    num_computed_tokens passes the placeholder range, as before."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+
+    request.num_computed_tokens = 149
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    request.num_computed_tokens = 150
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == set()
+
+
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     """Test that ensure_cache_available() returning False defers the request.
