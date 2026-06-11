@@ -296,7 +296,14 @@ class MixtralModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            # W8A8 compressed-tensors checkpoints name experts gate/up/down;
+            # map to the w1/w3/w2 the FusedMoE loader expects (no-op if native).
+            ".gate_proj.": ".w1.",
+            ".up_proj.": ".w3.",
+            ".down_proj.": ".w2.",
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
