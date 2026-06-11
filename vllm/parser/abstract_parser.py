@@ -459,12 +459,10 @@ class DelegatingParser(Parser):
             return request
 
         structural_tag = json.dumps(structure_tag.model_dump())
-        if request.structured_outputs is None:
-            request.structured_outputs = StructuredOutputsParams(
-                structural_tag=structural_tag,
-            )
-        else:
-            request.structured_outputs.structural_tag = structural_tag
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=structural_tag,
+        )
+        request.response_format = None
         return request
 
     def extract_reasoning_streaming(

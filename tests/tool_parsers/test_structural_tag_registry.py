@@ -10,7 +10,6 @@ from xgrammar.builtin_structural_tag import (
     _structural_tag_registry as xgrammar_structural_tag_registry,
 )
 
-import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
@@ -103,20 +102,6 @@ def test_get_model_structural_tag_supports_vllm_hermes(
             "tags": [
                 {
                     "type": "tag",
-                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}</tool_call>",
-                },
-                {
-                    "type": "tag",
                     "begin": '<tool_call>\n{"name": "get_weather", "arguments": ',
                     "content": {
                         "type": "json_schema",
@@ -129,15 +114,29 @@ def test_get_model_structural_tag_supports_vllm_hermes(
                     },
                     "end": "}\n</tool_call>",
                 },
+                {
+                    "type": "tag",
+                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "style": "json",
+                    },
+                    "end": "}</tool_call>",
+                },
             ],
-            "separator": "\n",
+            "separator": "",
             "at_least_one": True,
             "stop_after_first": False,
         },
     }
 
 
-def test_hermes_required_tool_calls_are_newline_separated():
+def test_hermes_required_tool_calls_use_empty_separator():
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -163,7 +162,7 @@ def test_hermes_required_tool_calls_are_newline_separated():
     )
 
     assert tag is not None
-    assert tag.format.separator == "\n"
+    assert tag.format.separator == ""
 
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
@@ -258,7 +257,7 @@ def test_get_structural_tag_disables_reasoning(
     assert captured == [False]
 
 
-def test_unified_parser_get_structural_tag_uses_reasoning_parser(
+def test_unified_parser_get_structural_tag_disables_reasoning(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools: list[ChatCompletionToolsParam],
 ):
@@ -287,10 +286,10 @@ def test_unified_parser_get_structural_tag_uses_reasoning_parser(
 
     parser.adjust_request(request)
 
-    assert captured == [True]
+    assert captured == [False]
 
 
-def test_structural_tag_global_env_relaxes_xgrammar_function_parameters(
+def test_xgrammar_function_parameters_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools: list[ChatCompletionToolsParam],
 ):
@@ -300,11 +299,6 @@ def test_structural_tag_global_env_relaxes_xgrammar_function_parameters(
         captured.append(tools)
         return None
 
-    monkeypatch.setitem(
-        envs.environment_variables,
-        "VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        lambda: False,
-    )
     monkeypatch.setattr(
         "vllm.tool_parsers.structural_tag_registry.get_xgrammar_model_structural_tag",
         fake_get_xgrammar_model_structural_tag,
@@ -317,21 +311,16 @@ def test_structural_tag_global_env_relaxes_xgrammar_function_parameters(
         reasoning=False,
     )
 
-    assert captured[0][0]["function"]["parameters"] is None
+    assert (
+        captured[0][0]["function"]["parameters"] == sample_tools[0].function.parameters
+    )
     assert sample_tools[0].function.parameters is not None
 
 
-def test_structural_tag_global_env_ignores_function_strict_false(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setitem(
-        envs.environment_variables,
-        "VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        lambda: True,
-    )
+def test_get_function_parameters_relaxes_function_strict_false():
     function = SimpleNamespace(
         parameters={"type": "object", "properties": {}},
         strict=False,
     )
 
-    assert _get_function_parameters(function) == function.parameters
+    assert _get_function_parameters(function) is True

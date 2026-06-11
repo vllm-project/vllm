@@ -63,7 +63,10 @@ class ToolParser:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if cls.structural_tag_model is not None:
+        if (
+            cls.structural_tag_model is not None
+            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+        ):
             cls.supports_required_and_named = False
 
     def __init__(
@@ -123,9 +126,10 @@ class ToolParser:
         # Set structured output params when tool constraints are derived from
         # the tool schema. Unified parsers handle model-specific structural
         # tags before calling into the tool parser.
+        structured_outputs = getattr(request, "structured_outputs", None)
         if (
-            request.structured_outputs is not None
-            and request.structured_outputs.structural_tag is not None
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
         ):
             return request
 
