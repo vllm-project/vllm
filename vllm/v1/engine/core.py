@@ -1030,6 +1030,16 @@ class EngineCoreProc(EngineCore):
                 #    (addresses).
                 # 2. Add front-end input/output addresses from colocated front-end
                 #    (client_addresses).
+                if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                    self.eep_notification_addresses = EngineZmqAddresses(
+                        inputs=addresses.inputs.copy(),
+                        outputs=addresses.outputs.copy(),
+                        coordinator_input=addresses.coordinator_input,
+                        coordinator_output=addresses.coordinator_output,
+                        frontend_stats_publish_address=(
+                            addresses.frontend_stats_publish_address
+                        ),
+                    )
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
                 yield addresses
@@ -1072,6 +1082,10 @@ class EngineCoreProc(EngineCore):
             if vllm_config.parallel_config.data_parallel_size > 1:
                 ready_msg["parallel_config_hash"] = (
                     vllm_config.parallel_config.compute_hash()
+                )
+            if vllm_config.parallel_config.enable_elastic_ep:
+                ready_msg["coord_store_port"] = (
+                    vllm_config.parallel_config._coord_store_port
                 )
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
@@ -1881,6 +1895,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 if self.eep_scaling_state.is_complete():
                     if self.eep_scaling_state.worker_type == "removing":
                         raise SystemExit
+                    if self.eep_scaling_state.worker_type == "new" and hasattr(
+                        self, "eep_notification_addresses"
+                    ):
+                        del self.eep_notification_addresses
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
@@ -2020,7 +2038,18 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         outputs.engine_index = self.engine_index
 
-        if hasattr(self, "output_thread") and self.output_thread.is_alive():
+        notification_addresses = getattr(self, "eep_notification_addresses", None)
+        if notification_addresses is not None:
+            encoder = MsgpackEncoder()
+            ctx = zmq.Context.instance()
+            with make_zmq_socket(
+                ctx,
+                notification_addresses.outputs[0],
+                zmq.PUSH,
+                linger=4000,
+            ) as socket:
+                socket.send_multipart(encoder.encode(outputs))
+        elif hasattr(self, "output_thread") and self.output_thread.is_alive():
             self.output_queue.put_nowait((0, outputs))
         else:
             encoder = MsgpackEncoder()

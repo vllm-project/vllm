@@ -528,10 +528,14 @@ class ElasticEPScalingState:
         self.engine_core.engines_running = bool(data[0])
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
-        if new_dp_group.rank() == 0:
+        if (
+            new_dp_group.rank() == 0
+            or self.vllm_config.parallel_config.data_parallel_external_lb
+        ):
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )
+        if new_dp_group.rank() == 0:
             logger.info("[Elastic EP] Switched to new setup")
 
     def _eplb_reshuffle(self):
