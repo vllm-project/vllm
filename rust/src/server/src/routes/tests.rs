@@ -43,6 +43,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use crate::config::ApiServerOptions;
 use crate::state::AppState;
 
 fn request_output(
@@ -427,6 +428,11 @@ impl Tokenizer for FakeChatTokenizer {
                 rest = stripped;
                 continue;
             }
+            if let Some(stripped) = rest.strip_prefix("<|image_pad|>") {
+                token_ids.push(151655);
+                rest = stripped;
+                continue;
+            }
 
             let ch = rest.chars().next().expect("rest is not empty");
             let mut buf = [0; 4];
@@ -547,11 +553,16 @@ impl ChatBackend for FakeChatBackend {
 
 impl ChatRenderer for FakeChatBackend {
     fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+        let placeholder = self
+            .multimodal_model_info
+            .as_ref()
+            .map(|info| info.placeholder_token())
+            .unwrap_or("<image>");
         let mut prompt = String::new();
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
             prompt.push_str(": ");
-            prompt.push_str(&render_fake_message_content(message)?);
+            prompt.push_str(&render_fake_message_content(message, placeholder)?);
             prompt.push('\n');
         }
         if request.chat_options.add_generation_prompt() {
@@ -563,17 +574,20 @@ impl ChatRenderer for FakeChatBackend {
     }
 }
 
-fn render_fake_message_content(message: &ChatMessage) -> vllm_chat::Result<String> {
+fn render_fake_message_content(
+    message: &ChatMessage,
+    placeholder: &str,
+) -> vllm_chat::Result<String> {
     match message {
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content),
+        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
 
-fn render_fake_content(content: &ChatContent) -> vllm_chat::Result<String> {
+fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::Result<String> {
     Ok(match content {
         ChatContent::Text(text) => text.clone(),
         ChatContent::Parts(parts) => {
@@ -581,7 +595,7 @@ fn render_fake_content(content: &ChatContent) -> vllm_chat::Result<String> {
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => out.push_str("<image>"),
+                    ChatContentPart::ImageUrl { .. } => out.push_str(placeholder),
                 }
             }
             out
@@ -774,8 +788,12 @@ async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
     )
     .await;
     let app = build_router(Arc::new(
-        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-            .with_request_id_headers(true),
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_request_id_headers: true,
+                ..Default::default()
+            },
+        ),
     ));
     (app, engine_task)
 }
