@@ -30,6 +30,8 @@ from .serving import OpenAIServingRealtime
 
 logger = init_logger(__name__)
 
+MAX_AUDIO_QUEUE_SIZE = 256
+
 
 class RealtimeConnection:
     """Manages WebSocket lifecycle and state for realtime transcription.
@@ -46,13 +48,16 @@ class RealtimeConnection:
         self.websocket = websocket
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
-        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+        self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(
+            maxsize=MAX_AUDIO_QUEUE_SIZE
+        )
         self.generation_task: asyncio.Task | None = None
 
         self._is_connected = False
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self._accumulated_audio_bytes = 0
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -123,17 +128,21 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                self._accumulated_audio_bytes += len(audio_bytes)
+                accumulated_mb = self._accumulated_audio_bytes / 1024**2
+                if accumulated_mb > self._max_audio_filesize_mb:
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",
-                        value=len(audio_array) / 1024**2,
+                        value=accumulated_mb,
                     )
                 if len(audio_array) == 0:
                     raise VLLMValidationError("Can't process empty audio.")
 
-                # Put audio chunk in queue
-                self.audio_queue.put_nowait(audio_array)
+                try:
+                    self.audio_queue.put_nowait(audio_array)
+                except asyncio.QueueFull:
+                    await self.send_error("Audio buffer full", "buffer_full")
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -260,6 +269,7 @@ class RealtimeConnection:
             # Clear queue for next utterance
             while not self.audio_queue.empty():
                 self.audio_queue.get_nowait()
+            self._accumulated_audio_bytes = 0
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
