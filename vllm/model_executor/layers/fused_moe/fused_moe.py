@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -1243,7 +1244,11 @@ def get_default_config(
         bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk, block_shape[1], E, bit)
         if use_moe_wna16_cuda:
-            config = {"BLOCK_SIZE_M": min(16, M), "SPLIT_K": 1}
+            config = {
+                "BLOCK_SIZE_M": min(16, next_power_of_2(M)),
+                "GROUP_SIZE_M": 1,
+                "SPLIT_K": 1,
+            }
         elif M <= 20:
             config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         elif M <= 40:
