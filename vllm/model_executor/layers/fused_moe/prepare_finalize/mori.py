@@ -49,6 +49,9 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def supports_async(self) -> bool:
         return False
 
+    def finalize_uses_original_topk(self) -> bool:
+        return True
+
     def prepare(
         self,
         a1: torch.Tensor,
