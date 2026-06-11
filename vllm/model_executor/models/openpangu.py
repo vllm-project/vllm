@@ -81,6 +81,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    sharded_weight_loader,
 )
 from vllm.model_executor.models.deepseek_v2 import (
     Indexer as _DeepseekIndexer,
@@ -219,13 +220,12 @@ class MomeAttention(AttentionLayerBase, CustomOp):
         )
 
         # Set weight loading attributes
-        set_weight_attrs(self.qa_conv.weight, {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.qa_conv.weight, {"weight_loader": default_weight_loader})
         set_weight_attrs(
-            self.compresskv_conv.weight, {"weight_loader": self.weight_loader}
+            self.compresskv_conv.weight, {"weight_loader": default_weight_loader}
         )
         set_weight_attrs(
-            self.o_conv.weight,
-            {"weight_loader": self.weight_loader, "output_parallel": True},
+            self.o_conv.weight, {"weight_loader": sharded_weight_loader(0)}
         )
 
         # In v1, the KV cache tensors are set by the ModelRunner
@@ -290,16 +290,6 @@ class MomeAttention(AttentionLayerBase, CustomOp):
             output,
         )
         return output
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
-        output_parallel = getattr(param, "output_parallel", False)
-        param_data = param.data
-        if output_parallel:
-            shard_size = param_data.shape[0]
-            loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
 
 
 def mome_attention_fused_op(
@@ -795,7 +785,7 @@ class OpenPanguMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
-class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
+class OpenPanguMLAAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1024,11 +1014,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 )
             )
             set_weight_attrs(
-                self.param_sink_k_pe,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                self.param_sink_k_pe, {"weight_loader": default_weight_loader}
             )
             self.param_sink_compressed_kv = torch.nn.Parameter(
                 torch.empty(
@@ -1041,11 +1027,7 @@ class OpenPanguMLAAttention(PanguSinkAttentionBase, nn.Module):
                 )
             )
             set_weight_attrs(
-                self.param_sink_compressed_kv,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                self.param_sink_compressed_kv, {"weight_loader": default_weight_loader}
             )
         # To enable dummy run with out weight
         self.post_weight_load()
@@ -1209,7 +1191,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         )
 
 
-class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
+class OpenPanguSinkAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -1341,11 +1323,7 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
                 )
             )
             set_weight_attrs(
-                self.param_sink_key,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                self.param_sink_key, {"weight_loader": sharded_weight_loader(1)}
             )
 
             self.param_sink_value = torch.nn.Parameter(
@@ -1360,51 +1338,10 @@ class OpenPanguSinkAttention(PanguSinkAttentionBase, nn.Module):
                 )
             )
             set_weight_attrs(
-                self.param_sink_value,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                self.param_sink_value, {"weight_loader": sharded_weight_loader(1)}
             )
         # To enable dummy run with out weight
         self.post_weight_load()
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        output_dim = getattr(param, "output_dim", None)
-
-        is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, nn.UninitializedParameter):
-            final_shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                assert final_shape[output_dim] % self.tp_size == 0
-                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
-
-        param_data = param.data
-        if output_dim is not None and not is_sharded_weight:
-            shard_size = param_data.shape[output_dim]
-            start_idx = self.tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
 
     def forward(
         self,
