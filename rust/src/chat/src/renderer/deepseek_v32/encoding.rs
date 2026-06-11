@@ -49,6 +49,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
     let last_user_actual_index = find_last_user_actual_index(request.messages.as_slice());
+    let continue_final_message = request.chat_options.continue_final_message();
     let mut prompt = String::from(BOS_TOKEN);
 
     if request.tool_parsing_enabled() {
@@ -66,6 +67,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
             last_user_actual_index,
             thinking_mode,
             drop_thinking,
+            continue_final_message,
         )?;
     }
 
@@ -96,6 +98,7 @@ fn render_message(
     last_user_actual_index: usize,
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
+    continue_final_message: bool,
 ) -> Result<()> {
     let render_index = message_index as isize + render_offset;
     let opens_thinking = render_index == last_user_render_index;
@@ -125,9 +128,7 @@ fn render_message(
                 thinking_mode,
                 drop_thinking,
             ),
-            // TODO: Respect `continue_final_message` and map it to DeepSeek's
-            // prefix-style final-assistant continuation behavior.
-            false,
+            continue_final_message && message_index + 1 == messages.len(),
         ),
         ChatMessage::ToolResponse { content, .. } => render_tool_message(
             out,
