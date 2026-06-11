@@ -696,6 +696,117 @@ def _process_awq_weights_marlin(
     )
 
 
+def _process_weights_cpu(
+    quant_config: QuantizationConfig | QuantizationArgs | None,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w13_qzeros: torch.Tensor | None = None,
+    w2_qzeros: torch.Tensor | None = None,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_g_idx
+    torch.Tensor | None,  # w2_g_idx
+    torch.Tensor | None,  # w13_g_idx_sort_indices
+    torch.Tensor | None,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """CPU INT4 W4A16 weight post-processing."""
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu,
+    )
+    from vllm.model_executor.layers.quantization.auto_gptq import (
+        AutoGPTQConfig,
+    )
+    from vllm.model_executor.layers.quantization.awq_marlin import (
+        AWQMarlinConfig,
+    )
+
+    # Detect packing format.
+    # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
+    # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
+    # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
+    if isinstance(quant_config, AWQMarlinConfig):
+        # AWQ: K is stored unpacked in dim 1.
+        cpu_quant_algo = ops.CPUQuantAlgo.AWQ
+    elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
+        # GPTQ / compressed-tensors: K//8 is stored packed in dim 1.
+        if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
+            raise NotImplementedError(
+                "CPU WNA16 MoE backend does not support GPTQ with "
+                "desc_act=True. The fused MoE kernel has no g_idx "
+                "reordering support."
+            )
+        cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+    else:
+        raise TypeError(
+            "CPU WNA16 MoE backend requires AWQMarlinConfig, AutoGPTQConfig "
+            f"or QuantizationArgs, got {type(quant_config).__name__}."
+        )
+
+    # Determine zero points for repacking.
+    w13_zeros: torch.Tensor | None = None
+    w2_zeros: torch.Tensor | None = None
+    if w13_qzeros is not None:
+        w13_zeros = (
+            w13_qzeros.data.view(torch.int32)
+            if w13_qzeros.dtype != torch.int32
+            else w13_qzeros.data
+        )
+    if w2_qzeros is not None:
+        w2_zeros = (
+            w2_qzeros.data.view(torch.int32)
+            if w2_qzeros.dtype != torch.int32
+            else w2_qzeros.data
+        )
+
+    (
+        blocked_w13,
+        blocked_w2,
+        blocked_s13,
+        blocked_s2,
+        blocked_z13,
+        blocked_z2,
+    ) = prepare_int4_moe_layer_for_cpu(
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        quant_algo=cpu_quant_algo,
+        w13_zeros=w13_zeros,
+        w2_zeros=w2_zeros,
+    )
+    return (
+        blocked_w13,
+        blocked_w2,
+        blocked_s13,
+        blocked_s2,
+        w13_g_idx,
+        w2_g_idx,
+        None,  # w13_g_idx_sort_indices (unused on CPU)
+        None,  # w2_g_idx_sort_indices (unused on CPU)
+        blocked_z13,
+        blocked_z2,
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        w13_bias.to(torch.float32) if w13_bias is not None else None,
+        w2_bias.to(torch.float32) if w2_bias is not None else None,
+    )
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -871,81 +982,16 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.CPU:
-        # CPU backend: repack INT4 weights to blocked format via
-        # prepare_int4_moe_layer_for_cpu.
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_int4_moe_layer_for_cpu,
-        )
-        from vllm.model_executor.layers.quantization.auto_gptq import (
-            AutoGPTQConfig,
-        )
-        from vllm.model_executor.layers.quantization.awq_marlin import (
-            AWQMarlinConfig,
-        )
-
-        # Detect AWQ vs GPTQ packing format.
-        # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
-        # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
-        # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
-        if isinstance(quant_config, AWQMarlinConfig):
-            # AWQ: K is stored unpacked in dim 1.
-            group_size = w13.size(1) // w13_scale.size(1)
-            cpu_quant_algo = ops.CPUQuantAlgo.AWQ
-        elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
-            # GPTQ / compressed-tensors: K//8 is stored packed in dim 1.
-            group_size = w13.size(1) * 8 // w13_scale.size(1)
-            cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
-        else:
-            raise TypeError(
-                "CPU WNA16 MoE backend requires AWQMarlinConfig, AutoGPTQConfig "
-                f"or QuantizationArgs, got {type(quant_config).__name__}."
-            )
-
-        # Determine zero points for repacking.
-        w13_zeros: torch.Tensor | None = None
-        w2_zeros: torch.Tensor | None = None
-        if w13_qzeros is not None:
-            w13_zeros = (
-                w13_qzeros.data.view(torch.int32)
-                if w13_qzeros.dtype != torch.int32
-                else w13_qzeros.data
-            )
-        if w2_qzeros is not None:
-            w2_zeros = (
-                w2_qzeros.data.view(torch.int32)
-                if w2_qzeros.dtype != torch.int32
-                else w2_qzeros.data
-            )
-
-        (
-            blocked_w13,
-            blocked_w2,
-            blocked_s13,
-            blocked_s2,
-            blocked_z13,
-            blocked_z2,
-        ) = prepare_int4_moe_layer_for_cpu(
+        return _process_weights_cpu(
+            quant_config,
             w13,
             w2,
             w13_scale,
             w2_scale,
-            quant_algo=cpu_quant_algo,
-            w13_zeros=w13_zeros,
-            w2_zeros=w2_zeros,
-        )
-        return (
-            blocked_w13,
-            blocked_w2,
-            blocked_s13,
-            blocked_s2,
             w13_g_idx,
             w2_g_idx,
-            None,  # w13_g_idx_sort_indices (unused on CPU)
-            None,  # w2_g_idx_sort_indices (unused on CPU)
-            blocked_z13,
-            blocked_z2,
-            None,  # w13_input_global_scale
-            None,  # w2_input_global_scale
+            w13_qzeros,
+            w2_qzeros,
             w13_bias,
             w2_bias,
         )

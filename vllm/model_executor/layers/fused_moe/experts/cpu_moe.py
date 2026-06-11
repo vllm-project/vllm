@@ -480,6 +480,12 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        if apply_router_weight_on_input:
+            raise NotImplementedError(
+                "CPUExpertsInt4 (W4A16) does not support "
+                "apply_router_weight_on_input=True. "
+            )
+
         from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
             select_experts,
         )

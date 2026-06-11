@@ -97,7 +97,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             if (
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
-                or current_platform.is_cpu()
             ):
                 from .compressed_tensors_moe_wna16 import (
                     CompressedTensorsWNA16MoEMethod,

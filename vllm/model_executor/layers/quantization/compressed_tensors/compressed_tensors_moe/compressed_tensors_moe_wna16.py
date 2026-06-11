@@ -19,19 +19,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
-    WNA16MoEBackend,
-    make_wna16_moe_kernel,
-    select_wna16_moe_backend,
-)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kInt4Static,
-)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -59,19 +50,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         assert weight_quant.symmetric, (
             "Only symmetric quantization is supported for MoE"
         )
-
-        self.wna16_moe_backend: WNA16MoEBackend | None = None
-        self.experts_cls: type[mk.FusedMoEExperts] | None = None
-        self.moe_kernel: mk.FusedMoEKernel | None = None
-        if current_platform.is_cpu():
-            if self.num_bits != 4:
-                raise NotImplementedError(
-                    "CPU WNA16 MoE currently supports W4A16 only."
-                )
-            self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
-                moe,
-                kInt4Static,
-            )
 
     def create_weights(
         self,
@@ -202,54 +180,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.wna16_moe_backend is not None:
-            from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
-                convert_to_wna16_moe_kernel_format,
-            )
-            from vllm.model_executor.utils import replace_parameter
-
-            (
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-                _w13_g_idx,
-                _w2_g_idx,
-                _w13_g_idx_sort_indices,
-                _w2_g_idx_sort_indices,
-                w13_qzeros,
-                w2_qzeros,
-                _w13_input_global_scale,
-                _w2_input_global_scale,
-                _w13_bias,
-                _w2_bias,
-            ) = convert_to_wna16_moe_kernel_format(
-                backend=self.wna16_moe_backend,
-                layer=layer,
-                quant_config=self.weight_quant,
-                input_dtype=None,
-                w13=layer.w13_weight_packed,
-                w2=layer.w2_weight_packed,
-                w13_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
-
-            replace_parameter(layer, "w13_weight_packed", w13)
-            replace_parameter(layer, "w2_weight_packed", w2)
-            replace_parameter(layer, "w13_weight_scale", w13_scale)
-            replace_parameter(layer, "w2_weight_scale", w2_scale)
-            if w13_qzeros is not None:
-                layer.register_parameter(
-                    "w13_qzeros", torch.nn.Parameter(w13_qzeros, requires_grad=False)
-                )
-            if w2_qzeros is not None:
-                layer.register_parameter(
-                    "w2_qzeros", torch.nn.Parameter(w2_qzeros, requires_grad=False)
-                )
-
-            self._setup_kernel(layer)
-            return
-
         # Reconfigure packed weights and scales to match moe_wna16 format
         layer.w13_weight_packed = torch.nn.Parameter(
             layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
@@ -264,23 +194,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
-        )
-
-    def _setup_kernel(self, layer: RoutedExperts) -> None:
-        """Build modular kernel and let experts repack weights."""
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_wna16_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            is_k_full=True,
-            w13_g_idx=None,
-            w2_g_idx=None,
-            w13_g_idx_sort_indices=None,
-            w2_g_idx_sort_indices=None,
-            routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(
@@ -335,20 +248,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        if self.moe_kernel is not None:
-            return self.moe_kernel.apply(
-                x,
-                layer.w13_weight_packed,
-                layer.w2_weight_packed,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                shared_experts_input=shared_experts_input,
-            )
-
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(
@@ -362,30 +261,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
-        )
-
-    def apply_monolithic(
-        self,
-        layer: RoutedExperts,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
         )
 
     @property

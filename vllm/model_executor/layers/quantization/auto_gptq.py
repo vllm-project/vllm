@@ -16,6 +16,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -640,11 +641,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
-        from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
-            WNA16MoEBackend,
-        )
-
-        if self.wna16_moe_backend != WNA16MoEBackend.CPU:
+        if self.experts_cls is not None and issubclass(
+            self.experts_cls, FusedMoEExpertsModular
+        ):
             device = layer.w13_qweight.device
             layer.workspace = marlin_make_workspace_new(device, 4)
 
