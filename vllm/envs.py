@@ -1640,8 +1640,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
     ),
-    # Timeout in seconds for worker process shutdown (only applies when TP >
-    # 1).
+    # Timeout in seconds for engine and worker process shutdown
     "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "4")
     ),
