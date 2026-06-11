@@ -238,22 +238,39 @@ class NixlConnectorWorker:
         view_info: list[tuple[int, int, int, dict[int, int]]] = []
         position = 0
         for view_idx, view in enumerate(self._views):
-            num_descs = view.num_descs()
             representative_group = next(
                 group_idx
                 for group_idx, mapped_view_idx in self._group_to_view_idx.items()
                 if mapped_view_idx == view_idx
             )
-            num_splits = len(plan.source_ranks_per_group[representative_group])
             if isinstance(view.spec, MambaSpec):
                 rank_to_slot = {r: idx for idx, r in enumerate(plan.all_source_ranks)}
+                num_splits = len(plan.source_ranks_per_group[representative_group])
             else:
                 rank_to_slot = {
                     r: plan.rank_to_attention_slot.get(r, 0)
                     for r in plan.all_source_ranks
                 }
-            view_info.append((position, position + num_descs, num_splits, rank_to_slot))
-            position += num_descs
+                # Use unique attention slot count, not total source ranks.
+                # With GQA replication, multiple remote ranks share the same
+                # head data and map to the same slot.  slice_for_tp_transfer
+                # produces one full head per remote rank, so the local chunk
+                # must also be one full head (not a fraction).
+                num_splits = len(
+                    set(
+                        plan.rank_to_attention_slot[r]
+                        for r in plan.source_ranks_per_group[representative_group]
+                    )
+                )
+            view_info.append(
+                (
+                    position,
+                    position + view.num_descs(),
+                    num_splits,
+                    rank_to_slot,
+                )
+            )
+            position += view.num_descs()
 
         for _source_idx, source_rank in enumerate(plan.all_source_ranks):
             handle: list[tuple[int, int, int]] = []
@@ -1412,10 +1429,20 @@ class NixlConnectorWorker:
             # we only do this once per remote tp_size (replica-friendly).
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
-            for handle_data in self._build_local_splits_from_plan(
-                plan,
-                self.src_blocks_data,
+            for p_idx, handle_data in enumerate(
+                self._build_local_splits_from_plan(
+                    plan,
+                    self.src_blocks_data,
+                )
             ):
+                local_lens = [d[1] for d in handle_data]
+                logger.info(
+                    "DBG_LOCAL_SPLIT rank=%s p_idx=%s num_descs=%s unique_lens=%s",
+                    self.tp_rank,
+                    p_idx,
+                    len(handle_data),
+                    sorted(set(local_lens)),
+                )
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
                 )
@@ -1425,15 +1452,23 @@ class NixlConnectorWorker:
         ### Register remote agent memory regions
         blocks_data: list[tuple[int, int, int]] = []
         for view in self._views:
-            blocks_data.extend(
-                self._build_view_remote(
-                    view,
-                    nixl_agent_meta,
-                    physical_blocks_per_logical,
-                    remote_tp_rank=remote_tp_rank,
-                    remote_tp_size=remote_tp_size,
-                )
+            view_data = self._build_view_remote(
+                view,
+                nixl_agent_meta,
+                physical_blocks_per_logical,
+                remote_tp_rank=remote_tp_rank,
+                remote_tp_size=remote_tp_size,
             )
+            remote_lens = [d[1] for d in view_data]
+            logger.info(
+                "DBG_REMOTE rank=%s remote_rank=%s view=%s num_descs=%s unique_lens=%s",
+                self.tp_rank,
+                remote_tp_rank,
+                type(view.spec).__name__,
+                len(view_data),
+                sorted(set(remote_lens)),
+            )
+            blocks_data.extend(view_data)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
