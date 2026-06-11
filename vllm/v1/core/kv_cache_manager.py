@@ -215,7 +215,7 @@ class KVCacheManager:
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
-        if not self.enable_caching or request.skip_reading_prefix_cache:
+        if not self._prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -231,15 +231,36 @@ class KVCacheManager:
             )
         )
 
-        if self.log_stats:
+        # NOTE: Prefix cache stats are intentionally NOT recorded here. The
+        # scheduler records them via record_prefix_cache_stats() only after
+        # the request is actually scheduled, so that requests which perform
+        # the lookup but fail to allocate KV slots (and are retried in a
+        # later step) are not counted multiple times.
+        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+
+    def _prefix_cache_lookup_enabled(self, request: Request) -> bool:
+        """Whether get_computed_blocks() performs a real local prefix cache
+        lookup for this request (i.e. did not take the early-out above)."""
+        return self.enable_caching and not request.skip_reading_prefix_cache
+
+    def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
+        """Record a local prefix cache lookup into the running stats.
+
+        Called by the scheduler once a request is actually scheduled (after a
+        successful KV slot allocation), rather than at lookup time, to avoid
+        double-counting requests that are retried across scheduling steps.
+
+        Mirrors the early-out in get_computed_blocks(): nothing is recorded
+        when prefix caching is disabled or the request skips the lookup, so a
+        no-lookup request does not register a phantom miss.
+        """
+        if self.log_stats and self._prefix_cache_lookup_enabled(request):
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
+                num_hits=num_hits,
                 preempted=request.num_preemptions > 0,
             )
-
-        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
         self,
