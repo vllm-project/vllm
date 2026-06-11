@@ -1926,10 +1926,10 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Sync every step: if engines_running is stale, multi-node DP ranks
+        # can diverge on the dummy-vs-real-step branch and issue a different
+        # number of coordination all-reduces, deadlocking the process group.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
-            return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
             self.dp_group,
