@@ -792,6 +792,112 @@ def test_linear_dora_forward(default_vllm_config, dist_init, device, stage) -> N
 
 
 @torch.inference_mode()
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Phase 1 DoRA forward support is CUDA-only.",
+)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_linear_dora_forward_matches_peft(
+    default_vllm_config, dist_init, device, stage
+) -> None:
+    peft = pytest.importorskip("peft")
+
+    class TinyLinear(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 3, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.linear(x)
+
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    dtype = torch.float16
+    max_loras = 2
+    rank = 2
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        lora_dtype=dtype,
+    )
+    punica_wrapper = get_punica_wrapper(16, 4, device, lora_config=lora_config)
+
+    base_weight = torch.tensor(
+        [
+            [0.5, -0.25, 0.75, 1.0],
+            [-1.0, 0.5, 0.25, -0.75],
+            [0.25, 1.25, -0.5, 0.5],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+    lora_a = torch.tensor(
+        [[0.5, 0.25, -0.5, 1.0], [1.5, -0.25, 0.75, -1.0]],
+        dtype=dtype,
+        device=device,
+    )
+    lora_b = torch.tensor(
+        [[0.25, -0.5], [1.0, 0.5], [-0.75, 1.25]],
+        dtype=dtype,
+        device=device,
+    )
+    dora_magnitude = torch.tensor([2.0, 3.0, 4.0], dtype=dtype, device=device)
+    x = torch.tensor(
+        [
+            [0.5, -1.0, 0.25, 1.5],
+            [-0.25, 0.75, 1.25, -0.5],
+            [1.0, 0.5, -0.75, 0.25],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+
+    peft_model = peft.get_peft_model(
+        TinyLinear().to(device=device, dtype=dtype),
+        peft.LoraConfig(
+            r=rank,
+            lora_alpha=rank,
+            target_modules=["linear"],
+            use_dora=True,
+            bias="none",
+        ),
+    )
+    peft_linear = peft_model.base_model.model.linear
+    peft_linear.base_layer.weight.data.copy_(base_weight)
+    peft_linear.lora_A["default"].weight.data.copy_(lora_a)
+    peft_linear.lora_B["default"].weight.data.copy_(lora_b)
+    peft_linear.lora_magnitude_vector["default"].weight.data.copy_(dora_magnitude)
+    expected = peft_model(x)
+
+    linear = ReplicatedLinear(4, 3, bias=False, params_dtype=dtype)
+    linear.weight.data.copy_(base_weight)
+    lora_linear = ReplicatedLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+    lora_linear.set_mapping(punica_wrapper)
+    dora_id = 1
+    dora_slot = 1
+    lora_linear.set_lora(
+        dora_slot,
+        lora_a=lora_a,
+        lora_b=lora_b,
+        lora_magnitude_vector=dora_magnitude,
+    )
+    token_lora_ids = [dora_id] * x.shape[0]
+    lora_mapping = LoRAMapping(
+        token_lora_ids,
+        token_lora_ids,
+        is_prefill=stage,
+    )
+    punica_wrapper.update_metadata(lora_mapping, [None, dora_id], max_loras, 512)
+
+    actual = lora_linear(x)[0]
+
+    rtol, atol = TOLERANCES[actual.dtype]
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])

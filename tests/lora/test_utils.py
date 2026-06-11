@@ -24,7 +24,6 @@ class LoRANameParserTestConfig(NamedTuple):
     weights_mapper: WeightsMapper | None = None
 
 
-@pytest.mark.skip_global_cleanup
 def test_parse_fine_tuned_lora_name_valid():
     fixture = [
         LoRANameParserTestConfig(
@@ -116,7 +115,6 @@ def test_parse_fine_tuned_lora_name_valid():
         )
 
 
-@pytest.mark.skip_global_cleanup
 def test_parse_fine_tuned_lora_name_invalid():
     fixture = {
         "base_model.weight",
