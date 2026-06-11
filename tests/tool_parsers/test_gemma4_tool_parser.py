@@ -413,6 +413,36 @@ class TestStreamingExtraction:
                         return name
         return None
 
+    def _collect_content(self, results):
+        return "".join(
+            delta.content for delta, _ in results if delta is not None and delta.content
+        )
+
+    def _collect_tool_calls(self, results):
+        """Collect streamed tool calls by index."""
+        calls: dict[int, dict[str, str | None]] = {}
+        for delta, _ in results:
+            if not delta or not delta.tool_calls:
+                continue
+            for tc in delta.tool_calls:
+                entry = calls.setdefault(tc.index, {"name": None, "arguments": ""})
+                func = tc.function if isinstance(tc.function, dict) else tc.function
+                if isinstance(func, dict):
+                    name = func.get("name")
+                    arguments = func.get("arguments", "")
+                else:
+                    name = getattr(func, "name", None)
+                    arguments = getattr(func, "arguments", "") or ""
+                if name:
+                    entry["name"] = name
+                if arguments:
+                    entry["arguments"] += arguments
+        return calls
+
+    def _assert_tool_call(self, calls, index, name, arguments):
+        assert calls[index]["name"] == name
+        assert json.loads(calls[index]["arguments"]) == arguments
+
     def test_basic_streaming_single_tool(self, parser, mock_request):
         """Simulate the exact streaming scenario from the bug report.
 
@@ -441,6 +471,142 @@ class TestStreamingExtraction:
         assert args_text, "No arguments were streamed"
         parsed_args = json.loads(args_text)
         assert parsed_args == {"location": "Paris, France"}
+
+    def test_streaming_complete_tool_call_in_single_delta(self, parser, mock_request):
+        """A full tool call can arrive in one speculative decode step."""
+        chunks = ['<|tool_call>call:get_weather{location:<|"|>Paris<|"|>}<tool_call|>']
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "get_weather", {"location": "Paris"})
+
+    def test_streaming_content_and_complete_tool_call_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Content before a coalesced explicit tool call is still emitted."""
+        content = "I will record this.\n"
+        chunks = [
+            f'{content}<|tool_call>call:get_weather{{location:<|"|>Paris<|"|>}}'
+            "<tool_call|>"
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == content
+        self._assert_tool_call(calls, 0, "get_weather", {"location": "Paris"})
+
+    def test_streaming_complete_tool_call_and_content_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Content after a coalesced explicit tool call is still emitted."""
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"|>Paris<|"|>}<tool_call|><div>'
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == "<div>"
+        self._assert_tool_call(calls, 0, "get_weather", {"location": "Paris"})
+
+    def test_streaming_coalesced_multiple_tool_calls(self, parser, mock_request):
+        """Back-to-back complete tool calls can arrive in one delta."""
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"|>Paris<|"|>}'
+            "<tool_call|>"
+            '<|tool_call>call:get_time{location:<|"|>Paris<|"|>}'
+            "<tool_call|>"
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "get_weather", {"location": "Paris"})
+        self._assert_tool_call(calls, 1, "get_time", {"location": "Paris"})
+
+    def test_streaming_coalesced_complete_and_open_call(self, parser, mock_request):
+        """A delta can finish one tool call and start the next."""
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"|>Paris<|"|>}'
+            "<tool_call|>"
+            "<|tool_call>call:get_time{",
+            'location:<|"|>Paris<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "get_weather", {"location": "Paris"})
+        self._assert_tool_call(calls, 1, "get_time", {"location": "Paris"})
+
+    def test_streaming_stripped_tool_call_body(self, parser, mock_request):
+        """Stripped Gemma4 tool grammar must not leak as content."""
+        chunks = ['call:record_status{item:<|"|>sprocket<|"|>,status:<|"|>empty<|"|>}']
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == ""
+        self._assert_tool_call(
+            calls,
+            0,
+            "record_status",
+            {"item": "sprocket", "status": "empty"},
+        )
+
+    def test_streaming_stripped_tool_call_after_content(self, parser, mock_request):
+        """A stripped call after content must not leak as content."""
+        content = "I will record this.\n"
+        chunks = [
+            content,
+            'call:record_status{item:<|"|>sprocket<|"|>,status:<|"|>empty<|"|>}',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == content
+        self._assert_tool_call(
+            calls,
+            0,
+            "record_status",
+            {"item": "sprocket", "status": "empty"},
+        )
+
+    def test_streaming_content_and_stripped_tool_call_in_single_delta(
+        self, parser, mock_request
+    ):
+        """A stripped call can share a delta with preceding content."""
+        content = "I will record this.\n"
+        chunks = [f'{content}call:record_status{{item:<|"|>sprocket<|"|>}}']
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == content
+        self._assert_tool_call(
+            calls,
+            0,
+            "record_status",
+            {"item": "sprocket"},
+        )
+
+    def test_streaming_stripped_multiple_tool_calls(self, parser, mock_request):
+        """Stripped back-to-back calls are split by call body boundaries."""
+        chunks = [
+            'call:first{text:<|"|>value with } brace<|"|>}call:second{value:<|"|>tw',
+            'o<|"|>}',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == ""
+        self._assert_tool_call(calls, 0, "first", {"text": "value with } brace"})
+        self._assert_tool_call(calls, 1, "second", {"value": "two"})
 
     def test_streaming_multi_arg(self, parser, mock_request):
         """Streaming with multiple arguments."""
@@ -649,9 +815,9 @@ class TestStreamingExtraction:
         captured_current_texts: list[str] = []
         original_extract_streaming = parser._extract_streaming
 
-        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+        def wrapped_extract_streaming(current_text):
             captured_current_texts.append(current_text)
-            return original_extract_streaming(previous_text, current_text, delta_text)
+            return original_extract_streaming(current_text)
 
         monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
 
@@ -728,3 +894,125 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+    def test_streaming_content_between_two_tool_calls(self, parser, mock_request):
+        """Content between two complete tool calls is emitted."""
+        middle = "Some text"
+        chunks = [
+            f'<|tool_call>call:a{{x:<|"|>1<|"|>}}<tool_call|>'
+            f"{middle}"
+            f'<|tool_call>call:b{{y:<|"|>2<|"|>}}<tool_call|>'
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == middle
+        self._assert_tool_call(calls, 0, "a", {"x": "1"})
+        self._assert_tool_call(calls, 1, "b", {"y": "2"})
+
+    def test_streaming_nested_object_args(self, parser, mock_request):
+        """Nested object arguments stream correctly."""
+        chunks = [
+            "<|tool_call>",
+            "call:fn{",
+            'nested:{inner:<|"|>val<|"|>}',
+            "}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "fn", {"nested": {"inner": "val"}})
+
+    def test_streaming_buffer_reassembles_split_start_token(self, parser, mock_request):
+        """Delta buffer reassembles <|tool_call> split across chunks."""
+        chunks = [
+            "<",
+            "|tool_call>",
+            'call:fn{x:<|"|>v<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == ""
+        self._assert_tool_call(calls, 0, "fn", {"x": "v"})
+
+    def test_streaming_buffer_reassembles_split_end_token(self, parser, mock_request):
+        """Delta buffer reassembles <tool_call|> split across chunks."""
+        chunks = [
+            '<|tool_call>call:fn{x:<|"|>v<|"|>}',
+            "<tool_",
+            "call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "fn", {"x": "v"})
+
+    def test_streaming_content_after_stripped_tool_call(self, parser, mock_request):
+        """Content after a stripped tool call is emitted, not swallowed."""
+        chunks = [
+            'call:fn{x:<|"|>v<|"|>}',
+            "trailing content",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        assert self._collect_content(results) == "trailing content"
+        self._assert_tool_call(calls, 0, "fn", {"x": "v"})
+
+    def test_streaming_partial_args_then_finalize(self, parser, mock_request):
+        """Partial argument diffs are flushed correctly by finalization."""
+        chunks = [
+            "<|tool_call>",
+            "call:fn{",
+            'a:<|"|>hello',
+            ' world<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls(results)
+
+        self._assert_tool_call(calls, 0, "fn", {"a": "hello world"})
+
+
+class TestFindCallBodyEnd:
+    """Unit tests for _find_call_body_end edge cases."""
+
+    @pytest.fixture
+    def parser(self, mock_tokenizer):
+        return Gemma4ToolParser(mock_tokenizer)
+
+    @pytest.fixture
+    def mock_tokenizer(self):
+        tokenizer = MagicMock()
+        tokenizer.encode.return_value = [1, 2, 3]
+        tokenizer.get_vocab.return_value = {TOOL_CALL_START: 48, TOOL_CALL_END: 49}
+        return tokenizer
+
+    def test_matched_braces(self, parser):
+        text = "{key:val}"
+        assert parser._find_call_body_end(text, 0) == 8
+
+    def test_nested_braces(self, parser):
+        text = "{a:{b:1}}"
+        assert parser._find_call_body_end(text, 0) == 8
+
+    def test_unmatched_open(self, parser):
+        text = "{a:{b:1}"
+        assert parser._find_call_body_end(text, 0) is None
+
+    def test_negative_depth(self, parser):
+        text = "}"
+        assert parser._find_call_body_end(text, 0) is None
+
+    def test_braces_inside_string_delimiters(self, parser):
+        text = '{a:<|"|>}{<|"|>}'
+        assert parser._find_call_body_end(text, 0) == len(text) - 1
