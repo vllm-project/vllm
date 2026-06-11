@@ -80,6 +80,20 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _merge_reasoning_into_content(
+    reasoning: str | None, content: str | None
+) -> tuple[str | None, str | None]:
+    """Merge reasoning text into content if separate_reasoning is False.
+
+    Returns (reasoning, content) with reasoning set to None and content
+    prepended with the reasoning text.
+    """
+    if reasoning:
+        content = reasoning + (content or "")
+        reasoning = None
+    return reasoning, content
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -661,6 +675,19 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    # Merge reasoning into content if separate_reasoning is False
+                    if not request.separate_reasoning and delta_message.reasoning:
+                        merged_reasoning, merged_content = (
+                            _merge_reasoning_into_content(
+                                delta_message.reasoning, delta_message.content
+                            )
+                        )
+                        delta_message = DeltaMessage(
+                            content=merged_content,
+                            reasoning=merged_reasoning,
+                            tool_calls=delta_message.tool_calls,
+                        )
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -889,6 +916,10 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning, content, _ = parse_chat_output(token_ids)
                 if not request.include_reasoning:
                     reasoning = None
+                if not request.separate_reasoning:
+                    reasoning, content = _merge_reasoning_into_content(
+                        reasoning, content
+                    )
 
                 if self.tool_parser is not None:
                     if tokenizer is None:
@@ -957,6 +988,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if not request.include_reasoning:
                     reasoning = None
+                if not request.separate_reasoning:
+                    reasoning, content = _merge_reasoning_into_content(
+                        reasoning, content
+                    )
             else:
                 reasoning = None
                 content = output.text
