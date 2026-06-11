@@ -7,9 +7,6 @@ import math
 from typing import TYPE_CHECKING, Any
 
 import torch
-from humming import dtypes
-from humming.config import GemmType as HummingGemmType
-from humming.layer import HummingLayerMeta, HummingMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -41,6 +38,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
+from vllm.utils.humming import GemmType as HummingGemmType
+from vllm.utils.humming import HummingLayerMeta, HummingMethod, dtypes
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:

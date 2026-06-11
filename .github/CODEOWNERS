@@ -80,7 +80,7 @@
 /vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
 
 # Model runner V2
-/vllm/v1/worker/gpu @WoosukKwon @njhill
+/vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
 # CI & building
