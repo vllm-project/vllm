@@ -2411,6 +2411,7 @@ def pack_swmmac_weight(
 def swmmac_gemm(
     packed_b: torch.Tensor,
     x: torch.Tensor,
+    logical_m: int,
     cu_count: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -2418,6 +2419,7 @@ def swmmac_gemm(
         packed_b,
         x,
         bias,
+        logical_m,
         cu_count,
     )
 
