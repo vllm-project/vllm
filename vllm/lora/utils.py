@@ -33,7 +33,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
@@ -100,8 +100,8 @@ _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
 
 
 def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    if any(isinstance(module, FusedMoE) for module in model.modules()):
+    """Checks if the model contains MoERunner layers and warns the user."""
+    if any(isinstance(module, MoERunner) for module in model.modules()):
         logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
         return True
     return False
@@ -234,7 +234,7 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
         ):
             shard_ids = [str(i) for i in range(len(module.output_sizes))]
             supported_lora_modules.update(shard_ids)
-        elif isinstance(module, (LinearBase, FusedMoE)):
+        elif isinstance(module, (LinearBase, MoERunner)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)

@@ -590,8 +590,11 @@ endif()
 
 if (VLLM_GPU_LANG STREQUAL "HIP")
   # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
+  # TODO: Remove the cuda_view when ROCm upgrade to torch 2.11.
   list(APPEND VLLM_EXT_SRC
     "csrc/custom_quickreduce.cu"
+    "csrc/cuda_view.cu"
+    "csrc/libtorch_stable/cuda_utils_kernels.cu"
   )
 # if ROCM endif
 endif()
@@ -621,12 +624,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
-    "csrc/libtorch_stable/cuda_view.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
+    "csrc/libtorch_stable/permute_cols.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
     "csrc/libtorch_stable/quantization/gguf/gguf_kernel.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
@@ -649,14 +652,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
-      "csrc/libtorch_stable/permute_cols.cu"
-      "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
 
@@ -1071,20 +1072,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.11.
-  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.11.
-  target_compile_definitions(_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
-
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+    # This ensures we only use C-shim APIs available in PyTorch 2.11.
+    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+    # which is currently set to 2.11.
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
+    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+    # This ensures we only use C-shim APIs available in PyTorch 2.10.
+    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+    # which is currently set to 2.10.
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020A000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
   endif()
 
@@ -1109,25 +1115,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# _moe_C extension
+# _moe_C_stable_libtorch extension
 #
 
 set(VLLM_MOE_EXT_SRC
-  "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/libtorch_stable/moe/torch_bindings.cpp"
+  "csrc/libtorch_stable/moe/moe_align_sum_kernels.cu"
+  "csrc/libtorch_stable/moe/topk_softmax_kernels.cu"
+  "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
-    "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
+    "csrc/libtorch_stable/moe/moe_wna16.cu"
+    "csrc/libtorch_stable/moe/grouped_topk_kernels.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(MOE_PERMUTE_SRC
-      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-      "csrc/moe/moe_permute_unpermute_op.cu")
+      "csrc/libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu")
 
   list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
 endif()
@@ -1138,7 +1144,7 @@ set_gencode_flags_for_srcs(
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC
-    "csrc/moe/moe_wna16.cu")
+    "csrc/libtorch_stable/moe/moe_wna16.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_MOE_WNA16_SRC}"
@@ -1169,7 +1175,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # preselected input type pairs and schedules.
     # Generate sources:
     set(MOE_MARLIN_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
     set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
@@ -1204,7 +1210,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_MOE_ARCHS)
-      file(GLOB MARLIN_MOE_SRC "csrc/moe/marlin_moe_wna16/sm80_kernel_*.cu")
+      file(GLOB MARLIN_MOE_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm80_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_SRC}"
         CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
@@ -1216,7 +1222,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_MOE_SM75_ARCHS)
-      file(GLOB MARLIN_MOE_SM75_SRC "csrc/moe/marlin_moe_wna16/sm75_kernel_*.cu")
+      file(GLOB MARLIN_MOE_SM75_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_SM75_SRC}"
         CUDA_ARCHS "${MARLIN_MOE_SM75_ARCHS}")
@@ -1228,7 +1234,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_MOE_FP8_ARCHS)
-      file(GLOB MARLIN_MOE_FP8_SRC "csrc/moe/marlin_moe_wna16/sm89_kernel_*.cu")
+      file(GLOB MARLIN_MOE_FP8_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_FP8_SRC}"
         CUDA_ARCHS "${MARLIN_MOE_FP8_ARCHS}")
@@ -1239,7 +1245,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_FP8_SRC})
     endif()
 
-    set(MARLIN_MOE_OTHER_SRC "csrc/moe/marlin_moe_wna16/ops.cu")
+    set(MARLIN_MOE_OTHER_SRC "csrc/libtorch_stable/moe/marlin_moe_wna16/ops.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_MOE_OTHER_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_OTHER_ARCHS}")
@@ -1260,9 +1266,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
     set(DSV3_ROUTER_GEMM_SRC
-      "csrc/moe/dsv3_router_gemm_entry.cu"
-      "csrc/moe/dsv3_router_gemm_float_out.cu"
-      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_entry.cu"
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_bf16_out.cu")
     set_gencode_flags_for_srcs(
       SRCS "${DSV3_ROUTER_GEMM_SRC}"
       CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
@@ -1275,9 +1281,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 endif()
 
-message(STATUS "Enabling moe extension.")
+message(STATUS "Enabling MoE C_stable extension.")
 define_extension_target(
-  _moe_C
+  _moe_C_stable_libtorch
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_MOE_EXT_SRC}
@@ -1287,6 +1293,47 @@ define_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+# Needed to use cuda/hip APIs from C-shim
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.11.
+  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.11.
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+  # Needed by CUTLASS kernels
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+    CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+elseif(VLLM_GPU_LANG STREQUAL "HIP")
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.10.
+  # _moe_C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.10.
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL)
+  target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+endif()
+
+# On ROCm, _moe_C_stable_libtorch calls raw HIP APIs (e.g. hipGetDevice in
+# get_device_prop()) which must resolve to the same libamdhip64.so that
+# PyTorch uses.  When PyTorch bundles its own copy (pip/conda wheels),
+# the raw HIP calls would otherwise resolve to the system ROCm copy,
+# initializing a second HIP runtime that corrupts device state (wrong
+# device on DeviceGuard, core dumps on multi-GPU tests).
+#
+# If PyTorch doesn't bundle libamdhip64 (built from source against system
+# ROCm), there is only one copy in the process and no action is needed —
+# the HIP compiler already links the system libamdhip64 automatically.
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  find_library(_MOE_STABLE_TORCH_AMDHIP64 amdhip64
+    PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
+  if(_MOE_STABLE_TORCH_AMDHIP64)
+    message(STATUS "Found PyTorch-bundled libamdhip64 for _moe_C_stable_libtorch at ${_MOE_STABLE_TORCH_AMDHIP64}")
+    target_link_libraries(_moe_C_stable_libtorch PRIVATE ${_MOE_STABLE_TORCH_AMDHIP64})
+  endif()
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
@@ -1302,7 +1349,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     set(VLLM_ROCM_HAS_GFX1100 ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
-      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+      "csrc/rocm/q_gemm_rdna3_wmma.cu"
+      "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
   define_extension_target(

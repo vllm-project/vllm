@@ -9,16 +9,14 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
-from vllm.models.deepseek_v4.nvidia.flashmla import (
-    DeepseekV4FlashMLASparseBackend,
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+    DeepseekV4FlashMLAMetadataBuilder,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseMetadata,
-    FlashMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
@@ -445,7 +443,7 @@ def _copy_ragged_to_graph_buffers(
 
 
 @dataclass
-class DeepseekV4ROCMAiterMLASparseMetadata(FlashMLASparseMetadata):
+class DeepseekV4ROCMAiterMLASparseMetadata(DeepseekV4FlashMLAMetadata):
     """ROCm-specific DeepSeek V4 metadata carrying ragged decode topk."""
 
     c128a_decode_topk_ragged_indices: torch.Tensor | None = None
@@ -458,12 +456,12 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indptr: torch.Tensor | None = None
 
 
-class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder):
+class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4FlashMLAMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
         self.c128a_decode_topk_ragged_indptr_buffer: torch.Tensor | None = None
-        if self.is_deepseek_v4 and self.compress_ratio == 128:
+        if self.compress_ratio == 128:
             max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             self.c128a_decode_topk_ragged_indices_buffer = torch.empty(
                 max_tokens * self.c128a_max_compressed,
@@ -569,7 +567,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
         )
 
 
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4FlashMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"

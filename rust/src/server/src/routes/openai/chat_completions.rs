@@ -1,4 +1,4 @@
-pub mod convert;
+pub(crate) mod convert;
 mod types;
 mod validate;
 
@@ -23,8 +23,9 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::StopReason;
 
+use self::convert::{ResponseOptions, prepare_chat_request};
+use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
@@ -62,7 +63,7 @@ pub async fn chat_completions(
     );
 
     let created = unix_timestamp();
-    let log_request = state.enable_log_requests;
+    let api_server_options = state.api_server_options;
 
     let chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
@@ -82,13 +83,8 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
-            prepared.include_usage,
-            prepared.requested_logprobs,
-            prepared.include_reasoning,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            api_server_options,
+            prepared.options,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -99,12 +95,8 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.requested_logprobs,
-            prepared.include_prompt_logprobs,
-            prepared.include_reasoning,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
+            api_server_options,
+            prepared.options,
         )
         .instrument(request_span.clone())
         .await
@@ -112,18 +104,6 @@ pub async fn chat_completions(
             Ok(response) => response,
             Err(error) => return error.into_response(),
         };
-
-        if log_request {
-            let usage = response.usage.as_ref();
-            info!(
-                parent: &request_span,
-                model = %response.model,
-                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
-                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
-                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
-                "chat completion finished"
-            );
-        }
 
         Json(response).into_response()
     }
@@ -134,12 +114,21 @@ async fn collect_chat_completion(
     request_id: String,
     response_model: String,
     created: u64,
-    requested_logprobs: bool,
-    include_prompt_logprobs: bool,
-    include_reasoning: bool,
-    echo: Option<String>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        // Ignored: non-streaming responses always include usage.
+        include_usage: _,
+        requested_logprobs,
+        include_prompt_logprobs,
+        include_reasoning,
+        echo,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -149,12 +138,11 @@ async fn collect_chat_completion(
     })?;
     let CollectedAssistantMessage {
         message,
-        prompt_token_count,
         prompt_token_ids,
         prompt_logprobs,
         logprobs,
         token_ids,
-        output_token_count,
+        usage,
         finish_reason,
         kv_transfer_params,
     } = collected;
@@ -199,7 +187,17 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
+    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+
+    if enable_log_requests {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            finish_reason = %finish_reason,
+            "chat completion finished"
+        );
+    }
 
     Ok(ChatCompletionResponse {
         id: request_id,
@@ -237,13 +235,21 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
-    log_request: bool,
-    include_usage: bool,
-    requested_logprobs: bool,
-    include_reasoning: bool,
-    echo: Option<String>,
-    return_token_ids: bool,
-    return_tokens_as_token_ids: bool,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        include_usage,
+        requested_logprobs,
+        // Ignored: chat streaming prompt logprobs are rejected for Python parity.
+        include_prompt_logprobs: _,
+        include_reasoning,
+        echo,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
@@ -393,17 +399,16 @@ async fn chat_completion_chunk_stream(
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
-                prompt_token_count,
+                usage,
                 finish_reason,
-                output_token_count,
                 ..
             }) => {
-                if log_request {
+                if enable_log_requests {
                     info!(
                         stream = true,
                         model = %response_model,
-                        prompt_tokens = prompt_token_count,
-                        output_tokens = output_token_count,
+                        prompt_tokens = usage.prompt_token_count,
+                        output_tokens = usage.output_token_count,
                         finish_reason = finish_reason.as_str(),
                         "chat completion finished"
                     );
@@ -438,7 +443,7 @@ async fn chat_completion_chunk_stream(
                         &request_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
+                        Usage::from_token_usage(usage, enable_prompt_tokens_details),
                     ))
                     .await;
                 }
@@ -806,7 +811,10 @@ mod tests {
     use vllm_engine_core_client::protocol::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::{block_delta_chunk, chat_completion_chunk_stream, final_chunk};
+    use super::{
+        ApiServerOptions, ResponseOptions, block_delta_chunk, chat_completion_chunk_stream,
+        final_chunk,
+    };
 
     #[test]
     fn text_chunk_uses_content_only_delta() {
@@ -919,8 +927,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 1,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -931,13 +942,16 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            true,
-            None,
-            false,
-            false,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions {
+                include_usage: true,
+                requested_logprobs: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -945,11 +959,21 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .expect("stream chunks");
 
-        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.len(), 4);
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let logprobs = chunks[1].choices[0].logprobs.as_ref().expect("logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "hi");
+        assert_eq!(
+            chunks[3]
+                .usage
+                .as_ref()
+                .expect("usage")
+                .prompt_tokens_details
+                .as_ref()
+                .map(|details| details.cached_tokens),
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -983,8 +1007,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -995,13 +1022,12 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            true,
-            None,
-            false,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -1036,8 +1062,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 2,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 2,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1048,13 +1077,8 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            false,
-            false,
-            None,
-            false,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
         )
         .collect::<Vec<_>>()
         .await
@@ -1119,8 +1143,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 2,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 2,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1131,13 +1158,12 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            false,
-            None,
-            true,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                return_token_ids: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -1250,8 +1276,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 4,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 4,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1262,13 +1291,12 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            true,
-            false,
-            None,
-            true,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                requested_logprobs: true,
+                return_token_ids: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await
@@ -1329,8 +1357,11 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -1341,13 +1372,11 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
-            false,
-            false,
-            false,
-            true,
-            None,
-            false,
-            false,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_reasoning: true,
+                ..Default::default()
+            },
         )
         .collect::<Vec<_>>()
         .await

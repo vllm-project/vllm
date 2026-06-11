@@ -41,7 +41,8 @@ steps:
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 &&
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel &&
         python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192 &&
-        VLLM_XPU_FUSED_MOE_USE_REF=1 python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --enforce-eager -tp 2
+        VLLM_XPU_FUSED_MOE_USE_REF=1 python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --enforce-eager -tp 2 --max-model-len 8192 &&
+        python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
   - label: "XPU V1 test"
     depends_on:
@@ -84,5 +85,5 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'pip install av &&
         cd tests &&
-        pytest -v -s entrypoints/openai/chat_completion/test_audio_in_video.py &&
+        pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
