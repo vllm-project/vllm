@@ -129,9 +129,14 @@ def _get_function_parameters(function) -> dict[str, Any] | bool:
 def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
     arguments_field_prefix = '", "arguments": '
     formats = [
-        ('<tool_call>{"name": "', "}</tool_call>"),
+        # <tool_call>
+        # {"name": "t1", "arguments": {"q": "v"}}
+        # </tool_call>
         ('<tool_call>\n{"name": "', "}\n</tool_call>"),
+        # <tool_call>{"name": "t1", "arguments": {"q": "v"}}</tool_call>
+        ('<tool_call>{"name": "', "}</tool_call>"),
     ]
+
     return [
         TagFormat(
             begin=begin + tool.function.name + arguments_field_prefix,
@@ -173,7 +178,7 @@ def get_hermes_structural_tag(
     else:
         suffix_tag = TagsWithSeparatorFormat(
             tags=_hermes_tool_tags(tools),
-            separator="\n",
+            separator="",
             at_least_one=True,
         )
 
