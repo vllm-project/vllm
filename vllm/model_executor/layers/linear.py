@@ -647,7 +647,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
         assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
-        self.checkpoint_format: Literal["sharded", "fused"] | None = None
+        self.checkpoint_format: Literal["fused", "sharded"] | None = None
         super().__init__(
             input_size=input_size,
             output_size=sum(output_sizes),
@@ -974,18 +974,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         for name, loaded_weight in weights:
-            shard_id_str, _, param_name = name.partition(".")
-            # If the shard_id is not an integer, the weight is not sharded
-            try:
+            if "." in name:
+                # Checkpoint is sharded
+                shard_id_str, _, name = name.partition(".")
                 shard_id = int(shard_id_str)
                 self.checkpoint_format = "sharded"
-            except ValueError:
+            else:
                 shard_id = None
                 self.checkpoint_format = "fused"
-            # If param_name is "bias" get it from self, otherwise load into self
-            param: Parameter = getattr(self, param_name, self)
+            # If name is "bias" get it from self, otherwise load into self
+            param: Parameter = getattr(self, name, self)
             param.weight_loader(param, loaded_weight, shard_id)
-            yield param_name
+            yield name
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -1407,19 +1407,19 @@ class QKVParallelLinear(ColumnParallelLinear):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         for name, loaded_weight in weights:
-            shard_id_str, _, param_name = name.partition(".")
-            # If the shard_id is not valid, the weight is not sharded
-            try:
-                self.validate_shard_id(shard_id_str)
-                shard_id = shard_id_str
+            if "." in name:
+                # Checkpoint is sharded
+                shard_id, _, name = name.partition(".")
+                self.validate_shard_id(shard_id)
                 self.checkpoint_format = "sharded"
-            except ValueError:
+            else:
+                # Checkpoint is fused
                 shard_id = None
                 self.checkpoint_format = "fused"
-            # If param_name is "bias" get it from self, otherwise load into self
-            param: Parameter = getattr(self, param_name, self)
+            # If name is "bias" get it from self, otherwise load into self
+            param: Parameter = getattr(self, name, self)
             param.weight_loader(param, loaded_weight, shard_id)
-            yield param_name
+            yield name
 
 
 # --8<-- [start:row_parallel_linear]
