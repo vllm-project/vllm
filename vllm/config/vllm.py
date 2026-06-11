@@ -1153,6 +1153,7 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+        self.kernel_config.setup_cutedsl_cache_env(self)
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()

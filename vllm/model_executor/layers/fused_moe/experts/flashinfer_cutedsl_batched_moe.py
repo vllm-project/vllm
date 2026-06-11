@@ -50,6 +50,16 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         )
         self.out_dtype = moe_config.in_dtype
 
+    def get_cutedsl_warmup_plan(self, runner: object) -> object:
+        del runner
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="flashinfer_cutedsl_batched_moe",
+            model_runner_modes=("mixed",),
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)

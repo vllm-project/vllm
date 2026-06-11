@@ -1,0 +1,220 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Orchestrate CuTeDSL warmup providers."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
+
+import torch
+
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.tracing import instrument
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+logger = init_logger(__name__)
+
+CuTeDSLWarmupCallback = Callable[["GPUModelRunner", Sequence[int]], None]
+CuTeDSLWarmupMode = Literal["prefill", "mixed", "uniform_decode"]
+_VALID_MODEL_RUNNER_MODES = {"prefill", "mixed", "uniform_decode"}
+
+
+@dataclass(frozen=True)
+class CuTeDSLWarmupPlan:
+    """Warmup work requested by one CuTeDSL integration.
+
+    CuTeDSL-backed classes can expose this by defining
+    ``get_cutedsl_warmup_plan(runner)`` on the existing model module, attention
+    impl, prefill backend, or kernel integration object.
+    """
+
+    provider: str
+    """Human-readable provider name used in logs and error messages."""
+
+    model_runner_modes: tuple[CuTeDSLWarmupMode, ...] = ()
+    """Generic ``GPUModelRunner._dummy_run`` batch modes to execute."""
+
+    warmup_callbacks: tuple[CuTeDSLWarmupCallback, ...] = ()
+    """Provider-specific warmup callbacks for paths generic dummy runs miss."""
+
+
+def _get_cutedsl_warmup_token_sizes(runner: "GPUModelRunner") -> list[int]:
+    kernel_config = runner.vllm_config.kernel_config
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    configured_sizes = kernel_config.cutedsl_warmup_token_sizes
+
+    token_sizes = {
+        min(size, max_tokens)
+        for size in configured_sizes
+        if isinstance(size, int) and size > 0
+    }
+    return sorted(token_sizes)
+
+
+def _iter_cutedsl_warmup_targets(
+    model: torch.nn.Module,
+) -> Iterable[object]:
+    seen: set[int] = set()
+
+    for module in model.modules():
+        candidates = [
+            module,
+            getattr(module, "impl", None),
+            getattr(module, "prefill_backend", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            candidate_id = id(candidate)
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            yield candidate
+
+
+def _coerce_cutedsl_warmup_plans(
+    value: object,
+) -> list[CuTeDSLWarmupPlan]:
+    if value is None:
+        return []
+    if isinstance(value, CuTeDSLWarmupPlan):
+        return [value]
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        plans = list(value)
+        if all(isinstance(plan, CuTeDSLWarmupPlan) for plan in plans):
+            return plans
+    raise TypeError(
+        "get_cutedsl_warmup_plan must return CuTeDSLWarmupPlan, "
+        "an iterable of CuTeDSLWarmupPlan, or None"
+    )
+
+
+def _validate_cutedsl_warmup_plan(plan: CuTeDSLWarmupPlan) -> None:
+    invalid_modes = set(plan.model_runner_modes) - _VALID_MODEL_RUNNER_MODES
+    if invalid_modes:
+        raise ValueError(
+            "Invalid CuTeDSL warmup model runner mode(s) "
+            f"{sorted(invalid_modes)} for provider {plan.provider}. "
+            f"Valid modes are {sorted(_VALID_MODEL_RUNNER_MODES)}."
+        )
+
+
+def _get_cutedsl_warmup_plans(
+    runner: "GPUModelRunner",
+    model: torch.nn.Module,
+) -> list[CuTeDSLWarmupPlan]:
+    plans: list[CuTeDSLWarmupPlan] = []
+
+    for target in _iter_cutedsl_warmup_targets(model):
+        get_plan = getattr(target, "get_cutedsl_warmup_plan", None)
+        if get_plan is not None:
+            plans.extend(_coerce_cutedsl_warmup_plans(get_plan(runner)))
+    for plan in plans:
+        _validate_cutedsl_warmup_plan(plan)
+    return plans
+
+
+def _run_mixed_dummy_warmup(
+    runner: "GPUModelRunner",
+    token_sizes: Sequence[int],
+) -> None:
+    for num_tokens in token_sizes:
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            create_mixed_batch=True,
+        )
+
+
+def _run_prefill_dummy_warmup(
+    runner: "GPUModelRunner",
+    token_sizes: Sequence[int],
+) -> None:
+    for num_tokens in token_sizes:
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+        )
+
+
+def _run_uniform_decode_dummy_warmup(runner: "GPUModelRunner") -> None:
+    decode_tokens = min(
+        runner.scheduler_config.max_num_seqs,
+        runner.scheduler_config.max_num_batched_tokens,
+    )
+    if decode_tokens <= 0:
+        return
+
+    runner._dummy_run(
+        num_tokens=decode_tokens,
+        skip_eplb=True,
+        is_profile=True,
+        force_attention=True,
+        uniform_decode=True,
+    )
+
+
+@instrument(span_name="CuTeDSL warmup")
+def cutedsl_warmup(runner: "GPUModelRunner") -> None:
+    """Run CuTeDSL warmup providers before serving."""
+    if not current_platform.is_cuda():
+        logger.info("Skipping CuTeDSL warmup on non-CUDA platform.")
+        return
+
+    if runner.is_pooling_model:
+        logger.info("Skipping CuTeDSL warmup for pooling model.")
+        return
+
+    model = runner.get_model()
+    plans = _get_cutedsl_warmup_plans(runner, model)
+    if not plans:
+        logger.info(
+            "Skipping CuTeDSL warmup because no providers requested warmup."
+        )
+        return
+
+    token_sizes = _get_cutedsl_warmup_token_sizes(runner)
+    if not token_sizes:
+        logger.info("Skipping CuTeDSL warmup because no token sizes were selected.")
+        return
+
+    provider_names = [plan.provider for plan in plans]
+    model_runner_modes = {
+        mode for plan in plans for mode in plan.model_runner_modes
+    }
+
+    logger.info(
+        "Warming up CuTeDSL providers=%s with token_sizes=%s "
+        "and model_runner_modes=%s.",
+        provider_names,
+        token_sizes,
+        sorted(model_runner_modes),
+    )
+
+    with torch.inference_mode():
+        for plan in plans:
+            for callback in plan.warmup_callbacks:
+                try:
+                    callback(runner, token_sizes)
+                except Exception:
+                    logger.exception(
+                        "CuTeDSL warmup provider %s failed.", plan.provider
+                    )
+                    raise
+        if "prefill" in model_runner_modes:
+            _run_prefill_dummy_warmup(runner, token_sizes)
+        if "mixed" in model_runner_modes:
+            _run_mixed_dummy_warmup(runner, token_sizes)
+        if "uniform_decode" in model_runner_modes:
+            _run_uniform_decode_dummy_warmup(runner)
+
+    logger.info("CuTeDSL warmup completed.")

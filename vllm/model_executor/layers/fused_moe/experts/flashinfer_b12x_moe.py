@@ -60,6 +60,16 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # one. Holding it on the instance keeps apply() alloc-free.
         self._fc2_input_scale: torch.Tensor | None = None
 
+    def get_cutedsl_warmup_plan(self, runner: object) -> object:
+        del runner
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="flashinfer_b12x_moe",
+            model_runner_modes=("mixed",),
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale
         # (w_gs).  vLLM's NVFP4 convention stores:
