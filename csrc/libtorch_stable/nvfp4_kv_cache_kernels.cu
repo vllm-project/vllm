@@ -20,7 +20,16 @@
 #include "libtorch_stable/dispatch_utils.h"
 #include "libtorch_stable/torch_utils.h"
 
+#include <cmath>
+#include <string>
+
 namespace vllm {
+
+enum class NVFP4KVScaleSearch {
+  DEFAULT,
+  FOUR_OVER_SIX,
+  FOUR_OVER_SIX_K_ONLY,
+};
 
 // Compute swizzled scale offset for SM100 trtllm-gen MHA kernel.
 // The swizzle pattern for HND layout is:
@@ -38,6 +47,115 @@ __device__ __forceinline__ int swizzle_scale_offset(int t, int s,
   return swizzled_t * scale_dim + swizzled_s;
 }
 
+__device__ __forceinline__ float round_to_nearest_e2m1(float x) {
+  const float ax = fabsf(x);
+  float q;
+  if (ax < 0.25f) {
+    q = 0.0f;
+  } else if (ax < 0.75f) {
+    q = 0.5f;
+  } else if (ax < 1.25f) {
+    q = 1.0f;
+  } else if (ax < 1.75f) {
+    q = 1.5f;
+  } else if (ax < 2.5f) {
+    q = 2.0f;
+  } else if (ax < 3.5f) {
+    q = 3.0f;
+  } else if (ax < 5.0f) {
+    q = 4.0f;
+  } else {
+    q = 6.0f;
+  }
+  return copysignf(q, x);
+}
+
+__device__ __forceinline__ void nvfp4_candidate_scale(
+    float SFScaleVal, float vecMax, float denominator, uint8_t* fp8_sf,
+    float* outputScale) {
+  float SFValue =
+      SFScaleVal * (vecMax * reciprocal_approximate_ftz(denominator));
+  __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
+  reinterpret_cast<__nv_fp8_e4m3&>(*fp8_sf) = tmp;
+  SFValue = float(tmp);
+  *outputScale =
+      SFValue != 0.0f ? reciprocal_approximate_ftz(
+                            SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                      : 0.0f;
+}
+
+template <class Type, int CVT_FP4_NUM_THREADS_PER_SF>
+__device__ __forceinline__ float nvfp4_reconstruction_error(
+    PackedVec<Type, CVT_FP4_PACK16>& vec, float outputScale) {
+  float error = 0.0f;
+  const float dequantScale =
+      outputScale != 0.0f ? reciprocal_approximate_ftz(outputScale) : 0.0f;
+
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+    float2 vals = cast_to_float2(vec.elts[i]);
+    if (outputScale == 0.0f) {
+      error += vals.x * vals.x + vals.y * vals.y;
+    } else {
+      float qx = round_to_nearest_e2m1(vals.x * outputScale);
+      float qy = round_to_nearest_e2m1(vals.y * outputScale);
+      float dx = qx * dequantScale - vals.x;
+      float dy = qy * dequantScale - vals.y;
+      error += dx * dx + dy * dy;
+    }
+  }
+
+  if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
+    error += __shfl_xor_sync(0xffffffffu, error, 1);
+  }
+  return error;
+}
+
+template <class Type, int CVT_FP4_NUM_THREADS_PER_SF>
+__device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4_4over6(
+    PackedVec<Type, CVT_FP4_PACK16>& vec, float SFScaleVal, uint8_t* SFout) {
+  auto localMax = __habs2(vec.elts[0]);
+
+#pragma unroll
+  for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+    localMax = __hmax2(localMax, __habs2(vec.elts[i]));
+  }
+
+  if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
+    localMax = __hmax2(__shfl_xor_sync(0xffffffffu, localMax, 1), localMax);
+  }
+  const float vecMax = float(__hmax(localMax.x, localMax.y));
+
+  uint8_t sf6;
+  uint8_t sf4;
+  float outputScale6;
+  float outputScale4;
+  nvfp4_candidate_scale(SFScaleVal, vecMax, 6.0f, &sf6, &outputScale6);
+  nvfp4_candidate_scale(SFScaleVal, vecMax, 4.0f, &sf4, &outputScale4);
+
+  const float err6 =
+      nvfp4_reconstruction_error<Type, CVT_FP4_NUM_THREADS_PER_SF>(
+          vec, outputScale6);
+  const float err4 =
+      nvfp4_reconstruction_error<Type, CVT_FP4_NUM_THREADS_PER_SF>(
+          vec, outputScale4);
+  const bool use4 = err4 < err6;
+  const float outputScale = use4 ? outputScale4 : outputScale6;
+
+  if (SFout) *SFout = use4 ? sf4 : sf6;
+
+  float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
+
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+    fp2Vals[i] = cast_to_float2(vec.elts[i]);
+    fp2Vals[i].x *= outputScale;
+    fp2Vals[i].y *= outputScale;
+  }
+
+  return pack_fp4(fp2Vals);
+}
+
 // Kernel: quantize bf16 key/value to NVFP4 and store in paged KV cache.
 //
 // Takes separate data and scale cache pointers for K and V.
@@ -45,7 +163,7 @@ __device__ __forceinline__ int swizzle_scale_offset(int t, int s,
 //
 // Threading: one CUDA block per token, threads process heads and
 // groups of 16 elements within each head.
-template <typename scalar_t>
+template <typename scalar_t, NVFP4KVScaleSearch SCALE_SEARCH>
 __global__ void reshape_and_cache_nvfp4_kernel(
     const scalar_t* __restrict__ key,      // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,    // [num_tokens, num_heads, head_size]
@@ -129,8 +247,23 @@ __global__ void reshape_and_cache_nvfp4_kernel(
       uint8_t sf_val;
       uint8_t* sf_out_ptr = (tg_lane == 0) ? &sf_val : nullptr;
 
-      fp4_packed_t packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
-          in_vec, global_scale, sf_out_ptr);
+      fp4_packed_t packed;
+      if constexpr (SCALE_SEARCH == NVFP4KVScaleSearch::FOUR_OVER_SIX) {
+        packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
+            in_vec, global_scale, sf_out_ptr);
+      } else if constexpr (SCALE_SEARCH ==
+                           NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY) {
+        if (kv == 0) {
+          packed = cvt_warp_fp16_to_fp4_4over6<CudaType, THREADS_PER_SF>(
+              in_vec, global_scale, sf_out_ptr);
+        } else {
+          packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
+              in_vec, global_scale, sf_out_ptr);
+        }
+      } else {
+        packed = cvt_warp_fp16_to_fp4<CudaType, THREADS_PER_SF>(
+            in_vec, global_scale, sf_out_ptr);
+      }
 
       // Write packed FP4 data to data cache
       uint8_t* __restrict__ data_dst = data_block + head * data_head_stride +
@@ -187,7 +320,8 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
                                       torch::stable::Tensor& value_cache,
                                       torch::stable::Tensor& slot_mapping,
                                       torch::stable::Tensor& k_scale,
-                                      torch::stable::Tensor& v_scale) {
+                                      torch::stable::Tensor& v_scale,
+                                      const std::string& kv_cache_dtype) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -262,16 +396,51 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
-        vllm::reshape_and_cache_nvfp4_kernel<scalar_t>
-            <<<grid, block, 0, stream>>>(
-                key.const_data_ptr<scalar_t>(),
-                value.const_data_ptr<scalar_t>(),
-                key_cache.mutable_data_ptr<uint8_t>(),
-                value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
-                value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
-                k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
-                num_heads, head_size, block_size, data_block_stride,
-                data_head_stride, data_block_offset_stride, scale_block_stride,
-                scale_head_stride, scale_block_offset_stride);
+        if (kv_cache_dtype == "nvfp4") {
+          vllm::reshape_and_cache_nvfp4_kernel<
+              scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride,
+                  scale_block_stride, scale_head_stride,
+                  scale_block_offset_stride);
+        } else if (kv_cache_dtype == "nvfp4_4over6") {
+          vllm::reshape_and_cache_nvfp4_kernel<
+              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride,
+                  scale_block_stride, scale_head_stride,
+                  scale_block_offset_stride);
+        } else if (kv_cache_dtype == "nvfp4_4over6_k_only") {
+          vllm::reshape_and_cache_nvfp4_kernel<
+              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX_K_ONLY>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride,
+                  scale_block_stride, scale_head_stride,
+                  scale_block_offset_stride);
+        } else {
+          STD_TORCH_CHECK(false, "Unsupported NVFP4 KV quantization mode: ",
+                          kv_cache_dtype);
+        }
       });
 }

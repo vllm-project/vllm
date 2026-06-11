@@ -768,16 +768,18 @@ void reshape_and_cache_flash(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  if (kv_cache_dtype == "nvfp4") {
+  if (kv_cache_dtype == "nvfp4" || kv_cache_dtype == "nvfp4_4over6" ||
+      kv_cache_dtype == "nvfp4_4over6_k_only") {
 #if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
     // NVFP4 dispatch is compiled separately for SM100+.
     extern void reshape_and_cache_nvfp4_dispatch(
         torch::stable::Tensor & key, torch::stable::Tensor & value,
         torch::stable::Tensor & key_cache, torch::stable::Tensor & value_cache,
         torch::stable::Tensor & slot_mapping, torch::stable::Tensor & k_scale,
-        torch::stable::Tensor & v_scale);
+        torch::stable::Tensor & v_scale, const std::string& kv_cache_dtype);
     reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
-                                     slot_mapping, k_scale, v_scale);
+                                     slot_mapping, k_scale, v_scale,
+                                     kv_cache_dtype);
     return;
 #else
     STD_TORCH_CHECK(
