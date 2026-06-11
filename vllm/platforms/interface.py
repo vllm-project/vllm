@@ -264,7 +264,13 @@ class Platform:
                     f"assigned_gpu_ids {_assigned_gpu_ids} "
                     f"({len(_assigned_gpu_ids)} devices assigned)"
                 )
-            return _assigned_gpu_ids[device_id]
+            mapped = _assigned_gpu_ids[device_id]
+            # When CVD is also set, assigned_gpu_ids holds logical
+            # indices into the CVD set.  Compose to get physical ids.
+            cvd = os.environ.get(cls.device_control_env_var, "")
+            if cvd:
+                return int(cvd.split(",")[mapped])
+            return mapped
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.

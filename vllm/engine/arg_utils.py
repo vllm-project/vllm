@@ -1726,7 +1726,10 @@ class EngineArgs:
                         f"{current_platform.device_control_env_var}"
                         f"={cvd} ({len(cvd_ids)} devices visible)"
                     )
-            ids = [cvd_ids[i] for i in ids]
+            # CVD remains in effect so PyTorch uses logical indices.
+            # Return the original ids (indices into the CVD set), not
+            # physical ids.  device_id_to_physical_device_id() composes
+            # assigned_gpu_ids with CVD when both are present.
         return ids
 
     def create_engine_config(
