@@ -392,6 +392,7 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
+        self.device_index: int
         if _WORLD is not None:
             self.device_index = _WORLD.device_index
         else:
