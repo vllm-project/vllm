@@ -64,8 +64,8 @@ def _all_kernel_classes() -> list[type]:
 
 
 def _probe(cls: type):
-    """A bare kernel instance with a plausible config, so ``input_quant_key()``
-    can be queried without the hardware-gated ``__init__``."""
+    """A bare kernel instance with a plausible config, so input_quant_key()
+    can be queried without the hardware-gated constructor."""
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()

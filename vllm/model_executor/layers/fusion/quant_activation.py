@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-A ``QuantizedActivation`` is a pre-quantized activation produced by a fused kernel
-and consumed directly by a linear, so the module skips its own input quantization.
-A linear advertises the key its kernel can consume via ``expose_input_quant_key``;
-the kernel validates and reads the activation via ``as_quantized_activation``.
+A QuantizedActivation is a pre-quantized activation produced by a fused kernel
+and consumed directly by a linear layer, letting the layer skip its own input
+quantization. A linear advertises the key its kernel can consume via
+expose_input_quant_key; the kernel validates and reads the activation via
+as_quantized_activation.
 """
 
 from dataclasses import dataclass
@@ -16,11 +17,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 @dataclass
 class QuantizedActivation:
-    """``quant_key`` defines the exact layout of ``data`` and ``scale``, beyond
-    what ``QuantKey`` itself encodes: for ``kNvfp4Dynamic``, ``data`` is packed
-    fp4 (two values per byte) and ``scale`` is the blockscale tensor in swizzled
-    SF layout (``is_sf_swizzled_layout=True``). Producers must match the layout
-    the consumer kernel expects; a mismatched layout passes the key check."""
+    """A quantized activation paired with its scale and original metadata.
+
+    The quant_key describes how data and scale are to be interpreted (dtype,
+    scale granularity, value packing). Details the key does not capture, such
+    as blockscale layout or activation padding, must follow the consumer
+    kernel's convention.
+
+    TODO(mgoin): Encode layout and padding requirements in the contract so
+    producers can match consumer kernels without relying on convention.
+    """
 
     data: torch.Tensor
     scale: torch.Tensor
@@ -30,12 +36,16 @@ class QuantizedActivation:
 
 
 def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
-    """Advertise the kernel's pre-quantized input key on ``layer``, if any.
+    """Advertise the kernel's pre-quantized input key on the layer, if any.
 
-    The single bridge from a kernel's ``input_quant_key()`` to the
-    ``layer.input_quant_key`` the fusion helper reads. Left unset when the kernel
-    quantizes its own input, so non-supporting backends never receive a
-    ``QuantizedActivation``.
+    This is the bridge from a kernel's input_quant_key() to the
+    layer.input_quant_key attribute that fusion call sites read. The attribute
+    is left unset when the kernel quantizes its own input, so non-supporting
+    backends never receive a QuantizedActivation.
+
+    TODO(mgoin): Producers also need the consumer's quantization scales (e.g.
+    static input scale, global scale). Expose those here as well so producers
+    do not reach into kernel-specific layer attributes.
     """
     key = kernel.input_quant_key()
     if key is not None:
@@ -47,11 +57,10 @@ def as_quantized_activation(
 ) -> "QuantizedActivation | None":
     """Validate and narrow a pre-quantized activation for a consumer kernel.
 
-    Returns the ``QuantizedActivation`` when ``x`` is one whose key matches the
-    kernel's declared ``expected_key``; returns ``None`` when ``x`` is a plain
-    tensor (the caller quantizes in-kernel). The caller then reads whichever
-    fields its ``quant_key`` defines. Raises on a key mismatch so a wrongly
-    routed activation fails loudly instead of being silently re-quantized.
+    Returns the QuantizedActivation when x is one whose key matches the
+    kernel's declared expected_key, and None when x is a plain tensor (the
+    caller quantizes in-kernel). Raises on a key mismatch so a wrongly routed
+    activation fails loudly instead of being silently re-quantized.
     """
     if not isinstance(x, QuantizedActivation):
         return None
