@@ -374,12 +374,18 @@ def prepare_hybrid_weights(
     Scales/zp follow the activation *dtype* so the kernel exercises the
     same fp16 vs bf16 code path it takes in production.
     """
+    from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
+        pack_skinny_int4,
+    )
+
     num_groups = K // group_size
 
-    w_q_skinny_i32 = torch.randint(
-        0, 2**31, (N, K // 8), dtype=torch.int32, device=device
-    )
-    w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
+    # Build the skinny weights via the SAME production helper the layer uses at
+    # load time, so the benchmark exercises the real memory layout -- including
+    # the gfx1151 cliff row-pad -- with no duplicated stride logic here. Values
+    # are random (irrelevant to timing); only shape/stride/dtype matter.
+    unpacked = torch.randint(0, 16, (N, K), dtype=torch.int32, device=device)
+    w_q_skinny, w_q_skinny_i32 = pack_skinny_int4(unpacked)
     w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
     w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
         dtype

@@ -252,16 +252,16 @@ def _triton_w4a16_skinny_fmt_kernel(
 # packed fp16 vs 64 for scalar bf16). Both were validated under do_bench_cudagraph
 # with rotating cold weights over the F.2 catalog.
 #
-# fp16 (packed) -- tuned table:
-#   * M <= 64: small BLOCK_M=32, BLOCK_K=128. A wide BLOCK_N leaves only
-#     ceil(N/BN) workgroups (e.g. 8 for N=2048/BN=256), starving the 40 CUs (the
-#     M-blind BLOCK_N=256 was a 1.6-3x regression at M<=32). BLOCK_N=64 for tall
-#     K, else 32.
-#   * 65 <= M <= 256: very wide N (>=16384) -> BLOCK_M=128/BN=64; tall K ->
-#     BLOCK_M=32/BN=64; else BLOCK_M=64/BN=32.
-#   * 257 <= M < 2048: wide distilled BN=256 for tall narrow non-cliff K; else
-#     BLOCK_M=128/BN=64. (K%2048==0 collapses BN=256 here, so excluded.)
-#   * M >= 2048: distilled BN=256/BLOCK_M=128; +13-50% over gfx11.
+# fp16 (packed) -- tuned table (weights are row-padded as in production, so the
+# K%4096 global-load cliff is already dodged and needs no special-casing):
+#   * M <= 16: BLOCK_M=16 (more M-tiles fill the 40 CUs at tiny M).
+#   * 17..64: BLOCK_M=32; small BLOCK_N keeps the grid large (a wide BLOCK_N
+#     leaves only ceil(N/BN) workgroups -- the M-blind BLOCK_N=256 was a 1.6-3x
+#     regression here). Square mid shapes take BLOCK_N=128/BK=64.
+#   * 65..256: square -> BLOCK_N=128 (BK=32 nw=8 at M>=128); tall -> BLOCK_N=128.
+#   * 257..2047: the wide distilled BLOCK_N=256/BLOCK_M=128 tile.
+#   * M >= 2048: distilled BLOCK_N=256; BLOCK_M=64 for narrow+deep K (N<=2048 and
+#     K>=4096), else 128. +13-50% over gfx11.
 #
 # bf16 (scalar) -- reuse the pre-packed-kernel ("gfx11") scalar-tuned table. The
 # bf16 kernel body is byte-identical to that kernel, so this keeps bf16 at gfx11
@@ -275,24 +275,36 @@ def _select_skinny_gfx11_config(
 ) -> tuple[int, int, int, int]:
     """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for the gfx11 skinny GEMM."""
     if dtype == torch.float16:
-        # Packed-dequant path (fp16 on gfx1x).
+        # Packed-dequant path (fp16 on gfx1x). Cold-optimal tiers from a broad
+        # rotating-buffer cudagraph sweep over the catalog (weights row-padded
+        # exactly as production via pack_skinny_int4, so the K%4096 cliff is
+        # already dodged -- no cliff special-casing needed here).
         tall = K >= 2 * N  # tall-K (down_proj-like)
-        if M <= 64:
-            block_m, block_n, block_k, num_warps = 32, (64 if tall else 32), 128, 4
-        elif M <= 256:
-            if N >= 16384:  # very wide N (gate_up / lm_head)
-                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
-            elif tall:  # tall K (down_proj)
+        if M <= 16:  # BM=16: more M-tiles fill the CUs at tiny M
+            block_m, block_n, block_k, num_warps = 16, 64, 128, 4
+        elif M <= 32:
+            block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+        elif M <= 64:
+            if tall or N >= 4 * K:  # tall or very wide
                 block_m, block_n, block_k, num_warps = 32, 64, 128, 4
-            else:  # N ~= K (o_proj / qkv)
-                block_m, block_n, block_k, num_warps = 64, 32, 128, 4
-        elif M < 2048:
-            if tall and N < 4096 and K % 2048 != 0:  # narrow tall non-cliff K
-                block_m, block_n, block_k, num_warps = 128, 256, 32, 8
-            else:
-                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
-        else:  # M >= 2048 (deep prefill)
+            else:  # square mid
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+        elif M <= 128:
+            if tall:
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+            elif N >= 16384:  # very wide N
+                block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+            else:  # square
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        elif M <= 256:
+            block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+        elif M < 2048:  # 257..2047 (mostly 512, 1024): wide distilled tile
             block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        else:  # M >= 2048 (deep prefill)
+            if N <= 2048 and K >= 4096:  # narrow + deep: halved BLOCK_M saturates
+                block_m, block_n, block_k, num_warps = 64, 256, 32, 8
+            else:
+                block_m, block_n, block_k, num_warps = 128, 256, 32, 8
         # Very narrow N (e.g. L2 N=512 microbench shapes) at small/mid M: a wide
         # BLOCK_N leaves too few N-tiles to fill the CUs, so clamp it. At M>=1024
         # the M-tiles already saturate, so the wide tile is kept.
@@ -530,6 +542,38 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
     )
 
 
+def pack_skinny_int4(unpacked: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
+
+    Single source of truth for the skinny weight memory layout: ExLlama shuffle
+    to [N, K//8] int32, then -- on gfx1151 only, when K_packed (= K/2 bytes) is a
+    multiple of 2048 -- pad each row by +32 int32 (+128 B). That pad makes the
+    GEMM read a non-power-of-2 row stride, dodging the multi-row global-load
+    cliff (channel/MALL hash collisions). Used by both
+    ``process_weights_after_loading`` and the perf benchmark so the benchmark can
+    never drift from the production stride.
+
+    Returns ``(w_q_skinny, w_q_skinny_i32)``: an int8 view for the HIP skinny
+    kernel and the int32 view for the Triton kernel; both share stride(0).
+    """
+    shuffled = pack_int4_exllama_shuffle(unpacked)
+    n_rows, k8 = shuffled.shape
+    k_packed_bytes = k8 * 4  # int32 -> bytes
+    pad_int32 = 32  # +128 B = one cache line, keeps each row cache-line aligned
+    if on_gfx1151() and k_packed_bytes % 2048 == 0 and shuffled.device.type == "cuda":
+        padded = torch.empty(
+            (n_rows, k8 + pad_int32), dtype=torch.int32, device=shuffled.device
+        )
+        padded[:, :k8].copy_(shuffled)
+        # Both views inherit stride(0) = k8 + pad_int32.
+        w_q_skinny_i32 = padded[:, :k8]
+        w_q_skinny = padded.view(torch.int8)[:, : k8 * 4]
+    else:
+        w_q_skinny_i32 = shuffled.contiguous()
+        w_q_skinny = w_q_skinny_i32.view(torch.int8)
+    return w_q_skinny, w_q_skinny_i32
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
@@ -700,41 +744,8 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         if getattr(w_q_raw, "output_dim", 0) != 0:
             unpacked = unpacked.t().contiguous()
 
-        # ---- Pack into skinny format: [N, K//8] ExLlama shuffle ----
-        shuffled = pack_int4_exllama_shuffle(unpacked)
-
-        # ---- Pad K axis by +128 B per row on the gfx1151 cliff ----
-        # On gfx1151 (Strix Halo) the int4 wvSplitK skinny kernel hits a sharp
-        # BW cliff when K_packed = K/2 is a multiple of 2048 B -- multi-row
-        # weight loads collide on memory-subsystem hash bits (DRAM channel
-        # and/or MALL slice) downstream of L2.  Adding 128 B (one cache line /
-        # 32 int32 cols) to the row stride breaks the collision.  Other gfx11x
-        # parts (Strix Point gfx1150, Krackan gfx115{2,3}) lack the
-        # multi-channel / MALL combination that produces the cliff and see no
-        # benefit from the pad, so the 3% weight-memory overhead is gated to
-        # gfx1151 only.
-        N_rows, K8 = shuffled.shape
-        K_packed_bytes = K8 * 4  # int32 -> bytes
-        # +128 B per row = one cache line, keeping each row cache-line aligned.
-        pad_int32 = 32
-        if (
-            on_gfx1151()
-            and K_packed_bytes % 2048 == 0
-            and shuffled.device.type == "cuda"
-        ):
-            padded = torch.empty(
-                (N_rows, K8 + pad_int32),
-                dtype=torch.int32,
-                device=shuffled.device,
-            )
-            padded[:, :K8].copy_(shuffled)
-            # Both views inherit stride(0) = K8 + pad_int32.
-            w_q_skinny_i32 = padded[:, :K8]
-            w_q_skinny = padded.view(torch.int8)[:, :K_packed_bytes]
-        else:
-            # Store as int8 for skinny kernel, keep int32 view for triton kernel
-            w_q_skinny_i32 = shuffled.contiguous()
-            w_q_skinny = w_q_skinny_i32.view(torch.int8)
+        # ---- Pack into skinny [N, K//8] (ExLlama shuffle + gfx1151 cliff pad) ----
+        w_q_skinny, w_q_skinny_i32 = pack_skinny_int4(unpacked)
 
         # ---- Prepare skinny scales: normalize to [N, K//G] ----
         permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
