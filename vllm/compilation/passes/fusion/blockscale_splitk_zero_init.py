@@ -19,18 +19,19 @@ the SplitK GEMM skips its internal hipMemsetAsync, and only one
 level, so no model code has to change to thread the preallocated output
 buffer through the producer.
 
-The pass is organized around two registries:
+The pass is built from two registries returned by
+:func:`build_default_registries`:
 
-* ``ZERO_INIT_PRODUCERS`` -- maps each producer op to a
-  :class:`ProducerSpec` that records its mutating zero-init alias plus
-  tuple-output indices, residual handling, etc.
-* ``BLOCKSCALE_GEMM_OPS`` -- maps each functional blockscale GEMM op to a
-  :class:`GemmSpec` that names the mutating out-style GEMM op used by the
-  replacement.
+* a list of :class:`ProducerSpec` -- one per "zero-init capable" producer op,
+  recording its mutating zero-init alias, tuple-output indices, residual
+  handling, and the ``pattern_builder`` that knows its FX call shape.
+* a list of :class:`GemmSpec` -- one per functional blockscale GEMM op, naming
+  the mutating out-style GEMM op used by the replacement.
 
-Adding a producer or GEMM backend that matches an existing builder is a
-registry entry; new FX call shapes can add a small builder and reuse the same
-registration loop.
+Adding a producer or GEMM backend that matches an existing builder is just a
+new registry entry; a producer with a new FX call shape adds a small
+``_make_*_producer_pattern`` builder and points its ``ProducerSpec`` at it,
+reusing the same registration loop.
 """
 
 from __future__ import annotations
