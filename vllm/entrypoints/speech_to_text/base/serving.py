@@ -154,8 +154,7 @@ class OpenAISpeechToText(OpenAIServing):
         return cast(type[SupportsTranscription], model_cls)
 
     def shutdown(self) -> None:
-        if (executor := getattr(self, "_preprocess_executor", None)) is not None:
-            executor.shutdown(wait=False)
+        self._preprocess_executor.shutdown(wait=False)
 
     def _decode_and_chunk_speech(
         self,
