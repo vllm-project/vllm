@@ -997,10 +997,11 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
+        capability = p.get_device_capability()
         return (
             p.is_cuda()
-            and p.is_device_capability_family(100)
-            and ops.mxfp4_experts_quant_supported()
+            and capability is not None
+            and ops.mxfp4_experts_quant_supported(capability.to_int())
         )
 
     @staticmethod

@@ -85,11 +85,3 @@ bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability) {
 #endif
   return false;
 }
-
-bool mxfp4_experts_quant_supported() {
-#if defined(ENABLE_MXFP4_EXPERTS_QUANT) && ENABLE_MXFP4_EXPERTS_QUANT
-  return true;
-#else
-  return false;
-#endif
-}

@@ -938,14 +938,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # FP4/NVFP4 kernels (moved from _C to _C_stable_libtorch)
   #
 
-  # The nvfp4_scaled_mm_sm120 kernels for Blackwell SM12x require
-  # CUDA 12.8 or later
+  # SM12x FP4 kernels. These share some generic NVFP4 quantization entry
+  # sources with the SM10x/11x block below; set_gencode_flags_for_srcs appends
+  # per-source flags, so shared files accumulate both SM12x and SM10x/11x
+  # gencodes when both families are requested.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_ARCHS "12.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(FP4_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_SM120_ARCHS)
     set(SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
@@ -954,65 +956,56 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${FP4_ARCHS}")
+      CUDA_ARCHS "${FP4_SM120_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
     set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
-      CUDA_ARCHS "${FP4_ARCHS}")
+      CUDA_ARCHS "${FP4_SM120_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
-    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
+    message(STATUS "Building SM12x NVFP4 for archs: ${FP4_SM120_ARCHS}")
   else()
-    message(STATUS "Not building NVFP4 as no compatible archs were found.")
-    # clear FP4_ARCHS
-    set(FP4_ARCHS)
+    message(STATUS "Not building SM12x NVFP4 as no compatible archs were found.")
   endif()
 
-  # FP4 Archs and flags
+  # SM10x/11x FP4 kernels. MXFP4 experts quantization is currently compiled
+  # only in this block; SM12x has separate NVFP4 matmul/MoE kernels above.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(FP4_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
   else()
-    cuda_archs_loose_intersection(FP4_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    cuda_archs_loose_intersection(FP4_SM100_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
-    set(NVFP4_SCALED_MM_ENTRY_SRC
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_SM100_ARCHS)
     set(SRCS
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
-      list(APPEND SRCS
-        "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu")
-      set_source_files_properties(${NVFP4_SCALED_MM_ENTRY_SRC}
-        PROPERTIES COMPILE_DEFINITIONS ENABLE_MXFP4_EXPERTS_QUANT=1)
-    else()
+    if(NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       message(STATUS
-        "Not building mxfp4_experts_quant as CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
+        "Building mxfp4_experts_quant unsupported stubs because CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
     endif()
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${FP4_ARCHS}")
+      CUDA_ARCHS "${FP4_SM100_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
     set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
-      CUDA_ARCHS "${FP4_ARCHS}")
+      CUDA_ARCHS "${FP4_SM100_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
-    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
+    message(STATUS "Building SM10x/11x NVFP4/MXFP4 for archs: ${FP4_SM100_ARCHS}")
   else()
-    message(STATUS "Not building NVFP4 as no compatible archs were found.")
-    # clear FP4_ARCHS
-    set(FP4_ARCHS)
+    message(STATUS "Not building SM10x/11x NVFP4/MXFP4 as no compatible archs were found.")
   endif()
 
   #
@@ -1089,6 +1082,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   message(STATUS "Enabling C_stable extension.")
+  list(REMOVE_DUPLICATES VLLM_STABLE_EXT_SRC)
   define_extension_target(
     _C_stable_libtorch
     DESTINATION vllm

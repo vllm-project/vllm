@@ -1,3 +1,4 @@
+#include <cuda.h>
 #include <cudaTypedefs.h>
 
 #include <torch/csrc/stable/tensor.h>
