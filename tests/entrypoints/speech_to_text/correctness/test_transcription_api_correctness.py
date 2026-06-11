@@ -377,9 +377,15 @@ def test_long_audio_wer_correctness(model_config):
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
 
+    # 1800 seconds is 30 minutes
+    env_dict = {
+        "VLLM_MAX_AUDIO_DECODE_DURATION_S": "1800",
+    }
+
     with RemoteOpenAIServer(
         model_name,
         server_args,
+        env_dict=env_dict,
     ) as remote_server:
         dataset = load_longform_dataset()
         client = remote_server.get_async_client()
