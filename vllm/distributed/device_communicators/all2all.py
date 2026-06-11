@@ -889,6 +889,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         use_fp8_dispatch: bool,
         use_nvfp4_dispatch: bool = False,
     ) -> dict:
+        assert not (use_fp8_dispatch and use_nvfp4_dispatch), \
+            "Cannot use both FP8 and NVFP4 dispatch simultaneously"
         return dict(
             group=self._device_group if self._device_group is not None
             else self.cpu_group,
