@@ -12,7 +12,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import partial
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import ParamSpec
@@ -244,6 +244,29 @@ def make_async(
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
         return loop.run_in_executor(executor=executor, func=p_func)
+
+    return _async_wrapper
+
+
+def make_async_with_semaphore(
+    func: Callable[P, T],
+    executor: ThreadPoolExecutor,
+) -> Callable[P, Awaitable[T]]:
+    """
+    Take a blocking function, and run it on in an executor thread.
+
+    This function prevents the blocking function from blocking the
+    asyncio event loop.
+    The code in this function needs to be thread safe.
+    """
+
+    semaphore = asyncio.Semaphore(executor._max_workers)
+
+    async def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        loop = asyncio.get_event_loop()
+        p_func = cast(Callable[[], T], partial(func, *args, **kwargs))
+        async with semaphore:
+            return await loop.run_in_executor(executor, p_func)
 
     return _async_wrapper
 

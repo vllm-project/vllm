@@ -38,7 +38,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
 
 from ..transcription.protocol import (
     TranscriptionResponse,
@@ -146,7 +146,7 @@ class OpenAISpeechToText(OpenAIServing):
             max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
         )
-        self._decode_and_chunk_speech_async = make_async(
+        self._decode_and_chunk_speech_async = make_async_with_semaphore(
             self._decode_and_chunk_speech, executor=self._preprocess_executor
         )
 
