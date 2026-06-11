@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+import queue
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
+    ReqMeta,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -402,6 +405,229 @@ def test_read_mode_loads_remote_block_ids():
         ],
     ):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
+
+
+def test_read_mode_trims_remote_blocks_not_local_blocks(moriio_read_mode):
+    """Read mode trims remote suffix without replacing local block ids."""
+
+    vllm_config = create_vllm_config(role="kv_consumer")
+    scheduler = create_scheduler(vllm_config)
+
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=int(block_size * 2.5),
+        do_remote_decode=False,
+        do_remote_prefill=True,
+    )
+    request = _setup_kv_transfer_request(request)
+    request_id = request.request_id
+
+    scheduler.add_request(request)
+    local_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks[request_id]
+    local_block_ids = [block.block_id for block in local_blocks]
+
+    remote_block_ids = [1000, 1001] + list(range(2000, 2000 + len(local_blocks)))
+    request.kv_transfer_params["remote_block_ids"] = remote_block_ids
+
+    scheduler_output = scheduler.schedule()
+    kv_connector_metadata = scheduler_output.kv_connector_metadata
+    assert kv_connector_metadata is not None
+    req_meta = kv_connector_metadata.reqs_to_recv[request_id]
+
+    assert req_meta.local_block_ids == local_block_ids
+    assert req_meta.remote_block_ids == remote_block_ids[-len(local_blocks) :]
+
+
+def test_requires_piecewise_for_cudagraph_by_default():
+    assert MoRIIOConnector.requires_piecewise_for_cudagraph({}) is True
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph(
+            {"allow_full_cudagraph": False}
+        )
+        is True
+    )
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph({"allow_full_cudagraph": "0"})
+        is True
+    )
+
+
+def test_requires_piecewise_for_cudagraph_can_be_disabled():
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph({"allow_full_cudagraph": True})
+        is False
+    )
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph(
+            {"allow_full_cudagraph": "true"}
+        )
+        is False
+    )
+
+
+def test_read_mode_start_load_kv_drains_all_ready_requests():
+    worker = object.__new__(MoRIIOConnectorWorker)
+    worker.transfer_id_to_request_id = {}
+    worker.is_producer = False
+    worker.mode = MoRIIOMode.READ
+    worker._reqs_to_send = {}
+    worker._ready_requests = queue.Queue()
+    worker.load_ready_flag = {"127.0.0.1:4789": True}
+    worker._remote_agents = {"127.0.0.1:4789_dp0": {"agent"}}
+    worker.moriio_config = MagicMock(transfer_timeout=0.01)
+
+    def make_meta(transfer_id):
+        return ReqMeta(
+            transfer_id=transfer_id,
+            local_block_ids=[1],
+            remote_block_ids=[2],
+            remote_host="127.0.0.1",
+            remote_port=4789,
+            remote_handshake_port=4789,
+            remote_notify_port=4789,
+            remote_engine_id="127.0.0.1:4789",
+            tp_size=1,
+            remote_dp_size=1,
+        )
+
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_recv["direct"] = make_meta("transfer-direct")
+    worker._ready_requests.put(("ready-1", make_meta("transfer-ready-1")))
+    worker._ready_requests.put(("ready-2", make_meta("transfer-ready-2")))
+
+    read_calls = []
+    worker._read_blocks_for_req = lambda req_id, meta: read_calls.append(req_id)
+
+    worker.start_load_kv(metadata)
+
+    assert read_calls == ["direct", "ready-1", "ready-2"]
+    assert worker._ready_requests.empty()
+
+
+def _bare_worker():
+    """Build a worker without opening sockets or initializing MoRIIO."""
+    return MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+
+
+def test_pick_host_for_dp_rank_cross_node():
+    worker = _bare_worker()
+    meta = MagicMock(
+        remote_hosts=["10.0.0.1", "10.0.0.2"],
+        remote_dp_size=16,
+        remote_host="10.0.0.1",
+        tp_size=1,
+    )
+
+    assert worker._pick_host_for_dp_rank(meta, 0) == "10.0.0.1"
+    assert worker._pick_host_for_dp_rank(meta, 7) == "10.0.0.1"
+    assert worker._pick_host_for_dp_rank(meta, 8) == "10.0.0.2"
+    assert worker._pick_host_for_dp_rank(meta, 15) == "10.0.0.2"
+
+
+def test_pick_host_for_dp_rank_single_node_fallback():
+    worker = _bare_worker()
+    meta_none = MagicMock(
+        remote_hosts=None, remote_dp_size=8, remote_host="10.0.0.1", tp_size=1
+    )
+    assert worker._pick_host_for_dp_rank(meta_none, 5) == "10.0.0.1"
+
+    meta_single = MagicMock(
+        remote_hosts=["10.0.0.1"],
+        remote_dp_size=8,
+        remote_host="10.0.0.1",
+        tp_size=1,
+    )
+    assert worker._pick_host_for_dp_rank(meta_single, 5) == "10.0.0.1"
+
+
+def _request_id_with_zmq(host: str = "10.0.0.1") -> str:
+    zmq_addr = f"host:{host},handshake:4789,notify:61005"
+    return f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{uuid.uuid4().hex}"
+
+
+def test_add_new_req_populates_remote_dp_rank():
+    base_kv = {
+        "transfer_id": "tx-1",
+        "remote_block_ids": [0, 1, 2],
+        "remote_engine_id": "engine-A",
+    }
+
+    metadata = MoRIIOConnectorMetadata()
+    metadata.add_new_req(
+        request_id=_request_id_with_zmq(),
+        local_block_ids=[10, 11],
+        kv_transfer_params=dict(base_kv, remote_dp_rank=7),
+        write_mode=True,
+    )
+    assert next(iter(metadata.reqs_to_save.values())).remote_dp_rank == 7
+
+    metadata = MoRIIOConnectorMetadata()
+    metadata.add_new_req(
+        request_id=_request_id_with_zmq(),
+        local_block_ids=[0],
+        kv_transfer_params=dict(base_kv),
+        write_mode=True,
+    )
+    assert next(iter(metadata.reqs_to_save.values())).remote_dp_rank == 0
+
+
+def _save_kv_worker(registered_dp_rank: int | None) -> MoRIIOConnectorWorker:
+    worker = _bare_worker()
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.WRITE
+    worker.moriio_config = MagicMock(transfer_timeout=0.01)
+    worker._handshake_lock = MagicMock()
+    worker._ready_requests = queue.Queue()
+    bare_engine_id = "10.0.0.1:4789"
+    worker.write_ready_flags = {bare_engine_id: True}
+    worker._remote_agents = {}
+    if registered_dp_rank is not None:
+        worker._remote_agents[f"{bare_engine_id}_dp{registered_dp_rank}"] = {"agent"}
+    worker._write_blocks_for_req = MagicMock()
+    worker._background_moriio_handshake = MagicMock()
+    return worker
+
+
+def _req_meta_for_dp(remote_dp_rank: int) -> ReqMeta:
+    return ReqMeta(
+        transfer_id="tx-1",
+        local_block_ids=[0, 1],
+        remote_block_ids=[0, 1],
+        remote_host="10.0.0.1",
+        remote_port=4789,
+        remote_handshake_port=4789,
+        remote_notify_port=61005,
+        remote_engine_id="placeholder",
+        tp_size=1,
+        remote_dp_size=8,
+        remote_dp_rank=remote_dp_rank,
+    )
+
+
+def test_save_kv_layer_routes_to_target_dp_rank():
+    worker = _save_kv_worker(registered_dp_rank=7)
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save = {"r1": _req_meta_for_dp(7)}
+
+    worker.save_kv_layer(metadata, "layer0", torch.zeros(1), None)
+
+    worker._write_blocks_for_req.assert_called_once()
+    worker._background_moriio_handshake.assert_not_called()
+
+
+def test_save_kv_layer_triggers_handshake_when_target_dp_missing():
+    worker = _save_kv_worker(registered_dp_rank=0)
+    metadata = MoRIIOConnectorMetadata()
+    metadata.reqs_to_save = {"r1": _req_meta_for_dp(7)}
+
+    worker.save_kv_layer(metadata, "layer0", torch.zeros(1), None)
+
+    worker._background_moriio_handshake.assert_called_once()
+    worker._write_blocks_for_req.assert_not_called()
 
 
 @pytest.mark.skipif(
