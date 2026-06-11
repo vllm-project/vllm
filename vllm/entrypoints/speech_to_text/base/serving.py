@@ -63,7 +63,6 @@ SpeechToTextSegment: TypeAlias = TranscriptionSegment | TranslationSegment
 T = TypeVar("T", bound=SpeechToTextResponse)
 V = TypeVar("V", bound=SpeechToTextResponseVerbose)
 S = TypeVar("S", bound=SpeechToTextSegment)
-R = TypeVar("R")
 
 
 ResponseType: TypeAlias = (
@@ -139,9 +138,6 @@ class OpenAISpeechToText(OpenAIServing):
         # of reusing the one from Renderer which showed lower throughput
         # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
         num_audio_preprocess_workers = envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS
-        logger.info(
-            "Using %d worker(s) for audio preprocess.", num_audio_preprocess_workers
-        )
         self._preprocess_executor = ThreadPoolExecutor(
             max_workers=num_audio_preprocess_workers,
             thread_name_prefix="stt-preprocess",
