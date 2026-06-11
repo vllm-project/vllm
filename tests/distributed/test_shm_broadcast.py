@@ -348,6 +348,27 @@ def test_message_queue_busy_to_idle():
     distributed_run(worker_fn_test_busy_to_idle, 4)
 
 
+
+def test_reader_timeout_rechecks_independent_of_warning_interval():
+    """Warning cadence must not control the SHM reader poll interval."""
+    with (
+        mock.patch(
+            "vllm.distributed.device_communicators.shm_broadcast."
+            "SHM_READER_RECHECK_INTERVAL_MS",
+            new=7,
+        ),
+        mock.patch(
+            "vllm.distributed.device_communicators.shm_broadcast."
+            "VLLM_RINGBUFFER_WARNING_INTERVAL",
+            new=60,
+        ),
+    ):
+        timeout = MessageQueue.ReadTimeoutWithWarnings(
+            timeout=None, should_warn=True
+        )
+        assert timeout.timeout_ms() == 7
+
+
 def test_warning_logs(caplog_vllm):
     """
     Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
