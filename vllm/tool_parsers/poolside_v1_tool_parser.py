@@ -11,7 +11,6 @@ The fix streams string values incrementally as they arrive, providing a true
 streaming experience for long content.
 """
 
-import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -41,6 +40,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import safe_literal_eval
 
 logger = init_logger(__name__)
 
@@ -106,7 +106,7 @@ class PoolsideV1ToolParser(ToolParser):
             pass
 
         try:
-            return ast.literal_eval(value)
+            return safe_literal_eval(value)
         except (ValueError, SyntaxError):
             pass
 

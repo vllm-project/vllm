@@ -153,6 +153,7 @@ class EncoderCudaGraphManager:
         )
 
         self.budget_graphs: dict[int, BudgetGraphMetadata] = {}
+        self.graph_pool: Any | None = None
         self.graph_hits = 0
         self.graph_misses = 0
         self.log_stats_interval = 100
@@ -183,15 +184,25 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
-    def capture(self):
+    def clear(self) -> None:
+        """Release captured encoder CUDA graphs and the manager-local pool."""
+        self.budget_graphs.clear()
+        self.graph_pool = None
+
+    def capture(self, graph_pool: Any):
         """Capture CUDA graphs for all token budgets."""
-        for token_budget in self.token_budgets:
+        self.graph_pool = graph_pool
+
+        for token_budget in sorted(self.token_budgets, reverse=True):
             self._capture_budget_graph(token_budget)
 
         logger.info(
             "Encoder CUDA graph capture complete. Captured %d budget graphs.",
             len(self.budget_graphs),
         )
+
+    def get_num_graphs_to_capture(self) -> int:
+        return len(self.token_budgets)
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
@@ -218,7 +229,7 @@ class EncoderCudaGraphManager:
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph):
+        with torch.inference_mode(), torch.cuda.graph(graph, pool=self.graph_pool):
             output = self.model.encoder_cudagraph_forward({**values})
             output_buffer.copy_(output)
 

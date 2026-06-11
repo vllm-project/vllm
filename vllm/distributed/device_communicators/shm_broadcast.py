@@ -38,9 +38,19 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
-if envs.VLLM_USE_SPINLOOP_EXT:
-    from vllm.spinloop import spinloop
+logger = init_logger(__name__)
 
+
+SPINLOOP_EXT_ENABLED = False
+if envs.VLLM_USE_SPINLOOP_EXT:
+    try:
+        from vllm.spinloop import spinloop
+
+        SPINLOOP_EXT_ENABLED = True
+    except ImportError:
+        logger.warning(
+            "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
+        )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
 
 if TYPE_CHECKING:
@@ -80,9 +90,6 @@ def memory_fence():
 
 def to_bytes_big(value: int, size: int) -> bytes:
     return value.to_bytes(size, byteorder="big")
-
-
-logger = init_logger(__name__)
 
 
 LONG_WAIT_TIME_LOG_MSG = (
@@ -552,7 +559,7 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (written_flag and read_count != self.buffer.n_reader)
 
-                if envs.VLLM_USE_SPINLOOP_EXT and not check():
+                if SPINLOOP_EXT_ENABLED and not check():
                     spinloop(metadata_buffer, check, timeout=SPINLOOP_TIMEOUT_SECONDS)
 
                 if not check():
@@ -673,7 +680,7 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (not written_flag or read_flag)
 
-                if envs.VLLM_USE_SPINLOOP_EXT and not check():
+                if SPINLOOP_EXT_ENABLED and not check():
                     spinloop(
                         metadata_buffer[0 : self.local_reader_rank + 1],
                         check,

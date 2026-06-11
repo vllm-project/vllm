@@ -28,6 +28,7 @@ def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=T
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        scheduler_block_size=sliding_window_spec.block_size,
         max_admission_blocks_per_request=10**9,
     )
 
@@ -40,6 +41,7 @@ def get_chunked_local_attention_manager(
         block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        scheduler_block_size=chunked_local_attention_spec.block_size,
         max_admission_blocks_per_request=10**9,
     )
 
@@ -84,7 +86,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -155,7 +157,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -458,6 +460,7 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
         block_pool=block_pool,
         enable_caching=False,
         kv_cache_group_id=0,
+        scheduler_block_size=spec.block_size,
         max_admission_blocks_per_request=cap,
     )
 

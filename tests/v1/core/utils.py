@@ -24,6 +24,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -89,6 +90,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -160,6 +163,7 @@ def create_scheduler(
         ],
     )
     cache_config.num_gpu_blocks = num_blocks
+    register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     return scheduler_cls(
         vllm_config=vllm_config,

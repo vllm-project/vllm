@@ -43,10 +43,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -113,12 +113,12 @@ class MiniMaxM2MoE(nn.Module):
             router_logits_dtype=torch.float32,
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
             params_dtype=torch.float32,
-            quant_config=None,
+            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
 
@@ -132,7 +132,7 @@ class MiniMaxM2MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states.to(torch.float32))
+        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )

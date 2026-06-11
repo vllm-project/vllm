@@ -68,6 +68,11 @@ impl DelimitedReasoningParser {
         .unwrap_or(self.default_in_reasoning);
     }
 
+    /// Return whether the parser is currently inside a reasoning section.
+    pub(crate) fn in_reasoning(&self) -> bool {
+        self.current_in_reasoning
+    }
+
     /// Parse one decoded text delta and return its reasoning/content split.
     pub(crate) fn push(&mut self, delta: &str) -> ReasoningDelta {
         self.buffer.push_str(delta);

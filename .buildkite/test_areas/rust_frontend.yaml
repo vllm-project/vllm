@@ -45,19 +45,19 @@ steps:
   - vllm/entrypoints/serve/
   - vllm/v1/engine/
   - tests/utils.py
-  # - tests/entrypoints/rpc/test_collective_rpc.py
+  # - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
   - tests/entrypoints/serve/disagg/test_serving_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
-  # - tests/entrypoints/serve/instrumentator/test_sleep.py
+  # - tests/entrypoints/serve/dev/test_sleep.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # - pytest -v -s entrypoints/rpc/test_collective_rpc.py
+  # - pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
   - pytest -v -s entrypoints/serve/disagg/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
-  # - pytest -v -s entrypoints/serve/instrumentator/test_sleep.py
+  # - pytest -v -s entrypoints/serve/dev/test_sleep.py
 
 - label: Rust Frontend Core Correctness
   timeout_in_minutes: 30

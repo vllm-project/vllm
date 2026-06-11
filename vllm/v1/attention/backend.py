@@ -267,6 +267,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
         return None
@@ -334,6 +335,7 @@ class AttentionBackend(ABC):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
         )
         if combination_reason is not None:
@@ -414,6 +416,12 @@ class CommonAttentionMetadata:
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
+
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+    """PrefixLM bidirectional ranges for multimodal tokens. Maps
+    request index to list of (start, end) token position ranges
+    where bidirectional attention should apply. None for text-only
+    batches or non-PrefixLM models."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -808,14 +816,17 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+    def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        :param quant_key: QuantKey object that describes the quantization op
-        :return: is fusion supported for this type of quantization
+        Args:
+            quant_key: QuantKey object that describes the quantization op
+
+        Returns:
+            is fusion supported for this type of quantization
         """
         return False
 

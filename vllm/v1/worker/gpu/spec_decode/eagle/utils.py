@@ -76,10 +76,15 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                     del sh.head
                     sh.head = target_lm_head
 
-    # MTP also shares a topk_indices_buffer between target and draft.
+    # MTP shares topk_indices_buffer with the target model. We update
+    # every module in the draft that holds a buffer reference so that
+    # the per-layer indexer and sparse-attention backends all point to
+    # the target's buffer.
     if hasattr(target_inner, "topk_indices_buffer"):
-        if hasattr(draft_inner, "topk_indices_buffer"):
-            del draft_inner.topk_indices_buffer
-        draft_inner.topk_indices_buffer = target_inner.topk_indices_buffer
+        target_buffer = target_inner.topk_indices_buffer
+        if target_buffer is not None:
+            for _, module in draft_inner.named_modules():
+                if hasattr(module, "topk_indices_buffer"):
+                    module.topk_indices_buffer = target_buffer
 
     return eagle_model

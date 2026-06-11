@@ -59,10 +59,6 @@ def _transformers_v4_compatibility_init() -> Any:
 
     This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
     Transformers."""
-    # Transformers v4
-    if hasattr(ProcessorMixin, "optional_attributes"):
-        return
-    # Transformers v5
     if hasattr(ProcessorMixin.__init__, "_vllm_patched"):
         return
 
@@ -159,6 +155,44 @@ def get_processor_cls_name_from_config(
         if config and "processor_class" in config:
             return config["processor_class"]
     return None
+
+
+def get_video_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
+    processor_name = convert_model_repo_to_path(processor_name)
+    config_file = [
+        "video_preprocessor_config.json",
+        "preprocessor_config.json",
+    ]
+    for file in config_file:
+        config = get_hf_file_to_dict(file, processor_name, revision=revision)
+        if config and "video_processor_type" in config:
+            return config["video_processor_type"]
+    return None
+
+
+_cached_get_video_processor_cls_name = lru_cache(
+    get_video_processor_cls_name_from_config
+)
+
+
+def get_video_processor_cls_name(
+    model_config: "ModelConfig",
+) -> str | None:
+    if is_gguf(model_config.model):
+        assert not is_gguf(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load video processor metadata."
+        )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
+    else:
+        model = model_config.model
+        revision = model_config.revision
+
+    return _cached_get_video_processor_cls_name(model, revision=revision)
 
 
 def get_processor(

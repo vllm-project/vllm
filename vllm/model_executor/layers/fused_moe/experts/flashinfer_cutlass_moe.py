@@ -4,7 +4,6 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -94,9 +93,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
+        self.max_capture_size = moe_config.max_capture_size
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(

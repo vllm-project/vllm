@@ -46,6 +46,22 @@ class MistralCommonImageProcessor:
         ncols, nrows = self.mm_encoder._image_to_num_tokens(image)
         return ncols * nrows, nrows, ncols
 
+    # Copied from Transformers (Apache-2.0):
+    # https://github.com/huggingface/transformers/blob/d20946079fd422335fbae3eeb98b7cd88334612f/src/transformers/image_processing_base.py#L473
+    def fetch_images(self, image_url_or_urls):
+        from transformers.image_utils import is_valid_image, load_image
+
+        if isinstance(image_url_or_urls, (list, tuple)):
+            return [self.fetch_images(x) for x in image_url_or_urls]
+        if isinstance(image_url_or_urls, str):
+            return load_image(image_url_or_urls)
+        if is_valid_image(image_url_or_urls):
+            return image_url_or_urls
+        raise TypeError(
+            "only a single or a list of entries is supported but got "
+            f"type={type(image_url_or_urls)}"
+        )
+
 
 class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
@@ -56,11 +72,6 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         image_processor: MistralCommonImageProcessor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
-
-        # Back-compatibility for Transformers v4
-        if not hasattr(self.tokenizer, "init_kwargs"):
-            self.tokenizer.init_kwargs = {}
-
         self.image_processor = image_processor
 
         image_special_ids = self.image_processor.mm_encoder.special_ids

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Module
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -38,7 +37,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -80,7 +79,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
     ) -> FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -89,7 +88,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -156,7 +155,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def _setup_kernel(
         self,
-        layer: Module,
+        layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
@@ -201,7 +200,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 routing_tables=layer._expert_routing_tables(),
             )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
 
         # Padding the weight for better performance on ROCm.

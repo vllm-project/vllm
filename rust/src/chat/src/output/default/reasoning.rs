@@ -178,8 +178,7 @@ pub(crate) async fn reasoning_event_stream(
                         y.yield_ok(next).await;
                     }
                     y.yield_ok(ContentEvent::Done {
-                        prompt_token_count: finished.prompt_token_count,
-                        output_token_count: finished.output_token_count,
+                        usage: finished.usage,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                     })
@@ -289,8 +288,11 @@ mod tests {
                 token_ids: vec![],
                 logprobs: None,
                 finished: Some(vllm_text::Finished {
-                    prompt_token_count: 3,
-                    output_token_count: 0,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 0,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -322,8 +324,11 @@ mod tests {
                     delta: "def".to_string(),
                 },
                 ContentEvent::Done {
-                    prompt_token_count: 3,
-                    output_token_count: 0,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 0,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },

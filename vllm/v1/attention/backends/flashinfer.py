@@ -62,7 +62,6 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
-    get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -608,10 +607,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        # Compatible with models with non-uniform per-layer head counts.
-        self.num_qo_heads = get_num_attention_heads_from_layers(
-            vllm_config, layer_names
-        ) or self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
+        )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -623,6 +621,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
+                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
+                # Fail fast at init rather than crashing on the first request.
+                if not current_platform.is_device_capability_family(100):
+                    raise ValueError(
+                        "--kv-cache-dtype nvfp4 requires sm100f, "
+                        "please try a different dtype or remove"
+                    )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype

@@ -6,7 +6,7 @@ import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
 from vllm.logger import init_logger
@@ -192,10 +192,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
+        moe_backend = get_current_vllm_config().kernel_config.moe_backend
+        if moe_backend == "flashinfer_cutedsl":
             logger.info_once(
-                "Skip quantization when using FlashInfer CUTEDSL(masked_gemm) "
-                "for ModelOptNvFp4FusedMoE."
+                "Skip quantization when using FlashInfer CUTEDSL "
+                "(--moe-backend flashinfer_cutedsl) for ModelOptNvFp4FusedMoE."
             )
             q_dtype = None
 

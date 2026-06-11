@@ -31,6 +31,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.multimodal.inputs import NestedTensors
 
+from .interfaces import LocalArgmaxMixin
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -284,19 +285,6 @@ class DeepseekV2Eagle3Model(nn.Module):
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
 
-            # Handle kv cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             # Remapping the name FP8 kv-scale
             if "scale" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -322,7 +310,7 @@ class DeepseekV2Eagle3Model(nn.Module):
         return loaded_params
 
 
-class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

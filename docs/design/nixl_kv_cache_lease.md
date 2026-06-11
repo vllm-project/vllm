@@ -128,7 +128,7 @@ The lease mechanism is controlled through `kv_connector_extra_config` in `--kv-t
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector": "NixlConnector",
-    "kv_role": "kv_both",
+    "kv_role": "kv_producer",
     "kv_connector_extra_config": {"kv_lease_duration": 60}
   }'
 ```

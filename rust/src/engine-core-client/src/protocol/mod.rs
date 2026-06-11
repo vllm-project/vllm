@@ -48,6 +48,7 @@ mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
+pub mod lora;
 pub mod multimodal;
 pub mod stats;
 pub mod tensor;
@@ -161,6 +162,21 @@ pub enum RequestOutputKind {
     FinalOnly = 2,
 }
 
+/// Structured-output backend selected for EngineCore grammar compilation.
+///
+/// Python vLLM stores this in `StructuredOutputsParams._backend` after request
+/// validation. The Rust frontend currently always lowers structured-output
+/// requests to guidance, while ignoring any user-supplied `_backend` value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StructuredOutputBackend {
+    Xgrammar,
+    #[default]
+    Guidance,
+    Outlines,
+    LmFormatEnforcer,
+}
+
 /// The stop reason associated with a finished output.
 ///
 /// Python models this as the union-typed `stop_reason: int | str | None`
@@ -208,6 +224,17 @@ pub struct StructuredOutputsParams {
     pub whitespace_pattern: Option<String>,
     /// Structural tag configuration (JSON-encoded string).
     pub structural_tag: Option<String>,
+    /// Structured-output backend, mirroring Python's internal `_backend`.
+    ///
+    /// User-supplied values are ignored during deserialization. This matches
+    /// Python's request boundary, where `_backend` is set by validation rather
+    /// than accepted as a request-level backend selector.
+    #[serde(
+        default,
+        rename = "_backend",
+        deserialize_with = "serde_with::rust::deserialize_ignore_any"
+    )]
+    pub backend: StructuredOutputBackend,
 }
 
 /// Engine-core-facing sampling parameters for text generation.
@@ -349,7 +376,7 @@ pub struct EngineCoreRequest {
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
     #[serde(default)]
-    pub lora_request: Option<OpaqueValue>,
+    pub lora_request: Option<lora::LoraRequest>,
     #[serde(default)]
     pub cache_salt: Option<String>,
     #[serde(default)]
@@ -598,5 +625,19 @@ mod tests {
         .unwrap_err();
 
         expect_test::expect![[r#"messagepack decode failed for u64: wrong msgpack marker FixMap(1); value fallback: {"status": "READY"}"#]].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn structured_outputs_backend_ignores_deserialized_value() {
+        let params: StructuredOutputsParams = serde_json::from_value(serde_json::json!({
+            "json_object": true,
+            "_backend": "xgrammar",
+        }))
+        .unwrap();
+
+        assert_eq!(params.backend, StructuredOutputBackend::Guidance);
+
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["_backend"], "guidance");
     }
 }

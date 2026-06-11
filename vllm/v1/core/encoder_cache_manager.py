@@ -71,6 +71,8 @@ class EncoderCacheManager:
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
+        # request_id => set of input_ids cached for that request
+        self.request_cached_ids: dict[str, set[int]] = {}
 
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
@@ -83,6 +85,7 @@ class EncoderCacheManager:
         Called when model weights are updated to invalidate stale embeddings.
         """
         self.cached.clear()
+        self.request_cached_ids.clear()
         self.freeable.clear()
         self.freed.clear()
         self.num_free_slots = self.cache_size
@@ -114,6 +117,7 @@ class EncoderCacheManager:
             self.num_freeable_slots -= num_encoder_embeds
 
         self.cached[mm_hash].add(request.request_id)
+        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
         return True
 
     def can_allocate(
@@ -201,22 +205,13 @@ class EncoderCacheManager:
         assert self.num_freeable_slots >= num_encoder_embeds
 
         self.cached[mm_hash].add(request_id)
+        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
         self.num_free_slots -= num_encoder_embeds
         self.num_freeable_slots -= num_encoder_embeds
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
-        """Get all cached multimodal input IDs for a request.
-
-        Returns the set of input IDs whose `mm_hash` exists in the cache map.
-        This includes entries that are currently unreferenced (and thus present
-        in `freeable`); for such entries, freeing for this request will be a
-        no-op.
-        """
-        return {
-            input_id
-            for input_id in range(len(request.mm_features))
-            if request.mm_features[input_id].identifier in self.cached
-        }
+        """Get all cached multimodal input IDs for a request."""
+        return self.request_cached_ids.get(request.request_id, set())
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         """Free the request's reference to the encoder input (`mm_data`)
@@ -230,6 +225,12 @@ class EncoderCacheManager:
         """
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
+        # Always clean up request_cached_ids, even if the mm_hash was
+        # already evicted from cache (e.g. by can_allocate).
+        if req_id in self.request_cached_ids:
+            self.request_cached_ids[req_id].discard(input_id)
+            if not self.request_cached_ids[req_id]:
+                del self.request_cached_ids[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -248,8 +249,7 @@ class EncoderCacheManager:
 
         Typically called when a request is finished, cancelled, or aborted.
         """
-        input_ids = self.get_cached_input_ids(request)
-        for input_id in input_ids:
+        for input_id in list(self.get_cached_input_ids(request)):
             self.free_encoder_input(request, input_id)
 
     def get_freed_mm_hashes(self) -> list[str]:

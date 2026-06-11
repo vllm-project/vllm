@@ -1,10 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde_with::DeserializeFromStr;
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 /// Specify which chat renderer implementation to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
 pub enum RendererSelection {
     /// Use model-based auto-detection.
     #[default]

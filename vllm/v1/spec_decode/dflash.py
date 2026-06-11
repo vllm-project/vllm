@@ -73,6 +73,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
+        # The draft model is text-only — clear the target's multimodal
+        # flag so flash_attn is not rejected for mm_prefix support.
+        arch = base.model_config.model_arch_config
+        if arch.is_mm_prefix_lm:
+            base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
         return replace(
             base,
             attention_config=replace(

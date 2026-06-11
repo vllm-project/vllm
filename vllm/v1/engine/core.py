@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
@@ -176,19 +177,19 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {tp_rank: metadata}
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[int, Any] = {}
+                content: dict[tuple[int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata(content)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
-        self.batch_queue_size = self.model_executor.max_concurrent_batches
+        self.batch_queue_size = vllm_config.max_concurrent_batches
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
@@ -234,6 +235,9 @@ class EngineCore:
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
+
+        # register all kvcache specs in enginecore process.
+        register_all_kvcache_specs(vllm_config)
 
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
@@ -534,14 +538,12 @@ class EngineCore:
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
-                if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
+                if len(batch_queue) < self.batch_queue_size and (
+                    model_executed or self.scheduler.has_requests()
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
-                    return None, True
+                    return None, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -606,6 +608,7 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -620,6 +623,7 @@ class EngineCore:
         # Tear down distributed state initialized in this EngineCore process
         # before it exits and release cached memory.
         cleanup_dist_env_and_memory()
+        logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
@@ -1170,6 +1174,11 @@ class EngineCoreProc(EngineCore):
             signal_callback = SignalCallback(wakeup_engine)
 
             def signal_handler(signum, frame):
+                signal_name = signal.Signals(signum).name
+                logger.info(
+                    "[shutdown] EngineCore: trigger received signal=%s",
+                    signal_name,
+                )
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
                 signal_callback.trigger()
 
@@ -1179,7 +1188,7 @@ class EngineCoreProc(EngineCore):
             engine_core.run_busy_loop()
 
         except SystemExit:
-            logger.debug("EngineCore exiting.")
+            logger.info_once("[shutdown] EngineCore: exiting busy loop")
             raise
         except Exception as e:
             if engine_core is None:
@@ -1283,13 +1292,21 @@ class EngineCoreProc(EngineCore):
 
         if self.shutdown_state == EngineShutdownState.REQUESTED:
             shutdown_timeout = self.vllm_config.shutdown_timeout
+            mode = "abort" if shutdown_timeout == 0 else "drain"
 
-            logger.info("Shutdown initiated (timeout=%d)", shutdown_timeout)
+            logger.info(
+                "[shutdown] EngineCore: start mode=%s timeout=%ds",
+                mode,
+                shutdown_timeout,
+            )
 
             if shutdown_timeout == 0:
                 num_requests = self.scheduler.get_num_unfinished_requests()
                 if num_requests > 0:
-                    logger.info("Aborting %d requests", num_requests)
+                    logger.info(
+                        "[shutdown] EngineCore: aborting in-flight requests count=%d",
+                        num_requests,
+                    )
                 aborted_reqs = self.scheduler.finish_requests(
                     None, RequestStatus.FINISHED_ABORTED
                 )
@@ -1298,7 +1315,8 @@ class EngineCoreProc(EngineCore):
                 num_requests = self.scheduler.get_num_unfinished_requests()
                 if num_requests > 0:
                     logger.info(
-                        "Draining %d in-flight requests (timeout=%ds)",
+                        "[shutdown] EngineCore: draining in-flight requests "
+                        "count=%d timeout=%ds",
                         num_requests,
                         shutdown_timeout,
                     )
@@ -1307,7 +1325,10 @@ class EngineCoreProc(EngineCore):
 
         # Exit when no work remaining
         if not self.has_work():
-            logger.info("Shutdown complete")
+            logger.info(
+                "[shutdown] EngineCore: request processing complete; "
+                "starting resource teardown"
+            )
             return False
 
         return True
@@ -1351,7 +1372,10 @@ class EngineCoreProc(EngineCore):
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False
 
-        logger.info("Rejecting request %s (server shutting down)", request.request_id)
+        logger.debug(
+            "[shutdown] EngineCore: rejecting new request request_id=%s",
+            request.request_id,
+        )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
         return True
 
@@ -1361,7 +1385,10 @@ class EngineCoreProc(EngineCore):
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False
 
-        logger.warning("Rejecting utility call %s (server shutting down)", method_name)
+        logger.warning(
+            "[shutdown] EngineCore: rejecting utility call method=%s",
+            method_name,
+        )
         output = UtilityOutput(call_id, failure_message="Server shutting down")
         self.output_queue.put_nowait(
             (client_idx, EngineCoreOutputs(utility_output=output))
@@ -1462,6 +1489,7 @@ class EngineCoreProc(EngineCore):
             ready_response = EngineCoreReadyResponse(
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
+                block_size=self.vllm_config.cache_config.block_size,
                 dp_stats_address=self.frontend_stats_publish_address,
                 dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
                 vllm_version=VLLM_VERSION,

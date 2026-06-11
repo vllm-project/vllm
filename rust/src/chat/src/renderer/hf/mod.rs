@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
 use vllm_text::Prompt;
@@ -13,6 +13,7 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
+use self::value::{TemplateValue, to_template_value};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -24,6 +25,7 @@ mod error;
 mod format;
 mod template;
 mod tojson;
+mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -38,7 +40,7 @@ pub struct MultimodalRenderInfo {
 /// state.
 pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
-    default_template_kwargs: HashMap<String, Value>,
+    default_template_kwargs: HashMap<String, JsonValue>,
     content_format: ContentFormatOption,
     special_tokens: Option<HfSpecialTokens>,
     multimodal: Option<MultimodalRenderInfo>,
@@ -48,7 +50,7 @@ impl HfChatRenderer {
     /// Create a renderer from the given template string.
     pub fn new(
         template: Option<String>,
-        default_template_kwargs: HashMap<String, Value>,
+        default_template_kwargs: HashMap<String, JsonValue>,
         content_format: ContentFormatOption,
     ) -> Result<Self> {
         Ok(Self {
@@ -245,7 +247,7 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: Value,
+    arguments: TemplateValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,7 +261,7 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: Value,
+    parameters: TemplateValue,
     strict: Option<bool>,
 }
 
@@ -345,13 +347,14 @@ fn to_template_tool_calls(
     let mut tool_calls = Vec::new();
 
     for tool_call in content.tool_calls() {
-        let arguments = serde_json::from_str::<Value>(&tool_call.arguments).map_err(|error| {
+        let arguments = serde_json::from_str(&tool_call.arguments).map_err(|error| {
             Error::ChatTemplate(format!(
                 "assistant tool call `{}` has invalid JSON arguments: {}",
                 tool_call.id,
                 error.as_report()
             ))
         })?;
+        let arguments = to_template_value(arguments);
 
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
@@ -434,7 +437,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
+                parameters: to_template_value(tool.parameters.clone()),
                 strict: tool.strict,
             },
         })
@@ -907,6 +910,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|Paris|call_1|Sunny");
+    }
+
+    #[test]
+    fn chat_template_tool_call_argument_items_method_is_not_shadowed_by_field() {
+        let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                id: "call_1".to_string(),
+                name: "add".to_string(),
+                arguments: r#"{"items":"operands","x":2,"y":1.0}"#.to_string(),
+            }),
+        ])]);
+
+        let rendered = render(
+            Some(
+                "{%- set arguments = messages[0].tool_calls[0].function.arguments -%}
+{%- for key, value in arguments.items() -%}{{ key }}={{ value }};{%- endfor -%}
+|{{ arguments['items'] }}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "items=operands;x=2;y=1.0;|operands");
     }
 
     #[test]

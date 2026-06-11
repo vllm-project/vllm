@@ -570,9 +570,16 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         )
         gated_norm_shapes: set[tuple[int, int]] = set()
         for layer in gdn_layers.values():
-            gated_norm_shapes.add(
-                (layer.num_v_heads // layer.tp_size, layer.head_v_dim)
+            num_v_heads = getattr(layer, "num_v_heads", None) or getattr(
+                layer, "num_heads", None
             )
+            head_v_dim = getattr(layer, "head_v_dim", None) or getattr(
+                layer, "head_dim", None
+            )
+
+            assert num_v_heads is not None and head_v_dim is not None
+
+            gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
 
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.

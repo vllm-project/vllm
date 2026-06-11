@@ -7,14 +7,11 @@
 
 #include <torch/csrc/stable/ops.h>
 
-// NOTE: These headers are intentionally kept in csrc/quantization/gguf/ (not
-// moved to libtorch_stable) to avoid unnecessary reformatting that would break
-// git rename detection and pollute blame history.
-#include "../../../quantization/gguf/ggml-common.h"
-#include "../../../quantization/gguf/vecdotq.cuh"
-#include "../../../quantization/gguf/dequantize.cuh"
-#include "../../../quantization/gguf/mmvq.cuh"
-#include "../../../quantization/gguf/mmq.cuh"
+#include "ggml-common.h"
+#include "vecdotq.cuh"
+#include "dequantize.cuh"
+#include "mmvq.cuh"
+#include "mmq.cuh"
 #include "moe.cuh"
 #include "moe_vec.cuh"
 
@@ -82,6 +79,7 @@ torch::stable::Tensor ggml_dequantize(
       W.get_device_index());
   auto dtype_ = dtype.value_or(torch::headeronly::ScalarType::Half);
   auto DW = torch::stable::empty({m, n}, dtype_, std::nullopt, W.device());
+  torch::stable::fill_(DW, 0.0);
   cudaStream_t stream = get_current_cuda_stream();
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(DW.scalar_type(), "ggml_dequantize", [&] {
@@ -96,13 +94,14 @@ torch::stable::Tensor ggml_mul_mat_vec_a8(
     torch::stable::Tensor W,  // quant weight
     torch::stable::Tensor X,  // input
     int64_t type, int64_t row) {
-  int col = X.sizes()[1];
-  int vecs = X.sizes()[0];
-  const int padded = (col + 512 - 1) / 512 * 512;
+  int64_t col = X.sizes()[1];
+  int64_t vecs = X.sizes()[0];
+  const int64_t padded = (col + 512 - 1) / 512 * 512;
   const torch::stable::accelerator::DeviceGuard device_guard(
       X.get_device_index());
   auto Y = torch::stable::empty({vecs, row}, X.scalar_type(), std::nullopt,
                                 W.device());
+  torch::stable::fill_(Y, 0.0);
   cudaStream_t stream = get_current_cuda_stream();
   auto quant_X = torch::stable::empty({vecs, padded / 32 * 9},
                                       torch::headeronly::ScalarType::Int,
@@ -216,13 +215,14 @@ torch::stable::Tensor ggml_mul_mat_vec_a8(
 torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,  // quant weight
                                       torch::stable::Tensor X,  // input
                                       int64_t type, int64_t row) {
-  int col = X.sizes()[1];
-  int padded = (col + 512 - 1) / 512 * 512;
-  int batch = X.sizes()[0];
+  int64_t col = X.sizes()[1];
+  int64_t padded = (col + 512 - 1) / 512 * 512;
+  int64_t batch = X.sizes()[0];
   const torch::stable::accelerator::DeviceGuard device_guard(
       X.get_device_index());
   auto Y = torch::stable::empty({batch, row}, X.scalar_type(), std::nullopt,
                                 W.device());
+  torch::stable::fill_(Y, 0.0);
   cudaStream_t stream = get_current_cuda_stream();
   auto quant_X = torch::stable::empty({batch, padded / 32 * 9},
                                       torch::headeronly::ScalarType::Int,
@@ -294,12 +294,13 @@ torch::stable::Tensor ggml_moe_a8(torch::stable::Tensor X,  // input
                                   torch::stable::Tensor num_tokens_post_padded,
                                   int64_t type, int64_t row, int64_t top_k,
                                   int64_t tokens) {
-  int col = X.sizes()[1];
-  int padded = (col + 512 - 1) / 512 * 512;
+  int64_t col = X.sizes()[1];
+  int64_t padded = (col + 512 - 1) / 512 * 512;
   const torch::stable::accelerator::DeviceGuard device_guard(
       X.get_device_index());
   auto Y = torch::stable::empty({tokens * top_k, row}, X.scalar_type(),
                                 std::nullopt, W.device());
+  torch::stable::fill_(Y, 0.0);
   cudaStream_t stream = get_current_cuda_stream();
   auto quant_X = torch::stable::empty({tokens, padded / 32 * 9},
                                       torch::headeronly::ScalarType::Int,
@@ -398,8 +399,8 @@ torch::stable::Tensor ggml_moe_a8_vec(
     torch::stable::Tensor W,  // expert weights
     torch::stable::Tensor topk_ids, int64_t top_k, int64_t type, int64_t row,
     int64_t tokens) {
-  int col = X.sizes()[1];
-  const int padded = (col + 512 - 1) / 512 * 512;
+  int64_t col = X.sizes()[1];
+  const int64_t padded = (col + 512 - 1) / 512 * 512;
   const torch::stable::accelerator::DeviceGuard device_guard(
       X.get_device_index());
   auto Y = torch::stable::empty({tokens * top_k, row}, X.scalar_type(),

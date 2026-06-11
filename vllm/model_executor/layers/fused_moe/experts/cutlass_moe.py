@@ -322,6 +322,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
         ]
 
@@ -378,8 +379,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             topk_ids,
             activation,
             global_num_experts,
-            # the fp8 cutlass experts use their own expert map.
-            None,
+            expert_map,
             self.w1_scale,
             self.w2_scale,
             a1q_scale,
@@ -719,10 +719,12 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
         ]
 

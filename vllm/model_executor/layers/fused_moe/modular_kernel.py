@@ -1097,8 +1097,9 @@ class FusedMoEKernelModularImpl:
         shared_experts_input: torch.Tensor | None,
     ):
         if shared_experts is not None:
+            assert self.prepare_finalize.supports_async()
             assert shared_experts_input is not None
-            shared_experts.apply(
+            shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
@@ -1572,7 +1573,7 @@ class FusedMoEKernel:
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        router_logits: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,

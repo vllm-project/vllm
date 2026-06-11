@@ -26,7 +26,7 @@
 
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -74,6 +74,9 @@ from .minicpmv import (
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
 if os.getenv("USE_FLAGOS") == "1":
     import flag_gems
@@ -173,9 +176,64 @@ MiniCPMOAudioInputs: TypeAlias = (
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    audio_features = hf_inputs.get("audio_features")
+    audio_feature_lens = hf_inputs.get("audio_feature_lens")
+
+    # For multi-chunk audio (>30s), audio_features has one item per chunk
+    # (total_chunks) while audio_feature_lens has one item per audio (N).
+    # Use flat to group audio_features by audio so both fields
+    # share the same batch size (N).
+    audio_features_cfg = MultiModalFieldConfig.batched("audio")
+
+    if audio_features is not None and audio_feature_lens is not None:
+        num_features = (
+            len(audio_features)
+            if isinstance(audio_features, (list, tuple))
+            else audio_features.shape[0]
+        )
+        num_audios = (
+            len(audio_feature_lens)
+            if isinstance(audio_feature_lens, (list, tuple))
+            else audio_feature_lens.shape[0]
+        )
+
+        if num_features > num_audios:
+            # Compute the number of chunks belonging to each audio
+            chunks_per_audio: list[int] = []
+            for lens in audio_feature_lens:
+                if isinstance(lens, torch.Tensor):
+                    chunks_per_audio.append(lens.numel())
+                else:
+                    chunks_per_audio.append(1)
+
+            # When audio_feature_lens is padded (e.g. from batched HF
+            # processor output), numel() over-counts.  Fall back to
+            # counting non-zero entries so the sizes sum to num_features.
+            if sum(chunks_per_audio) != num_features:
+                chunks_per_audio = []
+                for lens in audio_feature_lens:
+                    if isinstance(lens, torch.Tensor):
+                        n = int((lens != 0).sum())
+                        chunks_per_audio.append(max(n, 1))
+                    else:
+                        chunks_per_audio.append(1)
+
+            # Use flat (not flat_from_sizes) because audio_features
+            # is list[Tensor] with variable-length chunks (post-unpad).
+            slice_idxs = [0]
+            for n in chunks_per_audio:
+                slice_idxs.append(slice_idxs[-1] + n)
+            audio_features_cfg = MultiModalFieldConfig.flat(
+                "audio",
+                [
+                    slice(slice_idxs[i], slice_idxs[i + 1])
+                    for i in range(len(chunks_per_audio))
+                ],
+            )
+
     return dict(
         **_minicpmv_field_config(hf_inputs),
-        audio_features=MultiModalFieldConfig.batched("audio"),
+        audio_features=audio_features_cfg,
         audio_feature_lens=MultiModalFieldConfig.batched("audio"),
         audio_embeds=MultiModalFieldConfig.batched("audio"),
     )
@@ -214,6 +272,38 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
+
+    def get_hf_processor(self, **kwargs: object) -> "MiniCPMOProcessor":
+        """Get vendored MiniCPMOProcessor for multimodal (image+audio) inputs.
+
+        Creates a vendored processor that reuses the HF image processor,
+        feature extractor, and tokenizer; applies the correct audio pooling
+        configuration; and converts numpy arrays in the image processor to
+        lists for serialization compatibility. The returned processor is
+        compatible with Transformers v5.
+        """
+        import numpy as np
+
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
+
+        # Create vendored processor with correct configuration
+        vendored_processor = MiniCPMOProcessor(
+            image_processor=hf_processor.image_processor,
+            feature_extractor=hf_processor.feature_extractor,
+            tokenizer=hf_processor.tokenizer,
+            pool_step=self.get_default_audio_pool_step(),
+        )
+
+        # Convert numpy arrays in image processor to lists for serialization
+        image_processor = vendored_processor.image_processor
+        for attr in ("mean", "std"):
+            val = getattr(image_processor, attr, None)
+            if val is not None and isinstance(val, np.ndarray):
+                setattr(image_processor, attr, val.tolist())
+
+        return vendored_processor
 
     def get_data_parser(self):
         return MiniCPMOMultiModalDataParser(
@@ -364,11 +454,23 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
 
             # Avoid padding since we need the output for each audio to be
             # independent of other audios for the cache to work correctly
+            # Flatten audio_feature_lens (list of tensors of any
+            # dimensionality, one per audio, each containing per-chunk
+            # lengths) into a flat list of integer lengths so there is
+            # one length per chunk, matching the first dimension of
+            # audio_features.  Using flatten() handles 0-D, 1-D, and
+            # higher-dimensional tensors uniformly.
+            flat_feature_lens: list[int] = []
+            for lens in audio_inputs["audio_feature_lens"]:
+                if isinstance(lens, torch.Tensor):
+                    flat_feature_lens.extend(lens.flatten().tolist())
+                else:
+                    flat_feature_lens.append(int(lens))
             unpadded_audio_features = [
-                feat[:, :feature_len]
-                for feat, feature_len in zip(
+                feat[:, :length]
+                for feat, length in zip(
                     audio_inputs["audio_features"],
-                    audio_inputs["audio_feature_lens"],
+                    flat_feature_lens,
                 )
             ]
             audio_inputs["audio_features"] = unpadded_audio_features

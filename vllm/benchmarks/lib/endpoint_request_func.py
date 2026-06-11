@@ -79,6 +79,10 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: str | None = None
     request_id: str | None = None
+    # Pre-built chat messages. When set, `async_request_openai_chat_completions`
+    # uses this list directly and skips building messages from `prompt` and
+    # `multi_modal_content`.
+    chat_messages: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -343,7 +347,10 @@ async def async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
-    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
+    if request_func_input.chat_messages is not None:
+        messages = request_func_input.chat_messages
+    else:
+        messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name

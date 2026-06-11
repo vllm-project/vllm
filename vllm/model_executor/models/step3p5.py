@@ -25,6 +25,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -634,36 +635,48 @@ class Step3p5Model(nn.Module):
 
         # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
         expert_params_mapping = [
-            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
-            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
-            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
             (
-                f".moe.experts.{base_layer}w13_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.gate_proj.weight",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.up_proj.weight",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.down_proj.weight",
+                "w2",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
                 ".moe.gate_proj.weight_scale_2",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
                 ".moe.up_proj.weight_scale_2",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale_2",
                 ".moe.down_proj.weight_scale_2",
                 "w2",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
                 ".moe.gate_proj.weight_scale",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
                 ".moe.up_proj.weight_scale",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale",
                 ".moe.down_proj.weight_scale",
                 "w2",
             ),
@@ -671,17 +684,17 @@ class Step3p5Model(nn.Module):
             # input scales are stored as moe.{gate,up,down}_proj.input_scale
             # rather than the standard per-expert format handled generically.
             (
-                f".moe.experts.{base_layer}w13_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
                 ".moe.gate_proj.input_scale",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
                 ".moe.up_proj.input_scale",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w2_input_scale",
                 ".moe.down_proj.input_scale",
                 "w2",
             ),
@@ -954,7 +967,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
             experts = layer.experts
-            assert isinstance(experts, FusedMoE)
+            assert isinstance(experts, MoERunner)
             # Register the expert weights.
             self.expert_weights.append(experts.get_expert_weights())
             experts.set_eplb_state(

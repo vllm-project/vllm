@@ -57,18 +57,13 @@ class ModelState(ABC):
         return None
 
     def postprocess_state(
-        self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
     ) -> None:
         return None
 
     @abstractmethod
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> torch.Tensor | None:
         raise NotImplementedError
 

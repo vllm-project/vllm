@@ -324,7 +324,7 @@ class MoRIIOConstants:
     DEFAULT_DEFER_TIMEOUT = 60.0
 
 
-# The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):
+# The router embeds both zmq_addresses in the request_id:
 #   "___prefill_addr_{zmq}___decode_addr_{zmq}_{32-hex-uuid}"
 # MoRIIO zmq_address format: "host:IP,handshake:PORT,notify:PORT"
 #

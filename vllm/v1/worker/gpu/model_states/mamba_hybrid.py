@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -86,6 +87,12 @@ class MambaHybridModelState(DefaultModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if for_capture:
+            # Capture with worst-case max_seq_len so the graph is valid at any replay.
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
@@ -106,13 +113,10 @@ class MambaHybridModelState(DefaultModelState):
             # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             if input_batch.num_draft_tokens_per_req is not None:
-                spec_decode_mask = (
-                    input_batch.num_draft_tokens_per_req > 0
-                ) & ~input_batch.is_prefilling_np
+                has_draft_tokens = input_batch.num_draft_tokens_per_req > 0
+                spec_decode_mask = has_draft_tokens & ~input_batch.is_prefilling_np
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask,
-                    input_batch.num_draft_tokens_per_req,
-                    -1,
+                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
@@ -129,7 +133,7 @@ class MambaHybridModelState(DefaultModelState):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
-            max_seq_len=self.max_model_len,
+            max_seq_len=max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
@@ -139,12 +143,33 @@ class MambaHybridModelState(DefaultModelState):
         )
 
     def postprocess_state(
-        self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor | int
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = torch.clamp(
-            num_sampled, min=1
-        )
+        if not isinstance(num_sampled, int):
+            # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+            # kernel skips them rather than scattering with a host-side gather.
+            num_reqs = idx_mapping.shape[0]
+            if num_reqs:
+                _scatter_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+                )
+            return
+
+        # Fill with single value.
+        self.num_accepted_tokens_gpu.index_fill_(0, idx_mapping, max(num_sampled, 1))
+
+
+@triton.jit
+def _scatter_num_accepted_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_sampled_ptr,  # [num_reqs]
+    num_accepted_ptr,  # [max_num_reqs]
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    num_sampled = tl.load(num_sampled_ptr + row)
+    tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))

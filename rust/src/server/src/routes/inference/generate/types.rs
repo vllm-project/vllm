@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable};
+use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
 
 /// vLLM-compatible request type for the token-in/token-out generate API.
 #[serde_with::skip_serializing_none]
@@ -17,6 +17,7 @@ pub struct GenerateRequest {
     pub sampling_params: SamplingParams,
     #[serde(default)]
     pub stream: bool,
+    pub stream_options: Option<StreamOptions>,
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub priority: i32,
@@ -35,6 +36,25 @@ pub(super) struct GenerateResponseChoice {
     pub logprobs: Option<ChatLogProbs>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
+}
+
+/// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateResponseStreamChoice {
+    pub index: u32,
+    pub logprobs: Option<ChatLogProbs>,
+    pub finish_reason: Option<String>,
+    pub token_ids: Vec<u32>,
+}
+
+/// Mirrors the Python vLLM `GenerateStreamResponse` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateStreamResponse {
+    pub request_id: String,
+    pub choices: Vec<GenerateResponseStreamChoice>,
+    pub usage: Option<Usage>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.

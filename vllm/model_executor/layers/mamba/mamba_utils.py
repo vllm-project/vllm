@@ -120,9 +120,9 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-    ):
+    ) -> tuple[torch.dtype, torch.dtype]:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
-        return (state_dtype, state_dtype, state_dtype, torch.float32)
+        return (state_dtype, torch.float32)
 
 
 class MambaStateShapeCalculator:
@@ -243,7 +243,7 @@ class MambaStateShapeCalculator:
         head_k_dim: int | None = None,
         conv_kernel_size: int = 4,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         if num_k_heads is None:
             num_k_heads = num_heads
         if head_k_dim is None:
@@ -252,19 +252,12 @@ class MambaStateShapeCalculator:
         proj_size = num_heads * head_dim
         proj_k_size = num_k_heads * head_k_dim
 
+        conv_dim = proj_size + 2 * proj_k_size
         conv_state_shape = cls._orient_conv_shape(
-            divide(proj_size, tp_world_size), conv_kernel_size - 1
-        )
-        conv_state_k_shape = cls._orient_conv_shape(
-            divide(proj_k_size, tp_world_size), conv_kernel_size - 1
+            divide(conv_dim, tp_world_size), conv_kernel_size - 1
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
-        return (
-            conv_state_shape,
-            conv_state_k_shape,
-            conv_state_k_shape,
-            recurrent_state_shape,
-        )
+        return (conv_state_shape, recurrent_state_shape)
 
 
 @dataclass
@@ -365,9 +358,4 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def kda_state_copy_func(cls):
-        return (
-            get_conv_copy_spec,
-            get_conv_copy_spec,
-            get_conv_copy_spec,
-            get_temporal_copy_spec,
-        )
+        return (get_conv_copy_spec, get_temporal_copy_spec)

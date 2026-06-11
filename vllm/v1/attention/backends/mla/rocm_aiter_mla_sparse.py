@@ -9,7 +9,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -644,6 +645,13 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
+        vllm_config = get_current_vllm_config()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        q_concat_shape = (max_tokens, num_heads, head_size)
+        (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
+            (q_concat_shape, vllm_config.model_config.dtype),
+        )
+
     def _forward_mla(
         self,
         layer: AttentionLayer,
@@ -703,7 +711,9 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            ql_nope, q_pe = q
+            q = self.q_concat_buffer[: ql_nope.shape[0]]
+            ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 

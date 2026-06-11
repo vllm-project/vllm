@@ -110,6 +110,36 @@ install_uv() {
     | env UV_INSTALL_DIR="$CARGO_HOME/bin" sh
 }
 
+setup_pyo3_python() {
+  local python_version="${PYO3_PYTHON_VERSION:-3.12}"
+
+  log_section "Installing Python ${python_version} for PyO3 tests"
+  uv python install "$python_version"
+  PYO3_PYTHON="$(uv python find \
+    --managed-python \
+    --no-project \
+    --resolve-links \
+    "$python_version")"
+  export PYO3_PYTHON
+
+  local python_libdir
+  python_libdir="$("$PYO3_PYTHON" - <<'PY'
+import pathlib
+import sysconfig
+
+libdir = pathlib.Path(sysconfig.get_config_var("LIBDIR"))
+ldlibrary = sysconfig.get_config_var("LDLIBRARY")
+assert sysconfig.get_config_var("Py_ENABLE_SHARED") == 1
+assert ldlibrary
+assert (libdir / ldlibrary).exists(), libdir / ldlibrary
+print(libdir)
+PY
+)"
+
+  export LD_LIBRARY_PATH="${python_libdir}:${LD_LIBRARY_PATH:-}"
+  export LIBRARY_PATH="${python_libdir}:${LIBRARY_PATH:-}"
+}
+
 run_style_clippy() {
   install_cargo_sort
 
@@ -132,6 +162,7 @@ run_style_clippy() {
 
 run_tests() {
   install_uv
+  setup_pyo3_python
   install_cargo_nextest
 
   log_section "Running cargo nextest"

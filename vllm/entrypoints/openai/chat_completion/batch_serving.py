@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput

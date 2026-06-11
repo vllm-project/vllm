@@ -45,6 +45,10 @@ if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
 
+if current_platform.is_xpu():
+    from .fusion.act_quant_fusion import ActivationQuantFusionPass
+    from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
+
 from .inductor_pass import (
     CustomGraphPass,
     InductorPass,

@@ -404,6 +404,24 @@ fn assistant_after_last_user_requires_reasoning_or_tool_calls() {
     expect!["chat template error: invalid DeepSeek V3.2 assistant message after last user message: expected reasoning or tool calls"]
         .assert_eq(&error.to_report_string());
 }
+
+#[test]
+fn continue_final_assistant_omits_final_eos() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("write"),
+            ChatMessage::assistant_text("partial answer"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜></think>partial answer"]
+        .assert_eq(&rendered);
+}
+
 #[test]
 fn render_rejects_multimodal_input() {
     let request = ChatRequest {

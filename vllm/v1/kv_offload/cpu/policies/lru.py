@@ -3,6 +3,8 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
+from typing_extensions import override
+
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
@@ -14,23 +16,29 @@ class LRUCachePolicy(CachePolicy):
         # cache_capacity unused by LRU but accepted for a uniform constructor
         self.blocks: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
 
+    @override
     def get(self, key: OffloadKey) -> BlockStatus | None:
         return self.blocks.get(key)
 
+    @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
         self.blocks[key] = block
 
+    @override
     def remove(self, key: OffloadKey) -> None:
         del self.blocks[key]
 
+    @override
     def touch(self, keys: Iterable[OffloadKey]) -> None:
         for key in reversed(list(keys)):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
 
+    @override
     def clear(self) -> None:
         self.blocks.clear()
 
+    @override
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:

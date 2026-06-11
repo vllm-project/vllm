@@ -33,8 +33,8 @@ from .punica_base import PunicaWrapperBase
 # ---------------------------------------------------------------------------
 # Control which kernel is used for prefill vs decode via environment variables:
 #
-#   VLLM_MOE_LORA_PREFILL_BACKEND = triton | cuda   (default: cuda)
-#   VLLM_MOE_LORA_DECODE_BACKEND  = triton | cuda   (default: cuda)
+#   VLLM_MOE_LORA_PREFILL_BACKEND = triton | cuda   (default: triton)
+#   VLLM_MOE_LORA_DECODE_BACKEND  = triton | cuda   (default: triton)
 #   VLLM_MOE_LORA_DECODE_THRESHOLD = <int>           (default: 0)
 #       When set > 0, use CUDA only when num_tokens <= threshold during
 #       decode; otherwise fall back to Triton.  0 means always use the
@@ -55,11 +55,11 @@ elif _legacy == "cuda":
     _MOE_DECODE_USE_CUDA = True
 else:
     _MOE_PREFILL_USE_CUDA = (
-        _os.environ.get("VLLM_MOE_LORA_PREFILL_BACKEND", "cuda").lower()
+        _os.environ.get("VLLM_MOE_LORA_PREFILL_BACKEND", "triton").lower()
         == "cuda"
     )
     _MOE_DECODE_USE_CUDA = (
-        _os.environ.get("VLLM_MOE_LORA_DECODE_BACKEND", "cuda").lower()
+        _os.environ.get("VLLM_MOE_LORA_DECODE_BACKEND", "triton").lower()
         == "cuda"
     )
 
@@ -808,8 +808,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Performs a fused forward computation for LoRA of MoE layer.
 
         Routes between CUDA BGMV and Triton kernels based on:
-          - VLLM_MOE_LORA_PREFILL_BACKEND (default: cuda)
-          - VLLM_MOE_LORA_DECODE_BACKEND  (default: cuda)
+          - VLLM_MOE_LORA_PREFILL_BACKEND (default: triton)
+          - VLLM_MOE_LORA_DECODE_BACKEND  (default: triton)
           - VLLM_MOE_LORA_DECODE_THRESHOLD (default: 0 = always)
         """
         # Skip entirely during cudagraph capture -- neither CUDA nor
@@ -953,7 +953,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         SPARSITY_FACTOR = 8
         naive_block_assignment = (
-            expert_map is None
+            not fully_sharded
+            and expert_map is None
             and num_tokens * top_k * SPARSITY_FACTOR <= local_num_experts * max_loras
         )
 

@@ -14,7 +14,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kInt4Static,
     kMxfp4Static,
@@ -62,6 +64,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.is_fp8 = False
         self.is_int4 = False
         self.is_mxfp4 = False
+        self.is_block_fp8 = False
         self.is_mxfp8 = False
         self.fused_moe_impl: XpuFusedMoe | None = None
 
@@ -171,6 +174,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 is_int4=self.is_int4,
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
+                is_block_fp8=self.is_block_fp8,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
@@ -209,7 +213,7 @@ class XPUExpertsFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMxfp8(XPUExpertsFp8):
+class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -234,6 +238,33 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         SUPPORTED_W_A = [
             (kMxfp8Static, None),
             (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsBlockFp8(XPUExperts):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_block_fp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -274,7 +305,7 @@ class XPUExpertsWNA16(XPUExperts):
         return (weight_key, activation_key) == (kInt4Static, None)
 
 
-class XPUExpertsMXFp4(XPUExperts):
+class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

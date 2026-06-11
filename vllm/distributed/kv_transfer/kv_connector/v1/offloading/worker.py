@@ -5,16 +5,10 @@ from dataclasses import replace
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
@@ -44,7 +38,6 @@ class OffloadingConnectorWorker:
         self.spec = spec
         self.worker = OffloadingWorker()
 
-        self.kv_connector_stats = OffloadingConnectorStats()
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
@@ -271,15 +264,18 @@ class OffloadingConnectorWorker:
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
+            is_load = job_id in self._load_jobs
             if (
-                transfer_result.transfer_time
+                transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
-                and transfer_result.transfer_type is not None
             ):
-                self.kv_connector_stats.record_transfer(
-                    num_bytes=transfer_result.transfer_size,
-                    time=transfer_result.transfer_time,
-                    transfer_type=transfer_result.transfer_type,
+                if is_load:
+                    stats = self._connector_worker_meta.transfer_stats.load
+                else:
+                    stats = self._connector_worker_meta.transfer_stats.store
+                stats.record(
+                    transfer_result.transfer_size,
+                    transfer_result.transfer_time,
                 )
 
             self._connector_worker_meta.mark_completed(job_id)
@@ -296,18 +292,6 @@ class OffloadingConnectorWorker:
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
-
-    def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        """
-        Get the KV transfer stats for the connector.
-        """
-
-        if self.kv_connector_stats.is_empty():
-            return None
-        # Clear stats for next iteration
-        kv_connector_stats = self.kv_connector_stats
-        self.kv_connector_stats = OffloadingConnectorStats()
-        return kv_connector_stats
 
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()

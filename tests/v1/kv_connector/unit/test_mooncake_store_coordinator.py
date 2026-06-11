@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
-def _make_coord(groups, hash_block_size, use_eagle=False):
+def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
     the test fixtures."""
@@ -26,6 +26,7 @@ def _make_coord(groups, hash_block_size, use_eagle=False):
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
+        retention_interval=retention_interval,
     )
 
 
@@ -300,6 +301,55 @@ def test_store_mask_fast_path_single_attention_group():
     assert len(coord.attention_groups) == 1
     masks = coord.store_mask(64)
     assert masks == ([True] * 4, [True] * 4)
+
+
+# ----- store_mask with retention_interval (DSV4 sparse SWA checkpointing) -----
+
+
+def _retention_groups():
+    """Hybrid full-attn(block=32) + SWA(block=8, sw=8); lcm=32. The SWA group
+    densely keeps one tail block per 32-token boundary."""
+    full = _full(32)
+    swa = _swa(block_size=8, sliding_window=8)
+    return [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+
+
+def test_store_mask_dense_default_matches_every_lcm_boundary():
+    """retention_interval=None (default) keeps the SWA tail at every lcm
+    boundary: tokens 32/64/96/128 -> chunks 3/7/11/15."""
+    coord = _make_coord(_retention_groups(), hash_block_size=8)
+    masks = coord.store_mask(128)
+    assert masks[0] == [True, True, True, True]
+    assert masks[1] == [i % 4 == 3 for i in range(16)]
+
+
+def test_store_mask_retention_interval_sparsifies_swa_tails():
+    """retention_interval=64 keeps an SWA tail once per 64-token segment
+    (chunks 7 and 15) instead of every 32 tokens, dropping the mid-segment
+    boundaries at 32 and 96."""
+    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
+    masks = coord.store_mask(128)
+    assert masks[0] == [True, True, True, True]  # full attn unaffected
+    assert masks[1] == [i in (7, 15) for i in range(16)]
+
+
+def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
+    """retention_interval=0 drops all segment tails; only the latest replay
+    boundary (capped at num_prompt-1, aligned down to lcm) is retained."""
+    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=0)
+    # No replay info -> nothing reachable for the SWA group.
+    assert coord.store_mask(128)[1] == [False] * 16
+    # num_prompt=100 -> latest hit boundary = (100-1)//32*32 = 96 -> chunk 11.
+    masks = coord.store_mask(128, num_prompt_tokens=100)
+    assert masks[1] == [i == 11 for i in range(16)]
+
+
+def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
+    """Sparse segment tails (interval=64 -> chunks 7,15) plus the replay
+    boundary tail (num_prompt=100 -> chunk 11) coexist."""
+    coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
+    masks = coord.store_mask(128, num_prompt_tokens=100)
+    assert masks[1] == [i in (7, 11, 15) for i in range(16)]
 
 
 # ----- Eagle / MTP interaction with load_mask -----

@@ -16,15 +16,13 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
     UnquantizedFusedMoEMethod,
-)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,

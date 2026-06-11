@@ -439,13 +439,12 @@ def _init_lmcache_engine(
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
+    Args:
+        lmcache_config: The LMCache configuration.
+        vllm_config: The vLLM configuration.
 
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
+    Returns:
+        The initialized LMCache engine
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
