@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router as topk_router
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -67,6 +68,52 @@ def test_sqrtsoftplus_bias_uses_deepseek_v4_routing_method():
         )
         == RoutingMethodType.Unspecified
     )
+
+
+def test_fused_topk_softplus_sqrt_hash_falls_back_when_op_missing(monkeypatch):
+    monkeypatch.setattr(
+        topk_router,
+        "_topk_softplus_sqrt_op_available",
+        lambda: False,
+    )
+
+    num_tokens = 4
+    hidden_size = 16
+    num_experts = 8
+    topk = 3
+    vocab_size = 16
+    torch.manual_seed(0)
+
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=torch.float32)
+    gating_output = torch.randn((num_tokens, num_experts), dtype=torch.float32)
+    hash_indices_table = torch.stack(
+        [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+    ).to(dtype=torch.int32)
+    input_ids = torch.tensor([0, 3, 7, 11], dtype=torch.int32)
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+    )
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=None,
+        topk=topk,
+        renormalize=True,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+        routed_scaling_factor=1.5,
+    )
+
+    torch.testing.assert_close(topk_ids_ref, topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights_ref, topk_weights, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
