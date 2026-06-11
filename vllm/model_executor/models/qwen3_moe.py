@@ -169,9 +169,18 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        # Use floor/ceil distribution so ranks 0..(remainder-1) each receive one
+        # extra expert when n_physical_experts % ep_size != 0.  This matches the
+        # formula in expert_map_manager.py::determine_expert_map() and allows EP
+        # with any ep_size, not just divisors of n_physical_experts.
+        _ep_base = self.n_physical_experts // self.ep_size
+        _ep_rem = self.n_physical_experts % self.ep_size
+        self.n_local_physical_experts = (
+            _ep_base + (1 if self.ep_rank < _ep_rem else 0)
+        )
+        self.physical_expert_start = (
+            self.ep_rank * _ep_base + min(self.ep_rank, _ep_rem)
+        )
         self.physical_expert_end = (
             self.physical_expert_start + self.n_local_physical_experts
         )
