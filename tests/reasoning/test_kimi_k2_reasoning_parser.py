@@ -216,3 +216,54 @@ def test_streaming_tool_section_id_buffered(mock_kimi_k2_tokenizer):
         delta_token_ids=[tool_begin_id, 999],
     )
     assert result is None
+
+
+# ----------------------------------------------------------------------
+# Regression: thinking-flag aliasing (vllm-project/vllm#43728)
+# ----------------------------------------------------------------------
+
+
+def test_kimi_k2_accepts_enable_thinking_canonical_kwarg(mock_kimi_k2_tokenizer):
+    """The exact reproduction from #43728: Kimi K2's tokenizer_config.json
+    chat template ships ``enable_thinking``, so users following the model
+    card send ``{"enable_thinking": false}``. Before the fix, the parser
+    only read ``thinking`` and silently ran in thinking mode →
+    ``content: null``.
+    """
+    parser = KimiK2ReasoningParser(
+        mock_kimi_k2_tokenizer, chat_template_kwargs={"enable_thinking": False}
+    )
+    assert isinstance(parser._identity_parser, IdentityReasoningParser)
+
+
+def test_kimi_k2_accepts_thinking_legacy_alias(mock_kimi_k2_tokenizer):
+    """Backward compatibility: callers that still pass the legacy
+    ``thinking`` name keep working byte-for-byte.
+    """
+    parser = KimiK2ReasoningParser(
+        mock_kimi_k2_tokenizer, chat_template_kwargs={"thinking": False}
+    )
+    assert isinstance(parser._identity_parser, IdentityReasoningParser)
+
+
+def test_kimi_k2_enable_thinking_wins_when_both_present(mock_kimi_k2_tokenizer):
+    """When both names are sent, ``enable_thinking`` (canonical) wins
+    over ``thinking`` (legacy alias). Pins both directions:
+
+    * ``enable_thinking=True`` keeps the parser active even if
+      ``thinking=False`` is also passed.
+    * ``enable_thinking=False`` disables thinking even if
+      ``thinking=True`` is also passed (would otherwise be the
+      pre-fix behavior — silent regression to thinking-on).
+    """
+    parser = KimiK2ReasoningParser(
+        mock_kimi_k2_tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "thinking": False},
+    )
+    assert parser._identity_parser is None
+
+    parser = KimiK2ReasoningParser(
+        mock_kimi_k2_tokenizer,
+        chat_template_kwargs={"enable_thinking": False, "thinking": True},
+    )
+    assert isinstance(parser._identity_parser, IdentityReasoningParser)

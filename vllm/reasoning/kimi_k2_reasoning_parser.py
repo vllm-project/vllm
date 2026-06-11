@@ -36,9 +36,18 @@ class KimiK2ReasoningParser(ReasoningParser):
                 "constructor during construction."
             )
 
-        # Check if thinking is disabled via chat_template_kwargs
+        # Check if thinking is disabled via chat_template_kwargs.
+        # ``enable_thinking`` is the canonical name vLLM has been
+        # standardizing on; ``thinking`` is kept as a backward-compat
+        # alias because this parser previously only honored that name,
+        # and callers sending ``{"thinking": false}`` should not silently
+        # regress. ``enable_thinking`` wins when both are sent.
+        # See vllm-project/vllm#43728.
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = bool(chat_kwargs.get("thinking", True))
+        if "enable_thinking" in chat_kwargs:
+            thinking = bool(chat_kwargs["enable_thinking"])
+        else:
+            thinking = bool(chat_kwargs.get("thinking", True))
 
         # If thinking is not enabled, use identity parser to fall through
         self._identity_parser: IdentityReasoningParser | None
