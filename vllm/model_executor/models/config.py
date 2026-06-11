@@ -489,6 +489,26 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class PanguUltraMoEForCausalLMConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Hybrid KV manager alignment for Pangu models.
+        Aligns all SWA window sizes to the largest one.
+        """
+        hf_config = vllm_config.model_config.hf_config
+
+        # Store max SWA window size for KV management alignment
+        max_swa = getattr(hf_config, "sliding_window", None) or 0
+        if hasattr(hf_config, "sliding_window_list") and hf_config.sliding_window_list:
+            # Filter out None values
+            window_list = [w for w in hf_config.sliding_window_list if w is not None]
+            if window_list:
+                max_swa = max(max_swa, max(window_list))
+
+        hf_config.max_sliding_window = max_swa
+
+
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -585,26 +605,6 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         model_config.hf_config.is_causal = False
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
-
-
-class PanguUltraMoEForCausalLMConfig(VerifyAndUpdateConfig):
-    @classmethod
-    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Hybrid KV manager alignment for Pangu models.
-        Aligns all SWA window sizes to the largest one.
-        """
-        hf_config = vllm_config.model_config.hf_config
-
-        # Store max SWA window size for KV management alignment
-        max_swa = getattr(hf_config, "sliding_window", None) or 0
-        if hasattr(hf_config, "sliding_window_list") and hf_config.sliding_window_list:
-            # Filter out None values
-            window_list = [w for w in hf_config.sliding_window_list if w is not None]
-            if window_list:
-                max_swa = max(max_swa, max(window_list))
-
-        hf_config.max_sliding_window = max_swa
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
