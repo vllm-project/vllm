@@ -29,6 +29,8 @@ logger = init_logger(__name__)
 # NIXL EP kernels quantize dispatch inputs in 128 element chunks.
 NIXL_EP_QUANT_BLOCK_SIZE = 128
 NIXL_EP_QUANT_BLOCK_SHAPE = [NIXL_EP_QUANT_BLOCK_SIZE, NIXL_EP_QUANT_BLOCK_SIZE]
+NIXL_EP_TOPK_INDICES_DTYPE = getattr(nixl_ep, "topk_idx_t", torch.int64)
+assert isinstance(NIXL_EP_TOPK_INDICES_DTYPE, torch.dtype)
 
 
 def dequant_fp8(
@@ -152,7 +154,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         all2all_manager.commit_staged_state()
 
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return torch.int64
+        return NIXL_EP_TOPK_INDICES_DTYPE
 
     def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if self.global_to_physical is None:
