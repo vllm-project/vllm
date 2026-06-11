@@ -15,6 +15,7 @@ accelerate
 arctic-inference
 lm_eval[api]
 modelscope
+transformers @ git+https://github.com/huggingface/transformers.git@v5.10-release
 
 # --- Audio Processing ---
 librosa
