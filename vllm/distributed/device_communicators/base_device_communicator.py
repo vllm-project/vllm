@@ -111,6 +111,10 @@ class All2AllManagerBase:
         """Returns has_fault scalar."""
         raise NotImplementedError
 
+    def clean_buffers(self) -> None:
+        """Clean RDMA buffers and mask state during FT retry."""
+        raise NotImplementedError
+
     def set_num_sms(self, num_sms: int):
         pass
 
