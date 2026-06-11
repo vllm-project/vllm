@@ -213,6 +213,13 @@ def test_rms_norm(
         # skip
         pytest.skip("scale_ub only supported for fp8 quantization")
 
+    if (
+        dtype != wt_dtype
+        and dtype in (torch.half, torch.bfloat16)
+        and wt_dtype in (torch.half, torch.bfloat16)
+    ):
+        pytest.skip("unsupported input and weight dtype combination")
+
     layer = RMSNorm(hidden_size, EPS, dtype=wt_dtype)
 
     # Make weights

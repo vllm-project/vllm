@@ -108,7 +108,7 @@ def test_fused_rms_norm_quant(
         and dtype in (torch.half, torch.bfloat16)
         and wt_dtype in (torch.half, torch.bfloat16)
     ):
-        pytest.skip()
+        pytest.skip("unsupported input and weight dtype combination")
 
     set_random_seed(seed)
     torch.set_default_device(device)
