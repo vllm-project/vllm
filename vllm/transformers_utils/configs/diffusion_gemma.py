@@ -40,5 +40,4 @@ class DiffusionGemmaConfig(PretrainedConfig):
             self.vision_config = Gemma4VisionConfig(**vision_config)
         else:
             self.vision_config = vision_config
-        self.audio_config = None
         PretrainedConfig.__init__(self, **kwargs)
