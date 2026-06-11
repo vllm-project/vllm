@@ -886,7 +886,7 @@ torch::stable::Tensor marlin_gemm(
       g_idx.mutable_data_ptr(), perm.mutable_data_ptr(),
       a_tmp.mutable_data_ptr(), size_m, size_n, size_k, a.stride(0),
       workspace.mutable_data_ptr(), a_type, b_type, c_type, s_type, has_bias,
-      has_act_order, is_k_full, has_zp, num_groups, group_size, dev_index,
+      has_act_order, is_k_full, has_zp, num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
       use_atomic_add, use_fp32_reduce, is_zp_float);
 
