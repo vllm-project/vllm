@@ -1122,7 +1122,9 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/topk_softplus_sqrt_kernels.cu"
+  "csrc/moe/silu_mul_fp8_quant/silu_mul_fp8_quant_ops.cu"
+  "csrc/moe/silu_mul_fp8_quant/silu_mul_fp8_persistent_launcher.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
@@ -1141,6 +1143,21 @@ endif()
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
+
+# NVFP4 SiLU+Mul+Quant kernels require sm_100a for e2m1 conversion instructions
+cuda_archs_loose_intersection(MOE_NVFP4_ARCHS "10.0a" "${CUDA_ARCHS}")
+if(MOE_NVFP4_ARCHS)
+  set(VLLM_MOE_NVFP4_SRC
+    "csrc/moe/silu_mul_fp8_quant/nvfp4_silu_mul_quant_launcher.cu"
+    "csrc/moe/silu_mul_fp8_quant/silu_mul_nvfp4_persistent_launcher.cu")
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_MOE_NVFP4_SRC}"
+    CUDA_ARCHS "${MOE_NVFP4_ARCHS}")
+  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_NVFP4_SRC}")
+  message(STATUS "Building MOE NVFP4 kernels for archs: ${MOE_NVFP4_ARCHS}")
+else()
+  message(STATUS "Not building MOE NVFP4 kernels as no compatible archs found")
+endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC

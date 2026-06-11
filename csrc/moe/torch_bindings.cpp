@@ -139,6 +139,57 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   // conditionally compiled so impl registration is in source file
 #endif
+
+  // FP8 baseline SiLU+Mul+FP8Quant kernel (flashinfer vectorized)
+  m.def(
+      "silu_mul_fp8_quant_baseline("
+      "Tensor input, "
+      "Tensor input_scales, "
+      "Tensor! output, "
+      "Tensor! output_scales, "
+      "Tensor n_tokens, "
+      "bool use_tanh_silu) -> ()");
+  m.impl("silu_mul_fp8_quant_baseline", torch::kCUDA,
+         &silu_mul_fp8_quant_baseline);
+
+  // FP8 TMA warp-specialized persistent SiLU+Mul+FP8Quant kernel
+  m.def(
+      "silu_mul_fp8_quant_tma_ws_persistent("
+      "Tensor input, "
+      "Tensor input_scales, "
+      "Tensor! output, "
+      "Tensor! output_scales, "
+      "Tensor n_tokens, "
+      "int n_compute, "
+      "int batch_size, "
+      "bool use_tanh_silu) -> ()");
+  m.impl("silu_mul_fp8_quant_tma_ws_persistent", torch::kCUDA,
+         &silu_mul_fp8_quant_tma_ws_persistent);
+
+  // NVFP4 baseline SiLU+Mul+Quant kernel
+  m.def(
+      "nvfp4_silu_mul_quant("
+      "Tensor! output, "
+      "Tensor! output_scale, "
+      "Tensor input, "
+      "Tensor input_global_scale, "
+      "Tensor mask, "
+      "int n_experts) -> ()");
+  m.impl("nvfp4_silu_mul_quant", torch::kCUDA, &nvfp4_silu_mul_quant);
+
+  // NVFP4 TMA warp-specialized persistent SiLU+Mul+Quant kernel
+  m.def(
+      "silu_mul_nvfp4_quant_tma_ws_persistent_bf16("
+      "Tensor input, "
+      "Tensor! output, "
+      "Tensor! output_sf, "
+      "Tensor global_scale, "
+      "Tensor n_tokens, "
+      "int n_compute, "
+      "int batch_size, "
+      "bool use_tanh_silu) -> ()");
+  m.impl("silu_mul_nvfp4_quant_tma_ws_persistent_bf16", torch::kCUDA,
+         &silu_mul_nvfp4_quant_tma_ws_persistent_bf16);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

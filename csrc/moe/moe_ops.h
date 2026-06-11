@@ -69,6 +69,27 @@ void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
 
+void silu_mul_fp8_quant_baseline(const at::Tensor& input,
+                                 const at::Tensor& input_scales,
+                                 at::Tensor& output, at::Tensor& output_scales,
+                                 const at::Tensor& n_tokens,
+                                 bool use_tanh_silu);
+
+void silu_mul_fp8_quant_tma_ws_persistent(
+    const at::Tensor& input, const at::Tensor& input_scales, at::Tensor& output,
+    at::Tensor& output_scales, const at::Tensor& n_tokens, int64_t n_compute,
+    int64_t batch_size, bool use_tanh_silu);
+
+void nvfp4_silu_mul_quant(at::Tensor& output, at::Tensor& output_scale,
+                          const at::Tensor& input,
+                          const at::Tensor& input_global_scale,
+                          const at::Tensor& mask, int64_t n_experts);
+
+void silu_mul_nvfp4_quant_tma_ws_persistent_bf16(
+    const at::Tensor& input, at::Tensor& output, at::Tensor& output_sf,
+    const at::Tensor& global_scale, const at::Tensor& n_tokens,
+    int64_t n_compute, int64_t batch_size, bool use_tanh_silu);
+
 #ifndef USE_ROCM
 // DeepSeek V3 optimized router GEMM kernel for SM90+
 // Computes output = mat_a @ mat_b.T where:
