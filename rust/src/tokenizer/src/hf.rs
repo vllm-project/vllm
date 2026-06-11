@@ -174,6 +174,13 @@ impl Tokenizer for HuggingFaceTokenizer {
         }
     }
 
+    fn vocab_size(&self) -> usize {
+        match &self.backend {
+            Backend::Hf(t) => t.get_vocab_size(true),
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.vocab_size(),
+        }
+    }
+
     fn id_to_token(&self, id: u32) -> Option<String> {
         match &self.backend {
             Backend::Hf(t) => t.id_to_token(id),

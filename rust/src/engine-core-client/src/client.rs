@@ -582,7 +582,8 @@ impl EngineCoreClient {
         let results: Vec<T> = self.call_utility(method, args).await?;
 
         if results.iter().all_equal() {
-            // `engine_count >= 1` is enforced during startup handshake so `results` must be non-empty.
+            // `engine_count >= 1` is enforced during startup handshake so `results` must be
+            // non-empty.
             Ok(results.into_iter().next().unwrap())
         } else {
             Err(Error::InconsistentUtilityResults {
