@@ -235,12 +235,8 @@ class ScalarType {
       STD_TORCH_CHECK(
           is_signed(),
           "We currently assume all floating point types are signed");
-      constexpr uint64_t sign_bit_double = (uint64_t(1) << 63);
-
-      double max = _floating_point_max();
-      uint64_t max_raw = std::bit_cast<uint64_t>(max);
-      uint64_t min_raw = max_raw | sign_bit_double;
-      return {std::bit_cast<double>(min_raw)};
+      // For symmetric IEEE-754 float types, min is just the negation of max.
+      return {-_floating_point_max()};
     } else {
       STD_TORCH_CHECK(!is_signed() || size_bits() <= 64,
                       "Cannot represent min as a int64_t");
