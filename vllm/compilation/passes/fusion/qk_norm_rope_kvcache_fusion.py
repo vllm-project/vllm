@@ -99,7 +99,8 @@ class QkNormRopeKvCachePattern:
       q = rms_norm(q.view(heads), q_weight).view(flat)
       k = rms_norm(k.view(heads), k_weight).view(flat)
       q, k = rotary_embedding(positions, q, k, cos_sin_cache, is_neox)
-      q = q.view(num_heads, head_dim)
+      # q is intentionally left flat here (no head reshape) so the match is
+      # robust to an in-graph query quant inserted between RoPE and attention.
       k = k.view(num_kv_heads, head_dim)
       v = v.view(num_kv_heads, head_dim)
       dummy = unified_kv_cache_update(k, v, layer_name)
@@ -179,7 +180,18 @@ class QkNormRopeKvCachePattern:
 
             q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
 
-            q_rope = q_rope.view(-1, self.num_heads, self.head_size)
+            # NOTE: deliberately do NOT reshape q_rope to (num_heads, head_size)
+            # inside the matched region. Some backends quantize the query
+            # in-graph between RoPE and attention -- e.g. ROCM_AITER_UNIFIED_ATTN
+            # with an fp8 KV cache sets supports_quant_query_input=True, so vLLM
+            # injects an fp8 per-tensor query quant (rocm_aiter_per_tensor_quant)
+            # that consumes the rope'd q. Including the q-head reshape here made
+            # the pattern require `rope_q -> view`, which that quant op breaks
+            # (rope_q -> quant -> view), so fusion silently matched 0 patterns on
+            # UA+fp8. Leaving the rope'd q flat and out of the matched tail lets
+            # the match succeed regardless of what consumes q downstream; that
+            # consumer (a plain view on FA, or the query quant on UA) is simply
+            # rewired onto the fused op's q_out.
             k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
@@ -223,8 +235,13 @@ class QkNormRopeKvCachePattern:
                 layer_name=self.layer_name,
             )
 
-            # results[0] = dummy, results[1] = q_out, results[2] = k_out
-            return results[0], results[1], results[2], v
+            # results[0] = dummy, results[1] = q_out, results[2] = k_out.
+            # The pattern now returns the rope'd q *flat* (matching the rotary op
+            # output before any head reshape), so flatten q_out from
+            # (T, num_heads, head_size) to (T, q_size) to keep the replacement a
+            # drop-in for the pattern.
+            q_out_flat = results[1].view(-1, self.q_size)
+            return results[0], q_out_flat, results[2], v
 
         def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
             gm = pm.fwd_only(*args, **kwargs)
