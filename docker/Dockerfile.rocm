@@ -129,6 +129,7 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # don't need the rust toolchain or protoc.
 FROM fetch_vllm AS rust-build
 ARG COMMON_WORKDIR
+ARG USE_SCCACHE
 
 # protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
@@ -155,8 +156,15 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        export RUSTC_WRAPPER=sccache \
+        && sccache --show-stats; \
+    fi \
     && bash build_rust.sh \
-    && test -x vllm/vllm-rs
+    && test -x vllm/vllm-rs \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        sccache --show-stats; \
+    fi
 
 # -----------------------
 # vLLM native build stages
