@@ -10,7 +10,7 @@ mod request_metrics;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo,
+    GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,
 };
 pub use request::GenerateRequest;
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
