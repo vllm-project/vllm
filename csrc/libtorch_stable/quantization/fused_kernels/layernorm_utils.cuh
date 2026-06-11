@@ -101,7 +101,7 @@ __device__ void compute_dynamic_per_token_scales(
       if constexpr (has_residual) {
         x += static_cast<float>(residual[token_offset + i]);
       }
-      x = static_cast<float>(static_cast<scalar_wt_t>(x * rms) * weight[i]);
+      x = static_cast<float>(static_cast<scalar_t>(static_cast<scalar_wt_t>(x * rms) * weight[i]));
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
@@ -158,7 +158,7 @@ __device__ void compute_dynamic_per_token_scales(
         x += static_cast<float>(residual[token_offset + i]);
       }
 
-      x = static_cast<float>(static_cast<scalar_wt_t>(x * rms) * weight[i]);
+      x = static_cast<float>(static_cast<scalar_t>(static_cast<scalar_wt_t>(x * rms) * weight[i]));
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -205,7 +205,7 @@ __device__ void norm_and_quant(
       residual[token_offset + i] = static_cast<scalar_t>(x);
     }
     // Norm
-    x = static_cast<float>(static_cast<scalar_wt_t>(x * rms) * weight[i]);
+    x = static_cast<float>(static_cast<scalar_t>(static_cast<scalar_wt_t>(x * rms) * weight[i]));
     // Quant
     // If groupwise is_scale_inverted is true, so we invert the scale here.
     int64_t scale_idx = 0;
@@ -360,7 +360,7 @@ __device__ void compute_dynamic_per_token_scales(
       for (int j = 0; j < VEC_SIZE; ++j) {
         block_absmax_val_maybe =
             fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j]));
+                  fabs(static_cast<scalar_t>(static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j])));
       }
     }
 
@@ -446,7 +446,7 @@ __device__ void compute_dynamic_per_token_scales(
       for (int j = 0; j < VEC_SIZE; ++j) {
         block_absmax_val_maybe =
             fmaxf(block_absmax_val_maybe,
-                  fabs(static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j]));
+                  fabs(static_cast<scalar_t>(static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j])));
       }
     }
 
@@ -552,7 +552,7 @@ __device__ void norm_and_quant(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
       out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-          static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j], scale_val);
+          static_cast<scalar_t>(static_cast<scalar_wt_t>(x.val[j] * rms) * w.val[j]), scale_val);
     }
     vec_output[i] = out;
   }

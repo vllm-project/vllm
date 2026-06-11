@@ -67,7 +67,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
       // Multiply in weight's native dtype to match rms_norm_kernel.
-      scalar_wt_t out_norm = static_cast<scalar_wt_t>(x * s_variance) * src2.val[j];
+      scalar_t out_norm = static_cast<scalar_t>(static_cast<scalar_wt_t>(x * s_variance) * src2.val[j]);
       out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
           scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
                                                 scale_inv);
@@ -141,9 +141,11 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     for (int i = 0; i < width; ++i) {
       float x = Converter::convert(res.data[i]);
       // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-      HipT out_norm_h = WeightConverter::convert(WeightConverter::convert(x * s_variance) * w.data[i]);
+      // temp hack to convert from wt_dtype -> float -> inp_dtype 
+      // as direct wt_dtype -> inp_dtype isn't available 
+      HipT out_norm_h = Converter::convert(WeightConverter::convert(WeightConverter::convert(x * s_variance) * w.data[i]));
       out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
-          WeightConverter::convert(out_norm_h), scale_inv);
+          Converter::convert(out_norm_h), scale_inv);
     }
   }
 }
@@ -187,7 +189,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
     // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-    scalar_wt_t out_norm = static_cast<scalar_wt_t>(x * s_variance) * weight[idx];
+    scalar_t out_norm = static_cast<scalar_t>(static_cast<scalar_wt_t>(x * s_variance) * weight[idx]);
     out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
         static_cast<float>(out_norm), scale_inv);
   }
