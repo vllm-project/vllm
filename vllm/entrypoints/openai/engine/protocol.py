@@ -100,7 +100,23 @@ class ModelList(OpenAIBaseModel):
 
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
-    cached_tokens: int | None = None
+    cached_tokens: int = 0
+    cached_rate: float = 0.0
+
+
+def build_prompt_tokens_details(
+    *,
+    enable_prompt_tokens_details: bool,
+    enable_prefix_caching: bool,
+    num_cached_tokens: int | None,
+    prompt_tokens: int,
+) -> PromptTokenUsageInfo | None:
+    """Build prompt token cache details when both server flags are enabled."""
+    if not (enable_prompt_tokens_details and enable_prefix_caching):
+        return None
+    cached = num_cached_tokens or 0
+    cached_rate = round(cached / prompt_tokens, 4) if prompt_tokens > 0 else 0.0
+    return PromptTokenUsageInfo(cached_tokens=cached, cached_rate=cached_rate)
 
 
 class UsageInfo(OpenAIBaseModel):

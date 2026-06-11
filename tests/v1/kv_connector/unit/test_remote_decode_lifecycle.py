@@ -61,6 +61,8 @@ def test_basic_lifecycle():
     output = engine_core_outputs[0].outputs[0]
     assert output.finish_reason == FinishReason.LENGTH
     assert output.kv_transfer_params is not None
+    assert "num_cached_tokens" in output.kv_transfer_params
+    assert output.kv_transfer_params["num_cached_tokens"] == 0
 
     # Request freed in Scheduler and in Persistent Batch ...
     assert request_id in scheduler.finished_req_ids

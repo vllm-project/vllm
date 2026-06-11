@@ -171,6 +171,8 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+        # Persisted APC hit count from first prefill (survives take_prefill_stats).
+        self.prefill_num_cached_tokens: int = 0
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a

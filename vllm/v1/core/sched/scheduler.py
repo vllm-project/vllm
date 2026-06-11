@@ -718,6 +718,9 @@ class Scheduler(SchedulerInterface):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
+                        request.prefill_num_cached_tokens = (
+                            num_new_local_computed_tokens + num_external_computed_tokens
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -2182,9 +2185,22 @@ class Scheduler(SchedulerInterface):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            delay_free_blocks, params = self.connector.request_finished(
+                request, block_ids[0]
+            )
+        else:
+            delay_free_blocks, params = self.connector.request_finished_all_groups(
+                request, block_ids
+            )
 
-        return self.connector.request_finished_all_groups(request, block_ids)
+        if (
+            params is not None
+            and request.kv_transfer_params is not None
+            and request.kv_transfer_params.get("do_remote_decode")
+        ):
+            params["num_cached_tokens"] = request.prefill_num_cached_tokens
+
+        return delay_free_blocks, params
 
     def _request_remaining_blocks(self, request: Request) -> int:
         """Blocks `request` still needs to allocate to hold its full sequence."""
