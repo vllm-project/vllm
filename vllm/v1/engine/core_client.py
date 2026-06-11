@@ -56,6 +56,11 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import FT_UTILITY_METHOD
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceRequest,
+    FaultToleranceResult,
+)
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
@@ -270,6 +275,14 @@ class EngineCoreClient(ABC):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        raise NotImplementedError
+
+    async def handle_fault(
+        self, fault_tolerance_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        raise NotImplementedError
+
+    async def get_status(self):
         raise NotImplementedError
 
 
@@ -1195,6 +1208,24 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+
+    async def handle_fault(
+        self, ft_request: FaultToleranceRequest
+    ) -> FaultToleranceResult:
+        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+        result = FaultToleranceResult(**res)
+        return result
+
+    async def get_status(self):
+        ft_request = FaultToleranceRequest(instruction="status", params={})
+        res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+        return {
+            "schema_version": 1,
+            "total_engines": len(self.engine_ranks_managed),
+            "engines": [
+                {"id": res["engine_id"], "status": res["status"]},
+            ],
+        }
 
 
 class DPAsyncMPClient(AsyncMPClient):
