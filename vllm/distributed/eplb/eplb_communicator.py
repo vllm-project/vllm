@@ -617,7 +617,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
-    backend: str | None,
+    backend: str,
     expert_weights: Sequence[Sequence[torch.Tensor]],
     expert_buffer: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
@@ -628,7 +628,6 @@ def create_eplb_communicator(
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
             ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
-            Falls back to ``"torch_nccl"`` when *None*.
             Stateless (elastic EP) groups only support ``"torch_nccl"``
             and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
             ``"pynccl"`` in that case.  When tensors reside on CPU,
@@ -641,9 +640,6 @@ def create_eplb_communicator(
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
     """
-    if backend is None:
-        backend = "torch_nccl"
-
     first_layer = expert_weights[0] if expert_weights else []
     tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
     torch_group = (
