@@ -72,30 +72,13 @@ logger = init_logger(__name__)
 temp_dir = tempfile.gettempdir()
 
 
-def enable_hf_transfer():
-    """automatically activates hf_transfer"""
-    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
-        try:
-            # enable hf hub transfer if available
-            import hf_transfer  # type: ignore # noqa
-
-            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
-        except ImportError:
-            pass
-
-
 def enable_xet_high_performance():
     """automatically activates xet high performance mode"""
     if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
         huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
 
-if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
-    # Transformers v5
-    enable_xet_high_performance()
-else:
-    # Transformers v4
-    enable_hf_transfer()
+enable_xet_high_performance()
 
 
 class DisabledTqdm(tqdm):
@@ -1481,8 +1464,10 @@ def maybe_remap_moe_expert_param_name(
 
     Checkpoint weights have names like:
         layers.0.mlp.experts.w13_weight
+        layers.0.feed_forward.experts.w2_input_scale
     But actual parameters are now:
         layers.0.mlp.experts.routed_experts.w13_weight
+        layers.0.feed_forward.experts.routed_experts.w2_input_scale
 
     This function inserts 'routed_experts.' into the path when needed.
 
@@ -1495,11 +1480,11 @@ def maybe_remap_moe_expert_param_name(
         otherwise the original name
     """
     # Only remap if this looks like an expert parameter
-    if ".mlp.experts." not in name:
+    if ".experts." not in name:
         return name
 
     # Skip if already has routed_experts
-    if ".mlp.experts.routed_experts." in name:
+    if ".experts.routed_experts." in name:
         return name
 
     # Expert parameter patterns to check
@@ -1533,8 +1518,8 @@ def maybe_remap_moe_expert_param_name(
     if not is_expert_param:
         return name
 
-    # Try inserting routed_experts
-    new_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+    # Try inserting routed_experts after .experts.
+    new_name = name.replace(".experts.", ".experts.routed_experts.", 1)
 
     # Only use the new name if it exists in the model
     if new_name in params_dict:

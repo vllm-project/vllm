@@ -40,7 +40,6 @@ _VLLM_TOKENIZERS = {
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
-    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
 }
 
 

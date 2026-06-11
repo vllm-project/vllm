@@ -44,6 +44,7 @@ anyio==4.13.0
     #   watchfiles
 apache-tvm-ffi==0.1.10
     # via
+    #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
 arctic-inference==0.1.1
