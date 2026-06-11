@@ -608,13 +608,22 @@ class OpenAIServingChat(OpenAIServing):
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
+                    # When reasoning is hidden, suppress per-token
+                    # metadata (logprobs, token_ids) on every chunk to
+                    # prevent leaking reasoning tokens through decoded
+                    # token text in logprob entries or raw token IDs.
+                    hide_stream_metadata = not request.include_reasoning and (
+                        reasoning_parser is not None or parser is not None
+                    )
+                    if hide_stream_metadata:
+                        logprobs = None
+
                     if delta_message is None:
                         # NOTE: If return_token_ids is enabled, we still need to
                         # send a chunk with token_ids even if delta_message is None
                         # to ensure all tokens are included in the response
-                        if (
-                            output.finish_reason is None
-                            and not request.return_token_ids
+                        if output.finish_reason is None and (
+                            not request.return_token_ids or hide_stream_metadata
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -647,6 +656,10 @@ class OpenAIServingChat(OpenAIServing):
                                 delta=True,
                             )
 
+                    include_token_ids = (
+                        request.return_token_ids and not hide_stream_metadata
+                    )
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -655,9 +668,7 @@ class OpenAIServingChat(OpenAIServing):
                             logprobs=logprobs,
                             finish_reason=None,
                             token_ids=(
-                                as_list(output.token_ids)
-                                if request.return_token_ids
-                                else None
+                                as_list(output.token_ids) if include_token_ids else None
                             ),
                         )
 
@@ -685,9 +696,7 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason=finish_reason_,
                             stop_reason=output.stop_reason,
                             token_ids=(
-                                as_list(output.token_ids)
-                                if request.return_token_ids
-                                else None
+                                as_list(output.token_ids) if include_token_ids else None
                             ),
                         )
 
