@@ -1552,6 +1552,17 @@ def _parse_chat_message_content(
     return result
 
 
+def _parse_tool_call_arguments(content: str) -> dict | list:
+    """Parse tool call arguments JSON, tolerating trailing extra data."""
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        if "Extra data" not in e.msg:
+            raise
+        parsed, _ = json.JSONDecoder().raw_decode(content)
+        return parsed
+
+
 def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # per the Transformers docs & maintainers, tool call arguments in
     # assistant-role messages with tool_calls need to be dicts not JSON str -
@@ -1573,7 +1584,9 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        item["function"]["arguments"] = json.loads(content)
+                        item["function"]["arguments"] = _parse_tool_call_arguments(
+                            content
+                        )
                 else:
                     item["function"]["arguments"] = {}
 

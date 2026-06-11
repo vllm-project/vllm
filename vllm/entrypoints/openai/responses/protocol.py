@@ -462,6 +462,15 @@ class ResponsesRequest(OpenAIBaseModel):
             item_type = item.get("type")
 
             if item_type == "function_call":
+                item = dict(item)
+                from vllm.entrypoints.openai.responses.utils import (
+                    normalize_function_call_arguments,
+                )
+
+                if "arguments" in item:
+                    item["arguments"] = normalize_function_call_arguments(
+                        item["arguments"]
+                    )
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+from json import JSONDecodeError, JSONDecoder
 from typing import Any
 
 from openai.types.chat import (
@@ -27,6 +29,54 @@ from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def normalize_function_call_arguments(arguments: Any) -> str:
+    """Normalize Responses API function_call.arguments for chat preprocessing.
+
+    Codex may send arguments as a JSON object, a valid JSON string, or a
+    string with trailing/consecutive JSON ("Extra data" for json.loads).
+    Chat preprocessing expects a single JSON object encoded as a string.
+    """
+    if arguments is None or arguments == "":
+        return "{}"
+    if isinstance(arguments, (dict, list)):
+        return json.dumps(arguments, ensure_ascii=False)
+    if not isinstance(arguments, str):
+        logger.warning(
+            "Unexpected function_call arguments type %s; using empty object.",
+            type(arguments).__name__,
+        )
+        return "{}"
+
+    content = arguments.strip()
+    if not content:
+        return "{}"
+
+    try:
+        json.loads(content)
+        return content
+    except JSONDecodeError as e:
+        if "Extra data" not in e.msg:
+            logger.warning(
+                "Invalid function_call arguments JSON: %s. Using empty object.",
+                e,
+            )
+            return "{}"
+        try:
+            parsed, _ = JSONDecoder().raw_decode(content)
+        except JSONDecodeError:
+            logger.warning(
+                "Failed to parse function_call arguments with extra data: %s. "
+                "Using empty object.",
+                e,
+            )
+            return "{}"
+        logger.warning(
+            "function_call arguments contained extra JSON data; "
+            "using the first JSON value only."
+        )
+        return json.dumps(parsed, ensure_ascii=False)
 
 
 def should_continue_final_message(
@@ -147,7 +197,7 @@ def _maybe_combine_reasoning_and_tool_call(
             id=item.call_id,
             function=FunctionCallTool(
                 name=item.name,
-                arguments=item.arguments,
+                arguments=normalize_function_call_arguments(item.arguments),
             ),
             type="function",
         )
@@ -174,23 +224,41 @@ def construct_chat_messages_with_tool_call(
     return messages
 
 
+def _construct_function_call_assistant_message(
+    *,
+    call_id: str,
+    name: str,
+    arguments: Any,
+) -> ChatCompletionAssistantMessageParam:
+    return ChatCompletionAssistantMessageParam(
+        role="assistant",
+        tool_calls=[
+            ChatCompletionMessageToolCallParam(
+                id=call_id,
+                function=FunctionCallTool(
+                    name=name,
+                    arguments=normalize_function_call_arguments(arguments),
+                ),
+                type="function",
+            )
+        ],
+    )
+
+
 def _construct_single_message_from_response_item(
     item: ResponseInputOutputItem,
 ) -> ChatCompletionMessageParam:
     if isinstance(item, ResponseFunctionToolCall):
-        # Append the function call as a tool call.
-        return ChatCompletionAssistantMessageParam(
-            role="assistant",
-            tool_calls=[
-                ChatCompletionMessageToolCallParam(
-                    id=item.call_id,
-                    function=FunctionCallTool(
-                        name=item.name,
-                        arguments=item.arguments,
-                    ),
-                    type="function",
-                )
-            ],
+        return _construct_function_call_assistant_message(
+            call_id=item.call_id,
+            name=item.name,
+            arguments=item.arguments,
+        )
+    elif isinstance(item, dict) and item.get("type") == "function_call":
+        return _construct_function_call_assistant_message(
+            call_id=item.get("call_id", ""),
+            name=item.get("name", ""),
+            arguments=item.get("arguments"),
         )
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""

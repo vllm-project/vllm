@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     convert_tool_responses_to_completions_format,
+    normalize_function_call_arguments,
     should_continue_final_message,
 )
 
@@ -827,3 +828,51 @@ class TestConstructToolDicts:
     def test_empty_tools_returns_none(self):
         assert construct_tool_dicts([], "auto") is None
         assert construct_tool_dicts([], "none") is None
+
+
+class TestNormalizeFunctionCallArguments:
+    def test_none_and_empty(self):
+        assert normalize_function_call_arguments(None) == "{}"
+        assert normalize_function_call_arguments("") == "{}"
+        assert normalize_function_call_arguments("   ") == "{}"
+
+    def test_dict_and_list(self):
+        assert normalize_function_call_arguments({"a": 1}) == '{"a": 1}'
+        assert normalize_function_call_arguments([1, 2]) == "[1, 2]"
+
+    def test_valid_json_string_preserved(self):
+        raw = '{"command": "ls", "workdir": "/tmp"}'
+        assert normalize_function_call_arguments(raw) == raw
+
+    def test_extra_data_uses_first_json_value(self):
+        raw = '{"command": "ls"}{"command": "pwd"}'
+        assert normalize_function_call_arguments(raw) == '{"command": "ls"}'
+
+    def test_construct_message_with_dict_arguments(self):
+        item = {
+            "type": "function_call",
+            "call_id": "call_abc",
+            "name": "shell",
+            "arguments": {"command": "ls", "workdir": "/tmp"},
+        }
+        msg = _construct_single_message_from_response_item(item)
+        assert msg["role"] == "assistant"
+        args = msg["tool_calls"][0]["function"]["arguments"]
+        assert args == '{"command": "ls", "workdir": "/tmp"}'
+        import json
+
+        assert json.loads(args)["command"] == "ls"
+
+    def test_construct_message_with_extra_data_arguments(self):
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_xyz",
+            name="shell",
+            arguments='{"command":"ls"} trailing',
+            id="fc_xyz",
+        )
+        msg = _construct_single_message_from_response_item(item)
+        args = msg["tool_calls"][0]["function"]["arguments"]
+        import json
+
+        assert json.loads(args) == {"command": "ls"}

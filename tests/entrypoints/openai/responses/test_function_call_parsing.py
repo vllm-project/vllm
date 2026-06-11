@@ -156,6 +156,52 @@ def test_invalid_function_call_fallback():
         ResponsesRequest(**request_data)
 
 
+def test_function_call_with_dict_arguments():
+    """Codex may send arguments as a JSON object instead of a string."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "fc_dict",
+                "name": "shell",
+                "arguments": {"command": "ls", "workdir": "/tmp"},
+            }
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    assert len(request.input) == 1
+    assert isinstance(request.input[0], ResponseFunctionToolCall)
+    import json
+
+    assert json.loads(request.input[0].arguments) == {
+        "command": "ls",
+        "workdir": "/tmp",
+    }
+
+
+def test_function_call_with_extra_data_arguments():
+    """History replay may contain concatenated JSON in arguments."""
+    request_data = {
+        "model": "gpt-oss",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "fc_extra",
+                "name": "shell",
+                "arguments": '{"command":"ls"}{"command":"pwd"}',
+            }
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+    import json
+
+    assert json.loads(request.input[0].arguments) == {"command": "ls"}
+
+
 def test_string_input_not_affected():
     """Test that string input is not affected by the validator."""
     request_data = {"model": "gpt-oss", "input": "This is a simple string input"}
