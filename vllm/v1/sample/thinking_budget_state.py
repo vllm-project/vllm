@@ -76,12 +76,6 @@ class ThinkingBudgetStateHolder:
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
         self.cu_num_tokens: dict[int, int] = {}
-        # Pre-built tensor for end token IDs (used by the soft bias).
-        self._end_ids = (
-            torch.tensor(self.think_end_token_ids, device=device, dtype=torch.long)
-            if self.think_end_token_ids
-            else None
-        )
 
         if self.num_spec_tokens > 0:
             self._mask_capacity = max_num_reqs * (self.num_spec_tokens + 1)
@@ -181,6 +175,23 @@ class ThinkingBudgetStateHolder:
             return logits
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
+
+    def _next_close_token_id(self, state: dict[str, Any]) -> int:
+        """The only close-marker token that is valid to sample next.
+
+        For a multi-token close marker the ids must be emitted in order; if
+        the tail of already-generated output tokens matches a proper prefix
+        of the marker, the next id of the sequence is the one to encourage.
+        Otherwise (and always for a single-token marker) it is the first id.
+        """
+        ids = self.think_end_token_ids
+        if len(ids) == 1:
+            return ids[0]
+        output = state.get("output_tok_ids") or []
+        for k in range(min(len(output), len(ids) - 1), 0, -1):
+            if output[-k:] == ids[:k]:
+                return ids[k]
+        return ids[0]
 
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
@@ -546,7 +557,7 @@ class ThinkingBudgetStateHolder:
                                     state["bonus_token_forced"] = True
             elif (
                 not self.in_spec_mode
-                and self._end_ids is not None
+                and self.think_end_token_ids
                 and state.get("soft_progress", 0.0) > 0.0
             ):
                 # Adaptive soft bias: boost the end-of-thinking logit
@@ -555,15 +566,21 @@ class ThinkingBudgetStateHolder:
                 #   progress=0%   -> target = end_logit (no change)
                 #   progress=50%  -> target = top_logit (equal)
                 #   progress=100% -> target = top + gap (dominates)
+                #
+                # Kept entirely in torch ops — no ``.item()`` — so the
+                # sampler never syncs device->host on this path. Only the
+                # *next valid* close token is biased: for a multi-token
+                # marker, boosting later ids could let the model sample them
+                # out of order and leak a marker fragment into the thinking
+                # text.
                 row = self.cu_num_tokens[seq_idx]
                 if row < logits.shape[0]:
-                    top_logit = logits[row].max().item()
-                    end_logit = logits[row, self._end_ids[0]].item()
-                    gap = max(top_logit - end_logit, 1.0)
-                    target = end_logit + 2.0 * gap * state["soft_progress"]
-                    logits[row, self._end_ids] = torch.clamp(
-                        logits[row, self._end_ids], min=target
-                    )
+                    next_id = self._next_close_token_id(state)
+                    top = logits[row].max()
+                    end = logits[row, next_id]
+                    gap = torch.clamp(top - end, min=1.0)
+                    target = end + 2.0 * state["soft_progress"] * gap
+                    logits[row, next_id] = torch.maximum(end, target)
 
         if active_indices_cpu:
             device = logits.device
