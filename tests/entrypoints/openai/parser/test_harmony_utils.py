@@ -17,6 +17,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
+    parse_output_into_messages,
+    repair_unterminated_visible_channel,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
@@ -1171,3 +1173,111 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
+
+
+def _tok(text: str) -> list[int]:
+    return get_encoding().encode(text, allowed_special="all")
+
+
+# Harmony control tokens used to assemble test streams.
+_CHANNEL = _tok("<|channel|>")[0]
+_MESSAGE = _tok("<|message|>")[0]
+_END = _tok("<|end|>")[0]
+_START = _tok("<|start|>")[0]
+_RETURN = _tok("<|return|>")[0]
+
+
+def _analysis(text: str) -> list[int]:
+    return [_CHANNEL, *_tok("analysis"), _MESSAGE, *_tok(text), _END]
+
+
+def _assistant_header() -> list[int]:
+    return [_START, *_tok("assistant")]
+
+
+class TestRepairUnterminatedVisibleChannel:
+    """A final/commentary header emitted without the ``<|message|>`` delimiter
+    should be repaired so the generated content is not silently dropped."""
+
+    def test_malformed_final_recovers_content(self):
+        # ``<|channel|>final {"answer": "hi"}<|return|>`` with no ``<|message|>``.
+        tokens = [
+            *_analysis("thinking"),
+            *_assistant_header(),
+            _CHANNEL,
+            *_tok("final"),
+            *_tok(' {"answer": "hi"}'),
+            _RETURN,
+        ]
+        repaired = repair_unterminated_visible_channel(tokens)
+        assert len(repaired) == len(tokens) + 1
+        assert repaired.count(_MESSAGE) == tokens.count(_MESSAGE) + 1
+
+        reasoning, content, _ = parse_chat_output(tokens)
+        assert content is not None
+        assert "answer" in content
+        assert reasoning == "thinking"
+
+    def test_parse_output_commits_repaired_final(self):
+        # Both parse_chat_output and the openai tool parser read the final
+        # message from parse_output_into_messages, so the repair must surface a
+        # committed final message here (the shared path).
+        tokens = [
+            *_analysis("thinking"),
+            *_assistant_header(),
+            _CHANNEL,
+            *_tok("final"),
+            *_tok(' {"answer": "hi"}'),
+            _RETURN,
+        ]
+        parser = parse_output_into_messages(tokens)
+        finals = [m for m in parser.messages if m.channel == "final"]
+        assert finals
+        assert "answer" in finals[0].content[0].text
+
+    def test_malformed_commentary_preamble_recovers_content(self):
+        tokens = [
+            *_analysis("thinking"),
+            *_assistant_header(),
+            _CHANNEL,
+            *_tok("commentary"),
+            *_tok(" Here is a summary."),
+            _RETURN,
+        ]
+        _, content, _ = parse_chat_output(tokens)
+        assert content is not None
+        assert "summary" in content
+
+    def test_well_formed_final_is_noop(self):
+        tokens = [
+            *_analysis("thinking"),
+            *_assistant_header(),
+            _CHANNEL,
+            *_tok("final"),
+            _MESSAGE,
+            *_tok('{"answer": "hi"}'),
+            _RETURN,
+        ]
+        assert repair_unterminated_visible_channel(tokens) == tokens
+        _, content, _ = parse_chat_output(tokens)
+        assert content == '{"answer": "hi"}'
+
+    def test_analysis_only_is_noop(self):
+        tokens = [_CHANNEL, *_tok("analysis"), _MESSAGE, *_tok("reasoning"), _RETURN]
+        assert repair_unterminated_visible_channel(tokens) == tokens
+
+    def test_empty_final_is_noop(self):
+        tokens = [_CHANNEL, *_tok("final"), _MESSAGE, _RETURN]
+        assert repair_unterminated_visible_channel(tokens) == tokens
+
+    def test_tool_call_commentary_is_noop(self):
+        # ``commentary`` with a recipient is a tool call, not visible content.
+        tokens = [
+            _CHANNEL,
+            *_tok("commentary"),
+            *_tok(" to=functions.get_weather"),
+            _MESSAGE,
+            *_tok('{"city": "Paris"}'),
+            _RETURN,
+        ]
+        assert repair_unterminated_visible_channel(tokens) == tokens

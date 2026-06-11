@@ -458,9 +458,128 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
 
 
+class _HarmonyControlTokens:
+    """Cached Harmony control-token ids used to repair a missing delimiter.
+
+    Resolved lazily from the encoding so there are no magic token numbers.
+    """
+
+    def __init__(self) -> None:
+        enc = get_encoding()
+        self._enc = enc
+
+        def tid(text: str) -> int:
+            return enc.encode(text, allowed_special="all")[0]
+
+        self.channel = tid("<|channel|>")
+        self.message = tid("<|message|>")
+        self.constrain = tid("<|constrain|>")
+        self.recipient = tid(" to")  # start of a ` to=<recipient>` tool target
+        # Tokens that terminate or restart a header; content never starts with one.
+        self.breakers = {
+            tid("<|channel|>"),
+            tid("<|start|>"),
+            tid("<|end|>"),
+            tid("<|return|>"),
+            tid("<|call|>"),
+        }
+        # Channel names whose content is user-visible (so a dropped body matters).
+        self.visible_channels = {
+            "final": tuple(enc.encode("final", allowed_special="all")),
+            "commentary": tuple(enc.encode("commentary", allowed_special="all")),
+        }
+
+    def is_whitespace(self, token_id: int) -> bool:
+        try:
+            return self._enc.decode([token_id]).strip() == ""
+        except Exception:
+            return False
+
+
+_harmony_control: _HarmonyControlTokens | None = None
+
+
+def _get_harmony_control() -> _HarmonyControlTokens:
+    global _harmony_control
+    if _harmony_control is None:
+        _harmony_control = _HarmonyControlTokens()
+    return _harmony_control
+
+
+def repair_unterminated_visible_channel(token_ids: list[int]) -> list[int]:
+    """Insert a missing ``<|message|>`` delimiter after a visible channel header.
+
+    GPT-OSS occasionally emits a user-visible channel header
+    (``<|channel|>final`` or ``<|channel|>commentary``) directly followed by the
+    message body, omitting the required ``<|message|>`` delimiter. The Harmony
+    parser then never leaves the header state, never commits the message, and the
+    generated answer is silently dropped (the chat response returns
+    ``content=None`` even though the tokens were generated and billed).
+
+    This repairs the token stream by inserting the delimiter at the
+    header/content boundary so the existing parser recovers the content.
+
+    It is a no-op on well-formed output: it only inserts when the visible channel
+    name is followed by content, never when it is followed by ``<|message|>``, a
+    ``<|constrain|>`` type, a ` to=` recipient (tool call), or another control
+    token.
+
+    Args:
+        token_ids: The decoded assistant token ids.
+
+    Returns:
+        A repaired copy of ``token_ids``; the original list is returned unchanged
+        when no repair is needed.
+    """
+    ctrl = _get_harmony_control()
+    n = len(token_ids)
+    insert_before: list[int] = []
+    i = 0
+    while i < n:
+        if token_ids[i] != ctrl.channel:
+            i += 1
+            continue
+        # Match the channel name immediately following ``<|channel|>``.
+        name_len = 0
+        for seq in ctrl.visible_channels.values():
+            if tuple(token_ids[i + 1 : i + 1 + len(seq)]) == seq:
+                name_len = max(name_len, len(seq))
+        if name_len == 0:
+            i += 1
+            continue  # e.g. ``analysis`` -> not user-visible, leave untouched
+        j = i + 1 + name_len
+        # Tolerate whitespace tokens between the name and the delimiter.
+        while j < n and ctrl.is_whitespace(token_ids[j]):
+            j += 1
+        # Leave well-formed (``<|message|>``), typed (``<|constrain|>``),
+        # tool-call (recipient), and empty (breaker) headers untouched.
+        if j < n:
+            nxt = token_ids[j]
+            header_ok = nxt in (ctrl.message, ctrl.constrain, ctrl.recipient)
+            if not header_ok and nxt not in ctrl.breakers:
+                insert_before.append(j)  # content with no delimiter
+        i = j
+    if not insert_before:
+        return token_ids  # common path: no allocation
+    out: list[int] = []
+    prev = 0
+    for pos in insert_before:
+        out.extend(token_ids[prev:pos])
+        out.append(ctrl.message)
+        prev = pos
+    out.extend(token_ids[prev:])
+    return out
+
+
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
-    for token_id in token_ids:
+    # Repair a visible channel header emitted without its ``<|message|>``
+    # delimiter so the body is not silently dropped. This is shared by every
+    # non-streaming consumer (``parse_chat_output`` and the ``openai`` tool
+    # parser, which sources the final content), and is a no-op on well-formed
+    # output.
+    repaired_token_ids = repair_unterminated_visible_channel(list(token_ids))
+    for token_id in repaired_token_ids:
         parser.process(token_id)
     return parser
 
