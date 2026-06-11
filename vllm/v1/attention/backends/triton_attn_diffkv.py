@@ -200,7 +200,7 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
-        output: torch.Tensor,
+        output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -214,6 +214,7 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
                        head_size_qk + head_size_v]
             output:   [num_tokens, num_heads, head_size_v]
         """
+        assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not supported for "
