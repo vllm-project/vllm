@@ -70,6 +70,7 @@ from .interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
     SupportsPP,
+    SupportsEagle3,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -758,6 +759,7 @@ class Qwen3NextForCausalLM(
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
+    SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": [
