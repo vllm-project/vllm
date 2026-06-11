@@ -155,7 +155,7 @@ impl LoraInfoExporter {
         running: BTreeSet<String>,
         waiting: BTreeSet<String>,
     ) {
-        let next = (!running.is_empty() || !waiting.is_empty()).then(|| LoraInfoLabels {
+        let next = (!running.is_empty() || !waiting.is_empty()).then_some(LoraInfoLabels {
             running_lora_adapters: LoraAdapterNames(running),
             waiting_lora_adapters: LoraAdapterNames(waiting),
         });
