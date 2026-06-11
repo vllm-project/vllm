@@ -979,9 +979,22 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_id_str, _, name = name.partition(".")
                 shard_id = int(shard_id_str)
                 self.checkpoint_format = "sharded"
+                logger.debug(
+                    "Loaded shard %s into %s for layer %s.%s",
+                    shard_id,
+                    name,
+                    self.prefix,
+                    name,
+                )
             else:
                 shard_id = None
                 self.checkpoint_format = "fused"
+                logger.debug(
+                    "Loaded weight %s.%s with shape %s",
+                    self.prefix,
+                    name,
+                    loaded_weight.shape,
+                )
             # If name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, name, self)
             param.weight_loader(param, loaded_weight, shard_id)
@@ -1412,10 +1425,23 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_id, _, name = name.partition(".")
                 self.validate_shard_id(shard_id)
                 self.checkpoint_format = "sharded"
+                logger.debug(
+                    "Loaded shard %s into %s for layer %s.%s",
+                    shard_id,
+                    name,
+                    self.prefix,
+                    name,
+                )
             else:
                 # Checkpoint is fused
                 shard_id = None
                 self.checkpoint_format = "fused"
+                logger.debug(
+                    "Loaded weight %s.%s with shape %s",
+                    self.prefix,
+                    name,
+                    loaded_weight.shape,
+                )
             # If name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, name, self)
             param.weight_loader(param, loaded_weight, shard_id)
