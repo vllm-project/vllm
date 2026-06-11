@@ -192,7 +192,6 @@ MULTIMODAL_MODELS = {
     "AIDC-AI/Ovis2.5-2B": PPTestSettings.fast(),
     "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
-    "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),

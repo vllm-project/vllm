@@ -1667,7 +1667,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     .unsqueeze(1)
                     .expand(-1, num_prefills)
                     * max_context_chunk
-                )
+                ).pin_memory()
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
@@ -1683,7 +1683,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
                 max_token_num_over_chunk = chunk_total_token.max().item()
                 token_to_seq_tensor_cpu = torch.zeros(
-                    [num_chunks, max_token_num_over_chunk], dtype=torch.int32
+                    [num_chunks, max_token_num_over_chunk],
+                    dtype=torch.int32,
+                    pin_memory=True,
                 )
                 range_idx = torch.arange(num_prefills, dtype=torch.int32)
                 for i in range(num_chunks):
@@ -1727,7 +1729,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
                         * padded_local_max_context_chunk_across_ranks
-                    )
+                    ).pin_memory()
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts
