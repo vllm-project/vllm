@@ -123,7 +123,8 @@ def initialize_online_processing(layer: torch.nn.Module):
     Called by either `initialize_layerwise_reload` or an online quantization scheme,
     prevents double wrapping in the case of online quantization + reloading
 
-    :param layer: layer whose parameter weight loaders will be wrapped
+    Args:
+        layer: layer whose parameter weight loaders will be wrapped
     """
     info = get_layerwise_info(layer)
 
@@ -222,8 +223,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     This function should be applied after `initialize_layerwise_reload` is applied
     unwrap the layerwise weight loaders.
 
-    :param model: model to finalize processing for
-    :param model_config: config needed for applying processing to attention layers
+    Args:
+        model: model to finalize processing for
+        model_config: config needed for applying processing to attention layers
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload

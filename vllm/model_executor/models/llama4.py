@@ -51,6 +51,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    maybe_remap_moe_expert_param_name,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -588,21 +589,6 @@ class Llama4Model(LlamaModel):
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
 
-            # If kv cache quantization scales exist and the weight name
-            # corresponds to one of the kv cache quantization scales, load
-            # them.
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             # Iterate over stacked_params_mapping to check if the current weight
             # is one of the stacked parameters. If so, load the weight with the
             # corresponding shard id. Note that MoE weights are handled
@@ -625,9 +611,9 @@ class Llama4Model(LlamaModel):
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                # Remap kv cache scale names for ModelOpt checkpoints.
-                # TODO: ModelOpt should implement get_cache_scale() such that
-                #       kv cache scale name remapping can be done there.
+                # Remap kv cache scale names for any checkpoint format the
+                # quant config's `get_cache_scale_mapper` does not cover
+                # (idempotent for names already renamed by the mapper).
                 if name.endswith("scale"):
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
@@ -677,6 +663,7 @@ class Llama4Model(LlamaModel):
                 if "experts." in name and any(
                     scale_name in name for scale_name in scale_names
                 ):
+                    name = maybe_remap_moe_expert_param_name(name, params_dict)
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
