@@ -846,7 +846,6 @@ steps:
         allow_failure: true
       - step: build-cpu-release-image-arm64
         allow_failure: true
-    if: build.env("NIGHTLY") != "1"
 
   - label: "Publish release images to DockerHub"
     depends_on:
