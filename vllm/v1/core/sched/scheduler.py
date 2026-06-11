@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import itertools
 import time
 from collections import defaultdict, deque
@@ -49,7 +50,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -172,6 +178,16 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Streaming sessions finished from inside schedule()/add_request() (e.g.
+        # a resumable realtime session that reached max_model_len). finish_requests
+        # frees them scheduler-side but, outside update_from_output, has no
+        # `outputs` dict to emit an EngineCoreOutput on -- and finished_req_ids is
+        # worker-facing only, so the client would never receive a finish_reason
+        # and the websocket would hang. Buffer (client_index, req_id, reason) here
+        # and drain it in the next update_from_output, mirroring the failed-KV-load
+        # finish path. Flushed each step.
+        self._streaming_finish_outputs: list[tuple[int, str, FinishReason]] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -744,9 +760,14 @@ class Scheduler(SchedulerInterface):
                         # and can never make progress. Finish it gracefully
                         # (finish_requests removes it from the waiting queues)
                         # instead of asserting and crashing the engine, and
-                        # avoid head-of-line blocking the waiting queue.
-                        self.finish_requests(
+                        # avoid head-of-line blocking the waiting queue. Buffer a
+                        # client-facing finish output so the websocket does not
+                        # hang waiting for a finish_reason that never arrives.
+                        finished = self.finish_requests(
                             request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        self._buffer_streaming_finish(
+                            finished, RequestStatus.FINISHED_LENGTH_CAPPED
                         )
                         continue
 
@@ -1147,20 +1168,16 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
 
-    @property
+    @functools.cached_property
     def _reanchor_sliding_window(self) -> int | None:
         """The decoder (largest) sliding window across KV groups, or None if the
         model is not a pure sliding-window model. Cached after first lookup."""
-        sw = getattr(self, "_reanchor_sw_cache", -1)
-        if sw == -1:
-            sw = None
-            for mgr in self.kv_cache_manager.coordinator.single_type_managers:
-                mgr_sw = getattr(mgr, "sliding_window", None)
-                if mgr_sw is None:
-                    sw = None  # a non-sliding (full-attention) group is present
-                    break
-                sw = mgr_sw if sw is None else max(sw, mgr_sw)
-            self._reanchor_sw_cache = sw
+        sw = None
+        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+            mgr_sw = getattr(mgr, "sliding_window", None)
+            if mgr_sw is None:
+                return None  # a non-sliding (full-attention) group is present
+            sw = mgr_sw if sw is None else max(sw, mgr_sw)
         return sw
 
     def _reanchor_session(self, request: Request) -> bool:
@@ -1205,20 +1222,32 @@ class Scheduler(SchedulerInterface):
                 continue
             null_block = getattr(mgr, "_null_block", None)
             if null_block is None:
-                continue
+                # Fail safe: without a null block to compare against, the
+                # tripwire cannot prove the leading blocks are evicted, and the
+                # deletion pass below would drop live blocks unchecked.
+                logger.warning_once(
+                    "Re-anchor disabled: KV cache manager %s has no _null_block "
+                    "to validate evicted leading blocks against.",
+                    type(mgr).__name__,
+                )
+                return False
             mgr_shift = d // mgr.block_size
             for i in range(min(mgr_shift, len(blocks))):
                 if blocks[i] is not null_block:
                     logger.warning(
                         "Re-anchor aborted for %s: leading block %d not null "
                         "in a KV group (window=%d, clock=%d).",
-                        request.request_id, i, sw, request.num_computed_tokens)
+                        request.request_id,
+                        i,
+                        sw,
+                        request.num_computed_tokens,
+                    )
                     return False
         # (1) token / position bookkeeping
         request.num_computed_tokens -= d
-        del request._all_token_ids[: d]
+        del request._all_token_ids[:d]
         if request.prompt_token_ids is not None and len(request.prompt_token_ids) >= d:
-            del request.prompt_token_ids[: d]
+            del request.prompt_token_ids[:d]
             request.num_prompt_tokens -= d
         # (2) multimodal features: drop the dead leading features (those fully
         # before the new origin -> beyond the window, audio long since
@@ -1786,6 +1815,22 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
+        # Emit client-facing finish outputs for streaming sessions finished from
+        # inside schedule()/add_request() (the request is already freed, so this
+        # is the only place the client learns it ended). Mirrors the failed-KV
+        # path above; without it the websocket hangs on a finish_reason that
+        # never comes.
+        if self._streaming_finish_outputs:
+            for client_index, req_id, reason in self._streaming_finish_outputs:
+                outputs[client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=reason,
+                    )
+                )
+            self._streaming_finish_outputs.clear()
+
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
@@ -2034,9 +2079,12 @@ class Scheduler(SchedulerInterface):
                         existing.num_tokens,
                         self.max_model_len,
                     )
-                    self.finish_requests(
+                    finished = self.finish_requests(
                         existing.request_id,
                         RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
+                    self._buffer_streaming_finish(
+                        finished, RequestStatus.FINISHED_LENGTH_CAPPED
                     )
             else:
                 # Streaming-input session finished.
@@ -2118,6 +2166,22 @@ class Scheduler(SchedulerInterface):
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         return [(r.request_id, r.client_index) for r in valid_requests]
+
+    def _buffer_streaming_finish(
+        self,
+        finished: list[tuple[str, int]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Queue client-facing finish outputs for sessions finished from inside
+        schedule()/add_request() (where there is no `outputs` dict). Drained in
+        the next update_from_output so the client receives a finish_reason
+        instead of hanging. ``finished`` is the (req_id, client_index) list
+        returned by finish_requests."""
+        reason = RequestStatus.get_finished_reason(finished_status)
+        if reason is None:
+            return
+        for req_id, client_index in finished:
+            self._streaming_finish_outputs.append((client_index, req_id, reason))
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False

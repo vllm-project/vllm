@@ -218,6 +218,13 @@ so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_strea
     throughput. Real capacity is `min(KV ceiling, compute, max_num_seqs)`. Narrowing
     the window trades a little transcription fidelity for KV headroom, so measure on your audio.
 
+!!! note
+    Narrowing the window also shrinks the encoder cache budget, so a server configured
+    this way rejects long **one-shot** clips on `/v1/audio/transcriptions` with a 400
+    (`exceeds the pre-allocated encoder cache size`) that the default config would accept.
+    Streaming sessions are unaffected (audio arrives in small chunks). Serve long offline
+    clips from a default (non-overridden) server, or raise the window.
+
 **Duration: `--max-model-len` and unbounded streaming.** For realtime, `--max-model-len`
 also acts as a duration cap (about 1 text token per 80 ms of audio, so the 131072 default is ~2 h 55).
 A session that reaches it is finished gracefully (`FINISHED_LENGTH_CAPPED`) so the client can
@@ -228,8 +235,9 @@ reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
 ```
 
 - `--enable-realtime-unbounded` (default off): periodically re-anchors the RoPE position clock
-  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache and a
-  sliding-window decoder; rejected at startup otherwise.
+  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache, a
+  sliding-window decoder, **prefix caching off** (`--no-enable-prefix-caching`), CUDA, and
+  plain RoPE with `rope_theta=1e6` (Voxtral/Ministral); rejected at startup otherwise.
 - `--realtime-reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
   Must be smaller than `max_model_len - sliding_window`.
 

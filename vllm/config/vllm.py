@@ -1014,6 +1014,41 @@ class VllmConfig:
                     f"got cache_dtype={self.cache_config.cache_dtype!r}."
                 )
 
+            # Re-anchoring rebases the per-group block lists in place; it cannot
+            # also rebase prefix-cache block hashes, so _reanchor_session is a
+            # silent no-op when prefix caching is on (scheduler.py). With prefix
+            # caching enabled (the default), the flag would be inert and the
+            # session still killed at max_model_len -- worse, with the
+            # graceful-finish warning suppressed for re-anchor streams. Reject at
+            # startup rather than letting the feature silently do nothing.
+            if (
+                self.cache_config is not None
+                and self.cache_config.enable_prefix_caching
+            ):
+                raise ValueError(
+                    "enable_realtime_unbounded is incompatible with prefix "
+                    "caching (re-anchoring cannot rebase block hashes), but "
+                    "enable_prefix_caching is on. Pass --no-enable-prefix-caching."
+                )
+
+            # The worker re-rotation indexes the KV cache as (num_blocks, 2, ...)
+            # and reads head_size from the trailing dim -- the layout shared by
+            # the CUDA attention family (FlashAttention/FlashInfer/Triton/
+            # FlexAttention). ROCm's default ROCM_ATTN backend uses
+            # (2, num_blocks, ...) and the CPU backend interleaves K/V into the
+            # trailing dim, so both would corrupt keys (CPU silently, since a
+            # 64-dim head's 2*head_size=128 trailing dim still passes the
+            # head_size assert). Restrict the experimental path to CUDA.
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "enable_realtime_unbounded is only supported on CUDA "
+                    "(the re-anchor key re-rotation assumes the CUDA "
+                    "attention-family KV layout); current platform is "
+                    f"{current_platform.device_name!r}."
+                )
+
             if self.model_config is not None:
                 hf_config = self.model_config.hf_config
                 text_config = getattr(hf_config, "text_config", hf_config)
@@ -1041,15 +1076,39 @@ class VllmConfig:
                 # Voxtral's config carries a benign rope_scaling with
                 # rope_type="default" (plain RoPE plus an explicit theta), which
                 # must NOT be rejected.
+                #
+                # Read rope_parameters FIRST (canonical, see model.py): the Mistral
+                # config adapter writes scaling only into rope_parameters, never
+                # rope_scaling. transformers v5 aliases rope_scaling->rope_parameters
+                # so reading rope_scaling happens to work there, but under v4 there
+                # is no alias and a Mistral-format YaRN model would slip through.
                 for name, cfg in (("text", text_config), ("audio", audio_config)):
-                    rs = getattr(cfg, "rope_scaling", None) if cfg is not None else None
+                    if cfg is None:
+                        continue
+                    rs = getattr(cfg, "rope_parameters", None) or getattr(
+                        cfg, "rope_scaling", None
+                    )
                     rope_type = str(
                         (rs or {}).get("rope_type", (rs or {}).get("type", "default"))
                     ).lower()
                     if rs and rope_type not in ("default", "none"):
                         raise ValueError(
                             "enable_realtime_unbounded does not support RoPE "
-                            f"scaling; {name}_config has rope_scaling={rs!r}."
+                            f"scaling; {name}_config has rope={rs!r}."
+                        )
+                    # The worker re-rotation hardcodes rope_theta=1e6 (Voxtral/
+                    # Ministral). A checkpoint with a different theta would
+                    # SILENTLY corrupt re-rotated keys -- unlike head_size, theta
+                    # is not tripwired at runtime. Validate it here.
+                    theta = (rs or {}).get(
+                        "rope_theta", getattr(cfg, "rope_theta", None)
+                    )
+                    if theta is not None and float(theta) != 1.0e6:
+                        raise ValueError(
+                            "enable_realtime_unbounded assumes rope_theta=1e6 "
+                            f"(the worker re-rotation hardcodes it); {name}_config "
+                            f"has rope_theta={theta}. This experimental path is "
+                            "validated for Voxtral/Ministral only."
                         )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:

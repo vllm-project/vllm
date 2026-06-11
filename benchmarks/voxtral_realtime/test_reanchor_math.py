@@ -16,6 +16,11 @@ Run:  .venv/bin/python benchmarks/voxtral_realtime/test_reanchor_math.py
 
 import torch
 
+# Import the PRODUCTION re-anchor op so this test guards the real function rather
+# than a hand-copied duplicate. The helper lives in a dependency-light module so
+# importing it does not pull the GPU model runner graph.
+from vllm.v1.worker.reanchor_rotary import apply_inverse_rotary
+
 
 def _inv_freq(rotary_dim: int, base: float) -> torch.Tensor:
     return 1.0 / (
@@ -37,25 +42,6 @@ def forward_rotary(
     else:
         x1, x2 = rot[..., 0::2], rot[..., 1::2]
         o1, o2 = x1 * cos - x2 * sin, x2 * cos + x1 * sin
-        out = torch.stack([o1, o2], dim=-1).flatten(-2)
-    return torch.cat([out, pas], dim=-1) if pas.numel() else out
-
-
-def apply_inverse_rotary(
-    key: torch.Tensor, D: int, rotary_dim: int, base: float, is_neox: bool
-) -> torch.Tensor:
-    """Rotate a key by R(-D): the production re-anchor op. cos(-Df)=cos(Df),
-    sin(-Df)=-sin(Df)  ->  R(-D) = R(D)^T."""
-    half = rotary_dim // 2
-    ang = float(D) * _inv_freq(rotary_dim, base)
-    cos, sin = torch.cos(ang).to(key.dtype), torch.sin(ang).to(key.dtype)
-    rot, pas = key[..., :rotary_dim], key[..., rotary_dim:]
-    if is_neox:
-        x1, x2 = rot[..., :half], rot[..., half:]
-        out = torch.cat([x1 * cos + x2 * sin, -x1 * sin + x2 * cos], dim=-1)
-    else:
-        x1, x2 = rot[..., 0::2], rot[..., 1::2]
-        o1, o2 = x1 * cos + x2 * sin, -x1 * sin + x2 * cos
         out = torch.stack([o1, o2], dim=-1).flatten(-2)
     return torch.cat([out, pas], dim=-1) if pas.numel() else out
 

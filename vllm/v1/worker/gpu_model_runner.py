@@ -205,6 +205,10 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.reanchor_rotary import (
+    apply_inverse_rotary_cos_sin,
+    inverse_rotary_cos_sin,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -233,39 +237,6 @@ logger = init_logger(__name__)
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
-
-
-def _apply_inverse_rotary(
-    key: torch.Tensor, d: int, rotary_dim: int, base: float, is_neox: bool
-) -> torch.Tensor:
-    """Re-rotate an already position-rotated key by the constant R(-d).
-
-    Used by RoPE re-anchoring (unbounded realtime). cos(-d.f)=cos(d.f),
-    sin(-d.f)=-sin(d.f) -> R(-d)=R(d)^T. Validated to ~1e-6 against the vLLM
-    rotary convention for both NeoX and GPT-J styles in
-    benchmarks/voxtral_realtime/test_reanchor_math.py. ``key`` is
-    [..., head_size] with the leading ``rotary_dim`` dims rotary.
-    """
-    half = rotary_dim // 2
-    inv_freq = 1.0 / (
-        base
-        ** (
-            torch.arange(0, rotary_dim, 2, dtype=torch.float64, device=key.device)
-            / rotary_dim
-        )
-    )
-    angle = float(d) * inv_freq
-    cos = torch.cos(angle).to(key.dtype)
-    sin = torch.sin(angle).to(key.dtype)
-    rot, passthru = key[..., :rotary_dim], key[..., rotary_dim:]
-    if is_neox:
-        x1, x2 = rot[..., :half], rot[..., half:]
-        out = torch.cat([x1 * cos + x2 * sin, -x1 * sin + x2 * cos], dim=-1)
-    else:  # GPT-J interleaved
-        x1, x2 = rot[..., 0::2], rot[..., 1::2]
-        o1, o2 = x1 * cos + x2 * sin, -x1 * sin + x2 * cos
-        out = torch.stack([o1, o2], dim=-1).flatten(-2)
-    return torch.cat([out, passthru], dim=-1) if passthru.numel() else out
 
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
@@ -1163,8 +1134,11 @@ class GPUModelRunner(
         # (whisper positions are expanded by this factor), so its constant shift
         # is pool * D; the decoder (text) group shifts by D.
         audio_cfg = getattr(self.model_config.hf_config, "audio_config", None)
-        pool = getattr(audio_cfg, "block_pool_size", None) or getattr(
-            self.model_config.hf_config, "downsample_factor", 1) or 1
+        pool = (
+            getattr(audio_cfg, "block_pool_size", None)
+            or getattr(self.model_config.hf_config, "downsample_factor", 1)
+            or 1
+        )
         for req_id, D in reanchor_reqs.items():
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
@@ -1178,16 +1152,24 @@ class GPUModelRunner(
                     "persistent batch with D > 0. Key re-rotation dropped, so "
                     "attention will be corrupted for this stream. This should be "
                     "unreachable; investigate schedule().",
-                    req_id, idx, D)
+                    req_id,
+                    idx,
+                    D,
+                )
                 continue
             # The persistent-batch row already carries the rebased (small) clock
             # from full re-add; logged below for observability.
             clock = int(ib.num_computed_tokens_cpu[idx])
-            # Voxtral/Ministral rope_theta. It is absent from the HF config
-            # (Mistral-format), so it is fixed here; this experimental path is
-            # validated for Voxtral realtime only. Startup rejects scaled rope
-            # and the head_size assert below tripwires any other rotary geometry.
+            # Voxtral/Ministral rope_theta, hardcoded here for the experimental
+            # realtime path. Startup validation (VllmConfig) rejects any model
+            # whose text/audio rope_theta != 1e6 or that carries a real RoPE
+            # scaling, and the head_size assert below tripwires any other rotary
+            # geometry, so this constant is safe on every config that boots.
             base = 1.0e6
+            # At most two distinct rotations per re-anchor (decoder 128-dim
+            # NeoX shifted by D, audio encoder 64-dim GPT-J shifted by pool*D);
+            # compute each cos/sin table once instead of per layer (~60x).
+            cos_sin: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
             for gid, group in enumerate(groups):
                 bt = ib.block_table.block_tables[gid]
                 n = int(bt.num_blocks_per_row[idx])
@@ -1212,15 +1194,26 @@ class GPUModelRunner(
                     # shift pool*D) into one mixed-head_size group.
                     head_size = kv.shape[-1]
                     assert head_size in (64, 128), (
-                        f"re-anchor: unexpected rotary head_size {head_size}")
+                        f"re-anchor: unexpected rotary head_size {head_size}"
+                    )
                     is_neox = head_size == 128
                     d_grp = D if is_neox else pool * D
+                    cs = cos_sin.get((d_grp, head_size))
+                    if cs is None:
+                        cs = inverse_rotary_cos_sin(
+                            d_grp, head_size, base, kv.dtype, kv.device
+                        )
+                        cos_sin[(d_grp, head_size)] = cs
                     key = kv[live_t, 0]
-                    kv[live_t, 0] = _apply_inverse_rotary(
-                        key, d_grp, head_size, base, is_neox)
+                    kv[live_t, 0] = apply_inverse_rotary_cos_sin(
+                        key, cs[0], cs[1], head_size, is_neox
+                    )
             logger.info(
                 "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
-                req_id, D, clock)
+                req_id,
+                D,
+                clock,
+            )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -6314,13 +6307,23 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        # Realtime models process at most one new mm chunk per
-                        # step per session; profiling the full
-                        # max_num_seqs x max-audio product OOMs on consumer GPUs
-                        # without reflecting runtime pressure. Clamp to one item.
-                        # Refs vllm-project/vllm#38233.
+                        # Realtime models submit one new mm chunk per step per
+                        # session, so the max_num_seqs x max-audio product over-
+                        # profiles and OOMs on consumer GPUs (#38233). But runtime
+                        # encoder admission is bounded by the encoder *token*
+                        # budget, not item count (_try_schedule_encoder_inputs /
+                        # EncoderCacheManager), so several concurrent sessions'
+                        # chunks -- or a multi-audio prompt -- can land in a single
+                        # embed_multimodal forward. Profile exactly that many max-
+                        # size items (encoder_budget // max-tokens-per-item): the
+                        # same bound admission enforces. Clamping to 1 under-
+                        # profiles encoder peak memory and OOMs in service.
                         if supports_realtime(self.model):
-                            max_mm_items_per_batch = 1
+                            max_toks = mm_budget.mm_max_toks_per_item[dummy_modality]
+                            max_mm_items_per_batch = max(
+                                1,
+                                min(max_mm_items_per_batch, encoder_budget // max_toks),
+                            )
 
                         logger.info_once(
                             "Encoder cache will be initialized with a "
