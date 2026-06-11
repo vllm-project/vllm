@@ -29,7 +29,23 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
         TORCH_INDEX_URL=""
     fi
 else
-    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+    # Derive the CUDA wheel tag from the installed torch rather than hardcoding
+    # it, then point at the channel that actually serves the installed torch
+    # version. Release candidates live on the test channel until they are
+    # promoted to stable, so a hardcoded stable index breaks RC validation
+    # (e.g. a torch==X.Y.Z pin from nixl-cuNN that is only published to
+    # /whl/test). Probe stable, then test, then nightly; fall back to stable.
+    CUDA_TAG="cu$(python3 -c "import torch; print((torch.version.cuda or '').replace('.', ''))")"
+    TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])")
+    TORCH_INDEX_URL=""
+    for CHANNEL in "${CUDA_TAG}" "test/${CUDA_TAG}" "nightly/${CUDA_TAG}"; do
+        CANDIDATE_URL="https://download.pytorch.org/whl/${CHANNEL}"
+        if curl -fsSL "${CANDIDATE_URL}/torch/" 2>/dev/null | grep -qE "torch-${TORCH_VER}[%+-]"; then
+            TORCH_INDEX_URL="${CANDIDATE_URL}"
+            break
+        fi
+    done
+    TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/${CUDA_TAG}}"
 fi
 echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
 
