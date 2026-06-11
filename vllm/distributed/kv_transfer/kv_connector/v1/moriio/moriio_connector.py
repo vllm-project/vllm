@@ -3,7 +3,6 @@
 import logging
 import math
 import queue
-import re
 import threading
 import time
 from collections import defaultdict
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import msgpack
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -77,6 +77,8 @@ _TRANSFER_ID_RE = re.compile(
     r"(tx-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+_MAX_PENDING_UNMAPPED_DONE_TIDS = 4096
+
 _VLLM_REQUEST_SUFFIX_RE = re.compile(r"(.+)-[0-9a-fA-F]{8}$")
 
 
@@ -308,7 +310,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         return not _get_bool_extra_config(extra_config, "allow_full_cudagraph")
-
 
 
 class MoRIIOConnectorScheduler:
@@ -972,8 +973,8 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        # In progress transfers.
-        self._recving_transfers: defaultdict[ReqId, list] = defaultdict(list)
+        # In-progress READ transfers: per request, keyed by layer name.
+        self._recving_transfers: defaultdict[ReqId, dict[str, Any]] = defaultdict(dict)
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
         self._recving_transfer_local_block_ids: dict[ReqId, set[int]] = {}
@@ -1017,8 +1018,9 @@ class MoRIIOConnectorWorker:
         # never marks the request done_sending → producer KV blocks leak.
         # Retry on every get_finished call until mapping is populated. The
         # normal id is transfer_id, but older paths may deliver a wrapped
-        # transfer id or request id.
-        self._pending_unmapped_done_tids: set[str] = set()
+        # transfer id or request id. Keep insertion order so malformed
+        # notifications are evicted oldest-first at the cap.
+        self._pending_unmapped_done_tids: dict[str, None] = {}
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1031,9 +1033,7 @@ class MoRIIOConnectorWorker:
         self.request_id_to_transfer_id[request_id] = transfer_id
         external_request_id = _strip_vllm_request_suffix(request_id)
         if external_request_id != request_id:
-            self.request_id_to_transfer_id.setdefault(
-                external_request_id, transfer_id
-            )
+            self.request_id_to_transfer_id.setdefault(external_request_id, transfer_id)
 
     def _forget_transfer_mapping(
         self, transfer_id: TransferId, request_id: ReqId | None = None
@@ -1046,11 +1046,50 @@ class MoRIIOConnectorWorker:
         self.request_id_to_transfer_id.pop(request_id, None)
         external_request_id = _strip_vllm_request_suffix(request_id)
         if external_request_id != request_id:
-            mapped_transfer_id = self.request_id_to_transfer_id.get(
-                external_request_id
-            )
+            mapped_transfer_id = self.request_id_to_transfer_id.get(external_request_id)
             if mapped_transfer_id == transfer_id:
                 self.request_id_to_transfer_id.pop(external_request_id, None)
+
+    def _drop_pending_unmapped_done_tid(
+        self, transfer_id: TransferId, request_id: ReqId | None = None
+    ) -> None:
+        ids_to_drop = {transfer_id}
+        if request_id is not None:
+            ids_to_drop.add(request_id)
+            ids_to_drop.add(_strip_vllm_request_suffix(request_id))
+
+        for completion_id in list(self._pending_unmapped_done_tids):
+            if completion_id in ids_to_drop:
+                self._pending_unmapped_done_tids.pop(completion_id, None)
+                continue
+            match = _TRANSFER_ID_RE.search(completion_id)
+            if match is not None and match.group(1) == transfer_id:
+                self._pending_unmapped_done_tids.pop(completion_id, None)
+
+    def _buffer_pending_unmapped_done_tid(self, completion_id: str) -> None:
+        if completion_id in self._pending_unmapped_done_tids:
+            return
+        if len(self._pending_unmapped_done_tids) >= _MAX_PENDING_UNMAPPED_DONE_TIDS:
+            oldest = next(iter(self._pending_unmapped_done_tids))
+            self._pending_unmapped_done_tids.pop(oldest, None)
+            logger.warning(
+                "Dropping oldest pending READ completion id after buffer "
+                "reached %d entries",
+                _MAX_PENDING_UNMAPPED_DONE_TIDS,
+            )
+        self._pending_unmapped_done_tids[completion_id] = None
+
+    def _translate_or_buffer_read_completion(
+        self, completion_id: str, done_sending: set[str]
+    ) -> None:
+        mapped = self._pop_mapped_completion_id(completion_id)
+        if mapped is not None:
+            done_sending.add(mapped)
+        else:
+            # Mapping not yet populated — keep pending, retry next tick.
+            # Without this buffer the notification is lost and the producer's
+            # KV blocks leak.
+            self._buffer_pending_unmapped_done_tid(completion_id)
 
     def _pop_mapped_completion_id(self, completion_id: str) -> ReqId | None:
         request_id = self.transfer_id_to_request_id.get(completion_id)
@@ -1388,19 +1427,6 @@ class MoRIIOConnectorWorker:
             dp_rank,
         )
 
-    def _pick_host_for_dp_rank(self, meta: ReqMeta, dp_rank: int) -> str:
-        if meta.remote_hosts and len(meta.remote_hosts) > 1:
-            n_hosts = len(meta.remote_hosts)
-            if int(meta.remote_dp_size) >= n_hosts:
-                dp_per_node = max(1, int(meta.remote_dp_size) // n_hosts)
-                node_idx = dp_rank // dp_per_node
-                if 0 <= node_idx < n_hosts:
-                    return meta.remote_hosts[node_idx]
-            if int(meta.tp_size) > 1:
-                return self._pick_remote_host(meta)
-            return self._pick_remote_host(meta)
-        return meta.remote_host
-
     def _background_moriio_handshake(
         self, req_id: ReqId, remote_engine_id: EngineId, meta: ReqMeta
     ):
@@ -1570,7 +1596,8 @@ class MoRIIOConnectorWorker:
         to track which workers are done.
         """
 
-        done_sending, done_recving = set(), set()
+        done_sending: set[str] = set()
+        done_recving: set[str] = set()
 
         if self.is_producer:
             done_sending_raw = self.moriio_wrapper.pop_finished_req_ids()
@@ -1595,19 +1622,14 @@ class MoRIIOConnectorWorker:
                 # This race-buffer subsumes the simpler dict-membership
                 # filter introduced by #40344 — if the mapping is missing
                 # we now retry rather than drop the notification.
-                candidate_tids = (
-                    set(done_sending_raw) | self._pending_unmapped_done_tids
-                )
-                self._pending_unmapped_done_tids = set()
-                for tid in candidate_tids:
-                    mapped = self._pop_mapped_completion_id(tid)
-                    if mapped is not None:
-                        done_sending.add(mapped)
-                    else:
-                        # Mapping not yet populated — keep pending, retry
-                        # next tick. Without this buffer the notification
-                        # is lost and the producer's KV blocks leak.
-                        self._pending_unmapped_done_tids.add(tid)
+                pending_tids = self._pending_unmapped_done_tids
+                self._pending_unmapped_done_tids = {}
+                for tid in pending_tids:
+                    self._translate_or_buffer_read_completion(tid, done_sending)
+                for tid in done_sending_raw:
+                    if tid in pending_tids:
+                        continue
+                    self._translate_or_buffer_read_completion(tid, done_sending)
                 if self._pending_unmapped_done_tids:
                     logger.debug(
                         "get_finished (producer READ): %d tid(s) "
@@ -1667,9 +1689,7 @@ class MoRIIOConnectorWorker:
         else:
             message = str(error)
             code = "setup"
-        invalid_block_ids = self._recving_transfer_local_block_ids.get(
-            req_id, set()
-        )
+        invalid_block_ids = self._recving_transfer_local_block_ids.get(req_id, set())
         if record_invalid_blocks and invalid_block_ids:
             self._invalid_block_ids.put(set(invalid_block_ids))
             self._recving_transfer_local_block_ids[req_id] = set()
@@ -1883,8 +1903,9 @@ class MoRIIOConnectorWorker:
         # request_finished. get_finished() pops entries after a successful
         # translation, so the dict stays bounded.
         for transfer_id in metadata.freed_transfer_ids:
-            self._forget_transfer_mapping(transfer_id)
-        self._pending_unmapped_done_tids.difference_update(metadata.freed_transfer_ids)
+            request_id = self.transfer_id_to_request_id.get(transfer_id)
+            self._forget_transfer_mapping(transfer_id, request_id)
+            self._drop_pending_unmapped_done_tid(transfer_id, request_id)
         self._unmatched_write_completions.difference_update(metadata.freed_transfer_ids)
         for transfer_id, req_id in metadata.transfer_id_to_request_id.items():
             self._remember_transfer_mapping(transfer_id, req_id)
@@ -1956,9 +1977,7 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
-        actual_remote_host = self._pick_host_for_dp_rank(
-            meta, int(meta.remote_dp_rank)
-        )
+        actual_remote_host = self._pick_host_for_dp_rank(meta, int(meta.remote_dp_rank))
         self._read_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
@@ -2150,9 +2169,7 @@ class MoRIIOConnectorWorker:
             + get_port_offset(int(remote_dp_rank), self.tp_rank, int(remote_tp_size))
         )
         with self.moriio_wrapper.lock:
-            self._recving_transfer_local_block_ids[request_id] = set(
-                local_block_ids
-            )
+            self._recving_transfer_local_block_ids[request_id] = set(local_block_ids)
             self._recving_transfers_callback_addr[request_id] = (
                 remote_host,
                 notify_port,
@@ -2170,9 +2187,7 @@ class MoRIIOConnectorWorker:
                 )
             except Exception as e:
                 with self.moriio_wrapper.lock:
-                    has_partial_status = bool(
-                        self._recving_transfers.get(request_id)
-                    )
+                    has_partial_status = bool(self._recving_transfers.get(request_id))
                     self._handle_failed_read_transfer_locked(
                         request_id,
                         error=e,
