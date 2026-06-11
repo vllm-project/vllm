@@ -395,11 +395,14 @@ class GroupCoordinator:
         self.local_rank = local_rank
         if device_index is not None:
             self.device_index = device_index
-        else:
-            assert _WORLD is not None, (
-                "device_index must be provided when creating the world group"
-            )
+        elif _WORLD is not None:
             self.device_index = _WORLD.device_index
+        else:
+            assert local_rank >= 0, (
+                "local_rank must be provided when creating the world group "
+                "without device_index"
+            )
+            self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
