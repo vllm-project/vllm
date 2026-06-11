@@ -132,6 +132,21 @@ def test_validate_http_allowed_when_host_in_allowlist():
     )
 
 
+def test_validate_http_userinfo_confusion_blocked():
+    # Parser differential guard: stdlib ``urlsplit`` reads the host of
+    # ``http://evil.com\@good.com/v.mp4`` as ``good.com``, but urllib3/requests
+    # (which actually issue the request downstream) dial ``evil.com``. We parse
+    # with urllib3's ``parse_url`` so the allowlist sees the same host the HTTP
+    # client will, and this crafted URL is rejected against an allowlist that
+    # only permits ``good.com``.
+    with pytest.raises(ValueError):
+        _validate_video_source(
+            "http://evil.com\\@good.com/v.mp4",
+            _model_config(domains=["good.com"]),
+        )
+
+
+
 def test_validate_local_file_blocked_without_allowed_path():
     # Local file access is opt-in: without --allowed-local-media-path the
     # bare path is rejected.

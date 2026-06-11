@@ -137,14 +137,22 @@ def _validate_video_source(path: str, model_config) -> None:
     and ``--allowed-local-media-path`` exactly like the standard pipeline.
     """
     from pathlib import Path
-    from urllib.parse import urlsplit
     from urllib.request import url2pathname
+
+    from urllib3.util import parse_url
 
     allowed_local = getattr(model_config, "allowed_local_media_path", "") or ""
     allowed_domains = getattr(model_config, "allowed_media_domains", None) or []
 
-    parsed = urlsplit(str(path))
-    scheme = parsed.scheme.lower()
+    # Use urllib3's parser (not stdlib ``urlsplit``) to match the URL parsing
+    # used by downstream HTTP libraries (urllib3/requests) and by
+    # ``MediaConnector._assert_url_in_allowed_media_domains``. The parser
+    # differential would otherwise let crafted URLs such as
+    # ``http://evil.com\@good.com/v.mp4`` (which ``urlsplit`` reads as host
+    # ``good.com`` but urllib3/requests dial as ``evil.com``) bypass the
+    # ``--allowed-media-domains`` allowlist.
+    parsed = parse_url(str(path))
+    scheme = (parsed.scheme or "").lower()
 
     if scheme in ("http", "https"):
         if allowed_domains and parsed.hostname not in allowed_domains:
@@ -170,7 +178,9 @@ def _validate_video_source(path: str, model_config) -> None:
         # escapes. Mirrors MediaConnector._load_file_url (connector.py:266),
         # including the netloc so file://host/path is handled identically.
         if scheme == "file":
-            local = Path(url2pathname(parsed.netloc + parsed.path))
+            local = Path(
+                url2pathname((parsed.netloc or "") + (parsed.path or ""))
+            )
         else:
             # Bare local path (scheme==""): only the codec backend produces
             # these, and they bypass MediaConnector by design (path-survival,
