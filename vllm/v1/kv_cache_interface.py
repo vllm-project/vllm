@@ -326,14 +326,14 @@ class AttentionSpec(KVCacheSpec):
 
         h_start = overlap_start - other_start
         h_len = overlap_end - overlap_start
-
-        if tensor.shape[_DIM4_H] > 1:
-            return [tensor.narrow(_DIM4_H, h_start, h_len)]
-
         other_heads = other_end - other_start
-        C = tensor.shape[_DIM4_C]
-        c_per_head = C // other_heads
-        return [tensor.narrow(_DIM4_C, h_start * c_per_head, h_len * c_per_head)]
+        assert tensor.shape[_DIM4_H] == other_heads, (
+            f"tensor H={tensor.shape[_DIM4_H]} does not match expected "
+            f"remote heads={other_heads} for rank {other_rank}/{other_tp} "
+            f"with total_kv={total_kv}."
+        )
+
+        return [tensor.narrow(_DIM4_H, h_start, h_len)]
 
     def transfer_shapes(
         self,
@@ -914,17 +914,10 @@ class MambaSpec(KVCacheSpec):
         other_rank: int,
         model_config: ModelConfig,
     ) -> list[torch.Tensor]:
-        assert my_tp != other_tp or my_tp > 1, (
-            "Mamba state is always TP-sharded (never replicated)."
-        )
         if my_tp <= other_tp:
             return [tensor]
         tp_ratio = my_tp // other_tp
         C = tensor.shape[_DIM4_C]
-        assert C % tp_ratio == 0, (
-            f"Mamba state C={C} not evenly divisible by tp_ratio={tp_ratio}. "
-            f"Mamba state must always be shardable (no replication)."
-        )
         chunk = C // tp_ratio
         local_offset = my_rank % tp_ratio
         return [tensor.narrow(_DIM4_C, local_offset * chunk, chunk)]
