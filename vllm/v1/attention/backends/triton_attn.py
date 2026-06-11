@@ -34,10 +34,6 @@ from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_kv_cache_layout,
 )
-from vllm.v1.attention.ops.triton_per_token_head_attention import (
-    triton_per_token_head_attention,
-    triton_per_token_head_prefill,
-)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -52,8 +48,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
-
-_CONTINUATION_DECODE_THRESHOLD = 128
 
 
 # constants
@@ -98,20 +92,8 @@ class TritonAttentionMetadata:
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
 
-    all_pure_first_prefill: bool = False
-
-    num_decodes: int = 0
-    num_decode_tokens: int = 0
-    prefill_is_first_chunk: bool = False
-
     seq_lens_cpu: torch.Tensor | None = None
     query_start_loc_cpu: torch.Tensor | None = None
-
-    # Per-token-head kernel inputs: precomputed on CPU in build() and copied
-    # into pre-allocated GPU buffers so pointers are stable across CUDA graph
-    # capture/replay. Slices into the builder-owned buffers.
-    q_to_req: torch.Tensor | None = None
-    q_to_klen: torch.Tensor | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -129,17 +111,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self._is_per_token_head = kv_cache_spec.kv_quant_mode.is_per_token_head
         if self._is_per_token_head:
             self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
-            # Persistent GPU buffers for the kernel's per-query maps. Sized
-            # to max_num_batched_tokens — the scheduler's upper bound on
-            # tokens per forward. Pointers stay stable across CUDA graph
-            # capture/replay; build() writes contents via .copy_().
-            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-            self._q_to_req_buf = torch.empty(
-                max_tokens, dtype=torch.int32, device=device
-            )
-            self._q_to_klen_buf = torch.empty(
-                max_tokens, dtype=torch.int32, device=device
-            )
 
         self.block_size = kv_cache_spec.block_size
 
@@ -212,8 +183,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
-        attn_metadata.all_pure_first_prefill = False
-        attn_metadata.prefill_is_first_chunk = False
         return attn_metadata
 
     def build(
@@ -234,66 +203,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         use_cascade = common_prefix_len > 0
 
-        # Per-request check.  Only runs when the scheduler already
-        # materialized the CPU copy of seq_lens — otherwise we skip the
-        # fast-path gate to avoid triggering a D2H sync here.
         seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-        qsl_cpu = None
-        num_decodes = 0
-        num_decode_tokens = 0
-        prefill_is_first_chunk = False
-        if seq_lens_cpu is not None:
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
-            all_pure_first_prefill = bool(
-                torch.equal(query_lens_cpu, seq_lens_cpu.to(query_lens_cpu.dtype))
-            )
-            if self._is_per_token_head:
-                decode_mask = query_lens_cpu <= 1
-                if bool(decode_mask.all()):
-                    num_decodes = int(query_lens_cpu.shape[0])
-                elif not bool(decode_mask[0]):
-                    num_decodes = 0
-                else:
-                    num_decodes = int(decode_mask.to(torch.int32).sum().item())
-                num_decode_tokens = int(qsl_cpu[num_decodes].item())
-                if num_decodes < query_lens_cpu.shape[0]:
-                    ql_pref = query_lens_cpu[num_decodes:]
-                    sl_pref = seq_lens_cpu[num_decodes:].to(ql_pref.dtype)
-                    prefill_is_first_chunk = bool(torch.equal(ql_pref, sl_pref))
-
-                # Compute per-query maps on CPU and stage into persistent
-                # GPU buffers. Pointers are stable; only contents change.
-                q_lens_i32 = query_lens_cpu.to(torch.int32)
-                num_reqs_total = q_lens_i32.shape[0]
-                total_q = int(qsl_cpu[-1].item())
-                if total_q > 0:
-                    if num_reqs_total == total_q:
-                        # Pure decode fast path: q_to_req = arange,
-                        # q_to_klen = seq_lens.
-                        q_to_req_cpu = torch.arange(num_reqs_total, dtype=torch.int32)
-                        q_to_klen_cpu = seq_lens_cpu.to(torch.int32)
-                    else:
-                        qsl_i32 = qsl_cpu[:-1].to(torch.int32)
-                        seq_lens_i32 = seq_lens_cpu.to(torch.int32)
-                        q_to_req_cpu = torch.repeat_interleave(
-                            torch.arange(num_reqs_total, dtype=torch.int32),
-                            q_lens_i32,
-                        )
-                        cached_len_per_req = seq_lens_i32 - q_lens_i32
-                        pos_in_req = (
-                            torch.arange(total_q, dtype=torch.int32)
-                            - qsl_i32[q_to_req_cpu.long()]
-                        )
-                        q_to_klen_cpu = (
-                            cached_len_per_req[q_to_req_cpu.long()] + pos_in_req + 1
-                        )
-                    self._q_to_req_buf[:total_q].copy_(q_to_req_cpu, non_blocking=True)
-                    self._q_to_klen_buf[:total_q].copy_(
-                        q_to_klen_cpu, non_blocking=True
-                    )
-        else:
-            all_pure_first_prefill = False
+        qsl_cpu = (
+            common_attn_metadata.query_start_loc_cpu
+            if seq_lens_cpu is not None
+            else None
+        )
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -329,22 +244,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
-            all_pure_first_prefill=all_pure_first_prefill,
-            num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            prefill_is_first_chunk=prefill_is_first_chunk,
             seq_lens_cpu=seq_lens_cpu,
             query_start_loc_cpu=qsl_cpu,
-            q_to_req=(
-                self._q_to_req_buf[:num_actual_tokens]
-                if self._is_per_token_head and num_actual_tokens > 0
-                else None
-            ),
-            q_to_klen=(
-                self._q_to_klen_buf[:num_actual_tokens]
-                if self._is_per_token_head and num_actual_tokens > 0
-                else None
-            ),
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -594,14 +495,6 @@ class TritonAttentionImpl(AttentionImpl):
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
 
-        if self._is_per_token_head_quant:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-            self.max_num_kv_splits = (
-                vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
-            )
-
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel Xe2/Xe3).  The dead branch
         # is eliminated at Triton compile time, so other platforms see
@@ -677,15 +570,10 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Per-token-head quantized KV cache: dedicated kernels for the
-        # shapes they win on, else fall through to the core kernel below
-        # (which dequantizes per-(token, head) inline, and uses the packed
-        # kernel for INT4).
+        # Per-token-head quantized KV cache: handled by the core unified
+        # kernel, which dequantizes per-(token, head) inline via constexpr
+        # branches (INT8 / FP8) and dispatches to the packed INT4 kernel.
         if self._is_per_token_head_quant:
-            if self._forward_per_token_head_quant(
-                layer, query, key, value, output, kv_cache, attn_metadata, output_scale
-            ):
-                return output
             key_cache, value_cache = self._pth_key_value_caches(kv_cache)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
@@ -776,161 +664,6 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         return key_cache, value_cache
-
-    def _forward_per_token_head_quant(
-        self,
-        layer: AttentionLayer,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
-        output_scale: torch.Tensor | None,
-    ) -> bool:
-        """Dedicated per-token-head kernels for the shapes they win on.
-
-        Decode requests are front-loaded in the batch, so it splits into a
-        decode prefix ``[:num_decode_tokens]`` and a prefill suffix:
-
-          * pure decode           -> split-KV flash-decode kernel
-          * decode prefix         -> core unified_attention
-          * prefill, first chunk  -> context_attention_fwd (reads fresh K/V)
-          * prefill, continuation -> dedicated prefill kernel (reads cache)
-
-        Returns True if it fully handled the batch, False to fall through to
-        the core kernel (unsupported feature, large/SWA decode, or a SWA
-        continuation the dedicated prefill kernel can't take).
-        """
-        # Features the dedicated kernels don't implement -> core kernel.
-        if not (
-            self.alibi_slopes is None
-            and not self.use_alibi_sqrt
-            and self.sinks is None
-            and not self.logits_soft_cap
-            and attn_metadata.mm_prefix_range_tensor is None
-            and output_scale is None
-            and self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            return False
-
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        num_dec = attn_metadata.num_decodes
-        num_dec_tok = attn_metadata.num_decode_tokens
-        no_swa = self.sliding_window == (-1, -1)
-        qsl = attn_metadata.query_start_loc
-
-        # Pure decode batch: split-KV flash-decode kernel (each query gets
-        # its own causal K length via q_to_klen). Large/SWA decode -> core.
-        if num_dec_tok >= num_actual_tokens:
-            if not (
-                attn_metadata.max_query_len <= _CONTINUATION_DECODE_THRESHOLD
-                and attn_metadata.q_to_req is not None
-                and attn_metadata.q_to_klen is not None
-                and no_swa
-            ):
-                return False
-            key_cache, value_cache = self._pth_key_value_caches(kv_cache)
-            triton_per_token_head_attention(
-                query=query[:num_actual_tokens],
-                key_cache=key_cache,
-                value_cache=value_cache,
-                k_scale_cache=self._k_scale_cache,
-                v_scale_cache=self._v_scale_cache,
-                block_table=attn_metadata.block_table,
-                q_to_req=attn_metadata.q_to_req,
-                q_to_klen=attn_metadata.q_to_klen,
-                scale=self.scale,
-                max_num_kv_splits=self.max_num_kv_splits,
-                output=output[:num_actual_tokens],
-                mid_o_buf=getattr(layer, "_pth_mid_o_buf", None),
-                output_buf=getattr(layer, "_pth_output_buf", None),
-                lse_buf=getattr(layer, "_pth_lse_buf", None),
-                buf_holder=layer,
-                kv_quant_mode=self._kv_quant_mode,
-            )
-            return True
-
-        # The dedicated prefill kernel reads the paged cache and has no
-        # sliding-window support, so a SWA continuation falls back to core.
-        first_chunk = attn_metadata.prefill_is_first_chunk
-        if not first_chunk and not no_swa:
-            return False
-
-        # Decode prefix and continuation prefill both read the paged cache;
-        # a pure first-chunk prefill reads fresh K/V and needs neither.
-        if num_dec > 0 or not first_chunk:
-            key_cache, value_cache = self._pth_key_value_caches(kv_cache)
-
-        # Decode prefix -> core unified_attention.
-        if num_dec > 0:
-            unified_attention(
-                q=query[:num_dec_tok],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_dec_tok],
-                cu_seqlens_q=qsl[: num_dec + 1],
-                max_seqlen_q=1,
-                seqused_k=attn_metadata.seq_lens[:num_dec],
-                max_seqlen_k=attn_metadata.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=None,
-                use_alibi_sqrt=False,
-                window_size=self.sliding_window,
-                block_table=attn_metadata.block_table[:num_dec],
-                softcap=0,
-                q_descale=None,
-                k_descale=None,
-                v_descale=None,
-                seq_threshold_3D=attn_metadata.seq_threshold_3D,
-                num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
-                softmax_segm_output=attn_metadata.softmax_segm_output,
-                softmax_segm_max=attn_metadata.softmax_segm_max,
-                softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
-                sinks=None,
-                output_scale=None,
-                mm_prefix_range=None,
-                kv_quant_mode=self._kv_quant_mode,
-                k_scale_cache=self._k_scale_cache,
-                v_scale_cache=self._v_scale_cache,
-            )
-
-        # Prefill suffix.
-        pref_qsl = qsl[num_dec:] - num_dec_tok
-        if first_chunk:
-            context_attention_fwd(
-                q=query[num_dec_tok:num_actual_tokens],
-                k=key[num_dec_tok:num_actual_tokens],
-                v=value[num_dec_tok:num_actual_tokens],
-                o=output[num_dec_tok:num_actual_tokens],
-                b_start_loc=pref_qsl,
-                b_seq_len=attn_metadata.seq_lens[num_dec:],
-                max_input_len=attn_metadata.max_query_len,
-                is_causal=True,
-                softmax_scale=self.scale,
-                sliding_window_q=self.sliding_window[0],
-                sliding_window_k=self.sliding_window[1],
-            )
-        else:
-            triton_per_token_head_prefill(
-                query=query[num_dec_tok:num_actual_tokens],
-                output=output[num_dec_tok:num_actual_tokens],
-                key_cache=key_cache,
-                value_cache=value_cache,
-                k_scale_cache=self._k_scale_cache,
-                v_scale_cache=self._v_scale_cache,
-                block_table=attn_metadata.block_table[num_dec:],
-                query_start_loc=pref_qsl,
-                seq_lens=attn_metadata.seq_lens[num_dec:],
-                softmax_scale=self.scale,
-                num_reqs=qsl.shape[0] - 1 - num_dec,
-                max_query_len=attn_metadata.max_query_len,
-                kv_quant_mode=self._kv_quant_mode,
-            )
-        return True
 
     def _forward_encoder_attention(
         self,
