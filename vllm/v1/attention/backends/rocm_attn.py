@@ -27,11 +27,11 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
 )
-from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
@@ -199,10 +199,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        # ROCM custom attention kernel does not support sinks.
-        # Callink this backend with sinks will cause it to fall back to the Triton
-        # kernel, which is less efficient than the proper triton backends.
-        return False
+        return True
 
     @classmethod
     def supports_non_causal(cls) -> bool:
@@ -210,9 +207,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-        # incompatible with KV connectors that require blocks-first layout.
-        return False
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -249,7 +244,22 @@ class RocmAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            return (1, 0, 2, 3, 4, 5)
+        if cache_layout == "NHD":
+            return (0, 1, 2, 3, 4)
+        if cache_layout == "HND" and include_num_layers_dimension:
+            return (1, 4, 0, 2, 3, 5)
+        if cache_layout == "HND":
+            return (0, 1, 3, 2, 4)
+        raise ValueError(f"Unknown cache layout: {cache_layout}")
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -308,6 +318,46 @@ class RocmAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}."
             )
+
+    def _split_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Logical shape: [num_blocks, 2, block_size, num_kv_heads, head_size].
+        # ROCm paged attention stores split cache blocks in its native packed
+        # format: K [N, H, D/x, B, x], V [N, H, D, B]. The logical cache tensor
+        # may be physically K/V-first, NHD blocks-first, or HND blocks-first.
+        x = 16 // kv_cache.element_size()
+        num_blocks = kv_cache.shape[0]
+        block_size = kv_cache.shape[2]
+        num_kv_heads = kv_cache.shape[3]
+        head_size = kv_cache.shape[4]
+        block_stride = kv_cache.stride(0)
+        kv_stride = kv_cache.stride(1)
+
+        if kv_cache.stride(3) == head_size:
+            head_stride = block_size * head_size
+        else:
+            head_stride = kv_cache.stride(3)
+
+        key_cache = torch.as_strided(
+            kv_cache,
+            size=(num_blocks, num_kv_heads, head_size // x, block_size, x),
+            stride=(block_stride, head_stride, block_size * x, x, 1),
+            storage_offset=kv_cache.storage_offset(),
+        )
+        value_cache = torch.as_strided(
+            kv_cache,
+            size=(num_blocks, num_kv_heads, head_size, block_size),
+            stride=(block_stride, head_stride, block_size, 1),
+            storage_offset=kv_cache.storage_offset() + kv_stride,
+        )
+        return key_cache, value_cache
+
+    def _get_sinks(self) -> torch.Tensor | None:
+        if self.sinks is not None and self.sinks.dtype != torch.float32:
+            self.sinks = self.sinks.to(torch.float32)
+        return self.sinks
 
     def _forward_encoder_attention(
         self,
@@ -376,7 +426,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -414,9 +464,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -451,7 +499,7 @@ class RocmAttentionImpl(AttentionImpl):
             sliding_window=self.sliding_window[0],
             sm_scale=self.scale,
             output_scale=output_scale,
-            sinks=self.sinks,
+            sinks=self._get_sinks(),
             causal=attn_metadata.causal,
         )
 
@@ -467,9 +515,7 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # Reshape the input keys and values and store them in the cache.
         # Get the actual block_size from value_cache
@@ -478,22 +524,24 @@ class RocmAttentionImpl(AttentionImpl):
         has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
         if block_size in (16, 32) and has_native_layout:
-            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
-            PagedAttention.write_to_paged_cache(
+            # Normal 16, 32 with ROCm's packed per-block layout: use vLLM
+            # native HIP C++ logic. The writer honors block/head strides, so
+            # block-first connector storage can keep native packed pages.
+            from vllm import _custom_ops as ops
+
+            ops.reshape_and_cache(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                slot_mapping,
+                slot_mapping.flatten(),
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )
         else:
             # Non-standard blocks and hybrid attention/Mamba layouts need the
-            # stride-aware Triton writer. The native reshape_and_cache kernel
-            # assumes contiguous block storage and writes to the wrong hybrid
-            # cache blocks.
+            # Triton writer.
             triton_reshape_and_cache_flash(
                 key,
                 value,
@@ -506,7 +554,7 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        return rocm_aiter_ops.is_enabled() and get_kv_cache_layout() == "NHD"
 
     def do_rope_and_kv_cache_update(
         self,
@@ -522,11 +570,7 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
-        )
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = False
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
