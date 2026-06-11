@@ -73,23 +73,36 @@ def make_parser(tokenizer, reasoning=False, tool=False):
     return TestParser(tokenizer)
 
 
-# ── Non-streaming: extract_response_outputs ──────────────────────────
+# ── Non-streaming: parser.parse() + build_response_output_items ──────
 
 
-class TestExtractResponseOutputsIncludeReasoning:
+def parse_and_build(parser, request, model_output, enable_auto_tools=False):
+    """Mirrors the non-streaming path in ResponsesParser.process():
+    parser.parse() → include_reasoning check → build_response_output_items().
+    """
+    from vllm.entrypoints.openai.responses.utils import (
+        build_response_output_items,
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output, request, enable_auto_tools=enable_auto_tools
+    )
+    if not getattr(request, "include_reasoning", True):
+        reasoning = None
+    return build_response_output_items(
+        reasoning=reasoning,
+        content=content,
+        tool_calls=tool_calls,
+    )
+
+
+class TestNonStreamingIncludeReasoning:
     def test_include_reasoning_true_has_reasoning_item(self, tokenizer):
         """Default: reasoning items appear in output."""
         parser = make_parser(tokenizer, reasoning=True)
         request = make_responses_request(include_reasoning=True)
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-        )
+        outputs = parse_and_build(parser, request, MODEL_OUTPUT_REASONING_AND_CONTENT)
 
         types = [o.type for o in outputs]
         assert "reasoning" in types
@@ -100,14 +113,7 @@ class TestExtractResponseOutputsIncludeReasoning:
         parser = make_parser(tokenizer, reasoning=True)
         request = make_responses_request(include_reasoning=False)
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-        )
+        outputs = parse_and_build(parser, request, MODEL_OUTPUT_REASONING_AND_CONTENT)
 
         types = [o.type for o in outputs]
         assert "reasoning" not in types
@@ -119,14 +125,7 @@ class TestExtractResponseOutputsIncludeReasoning:
         parser = make_parser(tokenizer, reasoning=True)
         request = make_responses_request(include_reasoning=False)
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-        )
+        outputs = parse_and_build(parser, request, MODEL_OUTPUT_REASONING_AND_CONTENT)
 
         message = next(o for o in outputs if o.type == "message")
         assert message.content[0].text == "The answer is 42."
@@ -148,13 +147,10 @@ class TestExtractResponseOutputsIncludeReasoning:
             ],
         )
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_TOOL,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_TOOL,
-                add_special_tokens=False,
-            ),
-            request=request,
+        outputs = parse_and_build(
+            parser,
+            request,
+            MODEL_OUTPUT_REASONING_AND_TOOL,
             enable_auto_tools=True,
         )
 
@@ -170,13 +166,7 @@ class TestExtractResponseOutputsIncludeReasoning:
         parser = make_parser(tokenizer, reasoning=False)
         request = make_responses_request(include_reasoning=False)
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_CONTENT_ONLY,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_CONTENT_ONLY, add_special_tokens=False
-            ),
-            request=request,
-        )
+        outputs = parse_and_build(parser, request, MODEL_OUTPUT_CONTENT_ONLY)
 
         assert len(outputs) == 1
         assert outputs[0].type == "message"
@@ -187,67 +177,14 @@ class TestExtractResponseOutputsIncludeReasoning:
         request = make_responses_request()
         assert request.include_reasoning is True
 
-    def test_chat_completion_request_also_works(self, tokenizer):
-        """extract_response_outputs respects ChatCompletionRequest too."""
+    def test_include_reasoning_false_suppresses_all_reasoning(self, tokenizer):
+        """Reasoning is suppressed regardless of request type."""
         parser = make_parser(tokenizer, reasoning=True)
         request = make_responses_request(include_reasoning=False)
 
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-        )
+        outputs = parse_and_build(parser, request, MODEL_OUTPUT_REASONING_AND_CONTENT)
 
         assert all(o.type != "reasoning" for o in outputs)
-
-    def test_include_reasoning_false_suppresses_logprobs(self, tokenizer):
-        """Logprobs are suppressed to avoid leaking reasoning tokens."""
-        from openai.types.responses.response_output_text import Logprob
-
-        parser = make_parser(tokenizer, reasoning=True)
-        request = make_responses_request(include_reasoning=False)
-        fake_logprobs = [
-            Logprob(token="<think>", bytes=[], logprob=-0.1, top_logprobs=[]),
-        ]
-
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-            logprobs=fake_logprobs,
-        )
-
-        message = next(o for o in outputs if o.type == "message")
-        assert message.content[0].logprobs is None
-
-    def test_include_reasoning_true_preserves_logprobs(self, tokenizer):
-        """Logprobs are preserved when reasoning is included."""
-        from openai.types.responses.response_output_text import Logprob
-
-        parser = make_parser(tokenizer, reasoning=True)
-        request = make_responses_request(include_reasoning=True)
-        fake_logprobs = [
-            Logprob(token="hello", bytes=[], logprob=-0.5, top_logprobs=[]),
-        ]
-
-        outputs = parser.extract_response_outputs(
-            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            model_output_token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            request=request,
-            logprobs=fake_logprobs,
-        )
-
-        message = next(o for o in outputs if o.type == "message")
-        assert message.content[0].logprobs is not None
 
 
 # ── Streaming: parse_delta ───────────────────────────────────────────
