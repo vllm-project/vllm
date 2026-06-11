@@ -117,13 +117,6 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
-        config = self.get_hf_config()
-        vision_config = getattr(config, "vision_config", None)
-        if vision_config is None:
-            # TODO(diffusion): backward-compat for the pre-RC0.1
-            # architecture name. Remove once old checkpoints are gone.
-            return {"image": 0, "video": 0}
-
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
@@ -232,8 +225,6 @@ class DiffusionGemmaForConditionalGeneration(
                     prefix=maybe_prefix(prefix, "vision_tower"),
                 )
         else:
-            # TODO(diffusion): backward-compat for the pre-RC0.1
-            # architecture name. Remove once old checkpoints are gone.
             self.vision_tower = None
             self.embed_vision = None
 

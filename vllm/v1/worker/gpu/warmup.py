@@ -38,7 +38,7 @@ def warmup_kernels(
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
     # a uniform decode batch.
-    prompt_len = decode_query_len + model_runner.decode_query_len
+    prompt_len = decode_query_len + 1
     prompt_token_ids = list(range(prompt_len))
     # After prefill, decode generates decode_query_len tokens.
     decode_len = prompt_len + decode_query_len

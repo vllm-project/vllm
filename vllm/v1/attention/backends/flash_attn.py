@@ -829,6 +829,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
 
                 causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
 
                 # For non-causal (bidirectional) attention, make the
                 # sliding window symmetric so queries attend in both
@@ -836,7 +837,7 @@ class FlashAttentionImpl(AttentionImpl):
                 if (
                     sliding_window_size is not None
                     and sliding_window_size[1] == 0
-                    and (causal is False or isinstance(causal, torch.Tensor))
+                    and (is_dynamic_causal or causal is False)
                 ):
                     sliding_window_size = [
                         sliding_window_size[0],
@@ -848,7 +849,7 @@ class FlashAttentionImpl(AttentionImpl):
                 mm_aux = None
                 if (
                     mm_prefix_ranges is not None
-                    and not isinstance(causal, torch.Tensor)
+                    and not is_dynamic_causal
                     and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
@@ -857,7 +858,7 @@ class FlashAttentionImpl(AttentionImpl):
                     mm_aux = [mm_prefix_ranges]
 
                 dynamic_causal = None
-                if isinstance(causal, torch.Tensor):
+                if is_dynamic_causal:
                     if self.vllm_flash_attn_version != 4:
                         raise NotImplementedError(
                             "Per-sequence causal requires FA4. Current version: "
