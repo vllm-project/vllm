@@ -137,6 +137,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_gated_act_gemm: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
@@ -171,6 +172,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             cache_permute_indices,
             w13_weight[i].view(torch.uint8),
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_act_gemm,
         )
         tmp_weights1 = (
             w13_weight[i]
@@ -304,12 +306,12 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_hidden_size
 
 
-def align_fp8_moe_weights_for_fi(
+def align_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool, min_alignment: int = 16
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
 
-    Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+    Some FlashInfer MoE kernels require the (gated) intermediate size
     used for GEMM to be divisible by a small alignment value. When this is
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
@@ -508,7 +510,7 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
+        w13, w2, new_intermediate = align_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,
