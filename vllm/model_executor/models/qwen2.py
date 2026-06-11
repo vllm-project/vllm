@@ -64,6 +64,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -318,7 +319,7 @@ class Qwen2DecoderLayer(nn.Module):
         "inputs_embeds": {0: "b"},
     }
 )
-class Qwen2Model(nn.Module, EagleModelMixin):
+class Qwen2Model(nn.Module, EagleModelMixin, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".q_proj": ".qkv_proj.q",

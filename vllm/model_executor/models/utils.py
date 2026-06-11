@@ -120,6 +120,34 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
+    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
+        """Derive a `packed_modules_mapping` from this mapper's fusion entries."""
+        qkv_order = {"q": 0, "k": 1, "v": 2}
+        packed: dict[str, list[tuple[int, str]]] = {}
+        mappings = (
+            self.orig_to_new_substr,
+            self.orig_to_new_prefix,
+            self.orig_to_new_suffix,
+        )
+        for mapping in mappings:
+            for new in mapping.values():
+                if new is None or "." not in new:
+                    continue
+                param_path, _, shard_id = new.rpartition(".")
+                if shard_id.isdigit():
+                    order = int(shard_id)
+                elif shard_id in qkv_order:
+                    order = qkv_order[shard_id]
+                else:
+                    continue
+                param_name = param_path.lstrip(".").rpartition(".")[2]
+                shards = packed.setdefault(param_name, [])
+                shards.append((order, f"{param_name}.{shard_id}"))
+        return {
+            name: [shard for _, shard in sorted(shards)]
+            for name, shards in packed.items()
+        }
+
 
 class AutoWeightsLoader:
     """

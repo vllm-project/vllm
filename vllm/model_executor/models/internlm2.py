@@ -37,7 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import (
     AutoWeightsLoader,
@@ -247,7 +247,7 @@ class InternLMDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class InternLM2Model(nn.Module):
+class InternLM2Model(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".w1": ".gate_up_proj.0",

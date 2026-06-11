@@ -997,6 +997,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 )
             # If name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, name, self)
+            if (
+                param is None
+                and name == "bias"
+                and self.quant_config is not None
+                and "gptq" in self.quant_config.get_name()
+            ):
+                continue
             param.weight_loader(param, loaded_weight, shard_id)
             yield name
 
@@ -1444,6 +1451,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
             # If name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, name, self)
+            if (
+                param is None
+                and name == "bias"
+                and self.quant_config is not None
+                and "gptq" in self.quant_config.get_name()
+            ):
+                continue
             param.weight_loader(param, loaded_weight, shard_id)
             yield name
 

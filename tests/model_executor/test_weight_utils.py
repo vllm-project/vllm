@@ -281,5 +281,39 @@ class TestKvCacheScaleMapper:
         )
 
 
+def test_weights_mapper_get_packed_modules_mapping():
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".q_proj": ".qkv_proj.q",
+            ".k_proj": ".qkv_proj.k",
+            ".v_proj": ".qkv_proj.v",
+            ".gate_proj": ".gate_up_proj.0",
+            ".up_proj": ".gate_up_proj.1",
+            # Non-fusion entries must not contribute
+            ".word_embeddings": "",
+            "llm.model.": "model.decoder.",
+            "llm.lm_head": "lm_head",
+        }
+    )
+    assert mapper.get_packed_modules_mapping() == {
+        "qkv_proj": ["qkv_proj.q", "qkv_proj.k", "qkv_proj.v"],
+        "gate_up_proj": ["gate_up_proj.0", "gate_up_proj.1"],
+    }
+
+    # Shard order comes from the shard id, not declaration order, and
+    # dotted module paths reduce to the last component
+    mapper = WeightsMapper(
+        orig_to_new_substr={
+            "linear_proj.dense_h_to_4h": "linear_proj.merged_proj.1",
+            "linear_proj.gate_proj": "linear_proj.merged_proj.0",
+        }
+    )
+    assert mapper.get_packed_modules_mapping() == {
+        "merged_proj": ["merged_proj.0", "merged_proj.1"],
+    }
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()

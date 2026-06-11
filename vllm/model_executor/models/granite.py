@@ -51,7 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -248,7 +248,7 @@ class GraniteDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class GraniteModel(nn.Module):
+class GraniteModel(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".q_proj": ".qkv_proj.q",
