@@ -12,12 +12,16 @@ from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadingConnectorStats,
+    )
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
@@ -120,6 +124,26 @@ The class provides the following primitives:
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
 """
+
+
+@dataclass(frozen=True)
+class OffloadingMetricMetadata:
+    documentation: str
+
+
+@dataclass(frozen=True)
+class OffloadingCounterMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingGaugeMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingHistogramMetadata(OffloadingMetricMetadata):
+    buckets: tuple[float, ...] | None = None
 
 
 class OffloadingManager(ABC):
@@ -256,9 +280,21 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def on_schedule_end(self) -> None:
+        """Called once at the end of each scheduler step.
+
+        Managers may override this to flush deferred work accumulated
+        during the step (e.g., batched promotions).
+        """
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
+
+    def get_stats(self) -> "OffloadingConnectorStats | None":
+        """Return collected metrics since last call, or None if disabled."""
+        return None
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -311,6 +347,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.block_indices: Sequence[int] = block_indices
 
     @staticmethod
+    @override
     def medium() -> str:
         return "GPU"
 
@@ -367,6 +404,13 @@ class CanonicalKVCaches:
 
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, "OffloadingMetricMetadata"]:
+        """Return Prometheus metric definitions emitted by this spec."""
+        return {}
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(

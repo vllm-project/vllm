@@ -586,14 +586,16 @@ class Qwen3ASRForConditionalGeneration(
           [system: {context}]                         # only when prompt given
           user: {audio}
           assistant: [language {Lang}<asr_text>]{response_prefix}
+                                              # language tag only when forced
         """
         audio = stt_params.audio
         model_config = stt_params.model_config
-        task_type = stt_params.task_type
-        to_language = stt_params.to_language
         language = stt_params.language
+        task_type = stt_params.task_type
         request_prompt = stt_params.request_prompt
+        to_language = stt_params.to_language
         response_prefix = stt_params.response_prefix
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
