@@ -4474,3 +4474,81 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
         f"Expected only {HASH_FUTURE!r} from future mm feature filtering, "
         f"got {future_hashes!r}. Past/boundary features must be filtered out."
     )
+
+
+def test_async_load_reservation_prevents_wedge_e2e():
+    """Same wedge scenario as PR #40968's lateral-preemption e2e test, but
+    resolved by reservation-based admission control instead of preemption.
+
+    A (8 blocks) and B (5 blocks) both want an async KV load, sharing a 4-block
+    prefix, in a 10-block pool (9 usable). Admitting both loads would wedge:
+    once their recvs finish neither can complete its local prefill (8+5 > 9).
+
+    Here the reservation gate refuses to admit B's load while A's full sequence
+    is still reserved, so B never holds blocks and A is free to complete - no
+    deadlock, and (unlike lateral preemption) B is never preempted.
+    """
+    BLOCK_SIZE = 16
+    A_TOKENS = BLOCK_SIZE * 8  # bigger request
+    B_TOKENS = BLOCK_SIZE * 5  # smaller request
+    MATCHED_TOKENS = BLOCK_SIZE * 4  # 4-block prefix loaded for both
+    NUM_BLOCKS = 10  # 9 usable; both prefixes fit, but not both full sequences
+
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        num_blocks=NUM_BLOCKS,
+        max_num_seqs=4,
+        max_num_batched_tokens=A_TOKENS * 2,
+        use_kv_connector=mock_kv(matched_tokens=MATCHED_TOKENS, is_async=True),
+    )
+
+    [a] = create_requests(
+        num_requests=1, num_tokens=A_TOKENS, block_size=BLOCK_SIZE, req_ids=["a"]
+    )
+    [b] = create_requests(
+        num_requests=1, num_tokens=B_TOKENS, block_size=BLOCK_SIZE, req_ids=["b"]
+    )
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+
+    EMPTY_OUTPUT = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+
+    # Step 1: A's load is admitted; B's is held back by the reservation (B never
+    # holds blocks, so the wedge precondition - both holding prefixes - is gone).
+    out1 = scheduler.schedule()
+    assert a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert a.num_computed_tokens == MATCHED_TOKENS
+    assert b.status == RequestStatus.WAITING
+    assert b.request_id not in req_to_blocks
+    assert len(scheduler.running) == 0
+    scheduler.update_from_output(out1, EMPTY_OUTPUT)
+
+    # Step 2: nothing changes until A's recv lands.
+    out2 = scheduler.schedule()
+    assert len(scheduler.running) == 0
+    a_finished = dataclasses.replace(
+        EMPTY_OUTPUT,
+        kv_connector_output=KVConnectorOutput(finished_recving=[a.request_id]),
+    )
+    scheduler.update_from_output(out2, a_finished)
+
+    # Step 3: A makes forward progress straight to RUNNING - no preemption was
+    # needed because B never wedged it.
+    out3 = scheduler.schedule()
+    assert a.status == RequestStatus.RUNNING
+    assert a in scheduler.running
+    assert a.request_id in {req.req_id for req in out3.scheduled_new_reqs}
+    assert b.status == RequestStatus.WAITING
+    assert b.num_preemptions == 0
+    assert b.request_id not in req_to_blocks

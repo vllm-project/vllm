@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::slice;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -253,33 +252,47 @@ pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     mut abort_rx: mpsc::UnboundedReceiver<AbortRequest>,
 ) {
-    // TODO: receive and abort requests in batch
-    while let Some(AbortRequest { request_id, cause }) = abort_rx.recv().await {
-        let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
-            debug!(request_id, "skip auto-abort for inactive request");
-            continue;
-        };
+    // Coalesce bursts of auto-aborts into a single Abort message per engine.
+    // A dropped-stream storm (e.g. many clients disconnecting at once under
+    // high concurrency) would otherwise issue one engine round-trip per
+    // request. `recv_many` returns as soon as at least one item is ready, so a
+    // lone abort is still forwarded promptly.
+    const MAX_DRAIN: usize = 1024;
+    let mut batch: Vec<AbortRequest> = Vec::new();
 
-        match cause {
-            AbortCause::DroppedStream => {
-                info!(request_id, "auto-aborting request due to dropped stream")
+    while abort_rx.recv_many(&mut batch, MAX_DRAIN).await > 0 {
+        let mut by_engine: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
+
+        for AbortRequest { request_id, cause } in batch.drain(..) {
+            let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
+                debug!(request_id, "skip auto-abort for inactive request");
+                continue;
+            };
+
+            match cause {
+                AbortCause::DroppedStream => {
+                    info!(request_id, "auto-aborting request due to dropped stream")
+                }
+                AbortCause::StopStringMatched => {
+                    debug!(
+                        request_id,
+                        "auto-aborting request due to stop string matched"
+                    )
+                }
             }
-            AbortCause::StopStringMatched => {
-                debug!(
-                    request_id,
-                    "auto-aborting request due to stop string matched"
-                )
-            }
+
+            by_engine.entry(engine_id).or_default().push(request_id);
         }
 
-        if let Err(error) = inner.do_abort_requests(&engine_id, slice::from_ref(&request_id)).await
-        {
-            warn!(
-                request_id,
-                ?engine_id,
-                error = %error.as_report(),
-                "failed to auto-abort dropped request stream"
-            );
+        for (engine_id, request_ids) in by_engine {
+            if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await {
+                warn!(
+                    ?engine_id,
+                    ?request_ids,
+                    error = %error.as_report(),
+                    "failed to auto-abort request streams"
+                );
+            }
         }
     }
 }

@@ -52,6 +52,7 @@ class WeightsMapper:
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
@@ -343,6 +344,20 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        # Many models store quant_config in the base model instead of the causal model.
+        # We look at the causal model's direct children for this reason.
+        modules = (self.module, *self.module.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        quant_config = next(iterator, None)
+        cache_scale_mapper = (
+            quant_config.get_cache_scale_mapper() if quant_config is not None else None
+        )
+        if cache_scale_mapper is not None:
+            mapper = (
+                mapper | cache_scale_mapper
+                if mapper is not None
+                else cache_scale_mapper
+            )
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
@@ -823,7 +838,10 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
-    return torch.narrow(y, 0, start, chunk)
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case),
+    # since a functional custom op must not return a view of an input.
+    return out.clone() if y is x else out
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
