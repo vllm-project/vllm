@@ -743,7 +743,6 @@ class Scheduler(SchedulerInterface):
                 # When loading KV from a remote producer (ie on D), allocate without
                 # lookahead slots: the producer never reserves speculative token blocks
                 # so D must match to avoid a block-count mismatch in the connector.
-                # TODO check with dflash
                 effective_lookahead_tokens = (
                     0 if load_kv_async else self.num_lookahead_tokens
                 )

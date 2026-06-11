@@ -2166,7 +2166,7 @@ class VllmConfig:
             and self.kv_transfer_config.is_kv_producer
             and self.speculative_config.num_speculative_tokens > 1
         ):
-            logger.info(
+            logger.info_once(
                 "kv_role is 'kv_producer' in a PD setup: reducing "
                 "num_speculative_tokens from %d to 1.",
                 self.speculative_config.num_speculative_tokens,
