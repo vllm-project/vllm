@@ -255,51 +255,47 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
 # build stage doesn't need the rust toolchain, protoc, or the rust source.
-# This stage runs in parallel with csrc-build/extensions-build.
-FROM ${BUILD_BASE_IMAGE} AS rust-build
+# This stage reuses the Python environment from base and runs in parallel with
+# csrc-build/extensions-build.
+FROM base AS rust-build
 ARG BUILD_OS
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install a basic C toolchain (some rust crates compile C in their build.rs
-# scripts) and unzip (used to extract the pinned protoc release below).
+# Install native tools needed only for Rust/protoc builds.
 RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         dnf install -y --setopt=install_weak_deps=False \
-            ca-certificates curl git gcc gcc-c++ make unzip \
+            make unzip \
         && dnf clean all && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
         && apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential unzip \
+            make unzip \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
 COPY tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
-# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain none
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 WORKDIR /workspace
 
-# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs. The binary is the sole artifact we need.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
+COPY tools/build_rust.py tools/build_rust.py
 COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build the release binary. Cache cargo registry/git and target/, but copy the
-# binary out of the target/ cache mount so it persists into the image layer
-# for later COPY --from=rust-build.
+# Build the release binary. Cache cargo registry/git, but not target/, because
+# stale target metadata can outlive source updates across BuildKit cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
-    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+    bash build_rust.sh
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -342,6 +338,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 WORKDIR /workspace
 
 COPY pyproject.toml setup.py CMakeLists.txt ./
+COPY tools/build_rust.py tools/build_rust.py
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
@@ -508,7 +505,7 @@ COPY . .
 
 # Drop the pre-built rust frontend binary into the source tree. setup.py
 # detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
