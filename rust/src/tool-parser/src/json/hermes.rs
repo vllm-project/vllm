@@ -8,7 +8,7 @@ const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,
     name_key: "name",
-    arguments_key: "arguments",
+    arguments_key: &["arguments"],
 };
 
 /// Tool parser for Hermes XML-wrapped JSON tool calls.

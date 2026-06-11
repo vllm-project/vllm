@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai_harmony import Message, Role
+from openai.types.responses import FunctionTool
+from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    create_tool_definition,
     extract_function_from_recipient,
     get_encoding,
     get_system_message,
@@ -19,6 +22,58 @@ from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+
+_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {"status": {"type": "string"}},
+    "required": ["status"],
+    "additionalProperties": False,
+}
+
+
+class TestCreateToolDefinition:
+    def test_chat_completion_omitted_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_chat_completion_none_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "description": None,
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_response_tool_none_description_defaults_to_empty_string(self):
+        tool = FunctionTool(
+            name="report_status",
+            description=None,
+            parameters=_TOOL_PARAMETERS,
+            type="function",
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
 
 
 class TestIsFunctionRecipient:
@@ -269,7 +324,8 @@ class TestCommonParseInputToHarmonyMessage:
         assert messages[0].recipient == "functions.get_current_time"
 
     def test_system_message(self, parse_function):
-        """Test parsing system message."""
+        """Test parsing system messages, which are parsed into developer messages
+        with DeveloperContent."""
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",
@@ -278,9 +334,9 @@ class TestCommonParseInputToHarmonyMessage:
         messages = parse_function(chat_msg)
 
         assert len(messages) == 1
-        # System messages are converted using Message.from_dict
-        # which should preserve the role
-        assert messages[0].author.role == Role.SYSTEM
+        assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "You are a helpful assistant"
 
     def test_developer_message(self, parse_function):
         """Test parsing developer message."""
@@ -293,6 +349,8 @@ class TestCommonParseInputToHarmonyMessage:
 
         assert len(messages) == 1
         assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "Use concise language"
 
     def test_user_message_with_string_content(self, parse_function):
         """Test parsing user message with string content."""

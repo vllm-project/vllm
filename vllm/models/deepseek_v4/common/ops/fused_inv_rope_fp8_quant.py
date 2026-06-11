@@ -137,8 +137,6 @@ def _fused_inv_rope_fp8_quant_per_head(
             scale_ptr + g * scale_stride_group + pid_token + qb_indices * scale_stride_k
         )
         tl.store(scale_addrs, scales)
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
 
 
 def fused_inv_rope_fp8_quant(
@@ -249,7 +247,7 @@ def _fused_inv_rope_fp8_quant_kernel_impl(
         (scale_inner * tma_aligned_T, 1, tma_aligned_T),
     )
     grid = (tma_aligned_T, n_groups * heads_per_group)
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
+    use_gdc = current_platform.is_arch_support_pdl()
     pdl_kwargs = {"launch_pdl": True} if use_gdc else {}
     _fused_inv_rope_fp8_quant_per_head[grid](
         o,
