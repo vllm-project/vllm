@@ -15,20 +15,23 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheSpecKind,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.request import RequestStatus
 
 
@@ -143,9 +146,19 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
 
-    # test take_events
-    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
-        return [BlockHash(str(i).encode()) for i in int_hashes]
+    # take_events fallback path: feed events whose OffloadKeys were never
+    # populated in the side-table by _build_store_jobs. Each BlockStored
+    # is emitted per offload key with the placeholder payload
+    # (block_size=0, token_ids=[], parent_block_hash=None) so downstream
+    # KV-aware routers drop them -- strictly no worse than the
+    # pre-side-table behavior.
+    def to_wire_hashes(int_hashes: list[int]) -> list:
+        # The wire format is what `maybe_convert_block_hash` returns -- int
+        # when VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES is set (the default),
+        # bytes otherwise.
+        return [
+            maybe_convert_block_hash(BlockHash(str(i).encode())) for i in int_hashes
+        ]
 
     def take_events() -> Iterable[OffloadingEvent]:
         yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
@@ -153,20 +166,348 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
 
     runner.manager.take_events.side_effect = take_events
     events = list(runner.scheduler_connector.take_events())
-    assert len(events) == 2
-    event = events[0]
-    assert isinstance(event, BlockStored)
-    assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 0
-    assert event.medium == "A"
-    assert event.token_ids == []
-    assert event.parent_block_hash is None
-    assert event.lora_id is None
-    assert event.lora_name is None
-    event = events[1]
-    assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == to_hashes([4, 5, 6])
-    assert event.medium == "B"
+    # 3 per-key BlockStored events + 1 BlockRemoved event.
+    assert len(events) == 4
+    expected_hashes = to_wire_hashes([1, 2, 3])
+    for event, expected_hash in zip(events[:3], expected_hashes):
+        assert isinstance(event, BlockStored)
+        assert event.block_hashes == [expected_hash]
+        # Fallback placeholder payload.
+        assert event.block_size == 0
+        assert event.medium == "A"
+        assert event.token_ids == []
+        assert event.parent_block_hash is None
+        assert event.lora_id is None
+        assert event.lora_name is None
+    remove_event = events[3]
+    assert isinstance(remove_event, BlockRemoved)
+    assert remove_event.block_hashes == to_wire_hashes([4, 5, 6])
+    assert remove_event.medium == "B"
+
+
+# ---------------------------------------------------------------------------
+# Side-table KV-event emission tests.
+#
+# These tests exercise the populate-then-drain happy path of the per-key
+# event-metadata side-table maintained by OffloadingConnectorScheduler.
+# They drive a real request through _build_store_jobs (so the side-table
+# is populated by the production code path), then fire a fake
+# OffloadingEvent through the mocked manager.take_events to observe what
+# take_events emits on the wire.
+# ---------------------------------------------------------------------------
+
+
+def _captured_offload_keys_in_order(
+    runner,
+) -> list[OffloadKey]:
+    """Snapshot the side-table's insertion order so tests can feed the same
+    keys back through the manager.take_events mock."""
+    return list(
+        runner.connector_scheduler._events_tracker._pending_event_metadata.keys()
+    )
+
+
+def test_take_events_publishes_routable_block_stored(request_runner):
+    """factor==1, single full-attention group: stored blocks are published
+    with every wire-format field a downstream KV event consumer needs, the
+    parent chain stays intact within and ACROSS take_events batches, and
+    the side-table entries survive the store (eviction drains them).
+    """
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=1,
+    )
+
+    # Six full blocks; drained in two batches to cover the batch boundary.
+    runner.new_request(token_ids=list(range(1, block_size * 6 + 1)))
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+        expected_flushed=(0, 1, 2, 3, 4, 5),
+    )
+
+    pending = runner.connector_scheduler._events_tracker._pending_event_metadata
+    keys_in_order = _captured_offload_keys_in_order(runner)
+    assert len(keys_in_order) == 6, "expected six populated side-table entries"
+    expected_metas = [pending[k] for k in keys_in_order]
+
+    cpu_medium = CPULoadStoreSpec.medium()
+    runner.manager.take_events.side_effect = lambda: iter(
+        [OffloadingEvent(keys=keys_in_order[:3], medium=cpu_medium, removed=False)]
+    )
+    batch1 = list(runner.scheduler_connector.take_events())
+    assert len(batch1) == 3, "expected one BlockStored per offload key"
+
+    for i, (event, meta) in enumerate(zip(batch1, expected_metas)):
+        assert isinstance(event, BlockStored)
+        # Medium is forwarded verbatim from the OffloadingEvent.
+        assert event.medium == cpu_medium
+        # Single-hash event because gpu_block_size == offloaded_block_size
+        # == hash_block_size in this test.
+        assert event.block_hashes == [maybe_convert_block_hash(meta.block_hashes[0])]
+        # block_size must match the per-block token count so that
+        # consumers which slice token_ids per block accept the entry.
+        assert event.block_size == block_size
+        assert event.token_ids == list(
+            range(i * block_size + 1, (i + 1) * block_size + 1)
+        )
+        # Parent: None for the first block, previous block's hash thereafter.
+        if i == 0:
+            assert event.parent_block_hash is None
+        else:
+            assert event.parent_block_hash == maybe_convert_block_hash(
+                expected_metas[i - 1].block_hashes[-1]
+            )
+        # No LoRA / multimodal inputs in this test; single group at index 0.
+        assert event.lora_id is None
+        assert event.lora_name is None
+        assert event.extra_keys is None
+        assert event.group_idx == 0
+        assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
+        assert event.kv_cache_spec_sliding_window is None
+
+    # The second batch must chain off the first one across the take_events
+    # boundary -- the property consumers rely on to extend a prefix.
+    runner.manager.take_events.side_effect = lambda: iter(
+        [OffloadingEvent(keys=keys_in_order[3:], medium=cpu_medium, removed=False)]
+    )
+    batch2 = list(runner.scheduler_connector.take_events())
+    assert len(batch2) == 3
+    assert batch2[0].parent_block_hash == batch1[-1].block_hashes[-1]
+
+    # The side table is NOT drained by stores: entries must survive until
+    # eviction so BlockRemoved can fan out to the same hashes.
+    assert len(runner.connector_scheduler._events_tracker._pending_event_metadata) == 6
+
+
+def test_take_events_factor_gt_1_chunk_store_and_remove(request_runner):
+    """``block_size_factor > 1``: a stored chunk is published as ONE
+    BlockStored carrying ALL its constituent per-block hashes plus the whole
+    chunk's token_ids and block_size = the per-block token count, so on the
+    wire a chunk is indistinguishable from ordinary by-block stores. On
+    eviction the manager only reports the chunk's OffloadKey; the saved
+    side-table entry fans BlockRemoved out to the exact hashes the store
+    published, and is dropped afterwards."""
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=block_size_factor,
+    )
+
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+        expected_flushed=(0, 1, 2, 3, 4, 5),
+    )
+
+    # Two chunks -> two side-table entries, each holding every constituent
+    # hash; the last one is the chunk's OffloadKey.
+    pending = runner.connector_scheduler._events_tracker._pending_event_metadata
+    assert len(pending) == 2
+    keys_in_order = _captured_offload_keys_in_order(runner)
+    expected_metas = [pending[k] for k in keys_in_order]
+    for key, meta in zip(keys_in_order, expected_metas):
+        assert len(meta.block_hashes) == block_size_factor
+        assert meta.block_hashes[-1] == get_offload_block_hash(key)
+        assert meta.block_size == block_size  # per-block token count
+        assert len(meta.token_ids) == offloaded_block_size  # whole chunk
+    # Chunk-to-chunk chain: chunk 1's parent is chunk 0's tail hash.
+    assert expected_metas[1].parent_block_hash == expected_metas[0].block_hashes[-1]
+
+    cpu_medium = CPULoadStoreSpec.medium()
+    runner.manager.take_events.side_effect = lambda: iter(
+        [OffloadingEvent(keys=keys_in_order, medium=cpu_medium, removed=False)]
+    )
+    stored = list(runner.scheduler_connector.take_events())
+    assert len(stored) == 2  # one BlockStored per chunk
+
+    expected_hashes = []
+    for i, (event, meta) in enumerate(zip(stored, expected_metas)):
+        assert isinstance(event, BlockStored)
+        assert event.medium == cpu_medium
+        # All constituent hashes in one event; per-block block_size;
+        # whole-chunk tokens.
+        assert event.block_hashes == [
+            maybe_convert_block_hash(h) for h in meta.block_hashes
+        ]
+        assert event.block_size == block_size
+        assert len(event.token_ids) == offloaded_block_size
+        # The event's parent is the block right before the chunk.
+        if i == 0:
+            assert event.parent_block_hash is None
+        else:
+            assert event.parent_block_hash == maybe_convert_block_hash(
+                expected_metas[i - 1].block_hashes[-1]
+            )
+        assert event.group_idx == 0
+        expected_hashes.extend(event.block_hashes)
+
+    # Stores must NOT drain the side table.
+    assert len(runner.connector_scheduler._events_tracker._pending_event_metadata) == 2
+
+    # The eviction event fans out to all constituent hashes -- store and
+    # remove carry the identical hash list -- and drains the side table.
+    runner.manager.take_events.side_effect = lambda: iter(
+        [OffloadingEvent(keys=keys_in_order, medium=cpu_medium, removed=True)]
+    )
+    events = list(runner.scheduler_connector.take_events())
+    assert len(events) == 1  # single full-attention group
+    assert isinstance(events[0], BlockRemoved)
+    assert events[0].block_hashes == expected_hashes
+    assert events[0].medium == cpu_medium
+    assert not runner.connector_scheduler._events_tracker._pending_event_metadata
+
+
+def test_take_events_factor_gt_1_store_is_order_independent(request_runner):
+    """complete_store collects a job's keys from a set, so chunks may arrive
+    in any order, possibly interleaved with keys that have no side-table
+    entry. Every chunk's event must be self-contained: all its constituent
+    hashes plus its own parent (the previous chunk's last block hash),
+    regardless of emission order."""
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=block_size_factor,
+    )
+
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+        expected_flushed=(0, 1, 2, 3, 4, 5),
+    )
+
+    keys_in_order = _captured_offload_keys_in_order(runner)
+    assert len(keys_in_order) == 2
+    unknown_key = to_keys([12345])[0]
+
+    # Reversed chunk order with an unknown key in between.
+    cpu_medium = CPULoadStoreSpec.medium()
+    keys = [keys_in_order[1], unknown_key, keys_in_order[0]]
+    runner.manager.take_events.side_effect = lambda: iter(
+        [OffloadingEvent(keys=keys, medium=cpu_medium, removed=False)]
+    )
+    events = list(runner.scheduler_connector.take_events())
+
+    assert len(events) == 3
+    chunk1, placeholder, chunk0 = events
+    assert [len(e.block_hashes) for e in events] == [3, 1, 3]
+    # The unknown key falls back to the placeholder payload.
+    assert placeholder.block_size == 0
+    assert placeholder.token_ids == []
+    # Each chunk event carries its true parent: the chain is intact on the
+    # wire no matter the emission order.
+    assert chunk0.parent_block_hash is None
+    assert chunk1.parent_block_hash == chunk0.block_hashes[-1]
+
+
+def test_take_events_opt_out_keeps_placeholders(request_runner):
+    """With self_describing_kv_events disabled (the default), the tracker
+    records nothing -- no unbounded side-table growth when events are never
+    drained -- and take_events keeps the legacy placeholder payloads."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=1,
+        extra_config_overrides={"self_describing_kv_events": False},
+    )
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=[0] * block_size * 3)
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+    )
+
+    tracker = runner.connector_scheduler._events_tracker
+    assert not tracker.enabled
+    assert not tracker._pending_event_metadata, "disabled tracker must not record"
+
+    # Stored events keep the legacy placeholder payload (offload-key hash
+    # only), and removed events keep the offload-key hashes.
+    keys = to_keys([1, 2, 3])
+    runner.manager.take_events.side_effect = lambda: iter(
+        [
+            OffloadingEvent(keys=keys, medium=CPULoadStoreSpec.medium(), removed=False),
+            OffloadingEvent(keys=keys, medium=CPULoadStoreSpec.medium(), removed=True),
+        ]
+    )
+    events = list(runner.scheduler_connector.take_events())
+    assert len(events) == 4  # 3 placeholder BlockStored + 1 BlockRemoved
+    for event in events[:3]:
+        assert isinstance(event, BlockStored)
+        assert event.block_size == 0
+        assert event.token_ids == []
+        assert event.parent_block_hash is None
+    assert isinstance(events[3], BlockRemoved)
+    assert len(events[3].block_hashes) == 3
+
+
+def test_reset_cache_clears_side_table(request_runner):
+    """reset_cache must drain the side-table because the manager just
+    cleared the pool and no future take_events call could legitimately
+    consume the pending entries."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=1,
+    )
+
+    runner.new_request(token_ids=[0] * block_size * 3)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+    )
+
+    assert runner.connector_scheduler._events_tracker._pending_event_metadata, (
+        "precondition: side-table populated by the run above"
+    )
+    # Drain the stored events so the announced reference counts are non-empty.
+    keys_in_order = _captured_offload_keys_in_order(runner)
+    runner.manager.take_events.side_effect = lambda: iter(
+        [
+            OffloadingEvent(
+                keys=keys_in_order, medium=CPULoadStoreSpec.medium(), removed=False
+            )
+        ]
+    )
+    list(runner.scheduler_connector.take_events())
+
+    runner.connector_scheduler.reset_cache()
+
+    assert not runner.connector_scheduler._events_tracker._pending_event_metadata
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
