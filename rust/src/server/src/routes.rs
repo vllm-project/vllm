@@ -9,6 +9,7 @@ pub(crate) mod openai;
 mod pause;
 mod server_info;
 mod sleep;
+mod tokenize;
 mod version;
 
 use std::sync::Arc;
@@ -72,7 +73,9 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
-        // vLLM specific inference endpoints
+        // vLLM specific endpoints
+        .route("/tokenize", post(tokenize::tokenize))
+        .route("/detokenize", post(tokenize::detokenize))
         .route("/inference/v1/generate", post(inference::generate));
 
     if runtime_lora_updating_enabled {
@@ -97,12 +100,26 @@ fn build_router_with_options(
             .route("/server_info", get(server_info::server_info))
     }
 
-    let enable_request_id_headers = state.enable_request_id_headers;
+    let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
+    let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(from_fn_with_state(state, middleware::track_server_load))
-        .layer(from_fn(middleware::track_http_metrics))
-        .layer(TraceLayer::new_for_http());
+        .layer(from_fn_with_state(
+            state.clone(),
+            middleware::track_server_load,
+        ))
+        .layer(from_fn(middleware::track_http_metrics));
+
+    if enable_api_key_auth {
+        router = router.layer(from_fn_with_state(
+            state.clone(),
+            middleware::authenticate_api_key,
+        ));
+    }
+
+    // Later layers wrap earlier ones. Keep tracing outside auth so rejected
+    // requests are visible, while metrics/load only see authenticated traffic.
+    router = router.layer(TraceLayer::new_for_http());
 
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));

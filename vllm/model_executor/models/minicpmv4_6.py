@@ -424,6 +424,26 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
+    def get_hf_processor(self, **kwargs: object):
+        # MiniCPM-V 4.6 keeps the native transformers MiniCPMV4_6Processor:
+        # this model has its own image/video handling and prompt-update logic
+        # below, so it does not need (and is incompatible with) the vendored
+        # MiniCPMVProcessor used by 2.x/4.0/4.5, whose __init__ assumes a
+        # legacy `image_processor.version` attribute that 4.6 no longer has.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = getattr(hf_processor, "image_processor", None)
+        if image_processor is not None:
+            # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+            for attr in ("mean", "std", "image_mean", "image_std"):
+                val = getattr(image_processor, attr, None)
+                if isinstance(val, np.ndarray):
+                    setattr(image_processor, attr, val.tolist())
+
+        return hf_processor
+
     def _get_expected_hidden_size(self) -> int:
         config = self.get_hf_config()
         if hasattr(config, "text_config") and config.text_config is not None:
