@@ -8,6 +8,7 @@ without S3 credentials or a live object store. They verify the manager's
 state machine: job submission, transfer completion polling, and lookup.
 """
 
+import time
 import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -206,6 +207,24 @@ def drain(
     return results
 
 
+def lookup_and_wait(
+    tier: ObjectStoreSecondaryTierManager,
+    keys: list[OffloadKey],
+    ctx: ReqContext = _CTX,
+    timeout: float = 1.0,
+) -> list[bool]:
+    """Perform a full async lookup cycle and return resolved results."""
+    for k in keys:
+        tier.lookup(k, ctx)
+    tier.on_schedule_end()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not tier._lookup_manager._pending_results.empty():
+            break
+        time.sleep(0.01)
+    return [tier.lookup(k, ctx) for k in keys]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -216,19 +235,19 @@ class TestMockObjTierBasic:
         self.tier, self.agent = _make_tier(num_blocks=4)
 
     def test_lookup_empty_tier(self):
-        assert self.tier.lookup(key(1), _CTX) is False
+        assert lookup_and_wait(self.tier, [key(1)]) == [False]
 
     def test_store_and_lookup(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
         assert results[0].success
-        assert self.tier.lookup(key(1), _CTX) is True
+        assert lookup_and_wait(self.tier, [key(1)]) == [True]
 
     def test_lookup_unrelated_key_returns_false(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
-        assert self.tier.lookup(key(999), _CTX) is False
+        assert lookup_and_wait(self.tier, [key(999)]) == [False]
 
     def test_store_then_load_roundtrip(self):
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
@@ -280,15 +299,13 @@ class TestMockObjTierMultiBlock:
         results = drain(tier)
         assert len(results) == 1
         assert results[0].success
-        assert all(tier.lookup(k, _CTX) for k in keys)
+        assert lookup_and_wait(tier, keys) == [True] * 8
 
     def test_partial_block_lookup(self):
         tier, _ = _make_tier(num_blocks=4)
         tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
         drain(tier)
-        assert tier.lookup(key(0), _CTX) is True
-        assert tier.lookup(key(1), _CTX) is True
-        assert tier.lookup(key(2), _CTX) is False
+        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [True, True, False]
 
 
 class TestMockObjTierFailures:
@@ -297,7 +314,7 @@ class TestMockObjTierFailures:
         agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("backend error")
         )
-        assert tier.lookup(key(1), _CTX) is False
+        assert lookup_and_wait(tier, [key(1)]) == [False]
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
