@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """grammar_bitmask under spec-decode draft padding (#44006)."""
 
+import pytest
 from transformers import AutoTokenizer
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
@@ -15,13 +16,13 @@ TOKENIZER = "gpt2"
 NUM_SPEC_TOKENS = 4
 
 
-def _make_manager_and_request(prompt_str: str = '{"a": "b"}'):
+def _make_manager_and_request(backend: str, prompt_str: str = '{"a": "b"}'):
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode(prompt_str)
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
-        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
         speculative_config=SpeculativeConfig(
             model="[ngram]", num_speculative_tokens=NUM_SPEC_TOKENS
         ),
@@ -31,7 +32,7 @@ def _make_manager_and_request(prompt_str: str = '{"a": "b"}'):
     sampling_params = SamplingParams(
         structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
     )
-    sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.structured_outputs._backend = backend
     sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     request = Request(
@@ -47,14 +48,17 @@ def _make_manager_and_request(prompt_str: str = '{"a": "b"}'):
     return tokenizer, manager, request, prompt
 
 
-def test_bitmask_with_padded_invalid_drafts():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_with_padded_invalid_drafts(backend):
     """Bitmask handles -1 padded drafts and returns N+1 rows."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(
+        backend, prompt_str='{"a"'
+    )
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
 
-    valid_drafts = [tokenizer.encode(",")[0], tokenizer.encode('"')[0]]
+    valid_drafts = [tokenizer.encode(":")[0], tokenizer.encode(' "')[0]]
     padded = valid_drafts + [-1, -1]
 
     bitmask = manager.grammar_bitmask(
@@ -68,9 +72,10 @@ def test_bitmask_with_padded_invalid_drafts():
     assert not grammar.is_terminated()
 
 
-def test_bitmask_when_grammar_terminates_mid_window():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_when_grammar_terminates_mid_window(backend):
     """Drafts following an EOS that terminates the grammar are a no-op."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
@@ -88,14 +93,17 @@ def test_bitmask_when_grammar_terminates_mid_window():
     assert not grammar.is_terminated()
 
 
-def test_bitmask_idempotent_across_calls():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_idempotent_across_calls(backend):
     """Repeated calls with the same input return the same bitmask."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(
+        backend, prompt_str='{"a"'
+    )
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
 
-    drafts = [tokenizer.encode(",")[0], -1, -1, -1]
+    drafts = [tokenizer.encode(":")[0], -1, -1, -1]
 
     first = manager.grammar_bitmask(
         requests={request.request_id: request},
@@ -113,14 +121,17 @@ def test_bitmask_idempotent_across_calls():
     assert not grammar.is_terminated()
 
 
-def test_bonus_position_constrained_after_invalid_drafts():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bonus_position_constrained_after_invalid_drafts(backend):
     """Regression for #44006: bonus row stays constrained after -1 padding."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(
+        backend, prompt_str='{"a"'
+    )
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
 
-    valid = tokenizer.encode(" ")[0]
+    valid = tokenizer.encode(":")[0]
     drafts = [valid, -1, -1, -1]
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
@@ -134,9 +145,10 @@ def test_bonus_position_constrained_after_invalid_drafts():
     assert not grammar.is_terminated()
 
 
-def test_bitmask_constrained_when_reasoning_ends_midwindow():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
     """Drafts after a mid-window reasoning-end marker stay constrained."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
@@ -176,11 +188,14 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow():
     assert not grammar.is_terminated()
 
 
-def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
     """Post-marker drafts predate the bitmask and may be grammar-invalid;
     grammar_bitmask must skip the grammar advance instead of asserting.
     """
-    tokenizer, manager, request, prompt = _make_manager_and_request(prompt_str="{")
+    tokenizer, manager, request, prompt = _make_manager_and_request(
+        backend, prompt_str="{"
+    )
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
@@ -222,9 +237,10 @@ def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance():
     assert not grammar.is_terminated()
 
 
-def test_validate_tokens_then_bitmask_round_trip():
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_validate_tokens_then_bitmask_round_trip(backend):
     """validate_tokens -> pad with -1 -> grammar_bitmask must not assert."""
-    tokenizer, manager, request, prompt = _make_manager_and_request()
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
