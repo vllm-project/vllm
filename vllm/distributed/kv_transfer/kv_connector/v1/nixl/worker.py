@@ -408,6 +408,12 @@ class NixlConnectorWorker:
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
+        # TTL-based eviction of stale remote engine state.
+        self._engine_last_active: dict[EngineId, float] = {}
+        self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
+            "engine_ttl", 3600.0
+        )
+
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
 
@@ -711,6 +717,7 @@ class NixlConnectorWorker:
         returned future.
         Failures to handshake are logged and the request is marked as failed.
         """
+        self._evict_stale_engines()
         with self._handshake_lock:
             if engine_id in self._remote_agents:
                 return None
@@ -731,6 +738,7 @@ class NixlConnectorWorker:
                     del self._handshake_futures[eid]
                     try:
                         self._remote_agents[eid] = f.result()
+                        self._engine_last_active[eid] = time.perf_counter()
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -2028,6 +2036,9 @@ class NixlConnectorWorker:
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        # Update last activity from this remote. Mind that cleanup is done on main
+        # thread (this one), so we don't race on this structure.
+        self._engine_last_active[engine_id] = time.perf_counter()
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
@@ -2473,6 +2484,61 @@ class NixlConnectorWorker:
                 break
         return result
 
+    def _evict_stale_engines(self) -> None:
+        """Scan for and evict remote engines that have exceeded their TTL.
+
+        Called from the main thread in when a new remote engine appears.
+        We can only go OOM as we discover and register a new remote, therefore we make
+        sure we clean up stale engine data structures before then. This invariant
+        prevents us from using background threads, though memory usage is not guaranteed
+        to be "optimal" until a new handshake is performed.
+
+        Engines with active transfers or pending handshakes cannot be stale:
+        - Active transfers touch _engine_last_active in start_load_kv.
+        - Pending handshakes don't have an _engine_last_active entry yet
+        """
+        # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
+        # of remote engines is registered all at once (adding a background cleanup
+        # thread wouldnt help either).
+        # If that scenario is plausible, we can follow up with an LRU eviction policy.
+        if self._engine_ttl <= 0:
+            return
+
+        now = time.perf_counter()
+        for eid, last_active in list(self._engine_last_active.items()):
+            if now - last_active > self._engine_ttl:
+                self._cleanup_remote_engine(eid)
+
+    def _cleanup_remote_engine(
+        self, engine_id: EngineId, *, log_eviction: bool = True
+    ) -> None:
+        """Remove all state for a single remote engine.
+
+        Releases NIXL resources (dlist handles, remote agents) and clears
+        all per-engine data structures. Used by both TTL eviction and
+        shutdown.
+        """
+        assert engine_id in self._remote_agents
+
+        for handle in self.dst_xfer_side_handles.pop(engine_id).values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        for agent_name in self._remote_agents.pop(engine_id).values():
+            self.nixl_wrapper.remove_remote_agent(agent_name)
+
+        del self.kv_caches_base_addr[engine_id]
+        del self.dst_num_blocks[engine_id]
+        del self.tp_mappings[engine_id]
+        if self.transfer_topo is not None:
+            self.transfer_topo.unregister_remote_engine(engine_id)
+
+        last_active = self._engine_last_active.pop(engine_id)
+        if log_eviction:
+            logger.info(
+                "Evicted stale remote engine %s (inactive for %.1fs).",
+                engine_id,
+                time.perf_counter() - last_active,
+            )
+
     def __del__(self):
         self.shutdown()
 
@@ -2493,14 +2559,8 @@ class NixlConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
-        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
-            for dst_xfer_side_handle in dst_xfer_side_handles.values():
-                self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
-        self.dst_xfer_side_handles.clear()
-        for remote_agents in self._remote_agents.values():
-            for agent_name in remote_agents.values():
-                self.nixl_wrapper.remove_remote_agent(agent_name)
-        self._remote_agents.clear()
+        for engine_id in list(self._remote_agents):
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
