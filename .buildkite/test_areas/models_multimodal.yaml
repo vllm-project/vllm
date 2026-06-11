@@ -15,7 +15,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -33,7 +33,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -50,7 +50,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -155,7 +155,7 @@ steps:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
