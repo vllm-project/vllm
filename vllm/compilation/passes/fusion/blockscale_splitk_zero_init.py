@@ -73,11 +73,17 @@ class ProducerSpec:
     pass knows which output is the FP8 (i.e. the GEMM's ``A``) and which is
     the scales (``As``). ``residual_output_index`` is used by the fused-add
     family of producers so we preserve the residual edge in the rewrite.
+
+    ``pattern_builder`` is the ``_make_*_producer_pattern`` function that
+    isolates this producer's FX call shape (number of inputs, which kwargs the
+    node carries); the registration loop calls it to build the
+    pattern/replacement pair.
     """
 
     name: str
     op: torch._ops.OpOverload
     with_zero_init_op: torch._ops.OpOverload
+    pattern_builder: Callable
     fp8_output_index: int
     scales_output_index: int
     residual_output_index: int | None = None
@@ -115,6 +121,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
             ),
+            pattern_builder=_make_group_quant_producer_pattern,
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -125,6 +132,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
+            pattern_builder=_make_2_input_producer_pattern,
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -136,6 +144,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
             ),
+            pattern_builder=_make_2_input_with_residual_producer_pattern,
             fp8_output_index=0,
             residual_output_index=1,
             scales_output_index=2,
@@ -148,6 +157,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
             ),
+            pattern_builder=_make_act_mul_group_quant_producer_pattern,
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -158,6 +168,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
+            pattern_builder=_make_2_input_producer_pattern,
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -169,6 +180,7 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             with_zero_init_op=(
                 torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init.default
             ),
+            pattern_builder=_make_gated_producer_pattern,
             fp8_output_index=0,
             scales_output_index=1,
             static_kwargs={"group_size": 128},
@@ -617,21 +629,6 @@ def _make_gated_producer_pattern(
     )
 
 
-# Producer name -> pattern builder. The builder isolates argument-shape
-# differences between producers (number of inputs, which kwargs the FX node
-# carries) so the fusion pass body stays uniform.
-_BUILDERS: dict[str, Callable] = {
-    "aiter_group_fp8_quant": _make_group_quant_producer_pattern,
-    "aiter_rmsnorm_fp8_group_quant": _make_2_input_producer_pattern,
-    "aiter_rmsnorm_with_add_fp8_group_quant": (
-        _make_2_input_with_residual_producer_pattern
-    ),
-    "aiter_act_mul_and_fp8_group_quant": _make_act_mul_group_quant_producer_pattern,
-    "aiter_gemma_rmsnorm_fp8_group_quant": _make_2_input_producer_pattern,
-    "aiter_gated_rmsnorm_fp8_group_quant": _make_gated_producer_pattern,
-}
-
-
 class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
     """FX-level zero-init + SplitK fusion for FP8 blockscale GEMM."""
 
@@ -657,7 +654,7 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
         )
 
         for producer in producers:
-            builder = _BUILDERS[producer.name]
+            builder = producer.pattern_builder
             for gemm in gemms:
                 for eps in producer.eps_values:
                     pattern, replacement, inputs, extra_check = builder(
