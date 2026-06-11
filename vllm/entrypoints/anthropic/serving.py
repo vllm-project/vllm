@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
@@ -846,7 +847,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(type="internal_error", message=str(e)),
+                error=AnthropicError(
+                    type="internal_error", message=sanitize_message(str(e))
+                ),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
