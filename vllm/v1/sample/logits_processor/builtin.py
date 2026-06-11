@@ -19,6 +19,44 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+class PLessLogitsProcessor(LogitsProcessor):
+    def __init__(
+        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
+    ):
+        self.vllm_config = vllm_config
+        self.device = device
+        self.is_pin_memory = is_pin_memory
+
+    def is_argmax_invariant(self) -> bool:
+        """
+        p-less does not change the argmax.
+        """
+        return True
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        """
+        p-less is parameter-free; the logits processor is state-free.
+        """
+        if not batch_update:
+            return
+        return
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Modify the logits based on the p-less method.
+        """
+        # Convert logits to probabilities
+        probabilities = logits.softmax(dim=-1)
+        # Calculate threshold probabilities for the batch for filtering out invalid
+        # tokens
+        threshold_probabilities = probabilities.square().sum(dim=-1, keepdim=True)
+        # Create boolean mask for invalid tokens
+        invalid_token_mask = probabilities < threshold_probabilities
+        # Apply mask to convert logits of invalid tokens to negative infinity
+        logits.masked_fill_(invalid_token_mask, -float("inf"))
+        return logits
+
+
 class MinPLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
