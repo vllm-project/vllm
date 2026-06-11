@@ -1938,27 +1938,6 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Qwen-VL
-def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    engine_args = EngineArgs(
-        model="Qwen/Qwen-VL",
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Qwen2-VL
 def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
@@ -2522,7 +2501,6 @@ model_example_map = {
     "phi4_mm": run_phi4mm,
     "phi4_siglip": run_phi4siglip,
     "pixtral_hf": run_pixtral_hf,
-    "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,

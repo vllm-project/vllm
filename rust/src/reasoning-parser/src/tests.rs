@@ -6,7 +6,7 @@ use super::{
     DeepSeekR1ReasoningParser, DelimitedReasoningParser, Qwen3ReasoningParser, ReasoningParser,
 };
 
-struct FakeTokenizer;
+pub(crate) struct FakeTokenizer;
 
 impl Tokenizer for FakeTokenizer {
     fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
@@ -32,6 +32,8 @@ impl Tokenizer for FakeTokenizer {
             "<|END_THINKING|>" => Some(4),
             "◁think▷" => Some(5),
             "◁/think▷" => Some(6),
+            "<seed:think>" => Some(10),
+            "</seed:think>" => Some(11),
             _ => None,
         }
     }
