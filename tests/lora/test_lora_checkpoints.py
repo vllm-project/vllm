@@ -38,6 +38,11 @@ def _make_peft_helper(use_dora: bool) -> PEFTHelper:
     )
 
 
+@pytest.fixture
+def disable_lora_pin_memory(monkeypatch):
+    monkeypatch.setattr("vllm.lora.lora_model.is_pin_memory_available", lambda: False)
+
+
 @pytest.mark.parametrize("lora_name", lora_lst)
 def test_load_checkpoints(
     lora_name,
@@ -168,7 +173,8 @@ def test_gemma4_moe_lora_weights_mapping():
     )
 
 
-def test_load_dora_tensors():
+@pytest.mark.skip_global_cleanup
+def test_load_dora_tensors(disable_lora_pin_memory):
     tensors = {
         "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
         "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
@@ -195,7 +201,10 @@ def test_load_dora_tensors():
     )
 
 
-def test_load_lora_tensors_rejects_unconfigured_dora_magnitude():
+@pytest.mark.skip_global_cleanup
+def test_load_lora_tensors_rejects_unconfigured_dora_magnitude(
+    disable_lora_pin_memory,
+):
     tensors = {
         "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
         "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
@@ -211,7 +220,8 @@ def test_load_lora_tensors_rejects_unconfigured_dora_magnitude():
         )
 
 
-def test_load_dora_tensors_rejects_missing_magnitude():
+@pytest.mark.skip_global_cleanup
+def test_load_dora_tensors_rejects_missing_magnitude(disable_lora_pin_memory):
     tensors = {
         "base_model.model.linear.lora_A.weight": torch.randn(2, 3),
         "base_model.model.linear.lora_B.weight": torch.randn(4, 2),
