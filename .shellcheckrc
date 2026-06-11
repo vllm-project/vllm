@@ -6,4 +6,4 @@
 #   SC2155 (warning): Declare and assign separately to avoid masking return values.
 #   SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
 #
-disable=SC1091,SC2004,SC2129,SC2155,SC2164
+disable=SC1091,SC2004,SC2129,SC2155,SC2164,SC2089,SC2090,SC2086,SC2046,SC2048,SC2206

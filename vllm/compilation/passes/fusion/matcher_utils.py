@@ -45,8 +45,13 @@ if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
+if current_platform.is_cuda() and hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
-SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+SILU_MUL_OP = (
+    torch.ops._C.silu_and_mul.default if hasattr(torch.ops._C, "silu_and_mul") else None
+)
 
 
 class MatcherCustomOp(ABC):
@@ -458,7 +463,7 @@ class MatcherQuantFP8(MatcherCustomOp):
 class MatcherSiluAndMul(MatcherCustomOp):
     def __init__(self, enabled: bool | None = None) -> None:
         if enabled is None:
-            enabled = SiluAndMul.enabled()
+            enabled = SiluAndMul.enabled() and SILU_MUL_OP is not None
         super().__init__(enabled)
 
     def inputs(self) -> list[torch.Tensor]:
