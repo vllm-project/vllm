@@ -3,7 +3,7 @@
 """Triton unified attention with different K/V head dimensions (DiffKV).
 
 This is a slimmed fork of ``triton_unified_attention.py`` for models like
-MiMo-V2 where the V tensor's head dimension differs from K's.  The KV cache
+MiMo-V2.5 where the V tensor's head dimension differs from K's.  The KV cache
 is the same packed layout used by ``FlashAttentionDiffKVBackend``:
 
     kv_cache: [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]

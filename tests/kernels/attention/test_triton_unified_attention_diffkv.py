@@ -1,20 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the Triton DiffKV unified-attention kernel.
-
-DiffKV models (e.g. MiMo-V2) use a K/V cache whose value head dim differs
-from the query/key head dim.  This test does a direct comparison between
-``unified_attention_diffkv`` (Triton) and FlashAttention DiffKV, which is
-the reference the review asked for.  FA serves as the ground truth so we
-don't reimplement the paged KV gather/causal-masking logic by hand; it
-also covers ``softcap``.
-
-DiffKV (hdim_qk != hdim_v) requires FA3 (Hopper) or FA4 (Blackwell), so
-the test skips on platforms where neither is available.
-
-The KV cache mirrors the production packed layout
-``[num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]``;
-K/V views are sliced off the last dim exactly as the backends do.
+"""
+Unit tests for the Triton DiffKV unified-attention kernel.
 """
 
 import pytest
