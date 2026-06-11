@@ -1038,6 +1038,9 @@ class OpenAIServingResponses(OpenAIServing):
                 request,
                 enable_auto_tools=self.enable_auto_tools,
             )
+            if not getattr(request, "include_reasoning", True):
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
