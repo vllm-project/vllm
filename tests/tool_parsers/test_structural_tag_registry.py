@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,12 +10,14 @@ from xgrammar.builtin_structural_tag import (
     _structural_tag_registry as xgrammar_structural_tag_registry,
 )
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
@@ -31,6 +34,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
+    _get_function_parameters,
     get_model_structural_tag,
 )
 
@@ -252,3 +256,82 @@ def test_get_structural_tag_disables_reasoning(
     parser.get_structural_tag(request)
 
     assert captured == [False]
+
+
+def test_unified_parser_get_structural_tag_uses_reasoning_parser(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    captured: list[bool] = []
+
+    def fake_get_model_structural_tag(*, reasoning: bool, **kwargs):
+        captured.append(reasoning)
+        return None
+
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+        fake_get_model_structural_tag,
+    )
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3CoderToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    parser = TestParser(MagicMock(), tools=sample_tools)
+    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+    parser.adjust_request(request)
+
+    assert captured == [True]
+
+
+def test_structural_tag_global_env_relaxes_xgrammar_function_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    captured: list[list[dict]] = []
+
+    def fake_get_xgrammar_model_structural_tag(*, tools: list[dict], **kwargs):
+        captured.append(tools)
+        return None
+
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.tool_parsers.structural_tag_registry.get_xgrammar_model_structural_tag",
+        fake_get_xgrammar_model_structural_tag,
+    )
+
+    get_model_structural_tag(
+        model="llama",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert captured[0][0]["function"]["parameters"] is None
+    assert sample_tools[0].function.parameters is not None
+
+
+def test_structural_tag_global_env_ignores_function_strict_false(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        lambda: True,
+    )
+    function = SimpleNamespace(
+        parameters={"type": "object", "properties": {}},
+        strict=False,
+    )
+
+    assert _get_function_parameters(function) == function.parameters

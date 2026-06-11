@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Generator
+from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import (
@@ -1283,10 +1285,12 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
 def test_adjust_request_auto_uses_vllm_registry_structural_tag(
-    qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,
 ) -> None:
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3CoderToolParser
+
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
@@ -1295,7 +1299,7 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )
-    out = qwen3_tool_parser.adjust_request(req)
+    out = TestParser(MagicMock(), tools=sample_tools).adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
     assert isinstance(out.structured_outputs.structural_tag, str)
@@ -1304,9 +1308,11 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
 
 
 def test_adjust_request_required_prefers_structural_tag(
-    qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3CoderToolParser
+
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
@@ -1314,6 +1320,6 @@ def test_adjust_request_required_prefers_structural_tag(
         tools=request_tools,
         tool_choice="required",
     )
-    out = qwen3_tool_parser.adjust_request(req)
+    out = TestParser(MagicMock(), tools=sample_tools).adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
