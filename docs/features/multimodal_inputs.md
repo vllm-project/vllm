@@ -843,7 +843,7 @@ Works with common video formats like MP4 when using OpenCV backends.
 
 #### Keyframe-Only Video Sampling (Lossy)
 
-Video frames are sampled by a pluggable loader selected with the `VLLM_VIDEO_LOADER_BACKEND` environment variable (default: `opencv`, uniform sampling). The `pyav_keyframes` loader trades temporal accuracy for decode speed: it samples only bitstream keyframes, so decode cost is bounded by the frame budget regardless of clip length — P/B-frames are never decoded.
+Video frames are sampled by a pluggable loader selected with the `VLLM_VIDEO_LOADER_BACKEND` environment variable (default: `opencv`, uniform sampling). Video codecs store a complete image only at periodic *keyframes* (I-frames), each starting a group of pictures (GOP) of typically 2–10 seconds; the frames in between (P/B-frames) are deltas that can only be reconstructed by decoding forward from the preceding keyframe. The `pyav_keyframes` loader trades temporal accuracy for decode speed: it samples only bitstream keyframes, so decode cost is bounded by the frame budget regardless of clip length — P/B-frames are never decoded.
 
 ```bash
 VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes \
