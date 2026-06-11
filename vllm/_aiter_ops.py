@@ -737,6 +737,57 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_gemm_a8w8_blockscale_out_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+    y_is_zeroed: bool = False,
+) -> None:
+    """Blockscale GEMM into a caller-provided output buffer.
+
+    Kernel + SplitK selection are handled entirely by the AITER dispatcher
+    via the tuned CSV (``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE``).  AITER's
+    C++ cktile dispatch is keyed by ``kernelName`` resolved on the Python
+    side: any short-circuit that bypasses the CSV would lose both the tuned
+    splitK and the tuned kernel (the latter falling back to a non-tuned
+    default heuristic kernel).
+
+    ``y_is_zeroed`` is propagated to the cktile invoker so the kernel can skip
+    its internal Y.zero_() when a producer-fused prologue has already pre-zeroed
+    ``output``.
+    """
+    from aiter import gemm_a8w8_blockscale
+
+    gemm_a8w8_blockscale(
+        A,
+        B,
+        As,
+        Bs,
+        dtype=output_dtype,
+        out=output,
+        y_is_zeroed=y_is_zeroed,
+    )
+    # In-place op: `output` is mutated, never returned. Returning a mutated
+    # input would alias it under an inferred schema that declares a fresh
+    # result, which breaks Inductor's buffer-reuse planning (the zero-init
+    # output buffer gets recycled and clobbered by a later block's prologue).
+
+
+def _rocm_aiter_gemm_a8w8_blockscale_out_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+    y_is_zeroed: bool = False,
+) -> None:
+    return None
+
+
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -1070,9 +1121,13 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
+    kwargs = {}
+    if gemm_out_zero_init is not None:
+        kwargs["gemm_out_zero_init"] = gemm_out_zero_init
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
         weight,
@@ -1083,6 +1138,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=residual,
+        **kwargs,
     )
     return (
         x_quant,
@@ -1112,10 +1168,14 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
-    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+    kwargs = {}
+    if gemm_out_zero_init is not None:
+        kwargs["gemm_out_zero_init"] = gemm_out_zero_init
+    (x_quant, x_quant_scales), _, _, _ = fused_rms_fp8_group_quant(
         x,
         weight,
         variance_epsilon,
@@ -1125,6 +1185,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=None,
+        **kwargs,
     )
     return (x_quant, x_quant_scales)
 
@@ -1140,6 +1201,40 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     return (
         torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_rmsnorm_fp8_group_quant_impl(
+        x,
+        weight,
+        variance_epsilon,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
+        x,
+        residual,
+        weight,
+        variance_epsilon,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
     )
 
 
@@ -1190,8 +1285,19 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
+    if gemm_out_zero_init is not None:
+        from aiter.ops.quant import per_group_quant_hip
+
+        return per_group_quant_hip(
+            x.contiguous(),
+            quant_dtype=FP8_DTYPE,
+            group_size=group_size,
+            gemm_out_zero_init=gemm_out_zero_init,
+        )
+
     from aiter import QuantType, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
@@ -1218,14 +1324,19 @@ def _rocm_aiter_group_fp8_quant_fake(
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
+    kwargs = {}
+    if gemm_out_zero_init is not None:
+        kwargs["gemm_out_zero_init"] = gemm_out_zero_init
     return act_mul_and_fp8_group_quant(
         x,
         activation="silu",
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
+        **kwargs,
     )
 
 
@@ -1246,6 +1357,213 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
         device=x.device,
     )
     return x_fp8, out_bs
+
+
+def _fake_without_gemm_out_zero_init(
+    fake_impl: Callable[..., object],
+    arg_index: int,
+) -> Callable[..., object]:
+    def fake(*args, **kwargs):
+        if "gemm_out_zero_init" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs.pop("gemm_out_zero_init")
+        else:
+            args = (*args[:arg_index], *args[arg_index + 1 :])
+        return fake_impl(*args, **kwargs)
+
+    return fake
+
+
+def _rocm_aiter_group_fp8_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_group_fp8_quant_impl(
+        x,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_act_mul_and_fp8_group_quant_impl(
+        x,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+    gemm_out_zero_init: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Functional Gemma RMSNorm + FP8 group quant via AITER fused_qk_rmsnorm_group_quant.
+
+    Drives the kernel's ``gemma_norm=True`` path for Gemma-style RMSNorm.
+    """
+    from aiter.ops.fused_qk_rmsnorm_group_quant import fused_qk_rmsnorm_group_quant
+
+    M, N = x.shape
+    out = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
+    scale = torch.empty(
+        (M, (N + group_size - 1) // group_size),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    kwargs = {}
+    if gemm_out_zero_init is not None:
+        kwargs["gemm_out_zero_init"] = gemm_out_zero_init
+    fused_qk_rmsnorm_group_quant(
+        q_out_quantized=out,
+        q_out_scale=scale,
+        q=x,
+        q_weight=weight,
+        q_epsilon=variance_epsilon,
+        group_size=group_size,
+        transpose_scale=False,
+        gemma_norm=True,
+        **kwargs,
+    )
+    return out, scale
+
+
+def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    return (
+        torch.empty((M, N), dtype=FP8_DTYPE, device=x.device),
+        torch.empty(
+            (M, (N + group_size - 1) // group_size),
+            dtype=torch.float32,
+            device=x.device,
+        ),
+    )
+
+
+def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
+        x,
+        weight,
+        variance_epsilon,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+    gemm_out_zero_init: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Functional Gated RMSNorm + FP8 group quant via AITER gated_rmsnorm_fp8_group_quant.
+
+    Implements the gated RMSNorm + FP8 group quant used by the Qwen3-Next
+    GDN out_proj path.
+    """
+    from aiter.ops.gated_rmsnorm_fp8_group_quant import gated_rmsnorm_fp8_group_quant
+
+    if x.dim() == 3:
+        num_tokens, num_heads, head_dim = x.shape
+        flat_n = num_heads * head_dim
+        x_k = x
+        z_k = z
+    else:
+        # AITER's gated_rmsnorm_fp8_group_quant kernel only supports
+        # head_dim == 128 and requires 3D [T, H, D] inputs. Production
+        # Qwen3-Next GDN already passes 3D; this branch is a friendly
+        # fallback for 2D callers that match the same head_dim invariant.
+        num_tokens = x.shape[0]
+        flat_n = x.shape[-1]
+        assert flat_n % group_size == 0, (
+            "rocm_aiter_gated_rmsnorm_fp8_group_quant: 2D input requires "
+            f"hidden_dim ({flat_n}) divisible by group_size ({group_size})"
+        )
+        x_k = x.view(num_tokens, flat_n // group_size, group_size)
+        z_k = z.view(num_tokens, flat_n // group_size, group_size)
+
+    out = torch.empty((num_tokens, flat_n), dtype=FP8_DTYPE, device=x.device)
+    scale = torch.empty(
+        (num_tokens, (flat_n + group_size - 1) // group_size),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    kwargs = {}
+    if gemm_out_zero_init is not None:
+        kwargs["gemm_out_zero_init"] = gemm_out_zero_init
+    gated_rmsnorm_fp8_group_quant(
+        out=out,
+        scale=scale,
+        x=x_k,
+        z=z_k,
+        weight=weight,
+        epsilon=variance_epsilon,
+        group_size=group_size,
+        transpose_scale=False,
+        **kwargs,
+    )
+    return out, scale
+
+
+def _rocm_aiter_gated_rmsnorm_fp8_group_quant_fake(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if x.dim() == 3:
+        num_tokens, num_heads, head_dim = x.shape
+        flat_n = num_heads * head_dim
+    else:
+        num_tokens = x.shape[0]
+        flat_n = x.shape[-1]
+    return (
+        torch.empty((num_tokens, flat_n), dtype=FP8_DTYPE, device=x.device),
+        torch.empty(
+            (num_tokens, (flat_n + group_size - 1) // group_size),
+            dtype=torch.float32,
+            device=x.device,
+        ),
+    )
+
+
+def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    weight: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
+        x,
+        z,
+        weight,
+        variance_epsilon,
+        group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
 
 
 def _rocm_aiter_triton_add_rmsnorm_pad_impl(
@@ -1904,6 +2222,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8w8_blockscale_out",
+                op_func=_rocm_aiter_gemm_a8w8_blockscale_out_impl,
+                mutates_args=["output"],
+                fake_impl=_rocm_aiter_gemm_a8w8_blockscale_out_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
@@ -1924,6 +2249,15 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_rmsnorm_fp8_group_quant_fake, 1
+                ),
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
@@ -1936,9 +2270,27 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake, 1
+                ),
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_act_mul_and_fp8_group_quant_fake, 1
+                ),
             )
 
             direct_register_custom_op(
@@ -1955,6 +2307,15 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_group_fp8_quant_with_zero_init",
+                op_func=_rocm_aiter_group_fp8_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_group_fp8_quant_fake, 1
+                ),
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=[],
@@ -1967,6 +2328,36 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_per_token_quant_impl,
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemma_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_gemma_rmsnorm_fp8_group_quant_fake, 2
+                ),
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_gated_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_gated_rmsnorm_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_gated_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_fake_without_gemm_out_zero_init(
+                    _rocm_aiter_gated_rmsnorm_fp8_group_quant_fake, 3
+                ),
             )
 
             direct_register_custom_op(
@@ -2052,6 +2443,14 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def get_gemma_rmsnorm_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_gated_rmsnorm_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant.default
 
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
@@ -2513,7 +2912,10 @@ class rocm_aiter_ops:
         group_size: int = 128,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
+            input_2d,
+            group_size,
+        )
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:

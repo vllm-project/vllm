@@ -238,6 +238,14 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
         return torch.empty(*args, dtype=torch.float16, device="cuda", **kwargs)
 
     @staticmethod
+    def empty_fp8(*args, **kwargs) -> torch.Tensor:
+        from vllm.platforms import current_platform
+
+        return torch.empty(
+            *args, dtype=current_platform.fp8_dtype(), device="cuda", **kwargs
+        )
+
+    @staticmethod
     def empty_fp32(*args, **kwargs) -> torch.Tensor:
         return torch.empty(*args, dtype=torch.float32, device="cuda", **kwargs)
 
