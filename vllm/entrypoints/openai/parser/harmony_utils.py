@@ -11,6 +11,7 @@ from openai_harmony import (
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
+    HarmonyError,
     Message,
     ReasoningEffort,
     Role,
@@ -461,7 +462,23 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
-        parser.process(token_id)
+        try:
+            parser.process(token_id)
+        except HarmonyError as err:
+            # Tolerate mid-stream harmony parse errors caused by stray
+            # tokens between messages.
+            # The model can occasionally emit corrupt control-token sequences
+            # at message boundaries (e.g., doubled <|start|> or content tokens
+            # before <|start|>).
+            # Return whatever was successfully parsed before the bad token
+            # rather than letting the openai_harmony Rust binding raise out
+            # to the route handler.
+            logger.warning(
+                "Harmony parser error at token ID %d, returning partial parse: %r",
+                token_id,
+                err,
+            )
+            break
     return parser
 
 
