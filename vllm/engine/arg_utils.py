@@ -1726,7 +1726,11 @@ class EngineArgs:
         int_ids = cast(list[int], ids)
         # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
         # --device-ids values as indices into the CVD-visible set.
-        cvd = os.environ.get(current_platform.device_control_env_var)
+        cvd = getattr(
+            envs,
+            current_platform.device_control_env_var,
+            os.environ.get(current_platform.device_control_env_var),
+        )
         if cvd:
             cvd_ids = [
                 current_platform.device_control_id_to_physical_device_id(x)

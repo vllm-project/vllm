@@ -39,7 +39,9 @@ def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
     on CUDA_VISIBLE_DEVICES.
 
     Idempotent: a second call with the same value is a no-op.
-    Raises AssertionError if called again with a different value."""
+    Raises AssertionError if called again with a different value.
+
+    This is expected to run during single-threaded worker initialization."""
     global _assigned_physical_gpu_ids
     if _assigned_physical_gpu_ids is not None:
         assert _assigned_physical_gpu_ids == ids, (

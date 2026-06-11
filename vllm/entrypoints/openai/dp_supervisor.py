@@ -28,7 +28,6 @@ from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
     set_process_title,
-    update_environment_variables,
 )
 
 logger = init_logger(__name__)
@@ -131,12 +130,6 @@ def _build_vllm_dp_server_args(
     return child_args
 
 
-def _build_vllm_dp_server_env(
-    args: argparse.Namespace, local_rank: int
-) -> dict[str, str]:
-    return {}
-
-
 def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int]:
     """Build the --device-ids value for a DP child process."""
     devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
@@ -231,9 +224,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     return app
 
 
-def _run_vllm_dp_server(
-    child_args: argparse.Namespace, env_updates: dict[str, str]
-) -> None:
+def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     """
     Entrypoint function for the vLLM DP Server.
     """
@@ -244,7 +235,6 @@ def _run_vllm_dp_server(
     os.setpgrp()
 
     name = f"APIServer_DP{child_args.data_parallel_rank}"
-    update_environment_variables(env_updates)
     set_process_title(name)
     decorate_logs(name)
     uvloop.run(run_server(child_args))
@@ -348,11 +338,10 @@ class DPSupervisor:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
             child_args = _build_vllm_dp_server_args(self.args, local_rank)
-            child_env = _build_vllm_dp_server_env(self.args, local_rank)
             process = context.Process(
                 target=_run_vllm_dp_server,
                 name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
-                args=(child_args, child_env),
+                args=(child_args,),
             )
             process.start()
             self._processes.append(process)
