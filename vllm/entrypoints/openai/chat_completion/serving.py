@@ -964,6 +964,7 @@ class OpenAIServingChat(OpenAIServing):
             is_finish_reason_tool_calls = auto_tools_called or (
                 request.tool_choice
                 and request.tool_choice == "required"
+                and message.tool_calls
                 and output.finish_reason == "stop"
             )
 

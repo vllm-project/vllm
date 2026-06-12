@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.parser.parser_manager import ParserManager
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import (
@@ -268,6 +269,63 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser_parametrized):
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
+
+
+def test_required_tool_choice_uses_qwen3_xml_after_reasoning(
+    qwen3_tokenizer, sample_tools
+):
+    """Regression: qwen3 required tool choice must parse XML after </think>.
+
+    The generic required-tool parser expects JSON. Qwen3-Coder emits XML tool
+    calls, so required/named tool choice must route through this parser's XML
+    extraction path after reasoning extraction.
+    """
+    model_output = (
+        'The user asked for weather. I should call get_current_weather.</think>\n'
+        "<tool_call>\n"
+        "<function=get_current_weather>\n"
+        "<parameter=city>\n"
+        "Dallas\n"
+        "</parameter>\n"
+        "<parameter=state>\n"
+        "TX\n"
+        "</parameter>\n"
+        "<parameter=unit>\n"
+        "fahrenheit\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    request = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=_as_chat_completion_tools(sample_tools),
+        tool_choice="required",
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_coder",
+        reasoning_parser_name="nemotron_v3",
+        enable_auto_tools=True,
+        model_name=MODEL,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(qwen3_tokenizer, sample_tools)
+
+    reasoning, content, tool_calls = parser.parse(
+        model_output, request, enable_auto_tools=True
+    )
+
+    assert reasoning == "The user asked for weather. I should call get_current_weather."
+    assert content is None
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_current_weather"
+    assert json.loads(tool_calls[0].arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
 
 
 @pytest.mark.parametrize(
