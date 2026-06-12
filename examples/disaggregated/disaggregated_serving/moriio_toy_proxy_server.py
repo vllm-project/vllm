@@ -410,9 +410,32 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     t = start_service_discovery("0.0.0.0", 36367)
-    app.debug = True
+    # High-concurrency hardening. Quart's app.run() uses a shallow listen
+    # backlog (100) and, with app.debug=True, adds per-request overhead that
+    # starves the single accept loop. Under a burst of ~512 simultaneous client
+    # connections the backlog overflows and the kernel RSTs the excess, so
+    # clients see "ClientOSError: [Errno 104] Connection reset by peer" before
+    # any response (~16% request loss at c=512). Serve via hypercorn with debug
+    # OFF and a deep backlog so the burst QUEUES (higher TTFT) instead of being
+    # reset -> 100% request success.
+    app.debug = False
     app.config["BODY_TIMEOUT"] = 360000
     app.config["RESPONSE_TIMEOUT"] = 360000
 
-    app.run(host="0.0.0.0", port=args.port)
+    import os
+    import asyncio
+    from hypercorn.asyncio import serve as _hypercorn_serve
+    from hypercorn.config import Config as _HypercornConfig
+
+    _hcfg = _HypercornConfig()
+    _hcfg.bind = [f"0.0.0.0:{args.port}"]
+    # Deep listen backlog so a wide connection burst queues, not RSTs. NOTE:
+    # effective backlog is capped by the host's net.core.somaxconn (proxy runs
+    # --network host); kernel 6.x defaults to 4096. Override via
+    # PROXY_LISTEN_BACKLOG.
+    _hcfg.backlog = int(os.environ.get("PROXY_LISTEN_BACKLOG", "4096"))
+    # Long-lived SSE streams (8k1k decode ~5 min): never reap on keepalive.
+    _hcfg.keep_alive_timeout = 360000.0
+
+    asyncio.run(_hypercorn_serve(app, _hcfg))
     t.join()
