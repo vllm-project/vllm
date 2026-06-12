@@ -9,13 +9,13 @@ stream-interval) delivery.
 """
 
 import pytest
-
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
+
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gemma4_reasoning_parser import Gemma4ReasoningParser
-from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
 from vllm.tokenizers.registry import get_tokenizer
+from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
 
 TOKENIZER_NAME = "google/gemma-4-E2B-it"
 
@@ -49,7 +49,9 @@ def _encode(tokenizer, text: str) -> list[int]:
     ]:
         if special in text and tok_id is not None:
             parts = text.split(special, 1)
-            return _encode(tokenizer, parts[0]) + [tok_id] + _encode(tokenizer, parts[1])
+            return (
+                _encode(tokenizer, parts[0]) + [tok_id] + _encode(tokenizer, parts[1])
+            )
     try:
         return enc.encode(text, add_special_tokens=False)
     except TypeError:
@@ -122,14 +124,33 @@ def _run_single_delta(parser_instance, full_text: str, tokenizer):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_reasoning_then_tool_call_token_by_token(parser, tokenizer):
     """Token-by-token delivery: reasoning extracted, tool call parsed."""
-    token_strings = (
-        ["<|channel>", "thought", "\n", "I", " need", " to", " find", " files",
-         "<channel|>"]
-        + ["<|tool_call>", "call", ":", "find", "{", "path", ":", '<|"|>',
-           "research", '<|"|>', "}", "<tool_call|>"]
-    )
+    token_strings = [
+        "<|channel>",
+        "thought",
+        "\n",
+        "I",
+        " need",
+        " to",
+        " find",
+        " files",
+        "<channel|>",
+    ] + [
+        "<|tool_call>",
+        "call",
+        ":",
+        "find",
+        "{",
+        "path",
+        ":",
+        '<|"|>',
+        "research",
+        '<|"|>',
+        "}",
+        "<tool_call|>",
+    ]
     reasoning, content, tool_calls = _run_streaming(parser, token_strings, tokenizer)
 
     assert reasoning is not None
@@ -146,7 +167,7 @@ def test_reasoning_then_tool_call_token_by_token(parser, tokenizer):
 def test_reasoning_then_tool_call_single_delta(parser, tokenizer):
     """Single-delta delivery (large stream-interval): reasoning must not be lost."""
     full_text = (
-        '<|channel>thought\nI need to find files<channel|>'
+        "<|channel>thought\nI need to find files<channel|>"
         '<|tool_call>call:find{path:<|"|>research<|"|>}<tool_call|>'
     )
     reasoning, content, tool_calls = _run_single_delta(parser, full_text, tokenizer)
@@ -189,12 +210,12 @@ def test_reasoning_after_tool_response(parser, tokenizer):
     prompt_ids: list[int] = []
     if tool_call_tok is not None:
         prompt_ids.append(tool_call_tok)
-    prompt_ids += [1000, 1001, 1002]          # tool call body tokens
+    prompt_ids += [1000, 1001, 1002]  # tool call body tokens
     if tool_call_end_tok is not None:
         prompt_ids.append(tool_call_end_tok)
     if tool_resp_tok is not None:
         prompt_ids.append(tool_resp_tok)
-    prompt_ids += [2000, 2001]                 # tool response body tokens
+    prompt_ids += [2000, 2001]  # tool response body tokens
     if tool_resp_end_tok is not None:
         prompt_ids.append(tool_resp_end_tok)
 
@@ -207,8 +228,20 @@ def test_reasoning_after_tool_response(parser, tokenizer):
     # prompt_token_ids only on the very first call (mimics parse_delta usage).
     enc = getattr(tokenizer, "tokenizer", tokenizer)
     first = True
-    for tok_str in ["<|channel>", "thought", "\n", "I", " need", " to", " answer",
-                    "<channel|>", "The", " answer", " is", " 42"]:
+    for tok_str in [
+        "<|channel>",
+        "thought",
+        "\n",
+        "I",
+        " need",
+        " to",
+        " answer",
+        "<channel|>",
+        "The",
+        " answer",
+        " is",
+        " 42",
+    ]:
         tok_id = vocab.get(tok_str)
         if tok_id is not None:
             ids = [tok_id]
@@ -219,7 +252,9 @@ def test_reasoning_after_tool_response(parser, tokenizer):
                 ids = enc.encode(tok_str)
 
         delta = parser.parse_delta(
-            tok_str, ids, request,
+            tok_str,
+            ids,
+            request,
             prompt_token_ids=prompt_ids if first else None,
             finished=False,
         )
@@ -250,16 +285,23 @@ def test_reasoning_after_tool_response(parser, tokenizer):
     assert len(tool_calls_found) == 0
 
     # No raw thinking tokens should have leaked into content
-    assert "<|channel>" not in (content or ""), "thinking start token leaked into content"
+    assert "<|channel>" not in (content or ""), (
+        "thinking start token leaked into content"
+    )
     assert "<channel|>" not in (content or ""), "thinking end token leaked into content"
 
 
 def test_reasoning_only_no_tool_call(parser, tokenizer):
     """Reasoning only (no tool call): content passes through cleanly."""
-    token_strings = (
-        ["<|channel>", "thought", "\n", "Let", " me", " think", "<channel|>"]
-        + ["The", " answer", " is", " 42"]
-    )
+    token_strings = [
+        "<|channel>",
+        "thought",
+        "\n",
+        "Let",
+        " me",
+        " think",
+        "<channel|>",
+    ] + ["The", " answer", " is", " 42"]
     reasoning, content, tool_calls = _run_streaming(parser, token_strings, tokenizer)
 
     assert reasoning is not None
@@ -284,15 +326,21 @@ def test_empty_thinking_block_tool_call_no_reasoning_leak(parser, tokenizer):
 
     Exercises both token-by-token and single-delta delivery.
     """
-    vocab = tokenizer.get_vocab()
-    enc = getattr(tokenizer, "tokenizer", tokenizer)
-
     # Token-by-token: each token arrives individually.
-    token_strings = (
-        ["<|channel>", "thought", "\n", "<channel|>"]
-        + ["<|tool_call>", "call", ":", "find", "{", "path", ":", '<|"|>',
-           "research", '<|"|>', "}", "<tool_call|>"]
-    )
+    token_strings = ["<|channel>", "thought", "\n", "<channel|>"] + [
+        "<|tool_call>",
+        "call",
+        ":",
+        "find",
+        "{",
+        "path",
+        ":",
+        '<|"|>',
+        "research",
+        '<|"|>',
+        "}",
+        "<tool_call|>",
+    ]
     reasoning, content, tool_calls = _run_streaming(parser, token_strings, tokenizer)
 
     assert reasoning is None, (
@@ -305,7 +353,7 @@ def test_empty_thinking_block_tool_call_no_reasoning_leak(parser, tokenizer):
     parser2 = _Gemma4Parser(tokenizer)
 
     full_text = (
-        '<|channel>thought\n<channel|>'
+        "<|channel>thought\n<channel|>"
         '<|tool_call>call:find{path:<|"|>research<|"|>}<tool_call|>'
     )
     reasoning2, content2, tool_calls2 = _run_single_delta(parser2, full_text, tokenizer)

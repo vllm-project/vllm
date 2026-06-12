@@ -599,9 +599,10 @@ class Gemma4ToolParser(ToolParser):
             # the end marker; backends can batch one or more complete tool
             # calls into a single streaming chunk. Only wait for more text
             # when the delta is just the start token itself.
-            if start_count > end_count and len(delta_text) <= len(
-                self.tool_call_start_token
-            ) * num_new:
+            if (
+                start_count > end_count
+                and len(delta_text) <= len(self.tool_call_start_token) * num_new
+            ):
                 return None
 
         # Case 3: One or more tool calls just ended (possibly several in a

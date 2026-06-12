@@ -296,8 +296,8 @@ def test_gemma4_tool_response_does_not_block_reasoning_end(generic_tokenizer):
     # Exact token sequence produced by gemma4-26b with stream-interval 20:
     # thought\n<channel|><|tool_call>call:exec{...}<tool_call|><|tool_response>
     output_tokens = (
-        [vocab["<|channel>"]]        # chunk N-1: reasoning start
-        + gemma4_encode_output(      # chunk N: everything else in one batch
+        [vocab["<|channel>"]]  # chunk N-1: reasoning start
+        + gemma4_encode_output(  # chunk N: everything else in one batch
             generic_tokenizer,
             "thought\n<channel|><|tool_call>done<tool_call|>",
         )

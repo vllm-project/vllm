@@ -819,9 +819,7 @@ class TestStreamingExtraction:
         initialise tool state even when start_count == end_count, and
         _handle_tool_call_end must emit both the function name and arguments.
         """
-        full_call = (
-            "<|tool_call>call:exec{command:<|\"|>echo hello<|\"|>}<tool_call|>"
-        )
+        full_call = '<|tool_call>call:exec{command:<|"|>echo hello<|"|>}<tool_call|>'
         results = self._simulate_streaming(parser, mock_request, [full_call])
 
         name = self._collect_function_name(results)
@@ -849,8 +847,8 @@ class TestStreamingExtraction:
         names have not been individually streamed yet.
         """
         full_delta = (
-            "<|tool_call>call:read{path:<|\"|>a.py<|\"|>}<tool_call|>"
-            "<|tool_call>call:write{path:<|\"|>b.py<|\"|>,content:<|\"|>hello<|\"|>}<tool_call|>"
+            '<|tool_call>call:read{path:<|"|>a.py<|"|>}<tool_call|>'
+            '<|tool_call>call:write{path:<|"|>b.py<|"|>,content:<|"|>hello<|"|>}<tool_call|>'
         )
         results = self._simulate_streaming(parser, mock_request, [full_delta])
 
@@ -860,10 +858,16 @@ class TestStreamingExtraction:
             if delta and delta.tool_calls
             for tc in delta.tool_calls
         ]
-        assert len(all_tcs) == 2, f"expected 2 tool calls, got {len(all_tcs)}: {all_tcs}"
+        assert len(all_tcs) == 2, (
+            f"expected 2 tool calls, got {len(all_tcs)}: {all_tcs}"
+        )
 
         names = [
-            (tc.function.name if hasattr(tc.function, "name") else tc.function.get("name"))
+            (
+                tc.function.name
+                if hasattr(tc.function, "name")
+                else tc.function.get("name")
+            )
             for tc in all_tcs
         ]
         assert "read" in names
@@ -905,8 +909,7 @@ class TestStreamingExtraction:
                     idx = tc.index
                     if idx not in deltas_by_index:
                         deltas_by_index[idx] = {"name": None, "arguments": ""}
-                    func = tc.function if isinstance(tc.function,
-                                                      dict) else tc.function
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
                     if isinstance(func, dict):
                         if func.get("name"):
                             deltas_by_index[idx]["name"] = func["name"]
@@ -931,22 +934,23 @@ class TestStreamingExtraction:
                 assert isinstance(parsed, dict), f"Tool call {idx} args not a dict"
             except json.JSONDecodeError as e:
                 pytest.fail(
-                    f"Tool call {idx} arguments not valid JSON: "
-                    f"'{args_str}' - {e}"
+                    f"Tool call {idx} arguments not valid JSON: '{args_str}' - {e}"
                 )
 
         # Verify specific values
         # call 0 (search): name may or may not be present depending on
         # whether delta 1 emitted it; args should be complete
-        assert json.loads(deltas_by_index[0]["arguments"]) == {
-            "query": "hello"
-        }, f'Expected {{"query": "hello"}}, got {deltas_by_index[0]["arguments"]}'
+        assert json.loads(deltas_by_index[0]["arguments"]) == {"query": "hello"}, (
+            f'Expected {{"query": "hello"}}, got {deltas_by_index[0]["arguments"]}'
+        )
 
         # call 1 (read): should have name + full args
-        assert deltas_by_index[1]["name"] == "read",             f'Expected name "read", got {deltas_by_index[1]["name"]}'
-        assert json.loads(deltas_by_index[1]["arguments"]) == {
-            "path": "/foo"
-        }, f'Expected {{"path": "/foo"}}, got {deltas_by_index[1]["arguments"]}'
+        assert deltas_by_index[1]["name"] == "read", (
+            f'Expected name "read", got {deltas_by_index[1]["name"]}'
+        )
+        assert json.loads(deltas_by_index[1]["arguments"]) == {"path": "/foo"}, (
+            f'Expected {{"path": "/foo"}}, got {deltas_by_index[1]["arguments"]}'
+        )
 
     def _collect_content(self, results):
         """Concatenate all content deltas from streaming results."""
@@ -973,9 +977,7 @@ class TestStreamingExtraction:
         results = self._simulate_streaming(parser, mock_request, [delta])
 
         content = self._collect_content(results)
-        assert "and then" in content, (
-            f"inter-call text lost; content={content!r}"
-        )
+        assert "and then" in content, f"inter-call text lost; content={content!r}"
         # No raw tool call markers should leak.
         assert TOOL_CALL_START not in content
         assert TOOL_CALL_END not in content
@@ -992,29 +994,22 @@ class TestStreamingExtraction:
         """
         chunks = [
             '<|tool_call>call:search{query:<|"|>hel',
-            'lo<|"|>}<tool_call|> result: '
-            '<|tool_call>call:noop{}<tool_call|>',
+            'lo<|"|>}<tool_call|> result: <|tool_call>call:noop{}<tool_call|>',
         ]
         results = self._simulate_streaming(parser, mock_request, chunks)
 
         content = self._collect_content(results)
         # The legitimate text between calls IS content.
-        assert "result:" in content, (
-            f"inter-call text dropped; content={content!r}"
-        )
+        assert "result:" in content, f"inter-call text dropped; content={content!r}"
         # No tool call markers must leak into content.
         assert TOOL_CALL_START not in content
         assert TOOL_CALL_END not in content
         # No raw argument fragments must leak (e.g. the closing brace
         # or quote delimiter from the still-streaming first call).
-        assert "}" not in content, (
-            f"raw arg fragment leaked into content: {content!r}"
-        )
+        assert "}" not in content, f"raw arg fragment leaked into content: {content!r}"
         assert '<|"|>' not in content
 
-    def test_streaming_end_then_start_no_duplication(
-        self, parser, mock_request
-    ):
+    def test_streaming_end_then_start_no_duplication(self, parser, mock_request):
         """End-then-start in one delta must not duplicate inter-call text.
 
         Regression for the ``last_end < first_start`` slicing edge case
