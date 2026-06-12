@@ -2,10 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3 parser for tool calls and reasoning.
 
-``Qwen3Parser`` handles reasoning (``<think>``/``</think>``) **plus**
-tool calls in a single state machine.  Starts in REASONING state
-because Qwen3.5+ chat templates place ``<think>`` in the prompt.
-
 Qwen3 XML tool call format::
 
     <tool_call>
@@ -171,7 +167,6 @@ class Qwen3Parser(ParserEngine):
     """Qwen3 parser: ``<think>``/``</think>`` reasoning +
     ``<tool_call>`` XML tool calls in a single engine.
 
-    - Starts in REASONING state (Qwen3.5+ puts ``<think>`` in prompt)
     - ``<tool_call>`` as implicit reasoning end
     - Unpaired ``<tool_call>`` token ID detection for ``is_reasoning_end``
     """
