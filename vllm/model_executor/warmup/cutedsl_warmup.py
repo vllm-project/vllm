@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import sys
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -23,6 +26,8 @@ logger = init_logger(__name__)
 CuTeDSLWarmupCallback = Callable[["GPUModelRunner", Sequence[int]], None]
 CuTeDSLWarmupMode = Literal["prefill", "mixed", "uniform_decode"]
 _VALID_MODEL_RUNNER_MODES = {"prefill", "mixed", "uniform_decode"}
+_CUTE_DSL_CACHE_ENABLED_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"
+_CUTE_DSL_CACHE_DIR_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR"
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,77 @@ def _run_cudagraph_capture_mode_warmup(runner: "GPUModelRunner") -> None:
         )
 
 
+def _reset_cutedsl_persistent_cache() -> bool:
+    if os.environ.get(_CUTE_DSL_CACHE_ENABLED_ENV) != "1":
+        return False
+
+    cache_dir = os.environ.get(_CUTE_DSL_CACHE_DIR_ENV)
+    if not cache_dir:
+        return False
+
+    cache_path = Path(cache_dir)
+    try:
+        cache_path.mkdir(parents=True, exist_ok=True)
+        for child in cache_path.rglob("*"):
+            if child.is_file():
+                child.unlink(missing_ok=True)
+    except Exception:
+        logger.exception("Failed to reset CuTeDSL persistent cache at %s.", cache_path)
+        return False
+
+    logger.warning(
+        "Reset CuTeDSL persistent cache at %s after warmup failed.",
+        cache_path,
+    )
+    return True
+
+
+def _clear_cutedsl_in_memory_caches() -> None:
+    cache_attrs = (
+        "_flash_attn_fwd",
+        "_flash_attn_fwd_combine",
+        "_flash_attn_bwd",
+        "_bwd_preprocess",
+        "_bwd_postprocess_convert",
+    )
+    cleared = 0
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.endswith(".cute.interface"):
+            continue
+        for attr_name in cache_attrs:
+            fn = getattr(module, attr_name, None)
+            cache = getattr(fn, "compile_cache", None)
+            clear = getattr(cache, "clear", None)
+            if clear is None:
+                continue
+            clear()
+            cleared += 1
+    if cleared:
+        logger.warning("Cleared %d CuTeDSL in-memory compile caches.", cleared)
+
+
+def _run_cutedsl_warmup_once(
+    runner: "GPUModelRunner",
+    plans: list[CuTeDSLWarmupPlan],
+    token_sizes: list[int],
+    model_runner_modes: set[CuTeDSLWarmupMode],
+    use_cudagraph_capture_modes: bool,
+) -> None:
+    with torch.inference_mode():
+        if token_sizes:
+            for plan in plans:
+                for callback in plan.warmup_callbacks:
+                    callback(runner, token_sizes)
+            if "prefill" in model_runner_modes:
+                _run_prefill_dummy_warmup(runner, token_sizes)
+            if "mixed" in model_runner_modes:
+                _run_mixed_dummy_warmup(runner, token_sizes)
+            if "uniform_decode" in model_runner_modes:
+                _run_uniform_decode_dummy_warmup(runner)
+        if use_cudagraph_capture_modes:
+            _run_cudagraph_capture_mode_warmup(runner)
+
+
 @instrument(span_name="CuTeDSL warmup")
 def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     """Run CuTeDSL warmup providers before serving."""
@@ -273,24 +349,39 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     )
 
     start_time = time.perf_counter()
-    with torch.inference_mode():
-        if token_sizes:
-            for plan in plans:
-                for callback in plan.warmup_callbacks:
-                    try:
-                        callback(runner, token_sizes)
-                    except Exception:
-                        logger.exception(
-                            "CuTeDSL warmup provider %s failed.", plan.provider
-                        )
-                        raise
-            if "prefill" in model_runner_modes:
-                _run_prefill_dummy_warmup(runner, token_sizes)
-            if "mixed" in model_runner_modes:
-                _run_mixed_dummy_warmup(runner, token_sizes)
-            if "uniform_decode" in model_runner_modes:
-                _run_uniform_decode_dummy_warmup(runner)
-        if use_cudagraph_capture_modes:
-            _run_cudagraph_capture_mode_warmup(runner)
+    try:
+        _run_cutedsl_warmup_once(
+            runner,
+            plans,
+            token_sizes,
+            model_runner_modes,
+            use_cudagraph_capture_modes,
+        )
+    except Exception:
+        if not _reset_cutedsl_persistent_cache():
+            logger.exception("CuTeDSL warmup providers=%s failed.", provider_names)
+            raise
+
+        _clear_cutedsl_in_memory_caches()
+        logger.warning(
+            "CuTeDSL warmup providers=%s failed. Retrying once after "
+            "persistent cache reset.",
+            provider_names,
+            exc_info=True,
+        )
+        try:
+            _run_cutedsl_warmup_once(
+                runner,
+                plans,
+                token_sizes,
+                model_runner_modes,
+                use_cudagraph_capture_modes,
+            )
+        except Exception:
+            logger.exception(
+                "CuTeDSL warmup providers=%s failed after persistent cache reset.",
+                provider_names,
+            )
+            raise
 
     logger.info("CuTeDSL warmup completed in %.2f s.", time.perf_counter() - start_time)
