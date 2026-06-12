@@ -700,7 +700,7 @@ class ParserEngine(Parser):
                 case EventType.REASONING_END:
                     self._reasoning_ended = True
                 case EventType.TOOL_CALL_START:
-                    self._init_tool_slot(event)
+                    self._ensure_slot(event.tool_index)
                 case EventType.TOOL_NAME:
                     self._handle_tool_name(event)
                 case EventType.ARG_VALUE_CHUNK:
@@ -740,15 +740,15 @@ class ParserEngine(Parser):
         while len(self._tool_slots) <= idx:
             self._tool_slots.append(ToolCallSlot())
 
-    def _init_tool_slot(self, event: SemanticEvent) -> None:
-        idx = event.tool_index
-        self._ensure_slot(idx)
-        state = self._stream_state
-        self._tool_slots[idx].id = make_tool_call_id(
-            id_type=state.tool_call_id_type,
-            idx=state.history_tool_call_cnt,
-        )
-        state.history_tool_call_cnt += 1
+    def _ensure_tool_id(self, slot: ToolCallSlot, name: str) -> None:
+        if not slot.id:
+            state = self._stream_state
+            slot.id = make_tool_call_id(
+                id_type=state.tool_call_id_type,
+                func_name=name,
+                idx=state.history_tool_call_cnt,
+            )
+            state.history_tool_call_cnt += 1
 
     def _handle_tool_name(self, event: SemanticEvent) -> None:
         idx = event.tool_index
@@ -765,6 +765,7 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
+        self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
                 index=idx,
@@ -819,6 +820,7 @@ class ParserEngine(Parser):
             if name:
                 slot.name = name
                 slot.name_sent = True
+                self._ensure_tool_id(slot, name)
                 deltas.append(
                     DeltaToolCall(
                         index=idx,
@@ -932,7 +934,7 @@ class ParserEngine(Parser):
 
         tool_calls: list[ToolCall] = []
         for idx, slot in enumerate(self._tool_slots):
-            if not slot.id:
+            if not slot.name and not slot.args:
                 continue
 
             name = slot.name.strip()
@@ -956,6 +958,7 @@ class ParserEngine(Parser):
                 args_json = "{}"
 
             if name:
+                self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(
                     ToolCall(

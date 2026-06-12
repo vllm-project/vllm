@@ -198,6 +198,24 @@ class TestEventsToDelta:
         assert delta.reasoning == "thinking..."
         assert delta.content == "answer"
 
+    def test_kimi_k2_tool_call_id_includes_func_name(self):
+        engine = _make_engine()
+        engine._stream_state.tool_call_id_type = "kimi_k2"
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(
+                EventType.ARG_VALUE_CHUNK,
+                '{"city": "NYC"}',
+                tool_index=0,
+            ),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert len(delta.tool_calls) == 1
+        assert delta.tool_calls[0].id == "functions.get_weather:0"
+
 
 # ── TestContentWhitespaceHandling ────────────────────────────────────
 
