@@ -350,7 +350,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
     };
 
     pb::FinishInfo {
-        num_output_tokens: finished.output_token_count as u32,
+        num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
@@ -590,8 +590,11 @@ mod tests {
 
     fn finished(reason: FinishReason) -> Finished {
         Finished {
-            prompt_token_count: 0,
-            output_token_count: 0,
+            usage: vllm_llm::TokenUsage {
+                prompt_token_count: 0,
+                output_token_count: 0,
+                cached_token_count: 0,
+            },
             finish_reason: reason,
             kv_transfer_params: None,
         }
