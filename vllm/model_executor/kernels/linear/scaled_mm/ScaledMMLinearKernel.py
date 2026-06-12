@@ -9,6 +9,9 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -120,7 +123,7 @@ class FP8ScaledMMLinearKernel(
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
@@ -130,20 +133,36 @@ class FP8ScaledMMLinearKernel(
         #   ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_s computed from x.
         #   If static, layer.input_scale is scalar and x_s is input_scale.
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], w.shape[1]]
-        out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
+        if isinstance(x, QuantizedActivation):
+            if x.quant_key is not None and x.quant_key != self.config.activation_quant_key:
+                raise ValueError(
+                    "Pre-quantized activation uses an incompatible quantization "
+                    f"scheme: expected {self.config.activation_quant_key}, got "
+                    f"{x.quant_key}."
+                )
+            if x.scale is None:
+                raise ValueError("Pre-quantized activation is missing its scale.")
+            x_2d_q = x.q.view(-1, x.q.shape[-1])
+            output_shape = [*x.q.shape[:-1], w.shape[1]]
+            input_dtype = self.config.input_dtype
+            x_s = x.scale
+        else:
+            # View input as 2D matrix for fp8 methods
+            x_2d = x.view(-1, x.shape[-1])
+            output_shape = [*x.shape[:-1], w.shape[1]]
+            input_dtype = x.dtype
 
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
-        x_2d_q = x_2d
-        if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-                x_s_ub,
-            )
+            # If input not quantized
+            # TODO(luka) remove this path if not used anymore
+            x_2d_q = x_2d
+            if x.dtype != fp8_dtype:
+                x_2d_q, x_s = self.quant_fp8(
+                    x_2d,
+                    x_s,
+                    x_s_ub,
+                )
+
+        out_dtype = input_dtype if maybe_out_dtype is None else maybe_out_dtype
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
