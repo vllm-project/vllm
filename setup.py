@@ -1239,6 +1239,8 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
+        # extra quantization plugin
+        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
