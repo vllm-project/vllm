@@ -1219,9 +1219,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     )
 
     worker = _make_bare_worker(block_size=8)
-    full = FullAttentionSpec(
-        block_size=32, num_kv_heads=8, head_size=64, dtype=None
-    )
+    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
     swa = SlidingWindowSpec(
         block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
     )
