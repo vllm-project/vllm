@@ -11,7 +11,7 @@ from compressed_tensors.quantization import (
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
     SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -318,7 +318,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
