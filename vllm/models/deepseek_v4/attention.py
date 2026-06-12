@@ -447,30 +447,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                return q
+                return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+            run_indexer = lambda: indexer(
+                hidden_states,
+                qr,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                self.indexer_rotary_emb,
+            )
+            run_compressor = lambda: compressor(kv_score, positions, self.rotary_emb)
 
             if BreakableCUDAGraphCapture.is_active():
-                compressor_aux_stream = (
-                    aux_streams[1] if aux_streams is not None else None
-                )
-                # try run wq_b_kv_insert in default stream
-                # and compressor in aux stream
                 q, _ = maybe_execute_in_parallel(
                     wq_b_kv_insert,
-                    lambda: compressor(kv_score, positions, self.rotary_emb),
+                    run_compressor,
                     self.ln_events[0],
                     self.ln_events[1],
-                    compressor_aux_stream,
+                    aux_streams[1] if aux_streams is not None else None,
                 )
-                indexer(
-                    hidden_states,
-                    qr,
-                    indexer_kv_score,
-                    indexer_weights,
-                    positions,
-                    self.indexer_rotary_emb,
-                )
+                run_indexer()
             else:
                 # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
                 # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
@@ -478,17 +475,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 # overlap. ROCm (aux_streams is None) falls back to sequential.
                 q, _ = execute_in_parallel(
                     wq_b_kv_insert,
-                    [
-                        lambda: indexer(
-                            hidden_states,
-                            qr,
-                            indexer_kv_score,
-                            indexer_weights,
-                            positions,
-                            self.indexer_rotary_emb,
-                        ),
-                        lambda: compressor(kv_score, positions, self.rotary_emb),
-                    ],
+                    [run_indexer, run_compressor],
                     self.ln_events[0],
                     [self.ln_events[1], self.ln_events[2]],
                     [aux_streams[0], aux_streams[1]]
