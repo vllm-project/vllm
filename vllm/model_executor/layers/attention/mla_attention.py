@@ -762,7 +762,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
+                # Sparse MLA impls keep q as a bf16 (nope, pe) tuple even with
+                # an fp8 kv-cache (supports_quant_query_input is False), so the
+                # cat + all-gather below stays valid. Dense fp8 paths would
+                # quantize q into a single tensor and remain unsupported.
+                assert not fp8_attention or is_sparse_impl, (
+                    "DCP with fp8 kv-cache is only supported for sparse MLA backends."
+                )
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
