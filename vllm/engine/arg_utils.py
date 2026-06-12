@@ -650,6 +650,9 @@ class EngineArgs:
     cutedsl_warmup_token_sizes: list[int] = get_field(
         KernelConfig, "cutedsl_warmup_token_sizes"
     )
+    cutedsl_warmup_use_cudagraph_descriptors: bool = (
+        KernelConfig.cutedsl_warmup_use_cudagraph_descriptors
+    )
     cutedsl_cache_dir: str | None = KernelConfig.cutedsl_cache_dir
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
@@ -1458,6 +1461,10 @@ class EngineArgs:
             **kernel_kwargs["cutedsl_warmup_token_sizes"],
         )
         kernel_group.add_argument(
+            "--cutedsl-warmup-use-cudagraph-descriptors",
+            **kernel_kwargs["cutedsl_warmup_use_cudagraph_descriptors"],
+        )
+        kernel_group.add_argument(
             "--cutedsl-cache-dir",
             **kernel_kwargs["cutedsl_cache_dir"],
         )
@@ -2167,6 +2174,10 @@ class EngineArgs:
         default_cutedsl_token_sizes = KernelConfig().cutedsl_warmup_token_sizes
         if self.cutedsl_warmup_token_sizes != default_cutedsl_token_sizes:
             kernel_config.cutedsl_warmup_token_sizes = self.cutedsl_warmup_token_sizes
+        if self.cutedsl_warmup_use_cudagraph_descriptors:
+            kernel_config.cutedsl_warmup_use_cudagraph_descriptors = (
+                self.cutedsl_warmup_use_cudagraph_descriptors
+            )
         if self.cutedsl_cache_dir is not None:
             kernel_config.cutedsl_cache_dir = self.cutedsl_cache_dir
         if self.moe_backend != "auto":

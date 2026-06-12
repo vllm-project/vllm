@@ -183,6 +183,9 @@ class KernelConfig:
     )
     """Token counts to use for CuTeDSL warmup runs."""
 
+    cutedsl_warmup_use_cudagraph_descriptors: bool = False
+    """If True, warm CuTeDSL kernels for CUDA graph capture descriptors."""
+
     cutedsl_cache_dir: str | None = None
     """Root directory for the persistent CuTeDSL cache.
 
@@ -254,6 +257,7 @@ class KernelConfig:
         """
         ignored_factors = {
             "cutedsl_cache_dir",
+            "cutedsl_warmup_use_cudagraph_descriptors",
             "cutedsl_warmup_token_sizes",
             "enable_cutedsl_warmup",
             "enable_flashinfer_autotune",
@@ -291,11 +295,14 @@ class KernelConfig:
         )
 
     def _compute_cutedsl_cache_namespace(self, vllm_config: "VllmConfig") -> str:
+        from vllm.platforms import current_platform
+
         factors: dict[str, Any] = {
             "schema": 1,
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "torch": getattr(torch, "__version__", "unknown"),
             "torch_cuda": getattr(torch.version, "cuda", None),
+            "device_capability": repr(current_platform.get_device_capability()),
             "vllm_config": self._get_cutedsl_cache_config_factors(vllm_config),
         }
         for package_name in (

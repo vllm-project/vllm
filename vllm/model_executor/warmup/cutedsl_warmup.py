@@ -238,45 +238,58 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
         )
         return
 
-    token_sizes = _get_cutedsl_warmup_token_sizes(runner)
-    if not token_sizes:
-        logger.info("Skipping CuTeDSL warmup because no token sizes were selected.")
-        return
-
     provider_names = [plan.provider for plan in plans]
     model_runner_modes = {
         mode for plan in plans for mode in plan.model_runner_modes
     }
-    use_cudagraph_capture_modes = any(
+    has_cudagraph_capture_modes = any(
         plan.cudagraph_capture_modes for plan in plans
     )
+    use_cudagraph_capture_modes = (
+        has_cudagraph_capture_modes
+        and runner.vllm_config.kernel_config.cutedsl_warmup_use_cudagraph_descriptors
+    )
+    token_sizes = _get_cutedsl_warmup_token_sizes(runner)
+    uses_token_sizes = bool(model_runner_modes) or any(
+        plan.warmup_callbacks for plan in plans
+    )
+    if not token_sizes and uses_token_sizes:
+        logger.info(
+            "Skipping CuTeDSL token-size warmup because no token sizes were "
+            "selected."
+        )
+        if not use_cudagraph_capture_modes:
+            return
 
     logger.info(
         "Warming up CuTeDSL providers=%s with token_sizes=%s "
-        "model_runner_modes=%s and cudagraph_capture_modes=%s.",
+        "model_runner_modes=%s, cudagraph_capture_modes=%s, "
+        "use_cudagraph_descriptors=%s.",
         provider_names,
         token_sizes,
         sorted(model_runner_modes),
+        has_cudagraph_capture_modes,
         use_cudagraph_capture_modes,
     )
 
     start_time = time.perf_counter()
     with torch.inference_mode():
-        for plan in plans:
-            for callback in plan.warmup_callbacks:
-                try:
-                    callback(runner, token_sizes)
-                except Exception:
-                    logger.exception(
-                        "CuTeDSL warmup provider %s failed.", plan.provider
-                    )
-                    raise
-        if "prefill" in model_runner_modes:
-            _run_prefill_dummy_warmup(runner, token_sizes)
-        if "mixed" in model_runner_modes:
-            _run_mixed_dummy_warmup(runner, token_sizes)
-        if "uniform_decode" in model_runner_modes:
-            _run_uniform_decode_dummy_warmup(runner)
+        if token_sizes:
+            for plan in plans:
+                for callback in plan.warmup_callbacks:
+                    try:
+                        callback(runner, token_sizes)
+                    except Exception:
+                        logger.exception(
+                            "CuTeDSL warmup provider %s failed.", plan.provider
+                        )
+                        raise
+            if "prefill" in model_runner_modes:
+                _run_prefill_dummy_warmup(runner, token_sizes)
+            if "mixed" in model_runner_modes:
+                _run_mixed_dummy_warmup(runner, token_sizes)
+            if "uniform_decode" in model_runner_modes:
+                _run_uniform_decode_dummy_warmup(runner)
         if use_cudagraph_capture_modes:
             _run_cudagraph_capture_mode_warmup(runner)
 
