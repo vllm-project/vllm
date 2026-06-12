@@ -4,7 +4,6 @@
 from typing import Any
 
 import torch
-
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -22,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -32,6 +30,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+
+from vllm.model_executor.layers.quantization import QuantizationMethods
 
 
 class MoeWNA16Config(QuantizationConfig):
@@ -480,9 +480,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 )
 
             if "w13_qzeros" in weight_name:
-                tensor = loaded_weight.view(layer.moe_config.tp_size, -1, loaded_weight.size(1))[
-                    tp_rank
-                ]
+                tensor = loaded_weight.view(
+                    layer.moe_config.tp_size, -1, loaded_weight.size(1)
+                )[tp_rank]
                 if shard_id == "w1":
                     param.data[expert_id, : shard_size // 2] = tensor
                 else:
