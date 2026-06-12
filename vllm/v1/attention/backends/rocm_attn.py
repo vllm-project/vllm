@@ -36,6 +36,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.utils import create_attention_profiler_scope
 
 logger = init_logger(__name__)
 
@@ -342,19 +343,30 @@ class RocmAttentionImpl(AttentionImpl):
         # Call flash attention directly on Q, K, V tensors
         from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
-        context_attention_fwd(
-            q=query,
-            k=key,
-            v=value,
-            o=output,
-            b_start_loc=query_start_loc,
-            b_seq_len=seq_lens,
-            max_input_len=max_query_len,
+        with create_attention_profiler_scope(
+            backend_name="ROCM_ATTN",
+            batch_size=seq_lens.shape[0],
+            max_query_len=max_query_len,
+            max_seq_len=max_query_len,  # For encoder, Q and S are the same
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
             is_causal=False,
-            softmax_scale=self.scale,
-            sliding_window_q=self.sliding_window[0],
-            sliding_window_k=self.sliding_window[1],
-        )
+        ):
+            context_attention_fwd(
+                q=query,
+                k=key,
+                v=value,
+                o=output,
+                b_start_loc=query_start_loc,
+                b_seq_len=seq_lens,
+                max_input_len=max_query_len,
+                is_causal=False,
+                softmax_scale=self.scale,
+                sliding_window_q=self.sliding_window[0],
+                sliding_window_k=self.sliding_window[1],
+            )
         return output
 
     def forward(
@@ -432,28 +444,39 @@ class RocmAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         # Compute attention and update output up to `num_actual_tokens`.
-        chunked_prefill_paged_decode(
-            query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens] if key is not None else None,
-            value=value[:num_actual_tokens] if value is not None else None,
-            output=output[:num_actual_tokens],
-            kv_cache_dtype=self.kv_cache_dtype,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            block_table=block_table,
-            query_start_loc=cu_seqlens_q,
-            seq_lens=seqused_k,
-            max_seq_len=max_seqlen_k,
+        with create_attention_profiler_scope(
+            backend_name="ROCM_ATTN",
+            batch_size=seqused_k.shape[0],
             max_query_len=max_seqlen_q,
-            k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window[0],
-            sm_scale=self.scale,
-            output_scale=output_scale,
-            sinks=self.sinks,
-            causal=attn_metadata.causal,
-        )
+            max_seq_len=max_seqlen_k,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
+            is_causal=attn_metadata.causal,
+        ):
+            chunked_prefill_paged_decode(
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens] if key is not None else None,
+                value=value[:num_actual_tokens] if value is not None else None,
+                output=output[:num_actual_tokens],
+                kv_cache_dtype=self.kv_cache_dtype,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=block_table,
+                query_start_loc=cu_seqlens_q,
+                seq_lens=seqused_k,
+                max_seq_len=max_seqlen_k,
+                max_query_len=max_seqlen_q,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window[0],
+                sm_scale=self.scale,
+                output_scale=output_scale,
+                sinks=self.sinks,
+                causal=attn_metadata.causal,
+            )
 
         return output
 

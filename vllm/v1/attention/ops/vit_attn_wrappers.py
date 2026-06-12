@@ -18,6 +18,7 @@ import torch.nn.functional as F
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.utils import create_attention_profiler_scope
 
 
 def flash_attn_maxseqlen_wrapper(
@@ -53,19 +54,37 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens = cu_seqlens.to(q.device, non_blocking=True)
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = flash_attn_varlen_func(
-        q,
-        k,
-        v,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen,
-        max_seqlen_k=max_seqlen,
-        dropout_p=0.0,
-        causal=False,
-        softmax_scale=scale,
-        **kwargs,
-    )
+
+    # Prepare profiling scope for attention metadata
+    num_heads = q.shape[1]
+    head_size = q.shape[2]
+    num_kv_heads = k.shape[1]
+    backend_name = "ROCM_AITER_FA" if is_rocm_aiter else "FLASH_ATTN"
+
+    with create_attention_profiler_scope(
+        backend_name=backend_name,
+        batch_size=batch_size,
+        max_query_len=max_seqlen,
+        max_seq_len=max_seqlen,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_kv_heads=num_kv_heads,
+        dtype=q.dtype,
+        is_causal=False,
+    ):
+        output = flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            dropout_p=0.0,
+            causal=False,
+            softmax_scale=scale,
+            **kwargs,
+        )
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
@@ -135,19 +154,36 @@ def triton_attn_wrapper(
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q)
-    context_attention_fwd(
-        q,
-        k,
-        v,
-        output,
-        b_start_loc=cu_seqlens[:-1],
-        b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
-        max_input_len=max_seqlen,
+
+    # Prepare profiling scope for attention metadata
+    num_heads = q.shape[1]
+    head_size = q.shape[2]
+    num_kv_heads = k.shape[1]
+
+    with create_attention_profiler_scope(
+        backend_name="TRITON_ATTN",
+        batch_size=batch_size,
+        max_query_len=max_seqlen,
+        max_seq_len=max_seqlen,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_kv_heads=num_kv_heads,
+        dtype=q.dtype,
         is_causal=False,
-        sliding_window_q=None,
-        sliding_window_k=None,
-        softmax_scale=scale,
-    )
+    ):
+        context_attention_fwd(
+            q,
+            k,
+            v,
+            output,
+            b_start_loc=cu_seqlens[:-1],
+            b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+            max_input_len=max_seqlen,
+            is_causal=False,
+            sliding_window_q=None,
+            sliding_window_k=None,
+            softmax_scale=scale,
+        )
 
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
@@ -204,9 +240,28 @@ def apply_sdpa(
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+
+    # Prepare profiling scope for attention metadata
+    batch_size = q.shape[0]
+    num_heads = q.shape[1]
+    seq_len = q.shape[2]
+    head_size = q.shape[3]
+    num_kv_heads = k.shape[1]
+
+    with create_attention_profiler_scope(
+        backend_name="TORCH_SDPA",
+        batch_size=batch_size,
+        max_query_len=seq_len,
+        max_seq_len=seq_len,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_kv_heads=num_kv_heads,
+        dtype=q.dtype,
+        is_causal=False,  # ViT attention is non-causal
+    ):
+        output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 

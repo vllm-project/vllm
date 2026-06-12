@@ -244,11 +244,17 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
-        if row_limit is None:  # use profiler default row limit of 100
-            return self.profiler.key_averages().table(sort_by=sort_key)
+        # Set default max_name_column_width=100 to ensure profiler scopes like:
+        # "attn_causal B=1 Q=1 S=159 H=14 D=64 KV_H=2 DT=bfloat16 BE=ROCM_ATTN"
+        # have sufficient characters to show the full set of data
+        if row_limit is None:
+            return self.profiler.key_averages().table(
+                sort_by=sort_key, max_name_column_width=100
+            )
         return self.profiler.key_averages().table(
             sort_by=sort_key,
             row_limit=row_limit,
+            max_name_column_width=100,
         )
 
     def _write_profiler_table(self, rank: int, table: str) -> None:

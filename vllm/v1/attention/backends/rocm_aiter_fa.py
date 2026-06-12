@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.utils import create_attention_profiler_scope
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
@@ -1087,23 +1088,36 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 prefill_key = key[num_decode_tokens + num_extend_tokens :]
                 prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-                rocm_aiter_ops.flash_attn_varlen_func(
-                    q=prefill_query,
-                    k=prefill_key,
-                    v=prefill_value,
-                    cu_seqlens_q=attn_metadata.prefill_metadata.query_start_loc,
-                    cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
-                    max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                    min_seqlen_q=1,
-                    dropout_p=0.0,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
-                    out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
-                    sink_ptr=self.sinks,
-                )
+                with create_attention_profiler_scope(
+                    backend_name="ROCM_AITER_FA",
+                    batch_size=num_prefills,
+                    max_query_len=attn_metadata.prefill_metadata.max_query_len,
+                    max_seq_len=attn_metadata.prefill_metadata.max_seq_len,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    num_kv_heads=self.num_kv_heads,
+                    dtype=prefill_query.dtype,
+                    is_causal=attn_metadata.causal,
+                ):
+                    rocm_aiter_ops.flash_attn_varlen_func(
+                        q=prefill_query,
+                        k=prefill_key,
+                        v=prefill_value,
+                        cu_seqlens_q=attn_metadata.prefill_metadata.query_start_loc,
+                        cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
+                        max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
+                        max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
+                        min_seqlen_q=1,
+                        dropout_p=0.0,
+                        softmax_scale=self.scale,
+                        causal=attn_metadata.causal,
+                        window_size=self.sliding_window,
+                        alibi_slopes=self.alibi_slopes,
+                        out=output_actual_tokens[
+                            num_decode_tokens + num_extend_tokens :
+                        ],
+                        sink_ptr=self.sinks,
+                    )
 
             # calculate for extends
             if num_extends > 0:
@@ -1120,27 +1134,39 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     k_scale = attn_metadata.k_scale
                     v_scale = attn_metadata.v_scale
-                self.extend_forward(
-                    attn_metadata=attn_metadata,
-                    query=extend_queries,
-                    key=extend_keys,
-                    value=extend_values,
-                    key_cache=key_cache,
-                    value_cache=value_cache,
-                    output=extend_outputs,
-                    cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
-                    min_seqlen_q=1,
-                    max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
-                    block_table=attn_metadata.block_table[
-                        num_decodes : num_decodes + num_extends
-                    ],
-                    slot_mapping=attn_metadata.slot_mapping[
-                        num_decodes : num_decodes + num_extends
-                    ],
-                    k_scale=k_scale,
-                    v_scale=v_scale,
-                )
+
+                with create_attention_profiler_scope(
+                    backend_name="ROCM_AITER_FA",
+                    batch_size=num_extends,
+                    max_query_len=attn_metadata.extend_metadata.max_query_len,
+                    max_seq_len=attn_metadata.extend_metadata.max_seq_len,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    num_kv_heads=self.num_kv_heads,
+                    dtype=extend_queries.dtype,
+                    is_causal=True,
+                ):
+                    self.extend_forward(
+                        attn_metadata=attn_metadata,
+                        query=extend_queries,
+                        key=extend_keys,
+                        value=extend_values,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        output=extend_outputs,
+                        cu_seqlens_q=attn_metadata.extend_metadata.query_start_loc,
+                        max_seqlen_q=attn_metadata.extend_metadata.max_query_len,
+                        min_seqlen_q=1,
+                        max_seqlen_k=attn_metadata.extend_metadata.max_seq_len,
+                        block_table=attn_metadata.block_table[
+                            num_decodes : num_decodes + num_extends
+                        ],
+                        slot_mapping=attn_metadata.slot_mapping[
+                            num_decodes : num_decodes + num_extends
+                        ],
+                        k_scale=k_scale,
+                        v_scale=v_scale,
+                    )
 
             # calculate for decodes
             if num_decodes > 0:
@@ -1171,27 +1197,39 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             query.shape[1],
                             query.shape[2],
                         )
-                        decode_out = flash_attn_with_kvcache(
-                            q=decode_query,
-                            k_cache=key_cache,
-                            v_cache=value_cache,
-                            cache_seqlens=attn_metadata.seq_lens[:num_decodes],
-                            softmax_scale=self.scale,
-                            causal=attn_metadata.causal,
-                            window_size=self.sliding_window,
-                            softcap=self.logits_soft_cap,
-                            q_descale=None,
-                            k_descale=layer._k_scale.expand(descale_shape),
-                            v_descale=layer._v_scale.expand(descale_shape),
-                            page_table=attn_metadata.block_table[:num_decodes],
-                        )
-                        output[:num_decode_tokens].copy_(
-                            decode_out.reshape(
-                                num_decode_tokens,
-                                query.shape[1],
-                                query.shape[2],
+
+                        with create_attention_profiler_scope(
+                            backend_name="ROCM_AITER_FA",
+                            batch_size=num_decodes,
+                            max_query_len=decode_max_query_len,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            num_heads=self.num_heads,
+                            head_size=self.head_size,
+                            num_kv_heads=self.num_kv_heads,
+                            dtype=query.dtype,
+                            is_causal=attn_metadata.causal,
+                        ):
+                            decode_out = flash_attn_with_kvcache(
+                                q=decode_query,
+                                k_cache=key_cache,
+                                v_cache=value_cache,
+                                cache_seqlens=attn_metadata.seq_lens[:num_decodes],
+                                softmax_scale=self.scale,
+                                causal=attn_metadata.causal,
+                                window_size=self.sliding_window,
+                                softcap=self.logits_soft_cap,
+                                q_descale=None,
+                                k_descale=layer._k_scale.expand(descale_shape),
+                                v_descale=layer._v_scale.expand(descale_shape),
+                                page_table=attn_metadata.block_table[:num_decodes],
                             )
-                        )
+                            output[:num_decode_tokens].copy_(
+                                decode_out.reshape(
+                                    num_decode_tokens,
+                                    query.shape[1],
+                                    query.shape[2],
+                                )
+                            )
                     else:
                         # Non-uniform query lengths can appear in real serving
                         # traffic (e.g. mixed datasets). Fall back to varlen
@@ -1204,28 +1242,40 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             num_decodes,
                             key_cache.shape[2],
                         )
-                        unified_attention(
-                            q=query[:num_decode_tokens],
-                            k=key_cache,
-                            v=value_cache,
-                            out=output[:num_decode_tokens],
-                            cu_seqlens_q=attn_metadata.query_start_loc[
-                                : num_decodes + 1
-                            ],
-                            max_seqlen_q=decode_max_query_len,
-                            seqused_k=attn_metadata.seq_lens[:num_decodes],
-                            max_seqlen_k=attn_metadata.max_seq_len,
-                            softmax_scale=self.scale,
-                            causal=True,
-                            alibi_slopes=self.alibi_slopes,
-                            window_size=self.sliding_window,
-                            block_table=attn_metadata.block_table[:num_decodes],
-                            softcap=self.logits_soft_cap,
-                            q_descale=None,
-                            k_descale=layer._k_scale.expand(descale_shape),
-                            v_descale=layer._v_scale.expand(descale_shape),
-                            sinks=self.sinks,
-                        )
+
+                        with create_attention_profiler_scope(
+                            backend_name="ROCM_AITER_FA",
+                            batch_size=num_decodes,
+                            max_query_len=decode_max_query_len,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            num_heads=self.num_heads,
+                            head_size=self.head_size,
+                            num_kv_heads=self.num_kv_heads,
+                            dtype=query.dtype,
+                            is_causal=True,
+                        ):
+                            unified_attention(
+                                q=query[:num_decode_tokens],
+                                k=key_cache,
+                                v=value_cache,
+                                out=output[:num_decode_tokens],
+                                cu_seqlens_q=attn_metadata.query_start_loc[
+                                    : num_decodes + 1
+                                ],
+                                max_seqlen_q=decode_max_query_len,
+                                seqused_k=attn_metadata.seq_lens[:num_decodes],
+                                max_seqlen_k=attn_metadata.max_seq_len,
+                                softmax_scale=self.scale,
+                                causal=True,
+                                alibi_slopes=self.alibi_slopes,
+                                window_size=self.sliding_window,
+                                block_table=attn_metadata.block_table[:num_decodes],
+                                softcap=self.logits_soft_cap,
+                                q_descale=None,
+                                k_descale=layer._k_scale.expand(descale_shape),
+                                v_descale=layer._v_scale.expand(descale_shape),
+                                sinks=self.sinks,
+                            )
                     return
 
                 # The ll4mi kernel in paged_attention_v1 requires
@@ -1252,25 +1302,37 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         num_decodes,
                         key_cache.shape[2],
                     )
-                    unified_attention(
-                        q=query[:num_decode_tokens],
-                        k=key_cache,
-                        v=value_cache,
-                        out=output[:num_decode_tokens],
-                        cu_seqlens_q=decode_cu_seqlens_q,
-                        max_seqlen_q=1,
-                        seqused_k=attn_metadata.seq_lens[:num_decodes],
-                        max_seqlen_k=attn_metadata.max_seq_len,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        alibi_slopes=self.alibi_slopes,
-                        window_size=self.sliding_window,
-                        block_table=attn_metadata.block_table[:num_decodes],
-                        softcap=self.logits_soft_cap,
-                        q_descale=None,
-                        k_descale=layer._k_scale.expand(descale_shape),
-                        v_descale=layer._v_scale.expand(descale_shape),
-                    )
+
+                    with create_attention_profiler_scope(
+                        backend_name="ROCM_AITER_FA",
+                        batch_size=num_decodes,
+                        max_query_len=1,
+                        max_seq_len=attn_metadata.max_seq_len,
+                        num_heads=self.num_heads,
+                        head_size=self.head_size,
+                        num_kv_heads=self.num_kv_heads,
+                        dtype=query.dtype,
+                        is_causal=True,
+                    ):
+                        unified_attention(
+                            q=query[:num_decode_tokens],
+                            k=key_cache,
+                            v=value_cache,
+                            out=output[:num_decode_tokens],
+                            cu_seqlens_q=decode_cu_seqlens_q,
+                            max_seqlen_q=1,
+                            seqused_k=attn_metadata.seq_lens[:num_decodes],
+                            max_seqlen_k=attn_metadata.max_seq_len,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            alibi_slopes=self.alibi_slopes,
+                            window_size=self.sliding_window,
+                            block_table=attn_metadata.block_table[:num_decodes],
+                            softcap=self.logits_soft_cap,
+                            q_descale=None,
+                            k_descale=layer._k_scale.expand(descale_shape),
+                            v_descale=layer._v_scale.expand(descale_shape),
+                        )
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     _, num_heads, head_size = query.shape
                     num_seqs = attn_metadata.seq_lens.shape[0]
@@ -1306,27 +1368,39 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         if attn_metadata.v_scale is None
                         else attn_metadata.v_scale
                     )
-                    rocm_aiter_ops.paged_attention_common(
-                        Q=query[:num_decode_tokens],
-                        K=new_key_cache,
-                        V=new_value_cache,
-                        tmp_out=tmp_out,
-                        max_logits=max_logits,
-                        exp_sums=exp_sums,
+
+                    with create_attention_profiler_scope(
+                        backend_name="ROCM_AITER_FA",
+                        batch_size=num_decodes,
+                        max_query_len=1,
                         max_seq_len=attn_metadata.max_seq_len,
-                        block_tables=attn_metadata.block_table[:num_decodes],
-                        context_lens=attn_metadata.seq_lens[:num_decodes],
-                        block_tables_stride0=attn_metadata.block_table[
-                            :num_decodes
-                        ].stride(0),
-                        scale=self.scale,
-                        K_QScale_hip=k_qscale,
-                        V_QScale_hip=v_qscale,
-                        K_QScale_asm=k_qscale,
-                        V_QScale_asm=v_qscale,
-                        out_=output[:num_decode_tokens],
-                        kv_cache_dtype=self.kv_cache_dtype,
-                    )
+                        num_heads=self.num_heads,
+                        head_size=self.head_size,
+                        num_kv_heads=self.num_kv_heads,
+                        dtype=query.dtype,
+                        is_causal=True,
+                    ):
+                        rocm_aiter_ops.paged_attention_common(
+                            Q=query[:num_decode_tokens],
+                            K=new_key_cache,
+                            V=new_value_cache,
+                            tmp_out=tmp_out,
+                            max_logits=max_logits,
+                            exp_sums=exp_sums,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            block_tables=attn_metadata.block_table[:num_decodes],
+                            context_lens=attn_metadata.seq_lens[:num_decodes],
+                            block_tables_stride0=attn_metadata.block_table[
+                                :num_decodes
+                            ].stride(0),
+                            scale=self.scale,
+                            K_QScale_hip=k_qscale,
+                            V_QScale_hip=v_qscale,
+                            K_QScale_asm=k_qscale,
+                            V_QScale_asm=v_qscale,
+                            out_=output[:num_decode_tokens],
+                            kv_cache_dtype=self.kv_cache_dtype,
+                        )
                 else:
                     _, num_heads, head_size = query.shape
                     nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
@@ -1347,28 +1421,39 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     # torch.ops.aiter
                     import aiter  # noqa: F401
 
-                    torch.ops.aiter.paged_attention_v1(
-                        output[:num_decode_tokens],
-                        workspace_buffer,
-                        query[:num_decode_tokens],
-                        key_cache,
-                        value_cache,
-                        self.scale,
-                        attn_metadata.block_table[:num_decodes],
-                        attn_metadata.query_start_loc[:num_decodes],
-                        attn_metadata.seq_lens[:num_decodes],
-                        attn_metadata.max_seq_len,
-                        self.alibi_slopes,
-                        self.kv_cache_dtype,
-                        "NHD",
-                        self.logits_soft_cap,
-                        layer._k_scale,
-                        layer._v_scale,
-                        None,
-                        _PARTITION_SIZE_ROCM,
-                        1,
-                        self.sliding_window[0] + 1,
-                    )
+                    with create_attention_profiler_scope(
+                        backend_name="ROCM_AITER_FA",
+                        batch_size=num_decodes,
+                        max_query_len=1,
+                        max_seq_len=attn_metadata.max_seq_len,
+                        num_heads=self.num_heads,
+                        head_size=self.head_size,
+                        num_kv_heads=self.num_kv_heads,
+                        dtype=query.dtype,
+                        is_causal=True,
+                    ):
+                        torch.ops.aiter.paged_attention_v1(
+                            output[:num_decode_tokens],
+                            workspace_buffer,
+                            query[:num_decode_tokens],
+                            key_cache,
+                            value_cache,
+                            self.scale,
+                            attn_metadata.block_table[:num_decodes],
+                            attn_metadata.query_start_loc[:num_decodes],
+                            attn_metadata.seq_lens[:num_decodes],
+                            attn_metadata.max_seq_len,
+                            self.alibi_slopes,
+                            self.kv_cache_dtype,
+                            "NHD",
+                            self.logits_soft_cap,
+                            layer._k_scale,
+                            layer._v_scale,
+                            None,
+                            _PARTITION_SIZE_ROCM,
+                            1,
+                            self.sliding_window[0] + 1,
+                        )
         else:
             raise NotImplementedError(
                 "Cascade attention is not implemented for ROCM AITER"

@@ -667,6 +667,46 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
     return func(name)
 
 
+def create_attention_profiler_scope(
+    backend_name: str,
+    batch_size: int,
+    max_query_len: int,
+    max_seq_len: int,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    is_causal: bool,
+) -> AbstractContextManager:
+    """Create a profiler scope for attention operations with metadata.
+
+    Args:
+        backend_name: Name of the attention backend (e.g., "TRITON_ATTN")
+        batch_size: Number of sequences in the batch
+        max_query_len: Maximum query sequence length
+        max_seq_len: Maximum KV sequence length
+        num_heads: Number of query heads
+        head_size: Dimension of each head
+        num_kv_heads: Number of KV heads (for GQA/MQA)
+        dtype: Data type of the tensors
+        is_causal: Whether causal masking is applied
+
+    Returns:
+        Context manager for the profiler scope
+    """
+    dtype_str = str(dtype).replace("torch.", "")
+    causal_str = "causal" if is_causal else "non_causal"
+
+    scope_name = (
+        f"attn_{causal_str} "
+        f"B={batch_size} Q={max_query_len} S={max_seq_len} "
+        f"H={num_heads} D={head_size} KV_H={num_kv_heads} "
+        f"DT={dtype_str} BE={backend_name}"
+    )
+
+    return record_function_or_nullcontext(scope_name)
+
+
 def tensor_data(tensor: torch.Tensor) -> memoryview:
     """Get the raw data of a tensor as a uint8 memoryview, useful for
     serializing and hashing.

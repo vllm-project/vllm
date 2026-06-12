@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
     kv_cache_uses_per_token_head_scales,
 )
+from vllm.v1.utils import create_attention_profiler_scope
 
 logger = init_logger(__name__)
 
@@ -647,39 +648,50 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
-        unified_attention(
-            q=query[:num_actual_tokens],
-            k=key_cache,
-            v=value_cache,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=self.scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            use_alibi_sqrt=self.use_alibi_sqrt,
-            window_size=self.sliding_window,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            seq_threshold_3D=seq_threshold_3D,
-            num_par_softmax_segments=num_par_softmax_segments,
-            softmax_segm_output=softmax_segm_output,
-            softmax_segm_max=softmax_segm_max,
-            softmax_segm_expsum=softmax_segm_expsum,
-            sinks=self.sinks,
-            output_scale=output_scale,
-            mm_prefix_range=mm_prefix_range_tensor,
-            kv_quant_mode=self._kv_quant_mode,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            chunk_lookback=self.chunk_lookback,
-            use_td=self.use_td,
-        )
+        with create_attention_profiler_scope(
+            backend_name="TRITON_ATTN",
+            batch_size=seqused_k.shape[0],
+            max_query_len=max_seqlen_q,
+            max_seq_len=max_seqlen_k,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
+            is_causal=True,
+        ):
+            unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                use_alibi_sqrt=self.use_alibi_sqrt,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                seq_threshold_3D=seq_threshold_3D,
+                num_par_softmax_segments=num_par_softmax_segments,
+                softmax_segm_output=softmax_segm_output,
+                softmax_segm_max=softmax_segm_max,
+                softmax_segm_expsum=softmax_segm_expsum,
+                sinks=self.sinks,
+                output_scale=output_scale,
+                mm_prefix_range=mm_prefix_range_tensor,
+                kv_quant_mode=self._kv_quant_mode,
+                k_scale_cache=k_scale_cache,
+                v_scale_cache=v_scale_cache,
+                chunk_lookback=self.chunk_lookback,
+                use_td=self.use_td,
+            )
 
         return output
 
@@ -713,20 +725,37 @@ class TritonAttentionImpl(AttentionImpl):
         seq_lens = attn_metadata.seq_lens
         max_query_len = attn_metadata.max_query_len
 
+        # Prepare profiling scope for attention metadata
+        batch_size = seq_lens.shape[0]
+        num_heads = query.shape[1]
+        head_size = query.shape[2]
+        num_kv_heads = key.shape[1]
+
         # Call flash attention directly on Q, K, V tensors
-        context_attention_fwd(
-            q=query,
-            k=key,
-            v=value,
-            o=output,
-            b_start_loc=query_start_loc,
-            b_seq_len=seq_lens,
-            max_input_len=max_query_len,
+        with create_attention_profiler_scope(
+            backend_name="TRITON_ATTN",
+            batch_size=batch_size,
+            max_query_len=max_query_len,
+            max_seq_len=max_query_len,  # For encoder, Q and S are the same
+            num_heads=num_heads,
+            head_size=head_size,
+            num_kv_heads=num_kv_heads,
+            dtype=query.dtype,
             is_causal=False,  # Encoder attention is bidirectional
-            softmax_scale=self.scale,
-            sliding_window_q=self.sliding_window[0],
-            sliding_window_k=self.sliding_window[1],
-        )
+        ):
+            context_attention_fwd(
+                q=query,
+                k=key,
+                v=value,
+                o=output,
+                b_start_loc=query_start_loc,
+                b_seq_len=seq_lens,
+                max_input_len=max_query_len,
+                is_causal=False,  # Encoder attention is bidirectional
+                softmax_scale=self.scale,
+                sliding_window_q=self.sliding_window[0],
+                sliding_window_k=self.sliding_window[1],
+            )
         return output
 
     def do_kv_cache_update(

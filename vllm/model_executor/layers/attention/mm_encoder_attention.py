@@ -36,6 +36,7 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_torch_sdpa_wrapper,
     vit_triton_attn_wrapper,
 )
+from vllm.v1.utils import create_attention_profiler_scope
 
 logger = init_logger(__name__)
 
@@ -518,14 +519,25 @@ class MMEncoderAttention(CustomOp):
 
         query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
 
-        output = vit_torch_sdpa_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            enable_gqa=self.num_heads > self.num_kv_heads,
-        )
+        with create_attention_profiler_scope(
+            backend_name="TORCH_SDPA",
+            batch_size=bsz,
+            max_query_len=q_len,
+            max_seq_len=kv_len,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
+            is_causal=False,  # ViT attention is non-causal
+        ):
+            output = vit_torch_sdpa_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                enable_gqa=self.num_heads > self.num_kv_heads,
+            )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output
@@ -552,17 +564,36 @@ class MMEncoderAttention(CustomOp):
 
         query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
 
-        output = vit_flash_attn_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            batch_size=bsz,
-            is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
-            fa_version=self._fa_version,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+        # Prepare profiling scope for attention metadata
+        max_seqlen_val = max_seqlen.item() if max_seqlen is not None else q_len
+        backend_name = (
+            "ROCM_AITER_FA"
+            if self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
+            else "FLASH_ATTN"
         )
+
+        with create_attention_profiler_scope(
+            backend_name=backend_name,
+            batch_size=bsz,
+            max_query_len=max_seqlen_val,
+            max_seq_len=max_seqlen_val,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
+            is_causal=False,  # ViT attention is non-causal
+        ):
+            output = vit_flash_attn_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                batch_size=bsz,
+                is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
+                fa_version=self._fa_version,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output
@@ -589,15 +620,29 @@ class MMEncoderAttention(CustomOp):
 
         query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
 
-        output = vit_triton_attn_wrapper(
-            q=query,
-            k=key,
-            v=value,
+        # Prepare profiling scope for attention metadata
+        max_seqlen_val = max_seqlen.item() if max_seqlen is not None else q_len
+
+        with create_attention_profiler_scope(
+            backend_name="TRITON_ATTN",
             batch_size=bsz,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
+            max_query_len=max_seqlen_val,
+            max_seq_len=max_seqlen_val,
+            num_heads=self.num_heads,
+            head_size=self.head_size,
+            num_kv_heads=self.num_kv_heads,
+            dtype=query.dtype,
+            is_causal=False,  # ViT attention is non-causal
+        ):
+            output = vit_triton_attn_wrapper(
+                q=query,
+                k=key,
+                v=value,
+                batch_size=bsz,
+                scale=self.scale,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output

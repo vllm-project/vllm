@@ -61,6 +61,7 @@ from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.utils import create_attention_profiler_scope
 
 logger = init_logger(__name__)
 
@@ -793,29 +794,41 @@ class FlashAttentionImpl(AttentionImpl):
                     if self.sliding_window is not None
                     else None
                 )
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=sliding_window_size,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=q_descale,
-                    k_descale=k_descale,
-                    v_descale=v_descale,
-                    num_splits=attn_metadata.max_num_splits,
-                    s_aux=self.sinks,
-                )
+
+                with create_attention_profiler_scope(
+                    backend_name="FLASH_ATTN",
+                    batch_size=seqused_k.shape[0],
+                    max_query_len=max_seqlen_q,
+                    max_seq_len=max_seqlen_k,
+                    num_heads=self.num_heads,
+                    head_size=self.head_size,
+                    num_kv_heads=self.num_kv_heads,
+                    dtype=query.dtype,
+                    is_causal=attn_metadata.causal,
+                ):
+                    flash_attn_varlen_func(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k,
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=attn_metadata.causal,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=sliding_window_size,
+                        block_table=block_table,
+                        softcap=self.logits_soft_cap,
+                        scheduler_metadata=scheduler_metadata,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=q_descale,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        num_splits=attn_metadata.max_num_splits,
+                        s_aux=self.sinks,
+                    )
                 return output
 
         # Cascade attention (rare case).
