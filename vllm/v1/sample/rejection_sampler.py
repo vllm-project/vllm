@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -468,9 +468,12 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-    assert target_probs.is_contiguous()
+    # Compute the softmax normalizer without materializing the full
+    # [num_tokens, vocab_size] target_probs tensor. Kernels reconstruct
+    # probabilities as exp(logit - logsumexp(row)) at the point of use.
+    BLOCK_SIZE: tl.constexpr = 8192
+    target_lse = compute_target_lse(target_logits, vocab_size, BLOCK_SIZE)
+    assert target_lse.is_contiguous()
 
     # Sample recovered tokens for each position.
     # [num_tokens]
@@ -480,7 +483,8 @@ def rejection_sample(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        target_lse,
         sampling_metadata,
         device,
         use_fp64_gumbel,
@@ -493,7 +497,8 @@ def rejection_sample(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        target_lse,
         bonus_token_ids,
         recovered_token_ids,
         uniform_probs,
@@ -670,14 +675,16 @@ def sample_recovered_tokens(
     # [num_tokens, vocab_size]
     draft_probs: torch.Tensor | None,
     # [num_tokens, vocab_size]
-    target_probs: torch.Tensor,
+    target_logits: torch.Tensor,
+    # [num_tokens]
+    target_lse: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     device: torch.device,
     use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     # NOTE(woosuk): Create only one distribution for each request.
     batch_size = len(num_draft_tokens)
-    vocab_size = target_probs.shape[-1]
+    vocab_size = target_logits.shape[-1]
     q_dtype = torch.float64 if use_fp64_gumbel else torch.float32
     q = torch.empty(
         (batch_size, vocab_size),
@@ -700,7 +707,8 @@ def sample_recovered_tokens(
         cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        target_lse,
         inv_q,
         vocab_size,
         BLOCK_SIZE,
@@ -708,6 +716,69 @@ def sample_recovered_tokens(
         USE_FP64_GUMBEL=use_fp64_gumbel,
     )
     return recovered_token_ids
+
+
+def compute_target_lse(
+    target_logits: torch.Tensor,
+    vocab_size: int,
+    block_size: int,
+) -> torch.Tensor:
+    """Compute per-row logsumexp without materializing target probabilities."""
+    if target_logits.is_cuda and HAS_TRITON:
+        target_lse = torch.empty(
+            (target_logits.shape[0],),
+            dtype=torch.float32,
+            device=target_logits.device,
+        )
+        target_lse_kernel[(target_logits.shape[0],)](
+            target_logits,
+            target_lse,
+            vocab_size,
+            BLOCK_SIZE=block_size,
+            num_warps=8,
+        )
+        return target_lse
+    return torch.logsumexp(target_logits, dim=-1)
+
+
+@triton.jit
+def target_lse_kernel(
+    target_logits_ptr,  # [num_tokens, vocab_size]
+    target_lse_ptr,  # [num_tokens]
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0)
+
+    m = tl.full((), float("-inf"), tl.float32)
+    s = tl.full((), 0.0, tl.float32)
+    for v in range(0, vocab_size, BLOCK_SIZE):
+        vocab_offset = v + tl.arange(0, BLOCK_SIZE)
+        vocab_mask = vocab_offset < vocab_size
+        logits = tl.load(
+            target_logits_ptr + row * vocab_size + vocab_offset,
+            mask=vocab_mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        tile_max = tl.max(logits, axis=0)
+        new_m = tl.maximum(m, tile_max)
+        # If all visited tiles are -inf so far, new_m is -inf. Avoid forming
+        # -inf - -inf in either branch; masked contributions should be zero.
+        finite_new_m = tl.where(new_m > float("-inf"), new_m, 0.0)
+        old_scale = tl.where(
+            m > float("-inf"),
+            tl.exp2((m - finite_new_m) * 1.4426950408889634),
+            0.0,
+        )
+        tile_contrib = tl.where(
+            logits > float("-inf"),
+            tl.exp2((logits - finite_new_m) * 1.4426950408889634),
+            0.0,
+        )
+        s = s * old_scale + tl.sum(tile_contrib, axis=0)
+        m = new_m
+
+    tl.store(target_lse_ptr + row, m + tl.log(s))
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
@@ -771,7 +842,8 @@ def rejection_random_sample_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
+    target_logits_ptr,  # [num_tokens, vocab_size]
+    target_lse_ptr,  # [num_tokens]
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
@@ -809,9 +881,11 @@ def rejection_random_sample_kernel(
                         + (start_idx + pos) * vocab_size
                         + draft_token_id
                     )
-                target_prob = tl.load(
-                    target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
+                target_logit = tl.load(
+                    target_logits_ptr + (start_idx + pos) * vocab_size + draft_token_id
                 )
+                target_lse = tl.load(target_lse_ptr + start_idx + pos)
+                target_prob = tl.exp(target_logit - target_lse)
                 # NOTE(woosuk): While the draft probability should never be 0,
                 # we check it to avoid NaNs. If it happens to be 0, we reject.
                 accepted = draft_prob > 0 and target_prob / draft_prob >= uniform_prob
@@ -863,7 +937,8 @@ def sample_recovered_tokens_kernel(
     cu_num_draft_tokens_ptr,  # [batch_size]
     draft_token_ids_ptr,  # [num_tokens]
     draft_probs_ptr,  # [num_tokens, vocab_size] or None
-    target_probs_ptr,  # [num_tokens, vocab_size]
+    target_logits_ptr,  # [num_tokens, vocab_size]
+    target_lse_ptr,  # [num_tokens]
     inv_q_ptr,  # [batch_size, vocab_size]
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -885,6 +960,7 @@ def sample_recovered_tokens_kernel(
     if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
+    target_lse = tl.load(target_lse_ptr + token_idx)
     if USE_FP64_GUMBEL:
         max_val = tl.full((), float("-inf"), tl.float64)
     else:
@@ -895,22 +971,24 @@ def sample_recovered_tokens_kernel(
         vocab_mask = vocab_offset < vocab_size
 
         if NO_DRAFT_PROBS:
-            prob = tl.load(
-                target_probs_ptr + token_idx * vocab_size + vocab_offset,
+            target_logit = tl.load(
+                target_logits_ptr + token_idx * vocab_size + vocab_offset,
                 mask=(vocab_mask & (vocab_offset != draft_token_id)),
-                other=0.0,
+                other=float("-inf"),
             )
+            prob = tl.exp(target_logit - target_lse)
         else:
             draft_prob = tl.load(
                 draft_probs_ptr + token_idx * vocab_size + vocab_offset,
                 mask=vocab_mask,
                 other=0.0,
             )
-            target_prob = tl.load(
-                target_probs_ptr + token_idx * vocab_size + vocab_offset,
+            target_logit = tl.load(
+                target_logits_ptr + token_idx * vocab_size + vocab_offset,
                 mask=vocab_mask,
-                other=0.0,
+                other=float("-inf"),
             )
+            target_prob = tl.exp(target_logit - target_lse)
             prob = tl.maximum(target_prob - draft_prob, 0.0)
             # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
             # `tl.argmax` will select the maximum value.

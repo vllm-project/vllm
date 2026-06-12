@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    compute_target_lse,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -930,7 +931,8 @@ def test_sample_recovered_tokens(
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids,
         None if no_draft_probs else draft_probs,
-        target_probs,
+        target_logits,
+        compute_target_lse(target_logits, vocab_size, block_size=8192),
         sampling_metadata,
         device=DEVICE_TYPE,
     )
@@ -971,6 +973,7 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
         draft_token_ids.reshape(batch_size, max_spec_len).tolist(),
         target_probs.log(),
     )
+    target_logits = target_probs.log()
 
     expected = native_sample_recovered_tokens(
         max_spec_len,
@@ -989,7 +992,8 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        compute_target_lse(target_logits, vocab_size, block_size=8192),
         sampling_metadata,
         device=torch.device(DEVICE_TYPE),
         use_fp64_gumbel=True,
@@ -1076,7 +1080,8 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids.squeeze(-1),
         None if no_draft_probs else draft_probs,
-        target_probs,
+        target_probs.log(),
+        compute_target_lse(target_probs.log(), vocab_size, block_size=8192),
         sampling_metadata,
         device=DEVICE_TYPE,
     )
@@ -1089,6 +1094,114 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
         f"Recovered token IDs >= vocab_size ({vocab_size}): "
         f"{recovered[recovered >= vocab_size].tolist()}"
     )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_lse_target_prob_acceptance_matches_softmax_outside_tolerance():
+    """LSE probabilities should make the same accept/reject decisions.
+
+    Floating point reductions can differ by a few ULPs, so the decision claim is
+    parity except for rows whose probability ratio is on the uniform threshold.
+    Use the production fused LSE path so this binds the claim to the kernel.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_tokens = 256
+    vocab_size = 2048
+    logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=device)
+
+    # Simulate top-k/top-p style masks. Keep at least one valid token per row.
+    mask = torch.rand(num_tokens, vocab_size, device=device) < 0.2
+    logits = logits.masked_fill(mask, float("-inf"))
+    logits[:, 0] = torch.maximum(logits[:, 0], torch.zeros_like(logits[:, 0]))
+
+    draft_token_ids = torch.randint(
+        0, vocab_size, (num_tokens,), dtype=torch.int64, device=device
+    )
+    draft_probs = F.softmax(
+        torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=device),
+        dim=-1,
+    )
+    draft_prob = draft_probs[
+        torch.arange(num_tokens, device=device), draft_token_ids
+    ]
+    uniform_probs = torch.rand(num_tokens, dtype=torch.float64, device=device)
+
+    target_probs = F.softmax(logits, dim=-1, dtype=torch.float32)
+    softmax_prob = target_probs[
+        torch.arange(num_tokens, device=device), draft_token_ids
+    ]
+    lse = compute_target_lse(logits, vocab_size, block_size=1024)
+    lse_prob = torch.exp(
+        logits[torch.arange(num_tokens, device=device), draft_token_ids] - lse
+    )
+
+    softmax_ratio = softmax_prob / draft_prob
+    lse_ratio = lse_prob / draft_prob
+    softmax_accepted = softmax_ratio >= uniform_probs
+    lse_accepted = lse_ratio >= uniform_probs
+
+    tolerance = 1e-5
+    knife_edge = torch.minimum(
+        torch.abs(softmax_ratio - uniform_probs),
+        torch.abs(lse_ratio - uniform_probs),
+    ) < tolerance
+    mismatches = softmax_accepted != lse_accepted
+
+    assert mismatches.logical_and(~knife_edge).sum().item() == 0
+    assert torch.max(torch.abs(softmax_prob - lse_prob)).item() < 1e-6
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_target_lse_matches_fp64_reference():
+    """Fused LSE should match an fp64 logsumexp oracle closely.
+
+    The production kernel consumes LSE to reconstruct target probabilities.
+    Compare against fp64 rather than torch's fp32 logsumexp so the test bounds
+    numerical error against a stronger reference.
+    """
+    torch.manual_seed(0)
+    num_tokens = 64
+    vocab_size = 8193
+    logits = torch.randn(
+        num_tokens, vocab_size, dtype=torch.float32, device="cuda"
+    )
+
+    # Simulate top-k/top-p masks. Keep at least one finite value per row.
+    mask = torch.rand(num_tokens, vocab_size, device="cuda") < 0.2
+    logits = logits.masked_fill(mask, float("-inf"))
+    logits[:, 0] = torch.maximum(logits[:, 0], torch.zeros_like(logits[:, 0]))
+
+    fused_lse = compute_target_lse(logits, vocab_size, block_size=4096)
+    fp64_lse = torch.logsumexp(logits.double(), dim=-1).float()
+
+    assert torch.max(torch.abs(fused_lse - fp64_lse)).item() < 2e-6
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_target_lse_handles_full_negative_infinity_tiles():
+    """Rows with entire masked tiles must not poison online LSE with NaNs.
+
+    Top-k/top-p can mask complete vocab tiles to -inf. The online update must
+    skip those tiles instead of evaluating -inf - -inf into a persistent NaN.
+    """
+    block_size = 4096
+    vocab_size = block_size * 3 + 17
+    logits = torch.full((2, vocab_size), float("-inf"), device="cuda")
+
+    # First two full tiles are -inf; all finite values are in the final tile.
+    logits[0, block_size * 2 + 3] = 0.25
+    logits[0, block_size * 2 + 11] = -1.0
+    logits[1, block_size * 3 + 7] = 2.0
+
+    fused_lse = compute_target_lse(logits, vocab_size, block_size=block_size)
+    fp64_lse = torch.logsumexp(logits.double(), dim=-1).float()
+
+    assert torch.isfinite(fused_lse).all()
+    torch.testing.assert_close(fused_lse, fp64_lse, atol=2e-6, rtol=0)
 
 
 ########################### Tests for Synthetic Rejection Sampling #########
