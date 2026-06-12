@@ -60,6 +60,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    find_full_attention_gid,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -7367,18 +7368,20 @@ class GPUModelRunner(
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def _get_attention_kv_cache_gid(self) -> int:
-        """Find the KV cache group index for attention layers.
+        """Find the KV cache group index for routed-experts slot mapping.
 
-        Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler:
-        both pick the first ``FullAttentionSpec`` group so hybrid models
-        (Mamba / linear-attention layers that use other AttentionSpec
-        subclasses) end up indexing the same slot layout on both sides.
-        Falls back to 0 only for legacy single-group configs.
+        Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler;
+        both sides share find_full_attention_gid so they index the same
+        slot layout.
         """
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, FullAttentionSpec):
-                return gid
-        return 0
+        gid = find_full_attention_gid(self.kv_cache_config)
+        if gid is None:
+            raise ValueError(
+                "enable_return_routed_experts requires at least one "
+                "full-attention KV cache group; pure sliding-window / "
+                "Mamba models are unsupported."
+            )
+        return gid
 
     def init_routed_experts_capturer(self):
         logger.info(

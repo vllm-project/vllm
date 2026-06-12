@@ -822,9 +822,10 @@ class VllmConfig:
         """Reject KV connectors unsupported by --enable-return-routed-experts.
 
         Routed-experts capture only works with the single-instance CPU
-        offload connector, whose transfers the scheduler mirrors at block
-        granularity. PD disaggregation is unsupported (routing captured
-        on P can't reach D), as is any other connector. Must run after
+        offload connector, whose transfer jobs the scheduler follows to
+        store/load routed expert metadata at block granularity. PD
+        disaggregation is unsupported (routing captured on P can't reach
+        D), as is any other connector. Must run after
         _post_init_kv_transfer_config() so the connector synthesized from
         --kv-offloading-size is also checked.
 

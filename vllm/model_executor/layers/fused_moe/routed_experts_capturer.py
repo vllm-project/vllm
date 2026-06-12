@@ -14,9 +14,42 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 
 logger = logging.getLogger(__name__)
+
+# Spec kinds whose per-token slot layout spans the whole sequence — the
+# prerequisite for anchoring routed-experts slot mapping. MLA is a latent
+# full-attention variant; sliding-window / chunked-local / Mamba are not.
+_FULL_ATTENTION_KINDS = frozenset(
+    {
+        KVCacheSpecKind.FULL_ATTENTION,
+        KVCacheSpecKind.MLA_ATTENTION,
+        KVCacheSpecKind.SINK_FULL_ATTENTION,
+    }
+)
+
+
+def find_full_attention_gid(kv_cache_config: KVCacheConfig) -> int | None:
+    """Attention-slot anchor selection rule for routed-experts capture.
+
+    Both the scheduler-side RoutedExpertsManager and the worker-side
+    GPUModelRunner must derive slot mappings from the SAME KV cache
+    group; sharing this helper is a correctness requirement, not a
+    convenience. ``get_kv_cache_spec_kind`` unwraps the
+    ``UniformTypeKVCacheSpecs`` groups used by DSA / DeepSeek-V4 (which
+    wrap same-type MLA layers), so those anchor on their inner kind.
+    Returns None when the model has no full-attention group (pure
+    sliding-window / Mamba models are unsupported).
+    """
+    for gid, g in enumerate(kv_cache_config.kv_cache_groups):
+        if get_kv_cache_spec_kind(g.kv_cache_spec) in _FULL_ATTENTION_KINDS:
+            return gid
+    return None
 
 
 def _get_num_experts_per_tok(hf_config) -> int:
@@ -253,16 +286,16 @@ class RoutedExpertsManager:
     this can reach multiple GB; see the init log for the exact size.
 
     KV offload (``num_offload_blocks``): when the CPU OffloadingConnector
-    is active, ``offload_mirror`` shadows the CPU offload block pool.
-    :meth:`offload_store` / :meth:`offload_load` mirror each KV transfer
-    job at block granularity, so routing data follows the exact same
-    lifecycle as the offloaded KV blocks (a CPU block id is overwritten
-    only when the OffloadingManager reuses it). The stored values are
-    LOGICAL expert IDs captured before the EPLB logical->physical
-    mapping; physical/replica expert IDs are never exposed. Under data
-    parallelism each DP scheduler owns an independent offload block pool
-    and mirror; cross-DP request migration or KV/routing reuse is
-    unsupported.
+    is active, ``routed_experts_by_cpu_block`` stores offloaded routed
+    experts indexed by CPU block id. The store/load helpers follow each KV
+    transfer job's full-attention group at block granularity, so the
+    metadata shares the offloaded KV blocks' lifecycle. Stale/removed CPU
+    block rows need no zeroing:
+    only CPU block ids the connector puts in a load job are ever read,
+    and block id reuse overwrites on the next store. The stored values
+    are LOGICAL expert IDs captured before the EPLB logical->physical
+    mapping. Each DP rank owns an independent buffer and returns its own
+    requests' routed experts; cross-DP migration is unsupported.
     """
 
     def __init__(
@@ -271,17 +304,16 @@ class RoutedExpertsManager:
         kv_cache_config: KVCacheConfig,
         num_offload_blocks: int | None = None,
     ) -> None:
-        # Pick the attention group for block/slot mapping. We require
-        # a FullAttentionSpec group rather than any AttentionSpec to
-        # stay consistent with the worker-side lookup in
-        # ``GPUModelRunner._get_attention_kv_cache_gid``; hybrid models
-        # (Mamba / linear attention) also have other AttentionSpec
-        # groups whose slot layout differs.
-        self.attn_gid = next(
-            gid
-            for gid, g in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(g.kv_cache_spec, FullAttentionSpec)
-        )
+        # Must match the worker-side gid selection in
+        # GPUModelRunner._get_attention_kv_cache_gid (same helper).
+        attn_gid = find_full_attention_gid(kv_cache_config)
+        if attn_gid is None:
+            raise ValueError(
+                "enable_return_routed_experts requires at least one "
+                "full-attention KV cache group; pure sliding-window / "
+                "Mamba models are unsupported."
+            )
+        self.attn_gid = attn_gid
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
 
@@ -314,15 +346,13 @@ class RoutedExpertsManager:
             hf_config.num_hidden_layers,
             num_experts_per_tok,
         )
-        self.offload_mirror: np.ndarray | None = None
+        self.routed_experts_by_cpu_block: np.ndarray | None = None
         if num_offload_blocks is not None:
-            # Shadow buffer indexed by CPU offload block id. Lifecycle is
-            # implicit: a slot is overwritten exactly when the
-            # OffloadingManager reuses its CPU block id, mirroring the
-            # KV data lifecycle. Requires offloaded block size == GPU
-            # block size (block_size_factor == 1), enforced by the
-            # scheduler at init.
-            self.offload_mirror = np.zeros(
+            # Indexed by CPU offload block id; rows are overwritten when
+            # the OffloadingManager reuses a block id. Requires offloaded
+            # block size == GPU block size (block_size_factor == 1),
+            # enforced by the scheduler at init.
+            self.routed_experts_by_cpu_block = np.zeros(
                 (
                     num_offload_blocks,
                     self.block_size,
@@ -334,14 +364,14 @@ class RoutedExpertsManager:
         logger.info(
             "RoutedExpertsManager CPU buffer: %.2f GB "
             "(slots=%d, layers=%d, top_k=%d, dtype=%s), "
-            "offload mirror: %.2f GB (blocks=%s)",
+            "offloaded routed experts: %.2f GB (cpu_blocks=%s)",
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
             hf_config.num_hidden_layers,
             hf_config.num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
-            self.offload_mirror.nbytes / 1e9
-            if self.offload_mirror is not None
+            self.routed_experts_by_cpu_block.nbytes / 1e9
+            if self.routed_experts_by_cpu_block is not None
             else 0.0,
             num_offload_blocks,
         )
@@ -358,9 +388,9 @@ class RoutedExpertsManager:
     def _check_offload_args(
         self, gpu_block_ids: np.ndarray, cpu_block_ids: np.ndarray
     ) -> None:
-        if self.offload_mirror is None:
+        if self.routed_experts_by_cpu_block is None:
             raise RuntimeError(
-                "RoutedExpertsManager offload mirror is not initialized "
+                "routed_experts_by_cpu_block is not initialized "
                 "but a KV offload transfer was observed"
             )
         if len(gpu_block_ids) != len(cpu_block_ids):
@@ -369,34 +399,36 @@ class RoutedExpertsManager:
                 f"{len(gpu_block_ids)} GPU vs {len(cpu_block_ids)} CPU blocks"
             )
 
-    def offload_store(
+    def store_routed_experts_to_cpu_blocks(
         self, gpu_block_ids: np.ndarray, cpu_block_ids: np.ndarray
     ) -> None:
-        """Mirror routing data GPU-slots -> CPU-shadow for one store job.
+        """Store routed experts GPU slots -> CPU block rows for one store job.
 
-        Must be called after :meth:`store_batch` of the step whose
+        Must run after :meth:`store_batch` of the step whose
         scheduler_output carried the store job, so the GPU slots hold
         the routing of every token covered by the job.
         """
-        # TODO: coalesce consecutive block-id runs into slice copies
-        # (mirror[c0:c1] = blocks_view[g0:g1]) to skip the fancy-index
-        # temporary; per-step job sizes are small so this is not yet
-        # worth the complexity.
+        # TODO: coalesce consecutive block-id runs into slice copies to
+        # skip the fancy-index temporary; per-step job sizes are small.
         self._check_offload_args(gpu_block_ids, cpu_block_ids)
-        assert self.offload_mirror is not None  # narrowed by check above
-        self.offload_mirror[cpu_block_ids] = self._blocks_view[gpu_block_ids]
+        assert self.routed_experts_by_cpu_block is not None
+        self.routed_experts_by_cpu_block[cpu_block_ids] = self._blocks_view[
+            gpu_block_ids
+        ]
 
-    def offload_load(
+    def load_routed_experts_from_cpu_blocks(
         self, cpu_block_ids: np.ndarray, gpu_block_ids: np.ndarray
     ) -> None:
-        """Restore routing data CPU-shadow -> GPU-slots for one load job.
+        """Load routed experts CPU block rows -> GPU slots for one load job.
 
         Loaded tokens never re-run a forward pass, so this is the only
         writer of their slots until the blocks are freed.
         """
         self._check_offload_args(gpu_block_ids, cpu_block_ids)
-        assert self.offload_mirror is not None  # narrowed by check above
-        self._blocks_view[gpu_block_ids] = self.offload_mirror[cpu_block_ids]
+        assert self.routed_experts_by_cpu_block is not None
+        self._blocks_view[gpu_block_ids] = self.routed_experts_by_cpu_block[
+            cpu_block_ids
+        ]
 
     def get(
         self,

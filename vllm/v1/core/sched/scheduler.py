@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import numpy as np
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
+    find_full_attention_gid,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -55,7 +58,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.base import GPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -322,8 +325,9 @@ class Scheduler(SchedulerInterface):
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            # With KV offload, the manager additionally mirrors routing
-            # data per transfer job so it follows the KV block lifecycle.
+            # With KV offload, the manager additionally stores/loads
+            # routed experts per transfer job, following the KV block
+            # lifecycle.
             num_offload_blocks = None
             if self.connector is not None:
                 num_offload_blocks = self._validate_routed_experts_offload(
@@ -335,6 +339,8 @@ class Scheduler(SchedulerInterface):
                 kv_cache_config=kv_cache_config,
                 num_offload_blocks=num_offload_blocks,
             )
+            # Expected group count in every transfer spec's group_sizes.
+            self._re_num_kv_groups = len(kv_cache_config.kv_cache_groups)
             # Block-ID snapshot taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
@@ -347,14 +353,16 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills: set[Request] = set()
 
     def _validate_routed_experts_offload(self, kv_cache_config: KVCacheConfig) -> int:
-        """Validate the KV connector for routed-experts mirroring.
+        """Validate the KV connector for offloaded routed experts.
 
-        Only the CPU OffloadingConnector with block_size_factor == 1 on a
-        pure full-attention model is supported: the mirror relies on a
-        one-to-one, in-order GPU<->CPU block mapping per transfer job.
+        Only the CPU OffloadingConnector with block_size_factor == 1 is
+        supported: the per-job GPU<->CPU block mapping relies on
+        prepare_store/prepare_load preserving key order — the same
+        contract the worker-side KV copy depends on (see
+        kv_offload/cpu/gpu_worker.py transfer_async).
 
         Returns:
-            The CPU offload block pool size, used to size the mirror.
+            The CPU offload block pool size.
 
         Raises:
             ValueError: On any unsupported connector / spec combination.
@@ -385,13 +393,11 @@ class Scheduler(SchedulerInterface):
                 f"(block_size_factor={cs.config.block_size_factor}); drop "
                 "or adjust kv_connector_extra_config['block_size']."
             )
-        if len(kv_cache_config.kv_cache_groups) != 1 or not isinstance(
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec, FullAttentionSpec
-        ):
+        if find_full_attention_gid(kv_cache_config) is None:
             raise ValueError(
-                "--enable-return-routed-experts with KV offload only "
-                "supports pure full-attention models (single KV cache "
-                "group); sliding-window / hybrid models are not supported."
+                "--enable-return-routed-experts with KV offload requires "
+                "at least one full-attention KV cache group; pure "
+                "sliding-window / Mamba models are not supported."
             )
         if cs.spec.num_blocks <= 0:
             raise ValueError(
@@ -401,67 +407,84 @@ class Scheduler(SchedulerInterface):
             )
         return cs.spec.num_blocks
 
-    @staticmethod
-    def _validate_re_mirror_gpu_spec(gpu_spec: object) -> GPULoadStoreSpec:
-        """Validate the GPU side of a KV transfer job for routed-experts
-        mirroring (NOT a generic offload spec validator).
+    def _slice_full_attn_transfer(
+        self, gpu_spec: object, cpu_spec: object
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Slice the full-attention group's blocks out of one transfer job.
 
-        With a single full-attention group and block_size_factor == 1,
-        the spec must contain exactly one group covering all block IDs,
-        which guarantees gpu_block_ids[i] <-> cpu_block_ids[i]. For
-        block_size_factor > 1, one CPU block would map to factor
-        consecutive GPU blocks (with block_indices giving the first-block
-        offset); that expansion is unsupported and rejected at init.
+        Sole adapter between the scheduler and KV offload transfer specs.
+        Core invariant: CPU block ids are laid out in the same group-major
+        flat order as GPU block ids, with per-group lengths given by
+        ``group_sizes`` — guaranteed by prepare_store/prepare_load
+        preserving key order. Returns ``(gpu_block_ids, cpu_block_ids)``
+        views (no copy) regardless of transfer direction.
         """
         if not isinstance(gpu_spec, GPULoadStoreSpec):
             raise RuntimeError(
                 f"expected GPULoadStoreSpec, got {type(gpu_spec).__name__}"
             )
-        if len(gpu_spec.group_sizes) != 1 or gpu_spec.group_sizes[0] != len(
-            gpu_spec.block_ids
+        if not isinstance(cpu_spec, CPULoadStoreSpec):
+            raise RuntimeError(
+                f"expected CPULoadStoreSpec, got {type(cpu_spec).__name__}"
+            )
+        group_sizes = gpu_spec.group_sizes
+        attn_gid = self.routed_experts_mgr.attn_gid
+        if (
+            len(group_sizes) != self._re_num_kv_groups
+            or sum(group_sizes) != len(gpu_spec.block_ids)
+            or len(cpu_spec.block_ids) != len(gpu_spec.block_ids)
         ):
             raise RuntimeError(
-                "routed-experts mirror requires a single-group KV transfer "
-                f"spec; got group_sizes={gpu_spec.group_sizes} for "
-                f"{len(gpu_spec.block_ids)} blocks"
+                "routed-experts offload transfer violates the group-major "
+                "flat-order contract (CPU block ids must match GPU block "
+                f"ids per group): group_sizes={list(group_sizes)}, "
+                f"num_kv_groups={self._re_num_kv_groups}, "
+                f"attn_gid={attn_gid}, len(gpu)={len(gpu_spec.block_ids)}, "
+                f"len(cpu)={len(cpu_spec.block_ids)}"
             )
-        return gpu_spec
+        off = sum(group_sizes[:attn_gid])
+        n = group_sizes[attn_gid]
+        return (
+            gpu_spec.block_ids[off : off + n],
+            cpu_spec.block_ids[off : off + n],
+        )
 
-    def _mirror_routed_experts_offload(self, scheduler_output: SchedulerOutput) -> None:
-        """Mirror routed-experts data alongside this step's KV offload jobs.
+    def _apply_routed_experts_offload_transfers(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Store/load offloaded routed experts along this step's KV jobs.
 
         Must run after ``store_batch`` (store jobs built at schedule time
         cover tokens whose routing was just persisted) and before the
-        per-request ``routed_experts_mgr.get()`` reads (loaded blocks must
-        be populated before a resumed request can finish). Called even
-        when the step captured no routing data: pure-load steps schedule
-        no tokens.
+        per-request ``routed_experts_mgr.get()`` reads. Called even when
+        the step captured no routing data: pure-load steps schedule no
+        tokens. CPU block rows are written as soon as prepare_store
+        assigned the block ids — loadability is still gated by the KV
+        manager's complete_store, and no load job exists for an
+        incomplete store, so early writes are never read.
         """
         meta = scheduler_output.kv_connector_metadata
         if meta is None:
             return
-        # Fail loudly on unexpected metadata: init-time validation
-        # guarantees the connector is the CPU OffloadingConnector.
+        # Init-time validation guarantees the CPU OffloadingConnector.
         if not isinstance(meta, OffloadingConnectorMetadata):
             raise RuntimeError(
                 f"expected OffloadingConnectorMetadata, got {type(meta).__name__}"
             )
         for job in meta.load_jobs.values():
             src, dst = job.transfer_spec  # CPU -> GPU
-            if not isinstance(src, CPULoadStoreSpec):
-                raise RuntimeError(
-                    f"expected CPULoadStoreSpec src, got {type(src).__name__}"
+            gpu_ids, cpu_ids = self._slice_full_attn_transfer(dst, src)
+            if len(gpu_ids):
+                self.routed_experts_mgr.load_routed_experts_from_cpu_blocks(
+                    cpu_ids, gpu_ids
                 )
-            gpu_spec = self._validate_re_mirror_gpu_spec(dst)
-            self.routed_experts_mgr.offload_load(src.block_ids, gpu_spec.block_ids)
         for job in meta.store_jobs.values():
             src, dst = job.transfer_spec  # GPU -> CPU
-            if not isinstance(dst, CPULoadStoreSpec):
-                raise RuntimeError(
-                    f"expected CPULoadStoreSpec dst, got {type(dst).__name__}"
+            gpu_ids, cpu_ids = self._slice_full_attn_transfer(src, dst)
+            if len(gpu_ids):
+                self.routed_experts_mgr.store_routed_experts_to_cpu_blocks(
+                    gpu_ids, cpu_ids
                 )
-            gpu_spec = self._validate_re_mirror_gpu_spec(src)
-            self.routed_experts_mgr.offload_store(gpu_spec.block_ids, dst.block_ids)
 
     def _mamba_block_aligned_split(
         self,
@@ -1680,7 +1703,7 @@ class Scheduler(SchedulerInterface):
                 offset += num_scheduled_tokens[rid]
 
         if self.enable_return_routed_experts and self.connector is not None:
-            self._mirror_routed_experts_offload(scheduler_output)
+            self._apply_routed_experts_offload_transfers(scheduler_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
