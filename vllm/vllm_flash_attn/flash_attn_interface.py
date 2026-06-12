@@ -369,6 +369,52 @@ def flash_attn_varlen_func(
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
+        # The new SM90 FA4 kernel shares the bf16 code path but adds in-kernel dequant:
+        # it consumes fp16 Q + fp8 e4m3 paged K/V, dequantizes K/V to fp16, and computes
+        # attention in fp16. 
+        # As a temp WAR, for the fp8-KV path we cast Q bf16->fp16, pass q_descale=None 
+        # (the cute interface materializes an identity descale for fp16 Q), and forward the 
+        # (batch, num_kv_heads) float32 k/v descales.
+        fa4_fp8_kv_dequant = (
+            k.dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] == 9
+        )
+        # TODO(qixiangl): improve this WAR to avoid DRAM round-trip for Q.
+        if fa4_fp8_kv_dequant:
+            if q.dtype != torch.float16:
+                q = q.to(torch.float16)
+            fa4_q_descale = None
+            
+            # vLLM .expand()s the scalar descales into stride-0 broadcasts, but the
+            # cute interface needs stride-1 on num_kv_heads. A (1, 1) descale (TP>1:
+            # 1 KV head/rank + batch=1 decode) counts as "contiguous", so .contiguous()
+            # no-ops; clone() forces a real stride-1 copy (also fixes the derived q_descale).
+            fa4_k_descale = (
+                k_descale.clone(memory_format=torch.contiguous_format)
+                if k_descale is not None
+                else None
+            )
+            fa4_v_descale = (
+                v_descale.clone(memory_format=torch.contiguous_format)
+                if v_descale is not None
+                else None
+            )
+            # The dequant kernel computes in fp16 and writes an fp16 O, and the cute
+            # interface requires out.dtype == q.dtype (fp16). vLLM's `out` buffer is bf16
+            # (the model's dataflow dtype), so let the interface allocate its native fp16
+            # output, then copy it back into vLLM's bf16 buffer after the call.
+            # TODO(qixiangl): fuse the fp16->bf16 downcast into the kernel store
+            # epilogue (write bf16 straight into vLLM's `out`) to drop this extra
+            # buffer + DRAM round-trip.
+            fa4_out_buf = out
+            fa4_out = None
+        else:
+            fa4_q_descale = None
+            fa4_k_descale = None
+            fa4_v_descale = None
+            fa4_out_buf = None
+            fa4_out = out
+
         out, softmax_lse = _flash_attn_fwd(
             q,
             k,
@@ -386,9 +432,18 @@ def flash_attn_varlen_func(
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
             num_splits=num_splits,
             return_lse=return_softmax_lse,
-            out=out,
+            out=fa4_out,
             learnable_sink=s_aux,
+            q_descale=fa4_q_descale,
+            k_descale=fa4_k_descale,
+            v_descale=fa4_v_descale,
+            fp8_kv_dequant=fa4_fp8_kv_dequant,
         )
+        # TODO(qixiangl): same as above, fuse the fp16->bf16 downcast into the kernel store
+        if fa4_out_buf is not None:
+            # fp16 kernel output -> vLLM's preallocated bf16 out buffer (model dataflow).
+            fa4_out_buf.copy_(out)
+            out = fa4_out_buf
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
     return (out, softmax_lse) if return_softmax_lse else out
