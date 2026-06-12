@@ -75,6 +75,23 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }
 
+/// Per-request speculative decoding stats accumulated across decode steps.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/metrics/stats.py>
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RequestSpecDecodeStats {
+    /// Number of valid drafted tokens.
+    #[serde(default)]
+    pub num_draft_tokens: u64,
+    /// Number of accepted drafted tokens.
+    #[serde(default)]
+    pub num_accepted_tokens: u64,
+    /// Number of verify steps run for this request.
+    #[serde(default)]
+    pub num_verify_steps: u64,
+}
+
 /// Breakdown of a scheduled prefill computation.
 ///
 /// Python models this as a plain `@dataclass`, so it is serialized by msgspec

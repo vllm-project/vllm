@@ -95,6 +95,7 @@ fn request_output(
         prefill_stats: None,
         routed_experts: None,
         num_nans_in_logits: 0,
+        request_spec_decode_stats: None,
     }
 }
 

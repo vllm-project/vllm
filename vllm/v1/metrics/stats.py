@@ -199,6 +199,26 @@ class SchedulerStats:
 
 
 @dataclass
+class RequestSpecDecodeStats:
+    """Per-request speculative decoding stats.
+
+    Accumulated across decode steps for one external request. Use
+    ``dataclasses.replace(stats)`` when a snapshot is required.
+
+    Fields:
+        num_draft_tokens: number of *valid* draft tokens proposed (already
+            excludes tokens dropped via ``num_invalid_spec_tokens``).
+        num_accepted_tokens: number of draft tokens accepted by the verify
+            step.
+        num_verify_steps: number of verify steps that ran for this request.
+    """
+
+    num_draft_tokens: int = 0
+    num_accepted_tokens: int = 0
+    num_verify_steps: int = 0
+
+
+@dataclass
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -218,6 +238,8 @@ class RequestStateStats:
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
+
+    request_spec_decode_stats: RequestSpecDecodeStats | None = None
 
 
 @dataclass

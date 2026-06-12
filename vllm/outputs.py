@@ -147,6 +147,18 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        # Patch only request_spec_decode_stats; other metrics fields are
+        # owned by the upstream RequestState.
+        if (
+            next_output.metrics is not None
+            and next_output.metrics.request_spec_decode_stats is not None
+        ):
+            if self.metrics is None:
+                self.metrics = next_output.metrics
+            else:
+                self.metrics.request_spec_decode_stats = (
+                    next_output.metrics.request_spec_decode_stats
+                )
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
