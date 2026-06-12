@@ -342,7 +342,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # driver API. This causes problems when linking with earlier versions of CUDA.
   # Setting this variable sidesteps the issue by calling the driver directly.
   target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
-endif()
+endif() # _C HIP endif
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
