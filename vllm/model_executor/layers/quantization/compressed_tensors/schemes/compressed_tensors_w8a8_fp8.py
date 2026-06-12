@@ -27,6 +27,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
 )
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
@@ -188,10 +191,17 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if hasattr(self, "fp8_linear"):
             self.fp8_linear.process_weights_after_loading(layer)
 
+        # Advertise the input quantization this layer expects so upstream
+        # producers (e.g. manual rms_norm + quant fusion, RFC #43224) can
+        # quantize the activation in a fused kernel and pass it through as
+        # a QuantizedActivation.
+        if self.activation_quant_key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
+            layer.input_quant_key = self.activation_quant_key
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
