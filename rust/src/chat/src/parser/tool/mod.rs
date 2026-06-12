@@ -7,8 +7,8 @@ pub use vllm_tool_parser::{
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
     HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
+    ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
