@@ -53,6 +53,7 @@ def _fwd_kernel(
     kv_group_num: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    BLOCK_DMODEL_TAIL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
@@ -93,10 +94,40 @@ def _fwd_kernel(
     k_ptrs = K + off_k
     v_ptrs = V + off_v
 
+    # Split-D path: a non-power-of-2 head_dim (e.g. 72) would otherwise force
+    # BLOCK_DMODEL = next_pow2(Lk) = 128, so the qk/pv WMMAs run 8 K-passes
+    # when only ceil(Lk/16) are needed. Covering D as a power-of-2 main block
+    # plus a power-of-2 tail block (e.g. 64 + 16 = 80 for Lk=72) drops that to
+    # 5 passes. Constexpr-guarded: BLOCK_DMODEL_TAIL == 0 reproduces the
+    # single-block kernel exactly (dead-code eliminated) for power-of-2 dims.
+    if BLOCK_DMODEL_TAIL > 0:
+        offs_dt = BLOCK_DMODEL + tl.arange(0, BLOCK_DMODEL_TAIL)
+        mask_dt = offs_dt < Lk
+        off_qt = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
+            + cur_head * stride_qh
+            + offs_dt[None, :]
+        )
+        off_kt = (
+            offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_dt[:, None]
+        )
+        off_vt = (
+            offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_dt[None, :]
+        )
+        qt = tl.load(
+            Q + off_qt,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+            other=0.0,
+        )
+        kt_ptrs = K + off_kt
+        vt_ptrs = V + off_vt
+
     # initialize pointer to m and l
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = tl.zeros([BLOCK_M, BLOCK_DMODEL_TAIL], dtype=tl.float32)
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
 
@@ -143,6 +174,13 @@ def _fwd_kernel(
         )
 
         qk = tl.dot(q, k)
+        if BLOCK_DMODEL_TAIL > 0:
+            kt = tl.load(
+                kt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+                mask=(pos_k < cur_batch_seq_len) & (mask_dt[:, None]),
+                other=0.0,
+            )
+            qk += tl.dot(qt, kt)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -154,6 +192,8 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         # -- update output accumulator --
         acc = acc * alpha[:, None]
+        if BLOCK_DMODEL_TAIL > 0:
+            acc_t = acc_t * alpha[:, None]
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
@@ -162,6 +202,14 @@ def _fwd_kernel(
         )
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
+        if BLOCK_DMODEL_TAIL > 0:
+            vt = tl.load(
+                vt_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
+                mask=((start_n + offs_n[:, None]) < cur_batch_seq_len)
+                & (mask_dt[None, :]),
+                other=0.0,
+            )
+            acc_t = tl.dot(p, vt, acc_t)
         # update m_i
         m_i = m_ij
 
@@ -175,6 +223,18 @@ def _fwd_kernel(
     tl.store(
         out_ptrs, acc, mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_d[None, :])
     )
+    if BLOCK_DMODEL_TAIL > 0:
+        acc_t = acc_t / l_i[:, None]
+        off_o_tail = (
+            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
+            + cur_head * stride_oh
+            + offs_dt[None, :]
+        )
+        tl.store(
+            Out + off_o_tail,
+            acc_t,
+            mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
+        )
 
 
 def _is_rdna() -> bool:
@@ -231,6 +291,22 @@ def get_waves_per_eu(head_dim: int) -> int | None:
     return None
 
 
+def _split_head_dim(Lk: int) -> tuple[int, int]:
+    """Pick (BLOCK_DMODEL, BLOCK_DMODEL_TAIL) covering head_dim ``Lk``.
+
+    For a power-of-2 Lk, returns (Lk, 0) -- the single-block kernel.
+    Otherwise covers Lk with the largest power-of-2 main block (< Lk) plus a
+    power-of-2 tail block, so the WMMA K/N extent is ceil to a multiple of 16
+    near Lk (e.g. 72 -> 64 + 16 = 80) instead of next_pow2(Lk) = 128.
+    """
+    npo2 = triton.next_power_of_2(Lk)
+    if npo2 == Lk:
+        return npo2, 0
+    main = npo2 // 2  # largest power of 2 strictly below Lk
+    tail = max(16, triton.next_power_of_2(Lk - main))
+    return main, tail
+
+
 def context_attention_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -272,6 +348,8 @@ def context_attention_fwd(
     if waves_per_eu is not None:
         extra_kwargs["waves_per_eu"] = waves_per_eu
 
+    block_dmodel, block_dmodel_tail = _split_head_dim(Lk)
+
     _fwd_kernel[grid](
         q,
         k,
@@ -290,7 +368,8 @@ def context_attention_fwd(
         o.stride(1),
         kv_group_num=kv_group_num,
         BLOCK_M=BLOCK,
-        BLOCK_DMODEL=triton.next_power_of_2(Lk),
+        BLOCK_DMODEL=block_dmodel,
+        BLOCK_DMODEL_TAIL=block_dmodel_tail,
         BLOCK_N=BLOCK,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
