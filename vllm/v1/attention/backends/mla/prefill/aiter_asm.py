@@ -505,51 +505,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # (stride[1] = qk_head_dim, not v_head_dim), so force a copy here.
         v = v.contiguous()
 
-        # DEBUG: verify the live K/V/Q extents the standalone aiter test cannot
-        # reproduce. The kernel reads K/V rows 0..kv_indices.numel()-1 via the
-        # kv_indices identity map, and reads Q rows 0..qo_indptr[-1]-1. If the
-        # gathered K/V (from cp_gather_cache into the workspace) or Q disagree
-        # with the metadata, the kernel over-reads -> MAF. These are host reads of
-        # already-on-CPU/scalar values plus a couple of .item() syncs. Remove
-        # once the 256-conc cause is found.
-        kv_indices = ps["kv_indices"]
-        kv_indptr = ps["kv_indptr"]
-        qo_indptr = ps["qo_indptr"]
-        n_kv_idx = int(kv_indices.numel())
-        kv_last = int(kv_indptr[-1].item())
-        qo_last = int(qo_indptr[-1].item())
-        kv_idx_max = int(kv_indices.max().item()) if n_kv_idx > 0 else -1
-        logger.info(
-            "AITER_ASM INPUTS is_causal=%s q.shape0=%d k.shape0=%d "
-            "v.shape0=%d kv_indices.numel=%d kv_indices.max=%d "
-            "kv_indptr[-1]=%d qo_indptr[-1]=%d num_partial_tiles=%d",
-            is_causal,
-            q.shape[0],
-            k.shape[0],
-            v.shape[0],
-            n_kv_idx,
-            kv_idx_max,
-            kv_last,
-            qo_last,
-            ps["num_partial_tiles"],
-        )
-        assert k.shape[0] == v.shape[0], (
-            f"K/V row mismatch: k={k.shape[0]} v={v.shape[0]}"
-        )
-        assert n_kv_idx == kv_last, (
-            f"kv_indices.numel ({n_kv_idx}) != kv_indptr[-1] ({kv_last})"
-        )
-        assert k.shape[0] == kv_last, (
-            f"K rows ({k.shape[0]}) != kv_indptr[-1] ({kv_last})"
-        )
-        assert kv_idx_max < k.shape[0], (
-            f"kv_indices.max ({kv_idx_max}) >= K rows ({k.shape[0]}); "
-            "kernel will over-read K/V"
-        )
-        assert q.shape[0] == qo_last, (
-            f"Q rows ({q.shape[0]}) != qo_indptr[-1] ({qo_last})"
-        )
-
         total_q = q.shape[0]
         nhead = self.num_heads
         v_head_dim = self.v_head_dim
