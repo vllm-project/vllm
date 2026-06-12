@@ -400,23 +400,45 @@ class Scheduler(SchedulerInterface):
             ):
                 # force to cache the last chunk
                 num_new_tokens = last_cache_position - num_computed_tokens
-            elif self.mamba_partial_cache_hit:
-                # Prefill of the final partial block: stop once at the
-                # prompt's last hash boundary so the mamba partial tail entry
-                # can be registered.
-                tail_boundary = (
-                    request.num_prompt_tokens
+            elif (
+                self.mamba_partial_cache_hit
+                and num_computed_tokens
+                < (
+                    tail_boundary := request.num_prompt_tokens
                     // self.hash_block_size
                     * self.hash_block_size
                 )
-                if (
-                    num_computed_tokens
-                    < tail_boundary
-                    < num_computed_tokens_after_sched
-                    and tail_boundary < request.num_prompt_tokens
-                    and tail_boundary > last_cache_position
-                ):
-                    num_new_tokens = tail_boundary - num_computed_tokens
+                < num_computed_tokens_after_sched
+                and tail_boundary < request.num_prompt_tokens
+                and tail_boundary > last_cache_position
+            ):
+                # Prefill of the final partial block: stop once at the
+                # prompt's last hash boundary so the mamba partial tail entry
+                # can be registered.
+                num_new_tokens = tail_boundary - num_computed_tokens
+            else:
+                # Past the last cacheable boundary the final chunk may end
+                # unaligned, but intermediate chunks must still end on block
+                # boundaries: an unaligned intermediate chunk leaves a
+                # mid-block state snapshot in an aligned block-table slot,
+                # which cache_blocks would later hash as that boundary's
+                # state and poison the prefix cache for every request that
+                # resumes from it. This happens in particular with
+                # speculative decoding, where the eagle prune above zeroes
+                # `last_cache_position` for prompts shorter than
+                # 2 * block_size and the token budget fragments concurrent
+                # prefills (see #43559).
+                prefill_end = max(
+                    request.num_prompt_tokens, request.num_tokens - 1
+                )
+                if num_computed_tokens_after_sched < prefill_end:
+                    num_new_tokens = max(
+                        num_computed_tokens_after_sched
+                        // block_size
+                        * block_size
+                        - num_computed_tokens,
+                        0,
+                    )
 
             # Marconi cache admission optimization:
             # cache common prefixes by scheduling num_new_tokens = common prefix length
