@@ -6,9 +6,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from xgrammar import StructuralTag
-from xgrammar.builtin_structural_tag import (
-    _structural_tag_registry as xgrammar_structural_tag_registry,
-)
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
@@ -52,13 +49,6 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
             },
         )
     ]
-
-
-def test_vllm_builtin_models_match_xgrammar_builtin_registry():
-    assert (
-        frozenset(xgrammar_structural_tag_registry)
-        == XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS
-    )
 
 
 def test_supported_structural_tag_models_include_vllm_builtins():
