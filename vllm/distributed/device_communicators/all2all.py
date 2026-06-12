@@ -575,7 +575,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         torch.accelerator.synchronize()
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
-        NixlEPAll2AllManager._last_active_mask = None
+        NixlEPAll2AllManager._last_mask = None
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
