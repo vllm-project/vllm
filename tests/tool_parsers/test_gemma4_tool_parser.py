@@ -399,6 +399,21 @@ class TestStreamingExtraction:
                         args_text += arg
         return args_text
 
+    def _collect_arguments_by_index(self, results):
+        """Collect streamed argument deltas by tool-call index."""
+        args_by_index: dict[int, str] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        arg = func.get("arguments", "")
+                    else:
+                        arg = getattr(func, "arguments", "") or ""
+                    if arg:
+                        args_by_index[tc.index] = args_by_index.get(tc.index, "") + arg
+        return args_by_index
+
     def _collect_function_name(self, results):
         """Extract the function name from streaming results."""
         for delta, _ in results:
@@ -642,6 +657,113 @@ class TestStreamingExtraction:
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
 
+    def test_streaming_mtp_chunk_crossing_tool_call_boundary(
+        self, parser, mock_request
+    ):
+        """MTP-sized deltas can contain one call's end and the next call's start."""
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<tool_call|><|tool_call>call:getStationInfo{',
+            'location:<|"|>Piacenza<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
+    def test_streaming_mtp_chunk_crossing_buffered_tool_call_boundary(
+        self, parser, mock_request
+    ):
+        """A split start delimiter after a close delimiter should still replay."""
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<tool_call|><',
+            '|tool_call>call:getStationInfo{location:<|"|>Piacenza<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
+    def test_streaming_mtp_chunk_closes_existing_and_completes_next_call(
+        self, parser, mock_request
+    ):
+        """One MTP delta can close one call and contain the whole next call."""
+        chunks = [
+            '<|tool_call>call:getStationInfo{location:<|"|>Milano<|"|>}',
+            "<tool_call|><|tool_call>call:getStationInfo{"
+            'location:<|"|>Piacenza<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
+    def test_streaming_mtp_chunk_contains_two_complete_tool_calls(
+        self, parser, mock_request
+    ):
+        """A single large delta can contain two complete Gemma4 tool calls."""
+        chunks = [
+            "<|tool_call>call:getStationInfo{"
+            'location:<|"|>Milano<|"|>}<tool_call|>'
+            "<|tool_call>call:getStationInfo{"
+            'location:<|"|>Piacenza<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
+    def test_streaming_filename_suffix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """File extensions split across chunks must not be dropped."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+
+    def test_streaming_string_prefix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """String values split after the first character must be preserved."""
+        chunks = [
+            "<|tool_call>",
+            "call:spawn_agent{",
+            'subagent_type:<|"|>e',
+            'xplore<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"subagent_type": "explore"}
+
     def test_streaming_does_not_duplicate_plain_text_after_tool_call(
         self, parser, mock_request, monkeypatch
     ):
@@ -649,9 +771,9 @@ class TestStreamingExtraction:
         captured_current_texts: list[str] = []
         original_extract_streaming = parser._extract_streaming
 
-        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+        def wrapped_extract_streaming(current_text):
             captured_current_texts.append(current_text)
-            return original_extract_streaming(previous_text, current_text, delta_text)
+            return original_extract_streaming(current_text)
 
         monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
 
