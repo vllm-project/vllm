@@ -102,10 +102,9 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
-from vllm.parser import ParserManager
+from vllm.parser import Parser, ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -613,8 +612,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            tool_parser=self.parser.tool_parser_cls if self.parser else None,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
+            parser=self.parser,
         )
         return messages, engine_inputs
 
@@ -623,7 +621,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
-        tool_parser: type[ToolParser] | None,
+        parser: type[Parser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -638,8 +636,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            tool_parser=tool_parser,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
+            parser=parser,
         )
         return engine_inputs
 
@@ -707,7 +704,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
-                    context.parser_cls.tool_parser_cls if context.parser_cls else None,
+                    context.parser_cls,
                     context.chat_template,
                     context.chat_template_content_format,
                 )

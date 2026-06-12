@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
@@ -428,7 +429,47 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is not None:
             request = self._reasoning_parser.adjust_request(request)
         if self._tool_parser is not None:
+            request = self._apply_structural_tag(request)
+        if self._tool_parser is not None:
             request = self._tool_parser.adjust_request(request)
+        return request
+
+    def _apply_structural_tag(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if (
+            self._tool_parser is None
+            or self._tool_parser.structural_tag_model is None
+            or not request.tools
+        ):
+            return request
+
+        need_tool_calling = (
+            request.tool_choice == "auto"
+            or request.tool_choice == "required"
+            or isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
+        )
+        if not need_tool_calling:
+            return request
+
+        structure_tag = self._tool_parser.get_structural_tag(
+            request,
+            reasoning=False,
+        )
+        if structure_tag is None:
+            return request
+
+        structural_tag = json.dumps(structure_tag.model_dump())
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=structural_tag,
+        )
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
         return request
 
     def extract_reasoning_streaming(
