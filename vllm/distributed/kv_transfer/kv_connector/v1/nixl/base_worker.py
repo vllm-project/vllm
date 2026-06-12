@@ -1596,7 +1596,8 @@ class NixlBaseConnectorWorker:
         # Per-region block_len validation enforcing the P/D invariant.
         # REPLICATE regions (MLA, or a whole-model MLA / replicated-KV transfer)
         # only allow the number of blocks to differ; SPLIT regions scale with
-        # tp_ratio. Mamba uses the ssm_sizes counterpart, so skip block_len here.
+        # the per-rank head ratio. Mamba uses the ssm_sizes counterpart, so
+        # skip block_len here.
         if not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
@@ -1604,6 +1605,15 @@ class NixlBaseConnectorWorker:
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
                 remote_engine_id
             )
+            # SPLIT block_lens scale with the per-rank head count, which GQA
+            # replication caps at 1 when tp_size > total_num_kv_heads — so
+            # they do not scale linearly with 1/tp beyond that point
+            # (issue #45330). Compare against the actual per-rank head ratio
+            # rather than the raw tp_ratio (identical whenever neither side
+            # is capped).
+            total_kv_heads = self.transfer_topo.total_num_kv_heads
+            local_heads = self.transfer_topo.local_physical_heads
+            remote_heads = max(1, total_kv_heads // remote_tp_size)
             for i, local_len in enumerate(self.block_len_per_layer):
                 replicated = model_replicated or self._is_region_replicated(i)
                 remote_len = nixl_agent_meta.block_lens[i]
@@ -1614,20 +1624,30 @@ class NixlBaseConnectorWorker:
                         f"remote={remote_len}, bsr={block_size_ratio})."
                     )
                 elif tp_ratio > 0:
-                    assert remote_len == (local_len * tp_ratio) // block_size_ratio, (
+                    # D_TP >= P_TP: remote holds remote_heads/local_heads x
+                    # local heads (== tp_ratio when GQA replication caps
+                    # neither side).
+                    assert (
+                        remote_len
+                        == (local_len * remote_heads // local_heads) // block_size_ratio
+                    ), (
                         f"SPLIT region {i}: remote P KV block_len {remote_len} "
-                        f"must equal local {local_len} * tp_ratio {tp_ratio} "
+                        f"must equal local {local_len} * remote_heads "
+                        f"{remote_heads} // local_heads {local_heads} "
                         f"// block_size_ratio {block_size_ratio}."
                     )
                 else:
+                    # P_TP > D_TP: local holds local_heads/remote_heads x
+                    # remote heads (== |tp_ratio|; the capped combination is
+                    # rejected by the tp_ratio < 0 guard above).
                     assert block_size_ratio == 1, (
                         "Different local/remote block sizes are not supported "
                         "when P TP > D TP."
                     )
-                    assert remote_len == local_len // (-tp_ratio), (
-                        f"SPLIT region {i}: remote P KV block_len "
-                        f"{remote_len} must equal local {local_len} "
-                        f"// |tp_ratio| {-tp_ratio}."
+                    assert remote_len == local_len * remote_heads // local_heads, (
+                        f"SPLIT region {i}: remote P KV block_len {remote_len} "
+                        f"must equal local {local_len} * remote_heads "
+                        f"{remote_heads} // local_heads {local_heads}."
                     )
 
         # TP workers that handhshake with same remote have same #blocks.

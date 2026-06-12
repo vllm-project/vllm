@@ -1010,6 +1010,67 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_handshake_validates_gqa_replicated_block_len(
+        self, default_vllm_config, dist_init
+    ):
+        """Regression test for https://github.com/vllm-project/vllm/issues/45330.
+
+        When tp_size > total_num_kv_heads, GQA replication caps the per-rank
+        KV head count at 1, so block_len stops scaling linearly with 1/tp.
+        With 8 KV heads and D_TP=16 pulling from P_TP=8, both sides hold one
+        head per rank and report the *same* block_len; the handshake
+        validation used to expect local_block_len * tp_ratio and reject the
+        valid handshake.
+        """
+        vllm_config = create_vllm_config()
+
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=16,
+        ):
+            connector = NixlConnector(
+                vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            )
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
+            worker = connector.connector_worker
+
+            # 8 total KV heads: local TP=16 is capped at 1 head per rank.
+            worker.transfer_topo.total_num_kv_heads = 8
+            worker.transfer_topo.local_physical_heads = 1
+            # Head-splitting validation requires HND for heterogeneous TP.
+            worker.kv_cache_layout = "HND"
+
+            worker.slot_size_per_layer = [4096]
+            worker.block_len_per_layer = [4096 * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Remote P with TP=8 and 8 KV heads also holds exactly one head
+            # per rank -> identical block_len despite tp_ratio == 2.
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                device_id=0,
+                num_blocks=1,
+                block_lens=list(worker.block_len_per_layer),
+                kv_cache_layout="HND",
+                block_size=worker.block_size,
+                ssm_sizes=(0, 0),
+                attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
+            )
+
+            # Must validate cleanly (used to raise AssertionError expecting
+            # remote_block_len == local_block_len * tp_ratio).
+            worker.add_remote_agent(meta, remote_tp_size=8)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
         self, default_vllm_config, dist_init
     ):
