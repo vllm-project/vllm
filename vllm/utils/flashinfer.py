@@ -107,6 +107,9 @@ def _lazy_import_wrapper(
             return fallback_fn(*args, **kwargs)
         return impl(*args, **kwargs)
 
+    # Expose an explicit hook so tests can reset the cached backend
+    # resolution without introspecting the closure.
+    wrapper.cache_clear = _get_impl.cache_clear  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -223,6 +226,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
     if not has_flashinfer_moe():
         return False
     required_functions = [
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
@@ -977,6 +981,7 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 __all__ = [
     "has_flashinfer",
+    "flashinfer_trtllm_bf16_moe",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
