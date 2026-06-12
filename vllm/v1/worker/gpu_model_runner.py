@@ -4578,6 +4578,17 @@ class GPUModelRunner(
                 routed_experts=None,
             )
 
+        if scheduler_output.kv_transfer_spec_decode_handoff_req_ids:
+            draft_token_ids, draft_req_ids = self._get_draft_token_ids_cpu()
+            handoff_req_ids = scheduler_output.kv_transfer_spec_decode_handoff_req_ids
+            req_ids = []
+            token_ids = []
+            for req_id, draft_tokens_for_req in zip(draft_req_ids, draft_token_ids):
+                if req_id in handoff_req_ids:
+                    req_ids.append(req_id)
+                    token_ids.append(draft_tokens_for_req)
+            output.draft_token_ids = DraftTokenIds(req_ids, token_ids)
+
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
@@ -4698,6 +4709,7 @@ class GPUModelRunner(
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
+            or scheduler_output.kv_transfer_spec_decode_handoff_req_ids
         ):
             return
         # We must also set the corresponding request ids.

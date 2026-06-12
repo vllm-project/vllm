@@ -269,6 +269,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Real draft tokens generated in the current step for requests that need
+    # cross-engine speculative handoff.
+    draft_token_ids: "DraftTokenIds | None" = None
+
     # Per-step routed experts data captured by the worker.
     # ``routing_data`` shape: (num_scheduled_tokens, num_layers,
     #                         num_experts_per_tok); expert IDs as uint8/uint16.

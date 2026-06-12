@@ -245,6 +245,10 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # P-side KV-transfer requests whose first generated token and draft tokens
+    # should be handed off to a decode node.
+    kv_transfer_spec_decode_handoff_req_ids: set[str] = field(default_factory=set)
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

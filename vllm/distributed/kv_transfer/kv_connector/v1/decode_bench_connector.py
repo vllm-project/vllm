@@ -271,7 +271,6 @@ class DecodeBenchConnectorScheduler:
         kv_transfer_params = dict(request.kv_transfer_params or {})
         kv_transfer_params.update(
             {
-                "_decode_bench_speculative_handoff": True,
                 "first_gen_token_ids": [first_token_id],
                 "draft_token_ids": draft_token_ids,
             }
