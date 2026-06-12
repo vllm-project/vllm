@@ -442,10 +442,10 @@ counted separately via Prometheus (see
 | Metric | Unit | Description |
 | -------- | ------ | ------------- |
 | `Num successful transfers` | count | Number of NIXL KV-block transfers that completed without error during the interval. A transfer corresponds to one prefill request's worth of KV cache being moved from the prefiller to the decoder (or vice versa in bidirectional mode). |
-| `Avg xfer time (ms)` | ms | Mean duration of the RDMA data-copy phase per transfer (`xferDuration` in NIXL telemetry, converted from µs). This covers the time NIXL spends moving bytes across the fabric, excluding the post-notification step. |
+| `Avg xfer time (ms)` | ms | Mean end-to-end transfer duration (`xferDuration` in NIXL telemetry, converted from µs). Measured from when the request is posted to when the backend reports completion, so it includes both the posting step and the actual data movement. |
 | `P90 xfer time (ms)` | ms | 90th-percentile transfer duration. Use this to identify tail latency: a large gap between average and P90 suggests occasional stragglers (e.g., network congestion or large KV blocks). |
-| `Avg post time (ms)` | ms | Mean duration of the post-transfer notification phase per transfer (`postDuration` in NIXL telemetry). After the RDMA copy finishes, NIXL sends a completion notification to the remote side; this field captures that overhead. |
-| `P90 post time (ms)` | ms | 90th-percentile post-notification duration. Elevated P90 here (with low xfer P90) points to notification latency rather than bandwidth issues. |
+| `Avg post time (ms)` | ms | Mean time to submit the transfer request to the RDMA backend (`postDuration` in NIXL telemetry). This is the synchronous cost of posting work to the NIC queue (descriptor setup, etc.) before the async data movement begins. |
+| `P90 post time (ms)` | ms | 90th-percentile request-posting duration. Elevated P90 here (with low xfer P90) points to overhead in submitting requests rather than in the data transfer itself. |
 | `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
 | `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
@@ -458,7 +458,7 @@ exported when NixlConnector is active:
 | Metric name | Type | Description |
 | ------------- | ------ | ------------- |
 | `vllm:nixl_xfer_time_seconds` | Histogram | Per-transfer RDMA copy duration (seconds). |
-| `vllm:nixl_post_time_seconds` | Histogram | Per-transfer post-notification duration (seconds). |
+| `vllm:nixl_post_time_seconds` | Histogram | Time to submit the transfer request to the RDMA backend (seconds). |
 | `vllm:nixl_bytes_transferred` | Histogram | Bytes moved per transfer. |
 | `vllm:nixl_num_descriptors` | Histogram | Descriptor count per transfer. |
 | `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers. |
