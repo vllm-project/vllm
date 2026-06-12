@@ -5,6 +5,7 @@ import time
 
 import msgspec
 import msgspec.msgpack
+import prometheus_client
 import pytest
 import zmq
 from tqdm import tqdm
@@ -303,6 +304,167 @@ def test_cpu_offloading(
         del llm
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_cpu_offloading_metrics() -> None:
+    """Verify that offloading Prometheus metrics (new flat and deprecated
+    labeled) are emitted after stores and loads."""
+    extra_config: dict = {
+        "cpu_bytes_to_use": 500 << 20,
+        "block_size": CPU_BLOCK_SIZES,
+    }
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+
+    llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        max_model_len=4096,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=kv_transfer_config,
+        disable_log_stats=False,
+    )
+
+    try:
+        prompt_token_ids = list(range(500))
+
+        # First generate: cold run, triggers a store to CPU.
+        # Use max_tokens>1 so the request is still producing output
+        # tokens when the async store completes and stats get drained.
+        # (The LLMEngine only records stats on steps with request outputs.)
+        llm.generate(
+            [TokensPrompt(prompt_token_ids=prompt_token_ids)],
+            SamplingParams(max_tokens=10),
+            use_tqdm=False,
+        )
+
+        # Wait for the async offload to finish, then reset GPU prefix cache
+        # so the next generate must load from CPU.
+        _wait_for_prefix_cache_reset(llm)
+
+        # Second generate: triggers a load from CPU.
+        # Send a short filler alongside the load prompt so there's always
+        # a request producing output tokens when the load stats get drained
+        # (the LLMEngine only records stats on steps with request outputs).
+        filler = TokensPrompt(prompt_token_ids=[0])
+        llm.generate(
+            [filler, TokensPrompt(prompt_token_ids=prompt_token_ids)],
+            SamplingParams(max_tokens=50),
+            use_tqdm=False,
+        )
+
+        # Metric helpers.
+        registry = prometheus_client.REGISTRY
+
+        def _get_counter_value(
+            name: str, labels: dict[str, str] | None = None
+        ) -> float:
+            total = 0.0
+            for metric in registry.collect():
+                if metric.name == name:
+                    for sample in metric.samples:
+                        if sample.name != name + "_total":
+                            continue
+                        if labels and not all(
+                            sample.labels.get(k) == v for k, v in labels.items()
+                        ):
+                            continue
+                        total += sample.value
+            return total
+
+        def _get_histogram_count(
+            name: str, labels: dict[str, str] | None = None
+        ) -> float:
+            total = 0.0
+            for metric in registry.collect():
+                if metric.name == name:
+                    for sample in metric.samples:
+                        if sample.name != name + "_count":
+                            continue
+                        if labels and not all(
+                            sample.labels.get(k) == v for k, v in labels.items()
+                        ):
+                            continue
+                        total += sample.value
+            return total
+
+        # Stats are drained asynchronously — if the transfer finishes
+        # after the last engine step for that generate() call, the metrics
+        # won't appear until a subsequent step.  Retry with dummy generates
+        # to force additional stats drains.
+        deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
+        while time.monotonic() < deadline:
+            store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
+            load_bytes = _get_counter_value("vllm:kv_offload_load_bytes")
+            if store_bytes > 0 and load_bytes > 0:
+                break
+            llm.generate(
+                [TokensPrompt(prompt_token_ids=[0])],
+                SamplingParams(max_tokens=1),
+                use_tqdm=False,
+            )
+
+        # New flat counter metrics
+        store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
+        assert store_bytes > 0, f"Expected store_bytes > 0, got {store_bytes}"
+        load_bytes = _get_counter_value("vllm:kv_offload_load_bytes")
+        assert load_bytes > 0, f"Expected load_bytes > 0, got {load_bytes}"
+        store_time = _get_counter_value("vllm:kv_offload_store_time")
+        assert store_time > 0, f"Expected store_time > 0, got {store_time}"
+        load_time = _get_counter_value("vllm:kv_offload_load_time")
+        assert load_time > 0, f"Expected load_time > 0, got {load_time}"
+
+        # New flat histogram metrics
+        store_size_count = _get_histogram_count("vllm:kv_offload_store_size")
+        assert store_size_count > 0, (
+            f"Expected store_size histogram observations > 0, got {store_size_count}"
+        )
+        load_size_count = _get_histogram_count("vllm:kv_offload_load_size")
+        assert load_size_count > 0, (
+            f"Expected load_size histogram observations > 0, got {load_size_count}"
+        )
+
+        # Deprecated labeled metrics — verify per transfer_type label.
+        load_label = {"transfer_type": "CPU_to_GPU"}
+        store_label = {"transfer_type": "GPU_to_CPU"}
+
+        dep_load_bytes = _get_counter_value("vllm:kv_offload_total_bytes", load_label)
+        assert dep_load_bytes > 0, (
+            f"Expected deprecated load bytes > 0, got {dep_load_bytes}"
+        )
+        dep_store_bytes = _get_counter_value("vllm:kv_offload_total_bytes", store_label)
+        assert dep_store_bytes > 0, (
+            f"Expected deprecated store bytes > 0, got {dep_store_bytes}"
+        )
+        dep_load_time = _get_counter_value("vllm:kv_offload_total_time", load_label)
+        assert dep_load_time > 0, (
+            f"Expected deprecated load time > 0, got {dep_load_time}"
+        )
+        dep_store_time = _get_counter_value("vllm:kv_offload_total_time", store_label)
+        assert dep_store_time > 0, (
+            f"Expected deprecated store time > 0, got {dep_store_time}"
+        )
+        dep_load_size = _get_histogram_count("vllm:kv_offload_size", load_label)
+        assert dep_load_size > 0, (
+            f"Expected deprecated load size observations > 0, got {dep_load_size}"
+        )
+        dep_store_size = _get_histogram_count("vllm:kv_offload_size", store_label)
+        assert dep_store_size > 0, (
+            f"Expected deprecated store size observations > 0, got {dep_store_size}"
+        )
+
+        # Flat and deprecated metrics must be consistent (dual-write).
+        assert store_bytes == dep_store_bytes
+        assert load_bytes == dep_load_bytes
+        assert store_time == dep_store_time
+        assert load_time == dep_load_time
+        assert store_size_count == dep_store_size
+        assert load_size_count == dep_load_size
+    finally:
+        del llm
+
+
 def test_tiering_offloading() -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {
@@ -377,7 +539,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
 
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
-        max_model_len=512,
+        max_model_len=4096,
         gpu_memory_utilization=0.5,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
@@ -391,4 +553,92 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
+        del llm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="HMA mamba-align CPU offload test is CUDA-only",
+)
+@pytest.mark.parametrize(
+    "model,block_size,tp_size",
+    [
+        # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
+        # ("tiiuae/falcon-mamba-7b", 16, 1),
+        ("state-spaces/mamba-1.4b-hf", 16, 1)
+    ],
+)
+def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 << 30,
+            "block_size": block_size,
+        },
+    )
+    llm = LLM(
+        model=model,
+        max_model_len=block_size * 10,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=tp_size,
+        kv_transfer_config=kv_transfer_config,
+        language_model_only=True,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+        disable_hybrid_kv_cache_manager=False,
+    )
+
+    _PROMPT_SIZE: int = block_size * 2
+    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+
+    # build prompt ids to match prompt_size
+    tokenizer = llm.get_tokenizer()
+    raw_ids: list[int] = tokenizer.encode(_PROMPT_TEXT)
+    while len(raw_ids) < _PROMPT_SIZE:
+        raw_ids = tokenizer.encode("....") + raw_ids
+    initial_ids: list[int] = raw_ids[:_PROMPT_SIZE]
+
+    sampling_params = SamplingParams(max_tokens=128, temperature=0, ignore_eos=True)
+
+    failures: list[str] = []
+
+    def _get_output_str(outputs):
+        return outputs[0].outputs[0].text
+
+    def _verify(llm, prompt, label: str):
+        cold_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+        _wait_for_prefix_cache_reset(llm)
+        cpu_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+
+        cold_text = _get_output_str(cold_outputs)
+        cpu_text = _get_output_str(cpu_outputs)
+        print(f"{label} : cold outputs\n{cold_text}")
+        print(f"{label} : cpu outputs\n{cpu_text}")
+
+        if cold_text != cpu_text:
+            failures.append(
+                f"{label}: mismatch\n  cold: {cold_text!r}\n  cpu:  {cpu_text!r}"
+            )
+
+    try:
+        # Mamba has only a single state. The CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at the boundary,
+        # The CPU offload should not load the cached block.
+        # This is because we'd use that state to recompute the last token. This
+        # does not work for mamba as there is only one KV value and that is for
+        # for the token at the boundary.
+        # This is fine for other attention types as we have all the necessary
+        # token KV values in the hit blocks.
+        prompt = TokensPrompt(prompt_token_ids=initial_ids)
+        _verify(llm, prompt, "block-boundary-prompt")
+
+        # Test for prompt token ids at non-block boundaries.
+        # Reuse is okay for this case.
+        prompt = TokensPrompt(prompt_token_ids=[0] + initial_ids)
+        _verify(llm, prompt, "block-mid-prompt")
+
+        assert not failures, "\n\n".join(failures)
+
+    finally:
         del llm
