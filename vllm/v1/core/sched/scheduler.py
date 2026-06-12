@@ -328,8 +328,24 @@ class Scheduler(SchedulerInterface):
             # eagle prune
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
+            branch_cache_position = 0
+            dp_prefix_cache_prefix_len = request.dp_prefix_cache_prefix_len
+            if dp_prefix_cache_prefix_len is not None:
+                branch_cache_position = (
+                    dp_prefix_cache_prefix_len
+                    - dp_prefix_cache_prefix_len % block_size
+                )
+                branch_cache_position = min(branch_cache_position, last_cache_position)
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
+            if (
+                num_computed_tokens
+                < branch_cache_position
+                < num_computed_tokens_after_sched
+            ):
+                # Stop at an observed branch point so align-mode Mamba/GDN can
+                # materialize a reusable state block for later sibling prompts.
+                num_new_tokens = branch_cache_position - num_computed_tokens
+            elif num_computed_tokens_after_sched < last_cache_position:
                 # align to block_size
                 num_new_tokens = num_new_tokens // block_size * block_size
             elif (

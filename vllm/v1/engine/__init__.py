@@ -78,6 +78,7 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
     dtype: str
     vllm_version: str
+    hash_block_size: int | None = None
 
 
 class EngineCoreRequest(
@@ -130,6 +131,11 @@ class EngineCoreRequest(
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
+
+    # Internal hint used by DP prefix-cache-aware routing. When set, the
+    # scheduler may stop a prefill chunk at this block-aligned prefix boundary
+    # so hybrid KV cache state can be materialized for later sibling prompts.
+    dp_prefix_cache_prefix_len: int | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
