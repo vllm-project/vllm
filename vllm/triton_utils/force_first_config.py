@@ -16,11 +16,7 @@ def is_installed() -> bool:
 
 
 def install() -> None:
-    """Install the Autotuner.run replacement.
-
-    No-op if Triton is unavailable or the patch is already installed.
-    Callers must use it once before any kernel is launched.
-    """
+    """Install the Autotuner.run replacement."""
     global _installed
     if _installed:
         return
