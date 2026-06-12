@@ -14,8 +14,9 @@ from vllm.model_executor.model_loader.weight_utils import download_gguf
 class TestGGUFDownload:
     """Test GGUF model downloading functionality."""
 
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_single_file(self, mock_download):
+    def test_download_gguf_single_file(self, mock_download, mock_snapshot):
         """Test downloading a single GGUF file."""
         # Setup mock
         mock_folder = "/tmp/mock_cache"
@@ -46,8 +47,9 @@ class TestGGUFDownload:
             # Verify result is the file path, not folder
             assert result == f"{mock_folder}/model-IQ1_S.gguf"
 
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_sharded_files(self, mock_download):
+    def test_download_gguf_sharded_files(self, mock_download, mock_snapshot):
         """Test downloading sharded GGUF files."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
@@ -68,8 +70,9 @@ class TestGGUFDownload:
             # Should return the first file after sorting
             assert result == f"{mock_folder}/model-Q2_K-00001-of-00002.gguf"
 
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
-    def test_download_gguf_subdir(self, mock_download):
+    def test_download_gguf_subdir(self, mock_download, mock_snapshot):
         """Test downloading GGUF files from subdirectory."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
@@ -85,9 +88,102 @@ class TestGGUFDownload:
 
             assert result == f"{mock_folder}/Q2_K/model-Q2_K.gguf"
 
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
+    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
+    def test_download_gguf_with_mmproj(self, mock_download, mock_snapshot):
+        """Test that mmproj files are downloaded via snapshot_download."""
+        mock_folder = "/tmp/mock_cache"
+        mock_download.return_value = mock_folder
+
+        with patch("glob.glob") as mock_glob:
+
+            def glob_side_effect(pattern, **kwargs):
+                if "Q4_K_S" in pattern:
+                    return [f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"]
+                return []
+
+            mock_glob.side_effect = glob_side_effect
+
+            result = download_gguf("unsloth/gemma-3-4b-it-GGUF", "Q4_K_S")
+
+            # Verify snapshot_download was called for mmproj with all
+            # key parameters passed through correctly
+            mock_snapshot.assert_called_once()
+            call_kwargs = mock_snapshot.call_args.kwargs
+            assert call_kwargs["allow_patterns"] == ["mmproj*.gguf", "*/mmproj*.gguf"]
+            assert call_kwargs["cache_dir"] is None
+            assert call_kwargs["revision"] is None
+            assert call_kwargs["ignore_patterns"] is None
+
+            # Verify result is the backbone file, not mmproj
+            assert result == f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"
+            assert "mmproj" not in result
+
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
+    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
+    def test_download_gguf_mmproj_passthrough_params(
+        self, mock_download, mock_snapshot
+    ):
+        """Test that cache_dir, revision, ignore_patterns are passed through
+        to snapshot_download for mmproj."""
+        mock_folder = "/tmp/mock_cache"
+        mock_download.return_value = mock_folder
+
+        with patch("glob.glob") as mock_glob:
+
+            def glob_side_effect(pattern, **kwargs):
+                if "Q4_K_S" in pattern:
+                    return [f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"]
+                return []
+
+            mock_glob.side_effect = glob_side_effect
+
+            result = download_gguf(
+                "unsloth/gemma-3-4b-it-GGUF",
+                "Q4_K_S",
+                cache_dir="/custom/cache",
+                revision="dev",
+                ignore_patterns=["original/**/*"],
+            )
+
+            call_kwargs = mock_snapshot.call_args.kwargs
+            assert call_kwargs["cache_dir"] == "/custom/cache"
+            assert call_kwargs["revision"] == "dev"
+            assert call_kwargs["ignore_patterns"] == ["original/**/*"]
+            assert result == f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"
+
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
+    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
+    def test_download_gguf_mmproj_not_in_candidates(self, mock_download, mock_snapshot):
+        """Test that mmproj files never appear in return candidates
+        even when present on disk."""
+        mock_folder = "/tmp/mock_cache"
+        mock_download.return_value = mock_folder
+
+        with patch("glob.glob") as mock_glob:
+
+            def glob_side_effect(pattern, **kwargs):
+                if "Q4_K_S" in pattern:
+                    return [f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"]
+                return []
+
+            mock_glob.side_effect = glob_side_effect
+
+            result = download_gguf("unsloth/gemma-3-4b-it-GGUF", "Q4_K_S")
+
+            # glob should only be called with backbone patterns
+            glob_patterns = [call.args[0] for call in mock_glob.call_args_list]
+            for p in glob_patterns:
+                assert "mmproj" not in p
+
+            assert result == f"{mock_folder}/gemma-3-4b-it-Q4_K_S.gguf"
+
+    @patch("vllm.model_executor.model_loader.weight_utils.snapshot_download")
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
     @patch("glob.glob", return_value=[])
-    def test_download_gguf_no_files_found(self, mock_glob, mock_download):
+    def test_download_gguf_no_files_found(
+        self, mock_glob, mock_download, mock_snapshot
+    ):
         """Test error when no GGUF files are found."""
         mock_folder = "/tmp/mock_cache"
         mock_download.return_value = mock_folder
