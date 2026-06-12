@@ -862,8 +862,6 @@ _patch_inductor_fallback_allow_list()
 # ============================================================
 # Replace the Autotuner.run so it always pick the first running configuration.
 # Useful to eliminate autotune variability leading to non determinism.
-# The logic lives in vllm.triton_utils.force_first_config and it is gated on
-# VLLM_TRITON_FORCE_FIRST_CONFIG so it is opt-in.
 if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
     "1",
     "true",
