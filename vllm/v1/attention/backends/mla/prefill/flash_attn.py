@@ -98,6 +98,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         return CuTeDSLWarmupPlan(
             provider="fa4_mla_prefill",
+            cudagraph_capture_modes=True,
             warmup_callbacks=(self._run_cutedsl_warmup,),
         )
 

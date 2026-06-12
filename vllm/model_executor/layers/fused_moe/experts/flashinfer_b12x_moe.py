@@ -68,6 +68,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         return CuTeDSLWarmupPlan(
             provider="flashinfer_b12x_moe",
             model_runner_modes=("mixed",),
+            cudagraph_capture_modes=True,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

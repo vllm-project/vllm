@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+import time
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -38,6 +39,9 @@ class CuTeDSLWarmupPlan:
 
     model_runner_modes: tuple[CuTeDSLWarmupMode, ...] = ()
     """Generic ``GPUModelRunner._dummy_run`` batch modes to execute."""
+
+    cudagraph_capture_modes: bool = False
+    """Warm eager dummy runs for the runner's CUDA graph capture descriptors."""
 
     warmup_callbacks: tuple[CuTeDSLWarmupCallback, ...] = ()
     """Provider-specific warmup callbacks for paths generic dummy runs miss."""
@@ -163,6 +167,58 @@ def _run_uniform_decode_dummy_warmup(runner: "GPUModelRunner") -> None:
     )
 
 
+def _run_cudagraph_capture_mode_warmup(runner: "GPUModelRunner") -> None:
+    """Warm eager forwards for CUDA graph capture descriptors.
+
+    CUDA graph capture descriptors are vLLM's concrete, configuration-specific
+    batch shapes. Running them eagerly warms JIT'ed kernels without capturing
+    graphs or adding a separate shape grid.
+    """
+    cudagraph_dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if cudagraph_dispatcher is None:
+        logger.info(
+            "Skipping CuTeDSL CUDA graph descriptor warmup because the runner "
+            "does not have a cudagraph dispatcher."
+        )
+        return
+
+    capture_descs = cudagraph_dispatcher.get_capture_descs()
+    if not capture_descs:
+        logger.info(
+            "Skipping CuTeDSL CUDA graph descriptor warmup because no CUDA "
+            "graph capture descriptors are available."
+        )
+        return
+
+    descriptors: list[tuple[int, bool, int]] = []
+    seen_descs: set[tuple[int, bool, int]] = set()
+    for _runtime_mode, batch_descs in capture_descs:
+        for desc in batch_descs:
+            key = (desc.num_tokens, desc.uniform, desc.num_active_loras)
+            if key in seen_descs:
+                continue
+            seen_descs.add(key)
+            descriptors.append(key)
+
+    logger.info(
+        "Warming CuTeDSL eager CUDA graph descriptor shapes: %s.",
+        descriptors,
+    )
+
+    for num_tokens, uniform, num_active_loras in descriptors:
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=None,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=uniform,
+            allow_microbatching=False,
+            remove_lora=False,
+            num_active_loras=num_active_loras,
+        )
+
+
 @instrument(span_name="CuTeDSL warmup")
 def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     """Run CuTeDSL warmup providers before serving."""
@@ -191,15 +247,20 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     model_runner_modes = {
         mode for plan in plans for mode in plan.model_runner_modes
     }
+    use_cudagraph_capture_modes = any(
+        plan.cudagraph_capture_modes for plan in plans
+    )
 
     logger.info(
         "Warming up CuTeDSL providers=%s with token_sizes=%s "
-        "and model_runner_modes=%s.",
+        "model_runner_modes=%s and cudagraph_capture_modes=%s.",
         provider_names,
         token_sizes,
         sorted(model_runner_modes),
+        use_cudagraph_capture_modes,
     )
 
+    start_time = time.perf_counter()
     with torch.inference_mode():
         for plan in plans:
             for callback in plan.warmup_callbacks:
@@ -216,5 +277,7 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
             _run_mixed_dummy_warmup(runner, token_sizes)
         if "uniform_decode" in model_runner_modes:
             _run_uniform_decode_dummy_warmup(runner)
+        if use_cudagraph_capture_modes:
+            _run_cudagraph_capture_mode_warmup(runner)
 
-    logger.info("CuTeDSL warmup completed.")
+    logger.info("CuTeDSL warmup completed in %.2f s.", time.perf_counter() - start_time)

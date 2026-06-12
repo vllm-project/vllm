@@ -282,6 +282,7 @@ class DeepseekCompressor(nn.Module):
         return CuTeDSLWarmupPlan(
             provider="deepseek_v4_compressor",
             model_runner_modes=("mixed",),
+            cudagraph_capture_modes=True,
         )
 
     def forward(

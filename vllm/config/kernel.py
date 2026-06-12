@@ -162,7 +162,6 @@ LinearBackend = Literal[
     "emulation",
 ]
 
-
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -269,7 +268,7 @@ class KernelConfig:
 
         FlashAttention reads these variables when importing
         ``flash_attn.cute.cache_utils``, so this must run during config
-        finalization.
+        finalization before attention backends import FA4 CuTeDSL modules.
         """
         if not self.enable_cutedsl_warmup and self.cutedsl_cache_dir is None:
             os.environ["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "0"

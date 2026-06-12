@@ -706,6 +706,7 @@ class FlashAttentionImpl(AttentionImpl):
         return CuTeDSLWarmupPlan(
             provider="fa4_attention",
             model_runner_modes=("prefill", "mixed", "uniform_decode"),
+            cudagraph_capture_modes=True,
         )
 
     def forward(
