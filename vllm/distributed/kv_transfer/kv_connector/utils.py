@@ -31,6 +31,11 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
+def effective_block_size(block_size: int, cp_world_size: int) -> int:
+    """Return the sequence-token capacity covered by one KV block id."""
+    return block_size * cp_world_size
+
+
 def get_kv_connector_cache_layout():
     # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
     # used for faster transfer.

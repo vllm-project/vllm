@@ -79,17 +79,18 @@ class TestDcpSchedulerAccounting:
         assert cdiv(resolved - 1, physical) == 8
         assert cdiv(resolved - 1, resolved) == 1
 
-    def test_sliding_window_blocks_scale_with_dcp(self, default_vllm_config):
-        """blocks_per_sw uses the dcp-scaled per-group block capacity.
+    def test_sliding_window_blocks_scale_with_cp(self, default_vllm_config):
+        """blocks_per_sw uses the CP-scaled per-group block capacity.
 
-        Each block id covers block_size * dcp tokens of the sequence, so
-        the window clip count shrinks accordingly; the raw per-group size
+        Each block id covers block_size * dcp * pcp tokens of the sequence,
+        so the window clip count shrinks accordingly; the raw per-group size
         would over-count and let get_sw_clipped_blocks keep HMA's leading
         null-marked blocks.
         """
-        physical, dcp_size, sw_size = 16, 8, 512
+        physical, dcp_size, pcp_size, sw_size = 16, 4, 2, 512
         vllm_config = create_vllm_config(block_size=physical)
         vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
         # Single SWA group: hybrid (multi-group) layouts are still rejected
         # by resolve_kv_cache_block_sizes under CP.
         kv_cache_config = KVCacheConfig(
@@ -109,7 +110,9 @@ class TestDcpSchedulerAccounting:
             ],
         )
         scheduler = NixlConnectorScheduler(vllm_config, "engine", kv_cache_config)
-        assert scheduler.blocks_per_sw == [cdiv(sw_size, physical * dcp_size) + 1]
+        assert scheduler.blocks_per_sw == [
+            cdiv(sw_size, physical * dcp_size * pcp_size) + 1
+        ]
 
     def test_request_finished_emits_exact_token_count(self, default_vllm_config):
         """remote_num_tokens stays the exact computed count, unrounded."""

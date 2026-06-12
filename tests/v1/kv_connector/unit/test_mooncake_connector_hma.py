@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -20,6 +21,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferMetadata,
     SendBlockMeta,
     TransferRegion,
+)
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
@@ -59,6 +66,49 @@ def test_sw_sizes(swa_enabled, expected_blocks_per_sw):
         kv_cache_config=kv_cache_config,
     )
     assert scheduler.blocks_per_sw == expected_blocks_per_sw
+
+
+@pytest.mark.cpu_test
+def test_sw_sizes_scale_with_cp():
+    """blocks_per_sw uses the CP-scaled per-group block capacity."""
+    block_size, dcp_size, pcp_size, sw_size = 16, 4, 2, 512
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=block_size,
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    # Single SWA group: hybrid (multi-group) layouts are rejected by
+    # resolve_kv_cache_block_sizes under CP.
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                    sliding_window=sw_size,
+                ),
+            )
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+
+    assert scheduler.block_size == block_size * dcp_size * pcp_size
+    assert scheduler.blocks_per_sw == [
+        cdiv(sw_size, block_size * dcp_size * pcp_size) + 1,
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    effective_block_size,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -123,14 +124,15 @@ class NixlBaseConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
-        # Under context parallelism each block id covers block_size * dcp * pcp
-        # tokens of the sequence, so scale the per-group block size accordingly.
-        cp_factor = (
+        cp_world_size = (
             vllm_config.parallel_config.decode_context_parallel_size
             * vllm_config.parallel_config.prefill_context_parallel_size
         )
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size * cp_factor)
+            (
+                g.kv_cache_spec.sliding_window,
+                effective_block_size(g.kv_cache_spec.block_size, cp_world_size),
+            )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
             for g in kv_cache_config.kv_cache_groups
