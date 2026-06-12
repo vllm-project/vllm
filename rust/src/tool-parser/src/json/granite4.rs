@@ -488,8 +488,8 @@ mod tests {
     }
 
     #[test]
-    fn granite4_preserve_special_tokens_is_true() {
+    fn granite4_preserve_special_tokens_is_false() {
         let parser = Granite4ToolParser::new(&test_tools());
-        assert!(parser.preserve_special_tokens());
+        assert!(!parser.preserve_special_tokens());
     }
 }
