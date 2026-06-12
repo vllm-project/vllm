@@ -932,6 +932,7 @@ class WorkerProc:
             try:
                 output = output.get_output()
             except Exception as e:
+                logger.exception("Error getting async model runner output")
                 output = e
 
         if isinstance(output, Exception):
