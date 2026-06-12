@@ -299,8 +299,8 @@ class ReasoningParserManager:
         Example:
             ReasoningParserManager.register_lazy_module(
                 name="qwen3",
-                module_path="vllm.reasoning.parsers.qwen3_reasoning_parser",
-                class_name="Qwen3ReasoningParser",
+                module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+                class_name="Qwen3ParserReasoningAdapter",
             )
         """
         cls.lazy_parsers[name] = (module_path, class_name)

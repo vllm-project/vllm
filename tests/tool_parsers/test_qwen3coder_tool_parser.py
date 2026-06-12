@@ -26,9 +26,6 @@ from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3_engine_tool_parser import (
     Qwen3EngineToolParser,
 )
-from vllm.tool_parsers.qwen3coder_tool_parser import (
-    Qwen3CoderToolParser,
-)
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
@@ -40,22 +37,7 @@ def qwen3_tokenizer():
 
 @pytest.fixture
 def qwen3_tool_parser(qwen3_tokenizer, sample_tools):
-    return Qwen3CoderToolParser(qwen3_tokenizer, tools=sample_tools)
-
-
-@pytest.fixture
-def qwen3_engine_tool_parser(qwen3_tokenizer, sample_tools):
     return Qwen3EngineToolParser(qwen3_tokenizer, tools=sample_tools)
-
-
-@pytest.fixture(params=["coder", "engine"])
-def qwen3_tool_parser_parametrized(
-    qwen3_tool_parser, qwen3_engine_tool_parser, request
-):
-    if request.param == "coder":
-        return qwen3_tool_parser
-    else:
-        return qwen3_engine_tool_parser
 
 
 WEATHER_PARAMS = {
@@ -221,9 +203,9 @@ def stream_delta_message_generator(
         read_offset = new_read_offset
 
 
-def test_extract_tool_calls_no_tools(qwen3_tool_parser_parametrized):
+def test_extract_tool_calls_no_tools(qwen3_tool_parser):
     model_output = "This is a test response without any tool calls"
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+    extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=None
     )  # type: ignore[arg-type]
     assert not extracted_tool_calls.tools_called
@@ -404,13 +386,13 @@ circle
     ],
 )
 def test_extract_tool_calls(
-    qwen3_tool_parser_parametrized,
+    qwen3_tool_parser,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+    extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request
     )
     assert extracted_tool_calls.tools_called
@@ -421,7 +403,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(
-    qwen3_tool_parser_parametrized,
+    qwen3_tool_parser,
 ):
     """Test fallback parsing when XML tags are missing"""
     model_output = """<function=get_current_weather>
@@ -434,7 +416,7 @@ TX
 </function>"""
 
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+    extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request
     )
 
@@ -484,7 +466,7 @@ hello world
 </function>
 </tool_call>"""
 
-    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
@@ -576,7 +558,7 @@ some text
 </function>
 </tool_call>"""
 
-    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted = parser.extract_tool_calls(model_output, request=request)
 
@@ -650,7 +632,7 @@ true
 </function>
 </tool_call>"""
 
-    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
     tool_states = {}
@@ -856,7 +838,7 @@ circle
     ],
 )
 def test_extract_tool_calls_streaming(
-    qwen3_tool_parser_parametrized,
+    qwen3_tool_parser,
     qwen3_tokenizer,
     model_output,
     expected_tool_calls,
@@ -869,7 +851,7 @@ def test_extract_tool_calls_streaming(
     tool_states = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
     ):
         # role should never be streamed from tool parser
         assert not delta_message.role
@@ -930,7 +912,7 @@ def test_extract_tool_calls_streaming(
 
 
 def test_extract_tool_calls_missing_closing_parameter_tag(
-    qwen3_tool_parser_parametrized,
+    qwen3_tool_parser,
 ):
     """Test handling of missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -949,7 +931,7 @@ fahrenheit
 </tool_call>"""
 
     request = ChatCompletionRequest(model=MODEL, messages=[])
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+    extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request
     )
 
@@ -972,7 +954,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_missing_closing_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer
+    qwen3_tool_parser, qwen3_tokenizer
 ):
     """Test streaming with missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -996,7 +978,7 @@ fahrenheit
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -1045,9 +1027,7 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
-def test_extract_tool_calls_streaming_incremental(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer
-):
+def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer):
     """Test that streaming is truly incremental"""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
@@ -1064,7 +1044,7 @@ TX
 
     chunks = []
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
     ):
         chunks.append(delta_message)
 
@@ -1106,7 +1086,7 @@ TX
 
 
 def test_extract_tool_calls_streaming_missing_opening_tag(
-    qwen3_engine_tool_parser, qwen3_tokenizer
+    qwen3_tool_parser, qwen3_tokenizer
 ):
     """Test streaming with missing opening <tool_call> tag
 
@@ -1134,7 +1114,7 @@ fahrenheit
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        qwen3_engine_tool_parser, qwen3_tokenizer, model_output, request
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -1248,7 +1228,7 @@ def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
         )
     ]
 
-    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
 
     model_output = (
         "<tool_call>\n"
@@ -1339,7 +1319,7 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
 
 
 def test_get_vllm_registry_structural_tag_returns_structural_tag(
-    qwen3_tool_parser: Qwen3CoderToolParser,
+    qwen3_tool_parser: Qwen3EngineToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     request_tools = _as_chat_completion_tools(sample_tools)
@@ -1381,7 +1361,7 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
     include_reasoning: bool,
 ) -> None:
     class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3CoderToolParser
+        tool_parser_cls = Qwen3EngineToolParser
 
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
@@ -1403,7 +1383,7 @@ def test_adjust_request_required_prefers_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3CoderToolParser
+        tool_parser_cls = Qwen3EngineToolParser
 
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
