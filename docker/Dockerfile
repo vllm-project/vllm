@@ -144,7 +144,7 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
         && rm -rf /var/cache/dnf; \
     else \
         apt-get update -y \
-        && apt-get install -y --no-install-recommends \
+        && apt-get install -y --no-install-recommends --allow-change-held-packages \
             ccache \
             software-properties-common \
             git \
