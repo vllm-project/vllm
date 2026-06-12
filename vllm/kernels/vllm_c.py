@@ -12,6 +12,7 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
 IS_ROCM = current_platform.is_rocm()
 """ROCm needs shape normalization before calling some vLLM C kernels."""
+GPGPU_DEVICE = CUDA_ALIKE or current_platform.is_xpu()
 
 rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
     variance_size is None and (weight is None or weight.dtype == x.dtype)
@@ -20,7 +21,7 @@ rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
 
 
 @ir.ops.rms_norm.register_impl(
-    "vllm_c", supports_args=rms_no_var_size, supported=CUDA_ALIKE
+    "vllm_c", supports_args=rms_no_var_size, supported=GPGPU_DEVICE
 )
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
@@ -36,6 +37,9 @@ def rms_norm(
         torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.reshape(original_shape)
 
+    if current_platform.is_xpu() and weight is None:
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
@@ -51,7 +55,7 @@ matching input/weight dtype."""
 @ir.ops.fused_add_rms_norm.register_impl(
     "vllm_c",
     supports_args=rms_add_no_var_size,
-    supported=CUDA_ALIKE,
+    supported=GPGPU_DEVICE,
     inplace=True,
 )
 def fused_add_rms_norm(
@@ -79,6 +83,10 @@ def fused_add_rms_norm(
         x_residual = x_residual.view(-1, original_shape[-1])
         torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
         return x.view(original_shape), x_residual.view(original_shape)
+
+    if current_platform.is_xpu() and weight is None:
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
 
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual

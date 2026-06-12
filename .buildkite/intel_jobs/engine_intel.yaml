@@ -18,8 +18,10 @@ steps:
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
+    - tests/test_config/
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py'
+      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py &&
+      VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s test_config.py'

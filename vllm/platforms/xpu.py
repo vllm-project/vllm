@@ -439,7 +439,7 @@ class XPUPlatform(Platform):
         # use fused kernels where available when no codegen
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
 
         return IrOpPriorityConfig.with_default(default)
 
