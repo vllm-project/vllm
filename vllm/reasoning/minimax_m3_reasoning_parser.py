@@ -37,12 +37,19 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
+        self._at_response_start = True
 
     def extract_reasoning(
         self,
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
+        # MiniMax M3 can start a response with a stray closer. Drop that first
+        # token only; later unmatched closers stay visible as content.
+        if not self._initial_in_reasoning and model_output.startswith(self.end_token):
+            content = model_output[len(self.end_token) :]
+            return None, content or None
+
         if self._initial_in_reasoning and self.start_token not in model_output:
             reasoning, end, content = model_output.partition(self.end_token)
             if not end:
@@ -96,6 +103,17 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     ) -> DeltaMessage | None:
         if not delta_text:
             return None
+
+        if self._at_response_start and not self._initial_in_reasoning:
+            # Apply the leading-closer tolerance once. Later unmatched closers
+            # stay visible as content.
+            self._at_response_start = False
+            if delta_text.startswith(self.end_token):
+                delta_text = delta_text[len(self.end_token) :]
+                if not delta_text:
+                    return None
+                if delta_token_ids and delta_token_ids[0] == self.end_token_id:
+                    delta_token_ids = delta_token_ids[1:]
 
         if self.end_token_id in previous_token_ids:
             return DeltaMessage(content=delta_text)

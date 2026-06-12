@@ -176,6 +176,37 @@ fn minimax_m3_handles_explicit_think_delimiters() {
 }
 
 #[test]
+fn minimax_m3_drops_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("</mm:think>answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_preserves_non_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("XXX</mm:think>YYY").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("XXX</mm:think>YYY"));
+}
+
+#[test]
+fn minimax_m3_drops_split_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    assert!(parser.push("</mm").unwrap().is_empty());
+    let delta = parser.push(":think>answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
 fn minimax_m3_uses_prompt_prefilled_start_marker() {
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();

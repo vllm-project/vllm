@@ -164,6 +164,26 @@ def test_nonstreaming_without_start_tag_is_content():
     assert content == "plain answer"
 
 
+def test_nonstreaming_drops_leading_end_tag():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning("</mm:think>answer", request)
+
+    assert reasoning is None
+    assert content == "answer"
+
+
+def test_nonstreaming_non_leading_end_tag_is_content():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning("XXX</mm:think>YYY", request)
+
+    assert reasoning is None
+    assert content == "XXX</mm:think>YYY"
+
+
 def test_nonstreaming_enabled_mode_starts_in_reasoning():
     parser, _ = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
     request = ChatCompletionRequest(messages=[], model="test-model")
@@ -209,6 +229,34 @@ def test_streaming_boundary_can_emit_reasoning_and_content():
 
     assert reasoning == "plan"
     assert content == "answer"
+    assert end_states == [True]
+
+
+def test_streaming_drops_leading_end_tag():
+    parser, tokenizer = make_parser()
+
+    reasoning, content, end_states = run_streaming(
+        parser,
+        tokenizer,
+        ["</mm:think>", "answer"],
+    )
+
+    assert reasoning is None
+    assert content == "answer"
+    assert end_states == [True, True]
+
+
+def test_streaming_non_leading_end_tag_is_content():
+    parser, tokenizer = make_parser()
+
+    reasoning, content, end_states = run_streaming(
+        parser,
+        tokenizer,
+        ["XXX</mm:think>YYY"],
+    )
+
+    assert reasoning is None
+    assert content == "XXX</mm:think>YYY"
     assert end_states == [True]
 
 
