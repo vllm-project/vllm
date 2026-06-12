@@ -326,6 +326,12 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # prefill/decode path returns LSE only for decode tokens while the
         # merge needs LSE for every token (see PR #34429 discussion).
         if parallel_config.decode_context_parallel_size > 1:
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "DCP for FlashMLA sparse is only validated with the "
+                    "default 'ag_rs' DCP comm backend; got "
+                    f"'{parallel_config.dcp_comm_backend}'"
+                )
             if not self.fp8_use_mixed_batch:
                 raise NotImplementedError(
                     "DCP for FlashMLA sparse is only supported on the "

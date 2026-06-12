@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
+    dcp_localize_seq_lens,
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
@@ -32,31 +33,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
-
-
-def dcp_localize_seq_lens(
-    seq_lens: torch.Tensor,
-    dcp_rank: int,
-    dcp_world_size: int,
-    cp_kv_cache_interleave_size: int = 1,
-) -> torch.Tensor:
-    """Map global causal bounds to this DCP rank's local KV counts.
-
-    Interleaved ownership: global position j belongs to rank
-    (j // interleave_size) % dcp_world_size, so the result counts the
-    positions < bound owned by this rank. Equivalent to
-    get_dcp_local_seq_lens for a single rank, but purely elementwise: it
-    accepts a tensor of any shape (e.g. per-token expanded bounds, where
-    consecutive entries may land on different ranks), allocates no
-    intermediate (num_requests, world_size) tiling, and is CUDA-graph
-    safe (no device sync). Identity when dcp_world_size == 1.
-    """
-    ilv = cp_kv_cache_interleave_size
-    grp = dcp_world_size * ilv
-    full = seq_lens // grp
-    rem = seq_lens - full * grp
-    extra = (rem - dcp_rank * ilv).clamp_(0, ilv)
-    return full * ilv + extra
 
 
 @triton.jit
@@ -270,16 +246,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
-        try:
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.decode_context_parallel_size > 1:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
+        else:
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.cp_kv_cache_interleave_size = (
-            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -374,6 +348,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
             self.compress_ratio = self.kv_cache_spec.compress_ratio
+        if self.dcp_world_size > 1 and self.compress_ratio > 1:
+            raise NotImplementedError(
+                "DCP is not supported with indexer KV compression "
+                f"(compress_ratio={self.compress_ratio} > 1)"
+            )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -588,10 +567,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # topk/gather sizes must come from this rank's local lengths,
             # while `seq_lens` stays global (it provides the global start
             # positions for the ownership formula in the prefill metadata
-            # kernel).
-            assert self.compress_ratio == 1, (
-                "DCP is not supported with indexer KV compression (compress_ratio > 1)"
-            )
+            # kernel). compress_ratio > 1 is rejected at init.
             compressed_seq_lens = dcp_local_seq_lens
 
         prefill_metadata = None
