@@ -423,3 +423,49 @@ def test_multiple_senders_single_receiver_ipc():
         assert torch.allclose(decoded.prompt_embeds, original_tensor), (
             f"Value mismatch for sender {sender_idx} msg {msg_idx}"
         )
+
+
+def test_engine_notifications_round_trip():
+    """LoRA residency events survive the EngineCoreOutputs wire format.
+
+    The Rust frontend decodes the exact same bytes (see
+    rust/src/engine-core-client/src/protocol/notifications.rs), so this
+    also pins the map-with-"type"-tag encoding produced by msgspec.
+    """
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.notifications import LoRALoadEvent
+
+    event = LoRALoadEvent(
+        gpu_adapters=["alpha"],
+        cpu_adapters=["alpha", "beta"],
+        pinned_adapters=["alpha"],
+    )
+    outputs = EngineCoreOutputs(engine_index=3, engine_notifications=[event])
+
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(EngineCoreOutputs)
+    decoded = decoder.decode(encoder.encode(outputs))
+
+    assert decoded.engine_index == 3
+    assert decoded.engine_notifications == [event]
+
+    # tag check
+    raw = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    assert raw["type"] == "lora_load_event"
+
+    # events are rare, ensure not transmitted when unset
+    no_events = decoder.decode(encoder.encode(EngineCoreOutputs(engine_index=3)))
+    assert no_events.engine_notifications is None
+
+
+def test_engine_notifications_unknown_tag_fails_fast():
+    """The notification union is version-lockstep, like the rest of
+    EngineCoreOutputs: an unknown tag is a deployment error and must fail
+    the decode, not be skipped."""
+    from vllm.v1.notifications import EngineNotification
+
+    future_event = msgspec.msgpack.encode(
+        {"type": "graceful_shutdown_started", "step": 1}
+    )
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.msgpack.decode(future_event, type=EngineNotification)
