@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
+    InternVisionPatchModel,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import BaseDummyInputsBuilder
@@ -177,10 +178,14 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
+        llm_arch_name = config.text_config.architectures[0]
+        self.is_mono = llm_arch_name == "SkyworkLM2VEForCausalLM"
+
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_model = self._init_vision_model(
                 config,
                 quant_config=quant_config,
+                is_mono=self.is_mono,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.mlp1 = self._init_mlp1(
@@ -218,22 +223,26 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
+        is_mono: bool,
         prefix: str,
     ):
-        vision_feature_layer = config.select_layer
-        if vision_feature_layer < 0:
-            num_hidden_layers = (
-                config.vision_config.num_hidden_layers + vision_feature_layer + 1
+        if not is_mono:
+            vision_feature_layer = config.select_layer
+            if vision_feature_layer < 0:
+                num_hidden_layers = (
+                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
+                )
+            else:
+                num_hidden_layers = vision_feature_layer + 1
+
+            return InternVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                num_hidden_layers_override=num_hidden_layers,
+                prefix=prefix,
             )
         else:
-            num_hidden_layers = vision_feature_layer + 1
-
-        return InternVisionModel(
-            config.vision_config,
-            quant_config=quant_config,
-            num_hidden_layers_override=num_hidden_layers,
-            prefix=prefix,
-        )
+            return InternVisionPatchModel(config.vision_config)
 
     def _init_mlp1(
         self,
@@ -354,6 +363,14 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         ]
         return image_embeds.split(image_feature_sizes)
 
+    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
+        if self.is_mono:
+            self.visual_token_mask = (input_ids == self.img_context_token_id).reshape(
+                -1, 1
+            )
+        else:
+            self.visual_token_mask = None
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -368,6 +385,9 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
+            self._set_visual_token_mask(input_ids)
+
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)

@@ -9,14 +9,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <torch/all.h>
-
-#include "float_convert.hpp"
-
 namespace vec_op {
 
 // FP8 KV cache is not supported on RISC-V. These tag types and the
@@ -249,7 +245,8 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
     const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
     float tmp[8];
     for (int i = 0; i < 8; ++i) {
-      tmp[i] = bf16_to_float(u16[i]);
+      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
+      std::memcpy(&tmp[i], &v, 4);
     }
     reg_fp32 = RVVI(__riscv_vle32_v_f32, LMUL_256)(tmp, 8);
   }
@@ -259,7 +256,9 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
     RVVI(__riscv_vse32_v_f32, LMUL_256)(tmp, reg_fp32, 8);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < 8; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
   void save(void* ptr, int elem_num) const {
@@ -267,7 +266,9 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
     RVVI(__riscv_vse32_v_f32, LMUL_256)(tmp, reg_fp32, 8);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < elem_num; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
   void save_strided(void* ptr, ptrdiff_t stride) const {
@@ -276,8 +277,10 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
     uint8_t* u8 = static_cast<uint8_t*>(ptr);
     ptrdiff_t byte_stride = stride * sizeof(uint16_t);
     for (int i = 0; i < 8; ++i) {
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) =
-          float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      uint16_t val = static_cast<uint16_t>(v >> 16);
+      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
     }
   }
 };
@@ -289,7 +292,8 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
     float tmp[16];
     for (int i = 0; i < 16; ++i) {
-      tmp[i] = bf16_to_float(u16[i]);
+      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
+      std::memcpy(&tmp[i], &v, 4);
     }
     reg_fp32 = RVVI(__riscv_vle32_v_f32, LMUL_512)(tmp, 16);
   }
@@ -302,7 +306,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     RVVI(__riscv_vse32_v_f32, LMUL_512)(tmp, reg_fp32, 16);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < 16; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
   void save(void* ptr, int elem_num) const {
@@ -310,7 +316,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     RVVI(__riscv_vse32_v_f32, LMUL_512)(tmp, reg_fp32, 16);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < elem_num; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
   void save_strided(void* ptr, ptrdiff_t stride) const {
@@ -319,8 +327,10 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     uint8_t* u8 = static_cast<uint8_t*>(ptr);
     ptrdiff_t byte_stride = stride * sizeof(uint16_t);
     for (int i = 0; i < 16; ++i) {
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) =
-          float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      uint16_t val = static_cast<uint16_t>(v >> 16);
+      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
     }
   }
 };
@@ -333,7 +343,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
     float tmp[32];
     for (int i = 0; i < 32; ++i) {
-      tmp[i] = bf16_to_float(u16[i]);
+      uint32_t v = static_cast<uint32_t>(u16[i]) << 16;
+      std::memcpy(&tmp[i], &v, 4);
     }
     reg_fp32 = RVVI(__riscv_vle32_v_f32, LMUL_1024)(tmp, 32);
   }
@@ -360,7 +371,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     RVVI(__riscv_vse32_v_f32, LMUL_1024)(tmp, reg_fp32, 32);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < 32; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
 
@@ -369,7 +382,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     RVVI(__riscv_vse32_v_f32, LMUL_1024)(tmp, reg_fp32, 32);
     uint16_t* u16 = static_cast<uint16_t*>(ptr);
     for (int i = 0; i < elem_num; ++i) {
-      u16[i] = float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      u16[i] = static_cast<uint16_t>(v >> 16);
     }
   }
 
@@ -379,8 +394,10 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     uint8_t* u8 = static_cast<uint8_t*>(ptr);
     ptrdiff_t byte_stride = stride * sizeof(uint16_t);
     for (int i = 0; i < 32; ++i) {
-      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) =
-          float_to_bf16(tmp[i]);
+      uint32_t v;
+      std::memcpy(&v, &tmp[i], 4);
+      uint16_t val = static_cast<uint16_t>(v >> 16);
+      *reinterpret_cast<uint16_t*>(u8 + i * byte_stride) = val;
     }
   }
 };
@@ -717,17 +734,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(
         RVVI(__riscv_vfmax_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
   }
-  FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
-    return FP32Vec16(
-        RVVI(__riscv_vfmax_vv_f32, LMUL_512)(reg, b.reg, elem_num));
-  }
   FP32Vec16 min(const FP32Vec16& b) const {
     return FP32Vec16(
         RVVI(__riscv_vfmin_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
-  }
-  FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
-    return FP32Vec16(
-        RVVI(__riscv_vfmin_vv_f32, LMUL_512)(reg, b.reg, elem_num));
   }
   FP32Vec16 abs() const {
     return FP32Vec16(RVVI(__riscv_vfabs_v_f32, LMUL_512)(reg, VEC_ELEM_NUM));
@@ -858,27 +867,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 };
 
-struct INT8Vec16 : public Vec<INT8Vec16> {
-  constexpr static int VEC_ELEM_NUM = 16;
-  fixed_i8x16_t reg;
-
-  explicit INT8Vec16(const FP32Vec16& vec) {
-    auto i32_vec =
-        RVVI(__riscv_vfcvt_x_f_v_i32, LMUL_512)(vec.reg, VEC_ELEM_NUM);
-    auto i16_vec = RVVI(__riscv_vnclip_wx_i16, LMUL_256)(
-        i32_vec, 0, __RISCV_VXRM_RNU, VEC_ELEM_NUM);
-    reg = RVVI(__riscv_vnclip_wx_i8, LMUL_128)(i16_vec, 0, __RISCV_VXRM_RNU,
-                                               VEC_ELEM_NUM);
-  }
-
-  void save(int8_t* ptr) const {
-    RVVI(__riscv_vse8_v_i8, LMUL_128)(ptr, reg, VEC_ELEM_NUM);
-  }
-  void save(int8_t* ptr, int elem_num) const {
-    RVVI(__riscv_vse8_v_i8, LMUL_128)(ptr, reg, elem_num);
-  }
-};
-
 // ============================================================================
 // Type Traits & Global Helpers
 // ============================================================================
@@ -968,7 +956,9 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v)
 #else
 template <>
 inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16* ptr) {
-  *reinterpret_cast<uint16_t*>(ptr) = float_to_bf16(v);
+  uint32_t val;
+  std::memcpy(&val, &v, 4);
+  *reinterpret_cast<uint16_t*>(ptr) = static_cast<uint16_t>(val >> 16);
 }
 inline BF16Vec8::BF16Vec8(const FP32Vec8& v) : reg_fp32(v.reg) {}
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) : reg_fp32(v.reg) {}

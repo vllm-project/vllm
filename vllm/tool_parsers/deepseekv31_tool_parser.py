@@ -25,8 +25,6 @@ logger = init_logger(__name__)
 
 
 class DeepSeekV31ToolParser(ToolParser):
-    structural_tag_model = "deepseek_v3_1"
-
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 

@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import CompletionOutput
 from vllm.parser.abstract_parser import Parser
@@ -74,15 +73,11 @@ class ResponsesParser:
         self.finish_reason = output.finish_reason
 
         if self.parser_instance is not None:
-            reasoning, content, tool_calls = self.parser_instance.parse(
-                output.text,
-                self.request,
+            output_items = self.parser_instance.extract_response_outputs(
+                model_output=output.text,
+                model_output_token_ids=output.token_ids,
+                request=self.request,
                 enable_auto_tools=self.enable_auto_tools,
-            )
-            output_items = build_response_output_items(
-                reasoning=reasoning,
-                content=content,
-                tool_calls=tool_calls,
                 tool_call_id_type=self.tool_call_id_type,
             )
             self.response_messages.extend(output_items)

@@ -240,7 +240,8 @@ pub(crate) async fn tool_event_stream(
                 .await;
             }
             ContentEvent::Done {
-                usage,
+                prompt_token_count,
+                output_token_count,
                 finish_reason,
                 kv_transfer_params,
             } => {
@@ -249,7 +250,8 @@ pub(crate) async fn tool_event_stream(
                 }
 
                 y.yield_ok(AssistantEvent::Done {
-                    usage,
+                    prompt_token_count,
+                    output_token_count,
                     finish_reason,
                     kv_transfer_params,
                 })
@@ -463,11 +465,8 @@ mod tests {
                 })
             })
             .chain(std::iter::once(Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             })));
@@ -507,11 +506,8 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -663,11 +659,8 @@ mod tests {
                 delta: "def".to_string(),
             }),
             Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 3,
-                    output_token_count: 0,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 3,
+                output_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -704,11 +697,8 @@ mod tests {
                     delta: "def".to_string(),
                 },
                 AssistantEvent::Done {
-                    usage: vllm_llm::TokenUsage {
-                        prompt_token_count: 3,
-                        output_token_count: 0,
-                        cached_token_count: 0,
-                    },
+                    prompt_token_count: 3,
+                    output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -749,11 +739,8 @@ mod tests {
                 token_ids: vec![],
             }),
             Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 0,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 0,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -792,11 +779,8 @@ mod tests {
                     token_ids: vec![],
                 },
                 AssistantEvent::Done {
-                    usage: vllm_llm::TokenUsage {
-                        prompt_token_count: 1,
-                        output_token_count: 0,
-                        cached_token_count: 0,
-                    },
+                    prompt_token_count: 1,
+                    output_token_count: 0,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -812,11 +796,8 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -920,11 +901,8 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),

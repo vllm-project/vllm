@@ -24,12 +24,13 @@ def seed_everything():
     "model",
     [
         "boltuix/NeuroBERT-NER",
+        "gyr66/Ernie-3.0-base-chinese-finetuned-ner",
     ],
 )
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
-def test_bert_models(
+def test_bert_like_models(
     hf_runner,
     vllm_runner,
     example_prompts,

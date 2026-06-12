@@ -13,7 +13,7 @@ import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from typing import Any
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -308,12 +308,19 @@ async def init_app_state(
 ) -> None:
     vllm_config = engine_client.vllm_config
 
-    if args.tool_call_parser is not None:
-        from vllm.parser.metrics import init_parser_metrics
+    # Propagate enable_in_reasoning to the API-server process. The engine core
+    # runs in a separate process, so the contextvar that backs
+    # `get_current_vllm_config_or_none()` is None on this stack. Tool parsers
+    # call `get_enable_structured_outputs_in_reasoning()` during request
+    # handling and need to see the real flag, otherwise they silently fall
+    # back to False and mismatch the engine-side bitmask gating.
+    from vllm.tool_parsers.structural_tag_registry import (
+        set_enable_structured_outputs_in_reasoning,
+    )
 
-        init_parser_metrics(
-            model_name=cast(str, vllm_config.model_config.served_model_name)
-        )
+    set_enable_structured_outputs_in_reasoning(
+        vllm_config.structured_outputs_config.enable_in_reasoning
+    )
 
     if supported_tasks is None:
         warnings.warn(

@@ -1285,9 +1285,6 @@ def _test_body_eplb(
     expert_weights = [list(eplb_moe_layer.get_expert_weights())]
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-    assert vllm_config.parallel_config.eplb_config.communicator is not None, (
-        "EPLB communicator backend must be set by ParallelConfig"
-    )
     communicator = create_eplb_communicator(
         group_coordinator=get_eplb_group(),
         backend=vllm_config.parallel_config.eplb_config.communicator,
@@ -1804,9 +1801,12 @@ def test_moe_layer(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
-    # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
-    # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
-    # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
+    # TODO
+    # VLLM_FLASHINFER_MOE_BACKEND=latency
+    # VLLM_USE_FLASHINFER_MOE_FP16=1
+    # VLLM_USE_FLASHINFER_MOE_FP8
+    # VLLM_USE_FLASHINFER_MOE_FP4
+    # VLLM_USE_FLASHINFER_MOE_INT4
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,

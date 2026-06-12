@@ -1,6 +1,5 @@
 use std::any::type_name;
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use rmpv::Value;
 use serde::{Deserialize, Serialize};

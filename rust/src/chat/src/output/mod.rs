@@ -5,7 +5,6 @@ use futures::Stream;
 use subenum::subenum;
 use trait_set::trait_set;
 use uuid::Uuid;
-use vllm_llm::TokenUsage;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
@@ -50,7 +49,8 @@ pub(crate) enum AssistantEvent {
     ToolCallArgumentsDelta { delta: String },
     #[subenum(ContentEvent)]
     Done {
-        usage: TokenUsage,
+        prompt_token_count: usize,
+        output_token_count: usize,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
@@ -90,7 +90,8 @@ impl ContentEvent {
                 }
                 if let Some(finished) = finished {
                     events.push(Self::Done {
-                        usage: finished.usage,
+                        prompt_token_count: finished.prompt_token_count,
+                        output_token_count: finished.output_token_count,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                     });

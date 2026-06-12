@@ -119,8 +119,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
@@ -143,8 +143,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Olmo3PythonicToolParser",
     ),
     "openai": (
-        "gptoss_tool_parser",
-        "GptOssToolParser",
+        "openai_tool_parser",
+        "OpenAIToolParser",
     ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
@@ -159,8 +159,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Qwen3CoderToolParser",
     ),
     "qwen3_xml": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
     ),
     "seed_oss": (
         "seed_oss_tool_parser",

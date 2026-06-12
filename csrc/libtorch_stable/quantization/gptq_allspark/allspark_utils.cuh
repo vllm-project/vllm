@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-#include "libtorch_stable/quantization/marlin/marlin_dtypes.cuh"
+#include "quantization/marlin/marlin_dtypes.cuh"
 using marlin::MarlinScalarType2;
 
 namespace allspark {

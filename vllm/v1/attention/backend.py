@@ -387,7 +387,7 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    causal: bool | torch.Tensor = True
+    causal: bool = True
 
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
@@ -497,9 +497,7 @@ class CommonAttentionMetadata:
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
-            causal=self.causal[:num_actual_reqs]
-            if isinstance(self.causal, torch.Tensor)
-            else self.causal,
+            causal=self.causal,
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),

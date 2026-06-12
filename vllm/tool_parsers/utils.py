@@ -151,10 +151,6 @@ def consume_space(i: int, s: str) -> int:
     return i
 
 
-def _is_function_tool(tool: Tool) -> bool:
-    return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
-
-
 def _extract_tool_info(
     tool: Tool,
 ) -> tuple[str, dict[str, Any] | None]:
@@ -174,8 +170,6 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if not _is_function_tool(tool):
-            continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
             return (params or {}).get("properties", {})
@@ -216,16 +210,15 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
-    fn_tools = [t for t in tools if _is_function_tool(t)]
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in fn_tools],
+            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
         },
     }
-    json_schema_defs = _get_tool_schema_defs(fn_tools)
+    json_schema_defs = _get_tool_schema_defs(tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema

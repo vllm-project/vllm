@@ -109,10 +109,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
                 # Native ROCm HIP kernels (RDNA3, etc.)
                 if current_platform.is_rocm():
-                    from . import rocm_moe_rdna
+                    from . import rocm_moe
 
-                    if rocm_moe_rdna.is_supported(weight_quant):
-                        return rocm_moe_rdna.make_method(
+                    if rocm_moe.is_supported(weight_quant):
+                        return rocm_moe.make_method(
                             weight_quant, input_quant, layer.moe_config
                         )
 

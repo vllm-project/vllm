@@ -11,7 +11,6 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -50,37 +49,6 @@ class TransferEntry(NamedTuple):
     obj_handle: "nixl_prepped_dlist_handle"
 
 
-class ObjAsyncLookupManager(AsyncLookupManager):
-    """Async lookup manager for ObjectStoreSecondaryTierManager.
-
-    Batches existence probes into a single query_memory() call so the
-    background thread issues one round-trip per step instead of one per key.
-    """
-
-    def __init__(
-        self,
-        tier: "ObjectStoreSecondaryTierManager",
-        tier_type: str,
-    ) -> None:
-        super().__init__(tier_type=tier_type)
-        self._tier = tier
-
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        descriptors = [
-            (
-                _PROBE_ADDR,
-                _PROBE_LEN,
-                _PROBE_DEV_ID,
-                self._tier._file_mapper.get_file_name(k),
-            )
-            for k in keys
-        ]
-        results = self._tier._agent.query_memory(descriptors, "OBJ", "OBJ")
-        return (r is not None for r in results)
-
-
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that offloads KV cache blocks to an S3-compatible store.
 
@@ -108,10 +76,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._primary_reg = None
         self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
-        # Opt in; FileMapper enables it only for a parallelism-invariant block.
-        self._file_mapper = FileMapper.from_offloading_spec(
-            root_dir, offloading_spec, parallel_agnostic=True
-        )
+        self._file_mapper = FileMapper.from_offloading_spec(root_dir, offloading_spec)
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
         self._probe_connectivity()
@@ -132,10 +97,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # with the peer agent name ("ObjAgent").
         self._dram_prepped_handle: nixl_prepped_dlist_handle = (
             self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
-        )
-
-        self._lookup_manager = ObjAsyncLookupManager(
-            tier=self, tier_type=self.tier_type
         )
 
     def _probe_connectivity(self) -> None:
@@ -218,7 +179,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+        try:
+            return self._exists(self._file_mapper.get_file_name(key))
+        except Exception as e:
+            logger.warning("lookup failed for key %s: %s", key, e)
+            return False
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
@@ -231,12 +196,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
         )
-
-    def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
-
-    def on_schedule_end(self) -> None:
-        self._lookup_manager.flush()
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
@@ -267,7 +226,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return results
 
     def shutdown(self) -> None:
-        self._lookup_manager.shutdown()
         for job_id, entry in self._transfers.items():
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)

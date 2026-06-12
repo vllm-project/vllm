@@ -167,7 +167,6 @@ def _rocm_aiter_fused_moe_impl(
     output_dtype: torch.dtype | None = None,
     hidden_pad: int = 0,
     intermediate_pad: int = 0,
-    gate_mode: str = "",
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
@@ -177,10 +176,6 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
-
-    extra_kwargs: dict = {}
-    if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
-        extra_kwargs["gate_mode"] = gate_mode
 
     return fused_moe(
         hidden_states,
@@ -203,7 +198,6 @@ def _rocm_aiter_fused_moe_impl(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-        **extra_kwargs,
     )
 
 
@@ -225,7 +219,6 @@ def _rocm_aiter_fused_moe_fake(
     output_dtype: torch.dtype | None = None,
     hidden_pad: int = 0,
     intermediate_pad: int = 0,
-    gate_mode: str = "",
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
@@ -1811,21 +1804,6 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
-    @classmethod
-    @if_aiter_supported
-    @functools.cache
-    def fused_moe_supports_gate_mode(cls) -> bool:
-        """Probe whether the installed aiter.fused_moe accepts `gate_mode`.
-
-        Added in https://github.com/ROCm/aiter/pull/3123 (>=0.1.14).
-        Builds with older AITER must omit this argument.
-        """
-        import inspect
-
-        from aiter.fused_moe import fused_moe
-
-        return "gate_mode" in inspect.signature(fused_moe).parameters
-
     @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:
@@ -2194,7 +2172,6 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype | None = None,
         hidden_pad: int = 0,
         intermediate_pad: int = 0,
-        gate_mode: str = "",
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
@@ -2217,7 +2194,6 @@ class rocm_aiter_ops:
             output_dtype,
             hidden_pad,
             intermediate_pad,
-            gate_mode,
             bias1,
             bias2,
             moe_sorting_dispatch_policy,

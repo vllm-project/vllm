@@ -56,7 +56,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
-    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -398,9 +397,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     }
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
-    # ModelOpt NVFP4 checkpoints carry raw quantizer-module state
-    # (e.g. "*.weight_quantizer._double_scale"); drop them before loading. See #41925.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={"_quantizer.": None})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -457,4 +453,4 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         loader = AutoWeightsLoader(
             self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"]
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights)

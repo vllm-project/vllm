@@ -713,7 +713,6 @@ class TestHelionKernelWrapper:
 
         new_op = Mock()
         registered_ops: dict[str, Mock] = {}
-        mutates_args = ["y"]
 
         class MockNamespace:
             def __getattr__(self, name):
@@ -749,7 +748,6 @@ class TestHelionKernelWrapper:
                 raw_kernel_func=sample_kernel,
                 op_name="test_kernel",
                 fake_impl=fake_impl,
-                mutates_args=mutates_args,
                 config_picker=default_picker,
             )
             result = wrapper._get_or_register_custom_op()
@@ -757,7 +755,6 @@ class TestHelionKernelWrapper:
             mock_register.assert_called_once()
             assert result is new_op
             assert mock_register.call_args[1]["op_func"] is mock_decorated
-            assert mock_register.call_args[1]["mutates_args"] is mutates_args
 
 
 class TestKernelRegistry:

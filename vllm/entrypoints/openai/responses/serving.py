@@ -86,7 +86,6 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
-    build_response_output_items,
     construct_input_messages,
     construct_tool_dicts,
     extract_function_tool_names,
@@ -102,9 +101,10 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
-from vllm.parser import Parser, ParserManager
+from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -190,7 +190,6 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
-            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -612,7 +611,8 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            parser=self.parser,
+            tool_parser=self.parser.tool_parser_cls if self.parser else None,
+            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
         )
         return messages, engine_inputs
 
@@ -621,7 +621,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
-        parser: type[Parser] | None,
+        tool_parser: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -636,7 +636,8 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            parser=parser,
+            tool_parser=tool_parser,
+            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
         )
         return engine_inputs
 
@@ -704,7 +705,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
-                    context.parser_cls,
+                    context.parser_cls.tool_parser_cls if context.parser_cls else None,
                     context.chat_template,
                     context.chat_template_content_format,
                 )
@@ -1027,23 +1028,19 @@ class OpenAIServingResponses(OpenAIServing):
                 top_logprobs=request.top_logprobs,
             )
 
-        # Use parser to extract reasoning, content, and tool calls
+        # Use parser to extract and create response output items
         if self.parser:
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             parser = self.parser(
                 tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
             )
-            reasoning, content, tool_calls = parser.parse(
-                final_output.text,
-                request,
+            return parser.extract_response_outputs(
+                model_output=final_output.text,
+                model_output_token_ids=final_output.token_ids,
+                request=request,
                 enable_auto_tools=self.enable_auto_tools,
-            )
-            return build_response_output_items(
-                reasoning=reasoning,
-                content=content,
-                tool_calls=tool_calls,
-                logprobs=logprobs,
                 tool_call_id_type=self.tool_call_id_type,
+                logprobs=logprobs,
             )
 
         # Fallback when no parser is configured

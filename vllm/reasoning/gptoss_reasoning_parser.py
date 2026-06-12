@@ -8,6 +8,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -131,10 +132,10 @@ class GptOssReasoningParser(ReasoningParser):
         return self.is_reasoning_end(input_ids[n - window :])
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        raise NotImplementedError(
-            "GptOssReasoningParser only provides boundary detection. "
-            "Use HarmonyParser for output parsing."
-        )
+        _, content, _ = parse_chat_output(input_ids)
+        if content is None:
+            return []
+        return self.model_tokenizer.encode(content)
 
     def extract_reasoning_streaming(
         self,
@@ -145,10 +146,25 @@ class GptOssReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        raise NotImplementedError(
-            "GptOssReasoningParser only provides boundary detection. "
-            "Use HarmonyParser for output parsing."
-        )
+        prev_reasoning, prev_content, _ = parse_chat_output(list(previous_token_ids))
+        cur_reasoning, cur_content, _ = parse_chat_output(list(current_token_ids))
+        reasoning_delta = None
+        content_delta = None
+        if cur_reasoning is not None:
+            prev_r = prev_reasoning or ""
+            if cur_reasoning.startswith(prev_r):
+                reasoning_delta = cur_reasoning[len(prev_r) :] or None
+            else:
+                reasoning_delta = cur_reasoning
+        if cur_content is not None:
+            prev_c = prev_content or ""
+            if cur_content.startswith(prev_c):
+                content_delta = cur_content[len(prev_c) :] or None
+            else:
+                content_delta = cur_content
+        if reasoning_delta is None and content_delta is None:
+            return None
+        return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
 
     def extract_reasoning(
         self,
@@ -156,8 +172,7 @@ class GptOssReasoningParser(ReasoningParser):
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
-            "GptOssReasoningParser only provides boundary detection. "
-            "Use HarmonyParser for output parsing."
+            "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
         )
 
     # This function prepares the structural tag to format reasoning output

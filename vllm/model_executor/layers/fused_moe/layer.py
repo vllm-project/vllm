@@ -349,9 +349,7 @@ def FusedMoE(
         topk_group=topk_group,
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor
-        if not apply_routed_scale_to_output
-        else 1.0,
+        routed_scaling_factor=routed_scaling_factor,
         swiglu_limit=swiglu_limit,
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,

@@ -366,7 +366,8 @@ async fn harmony_assistant_event_stream(
 
                 if let Some(finished) = finished {
                     y.yield_ok(AssistantEvent::Done {
-                        usage: finished.usage,
+                        prompt_token_count: finished.prompt_token_count,
+                        output_token_count: finished.output_token_count,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                     })

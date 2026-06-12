@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -76,9 +77,6 @@ def extract_named_tool_call_streaming(
         )
     else:
         if is_mistral_tokenizer(tokenizer):
-            # Import mistral_common only if we need it.
-            from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
-
             tool_call_id = MistralToolCall.generate_random_id()
         else:
             tool_call_id = make_tool_call_id(

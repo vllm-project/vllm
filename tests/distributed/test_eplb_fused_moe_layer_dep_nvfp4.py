@@ -37,7 +37,6 @@ class TestConfig:
     hidden_size: int
     intermediate_size: int
     num_tokens: int
-    moe_backend: str
 
 
 def make_fused_moe_layer(
@@ -115,7 +114,6 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     vllm_config = VllmConfig()
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
-    vllm_config.kernel_config.moe_backend = test_config.moe_backend
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -252,7 +250,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("intermediate_size", [256])
 @pytest.mark.parametrize("num_tokens", [256])
-@pytest.mark.parametrize("moe_backend", ["flashinfer_trtllm", "flashinfer_cutlass"])
+@pytest.mark.parametrize("backend", ["latency", "throughput"])
 def test_eplb_fml(
     world_size: int,
     num_layers: int,
@@ -260,8 +258,12 @@ def test_eplb_fml(
     hidden_size: int,
     intermediate_size: int,
     num_tokens: int,
-    moe_backend: str,
+    backend: str,
+    monkeypatch,
 ):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
+
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
@@ -276,7 +278,6 @@ def test_eplb_fml(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         num_tokens=num_tokens,
-        moe_backend=moe_backend,
     )
 
     distributed_run(

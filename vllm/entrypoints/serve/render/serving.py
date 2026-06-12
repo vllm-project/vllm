@@ -43,7 +43,8 @@ from vllm.inputs import (
     tokens_input,
 )
 from vllm.logger import init_logger
-from vllm.parser import Parser, ParserManager
+from vllm.parser import ParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -51,6 +52,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
@@ -87,11 +89,15 @@ class OpenAIServingRender:
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
-        self.parser: type[Parser] | None = ParserManager.get_parser(
+        self.tool_parser: type[ToolParser] | None = ParserManager.get_tool_parser(
             tool_parser_name=tool_parser,
-            reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
+        )
+        self.reasoning_parser: type[ReasoningParser] | None = (
+            ParserManager.get_reasoning_parser(
+                reasoning_parser_name=reasoning_parser,
+            )
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
@@ -187,7 +193,7 @@ class OpenAIServingRender:
         """
         tokenizer = self.renderer.tokenizer
 
-        tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
+        tool_parser = self.tool_parser
 
         if is_mistral_tokenizer(tokenizer):
             # because of issues with pydantic we need to potentially
@@ -246,8 +252,9 @@ class OpenAIServingRender:
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
-                parser=self.parser,
+                tool_parser=tool_parser,
                 skip_mm_cache=skip_mm_cache,
+                reasoning_parser=self.reasoning_parser,
             )
         else:
             # For GPT-OSS.
@@ -519,7 +526,8 @@ class OpenAIServingRender:
         default_template_content_format: ChatTemplateContentFormatOption,
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
-        parser: type[Parser] | None = None,
+        tool_parser: type[ToolParser] | None = None,
+        reasoning_parser: type[ReasoningParser] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
@@ -559,6 +567,14 @@ class OpenAIServingRender:
             skip_mm_cache=skip_mm_cache,
         )
 
+        if reasoning_parser is not None:
+            tokenizer = renderer.get_tokenizer()
+            request = reasoning_parser(
+                tokenizer,
+                model_config=self.model_config,
+                chat_template_kwargs=chat_params.chat_template_kwargs,
+            ).adjust_request(request=request)
+
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
@@ -566,22 +582,15 @@ class OpenAIServingRender:
         # Exception: Mistral grammar-capable tokenizers always call
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
-        if parser is not None:
-            tokenizer = renderer.get_tokenizer()
-            tool_parser = parser.tool_parser_cls
+        if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
+            tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
-                tool_parser is not None
-                and is_mistral_tool_parser(tool_parser)
+                is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )
-            should_adjust_request = (
-                parser.reasoning_parser_cls is not None
-                or tool_choice != "none"
-                or is_mistral_grammar_eligible
-            )
-            if should_adjust_request:
+            if tool_choice != "none" or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -589,13 +598,8 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = parser(
-                    tokenizer,
-                    request.tools,
-                    model_config=self.model_config,
-                    chat_template_kwargs=chat_params.chat_template_kwargs,
-                ).adjust_request(
-                    request=request,
+                request = tool_parser(tokenizer, request.tools).adjust_request(
+                    request=request
                 )
 
         return conversation, [engine_input]

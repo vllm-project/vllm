@@ -71,7 +71,7 @@ To build the `vllm-rs` in isolation:
 
 ```bash
 # from the local checkout
-./build_rust.sh
+cargo install --path src/cmd --bin vllm-rs
 ```
 
 ### Example Request

@@ -142,7 +142,6 @@ class TrtLlmNvFp4ExpertsBase:
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
         ]
 
     @staticmethod

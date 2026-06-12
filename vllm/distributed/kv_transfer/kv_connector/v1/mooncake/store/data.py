@@ -213,7 +213,6 @@ class ReqMeta:
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
-    num_prompt_tokens: int | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -273,7 +272,6 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            num_prompt_tokens=tracker.prefill_end_tokens,
         )
 
 

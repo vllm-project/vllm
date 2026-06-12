@@ -23,8 +23,8 @@ use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode,
-    ParserSelection, RendererSelection,
+    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
+    RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -171,16 +171,6 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
-    #[arg(
-        long,
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    #[serde(default)]
-    pub enable_prompt_tokens_details: bool,
-
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -258,7 +248,6 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_server_options = self.api_server_options();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -281,7 +270,8 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
-            api_server_options,
+            enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -302,7 +292,6 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
-        let api_server_options = self.api_server_options();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -324,19 +313,12 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
-            api_server_options,
+            enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
-        }
-    }
-
-    fn api_server_options(&self) -> ApiServerOptions {
-        ApiServerOptions {
-            enable_log_requests: self.enable_log_requests,
-            enable_prompt_tokens_details: self.enable_prompt_tokens_details,
-            enable_request_id_headers: self.enable_request_id_headers,
         }
     }
 }
@@ -468,8 +450,6 @@ impl ServeArgs {
             self.runtime.model.clone(),
             self.runtime.max_model_len,
             self.runtime.language_model_only,
-            self.runtime.disable_log_stats,
-            self.runtime.shutdown_timeout,
             handshake_port,
         )
     }

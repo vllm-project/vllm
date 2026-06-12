@@ -31,7 +31,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.multimodal.inputs import NestedTensors
 
-from .interfaces import LocalArgmaxMixin
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -310,7 +309,7 @@ class DeepseekV2Eagle3Model(nn.Module):
         return loaded_params
 
 
-class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
+class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     """Eagle3 speculative decoding model for DeepseekV2/V3."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

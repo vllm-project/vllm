@@ -13,4 +13,3 @@ class SamplerOutput:
     logprobs_tensors: LogprobsTensors | None
     num_nans: torch.Tensor | None
     num_sampled: torch.Tensor | None
-    num_rejected: torch.Tensor | None = None

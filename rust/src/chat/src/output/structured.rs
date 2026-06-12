@@ -127,7 +127,8 @@ impl StructuredEventState {
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
-        usage: vllm_llm::TokenUsage,
+        prompt_token_count: usize,
+        output_token_count: usize,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
     ) -> Result<Vec<ChatEvent>> {
@@ -136,7 +137,8 @@ impl StructuredEventState {
         self.close_open_tool_call(&mut events);
         events.push(ChatEvent::Done {
             message: self.message.clone(),
-            usage,
+            prompt_token_count,
+            output_token_count,
             finish_reason,
             kv_transfer_params,
         });
@@ -271,11 +273,17 @@ pub(crate) async fn structured_chat_event_stream(
                 }
             }
             AssistantEvent::Done {
-                usage,
+                prompt_token_count,
+                output_token_count,
                 finish_reason,
                 kv_transfer_params,
             } => {
-                for next in state.finish(usage, finish_reason, kv_transfer_params)? {
+                for next in state.finish(
+                    prompt_token_count,
+                    output_token_count,
+                    finish_reason,
+                    kv_transfer_params,
+                )? {
                     y.yield_ok(next).await;
                 }
             }
@@ -305,11 +313,8 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -359,11 +364,8 @@ mod tests {
                 delta: r#"{"b":2}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -410,11 +412,8 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -461,11 +460,8 @@ mod tests {
                 delta: "done".to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count: 1,
-                    output_token_count: 1,
-                    cached_token_count: 0,
-                },
+                prompt_token_count: 1,
+                output_token_count: 1,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),

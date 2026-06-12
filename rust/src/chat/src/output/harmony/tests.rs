@@ -51,11 +51,8 @@ fn decoded_start() -> DecodedTextEvent {
 
 fn finished() -> Finished {
     Finished {
-        usage: vllm_llm::TokenUsage {
-            prompt_token_count: 0,
-            output_token_count: 0,
-            cached_token_count: 0,
-        },
+        prompt_token_count: 0,
+        output_token_count: 0,
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
     }
@@ -115,11 +112,8 @@ fn interrupted_final_message_is_preserved() {
                     text: "hello".to_string(),
                 }],
             },
-            usage: vllm_llm::TokenUsage {
-                prompt_token_count: 0,
-                output_token_count: 0,
-                cached_token_count: 0,
-            },
+            prompt_token_count: 0,
+            output_token_count: 0,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
         })
@@ -177,11 +171,8 @@ fn interrupted_analysis_message_is_preserved() {
                     text: "think".to_string(),
                 }],
             },
-            usage: vllm_llm::TokenUsage {
-                prompt_token_count: 0,
-                output_token_count: 0,
-                cached_token_count: 0,
-            },
+            prompt_token_count: 0,
+            output_token_count: 0,
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
         })

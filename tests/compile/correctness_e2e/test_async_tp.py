@@ -102,7 +102,7 @@ def test_async_tp_pass_correctness(
 
 
 @create_new_process_for_each_test()
-def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
+def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
     if (
         not current_platform.is_cuda()
         or not current_platform.is_device_capability_family(100)
@@ -110,6 +110,8 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
         pytest.skip("NVFP4 requires Blackwell")
     if not has_flashinfer():
         pytest.skip("FlashInfer is required for the NVFP4 AsyncTP path")
+
+    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", "flashinfer-cutlass")
 
     tp_size = 2
     if num_gpus_available < tp_size:
@@ -124,8 +126,6 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
         "8",
         "--load-format",
         "dummy",
-        "--linear-backend",
-        "flashinfer_cutlass",
         "--hf-overrides",
         json.dumps(NVFP4_HF_OVERRIDES),
     ]

@@ -79,8 +79,6 @@ class TritonAttentionMetadata:
     softmax_segm_max: torch.Tensor
     softmax_segm_expsum: torch.Tensor
 
-    causal: bool | torch.Tensor
-
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -221,7 +219,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            causal=common_attn_metadata.causal,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -273,10 +270,6 @@ class TritonAttentionBackend(AttentionBackend):
         return block_size % 16 == 0
 
     forward_includes_kv_cache_update: bool = False
-
-    @classmethod
-    def supports_non_causal(cls) -> bool:
-        return True
 
     @staticmethod
     def get_name() -> str:
@@ -626,7 +619,7 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=attn_metadata.causal,
+            causal=True,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
+    MoERunner,
     RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
@@ -132,7 +133,7 @@ class DeepseekV4FP8Config(Fp8Config):
         return None
 
     def get_quant_method(self, layer, prefix):
-        if isinstance(layer, RoutedExperts):
+        if isinstance(layer, (MoERunner, RoutedExperts)):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -155,6 +156,9 @@ class DeepseekV4FP8Config(Fp8Config):
         return super().get_quant_method(layer, prefix)
 
     def is_mxfp4_quant(self, prefix, layer):
-        if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
+        if (
+            not isinstance(layer, (MoERunner, RoutedExperts))
+            or self.expert_dtype != "fp4"
+        ):
             return False
         return self.moe_quant_algo != "NVFP4"

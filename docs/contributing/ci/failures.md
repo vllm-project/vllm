@@ -60,21 +60,15 @@ the failure?
 
 ## Logs Wrangling
 
-Logs are public; no Buildkite login needed.
+Download a job's log (no Buildkite login required):
+
 [.buildkite/scripts/ci-fetch-log.sh](../../../.buildkite/scripts/ci-fetch-log.sh)
-saves each log as `ci-<build>-<job-name>.log`, stripped of timestamps and
-ANSI codes:
 
 ```bash
-# All failed jobs in a PR's latest build (current branch's PR if omitted):
-.buildkite/scripts/ci-fetch-log.sh --pr <PR>
+# Find the failing job. Each row's URL is .../builds/<N>#<job_uuid>:
+gh pr checks <PR> --repo vllm-project/vllm
 
-# All failed jobs in a build (--soft also includes soft-failed jobs;
-# --all fetches every finished job):
-.buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>"
-
-# One job — `gh pr checks` URLs (#<job_uuid>) and web UI URLs (?sid=) both
-# work; pass "-" as a second argument to stream to stdout:
+# Download + strip timestamps/ANSI in one step:
 .buildkite/scripts/ci-fetch-log.sh "https://buildkite.com/vllm/ci/builds/<N>#<job_uuid>"
 ```
 
