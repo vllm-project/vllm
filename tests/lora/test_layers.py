@@ -655,9 +655,9 @@ def test_linear_dora_scale_stacked(default_vllm_config, dist_init, device) -> No
 
     lora_linear.set_lora(
         1,
-        lora_a=dora_lora_a,
-        lora_b=dora_lora_b,
-        lora_magnitude_vector=dora_magnitude,
+        lora_a=dora_lora_a.cpu(),
+        lora_b=dora_lora_b.cpu(),
+        lora_magnitude_vector=dora_magnitude.cpu(),
     )
 
     expected_delta = dora_lora_b.float() @ dora_lora_a.float()
@@ -778,9 +778,9 @@ def test_packed_qkv_dora_scale_stacked(
 
     lora_linear.set_lora(
         1,
-        lora_a=lora_a,
-        lora_b=lora_b,
-        lora_magnitude_vector=dora_magnitude,
+        lora_a=[lora.cpu() for lora in lora_a],
+        lora_b=[lora.cpu() for lora in lora_b],
+        lora_magnitude_vector=[magnitude.cpu() for magnitude in dora_magnitude],
     )
 
     expected_scales = []

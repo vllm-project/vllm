@@ -277,6 +277,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 f"lora_b={tuple(lora_b.shape)}."
             )
 
+        lora_a = lora_a.to(device=base_weight.device, non_blocking=True)
+        lora_b = lora_b.to(device=base_weight.device, non_blocking=True)
+        lora_magnitude_vector = lora_magnitude_vector.to(
+            device=base_weight.device, non_blocking=True
+        )
         delta_weight = lora_b.float() @ lora_a.float()
         merged_weight = base_weight.float() + delta_weight
         weight_norm = torch.linalg.vector_norm(merged_weight, dim=1)
