@@ -135,14 +135,12 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
-    - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
     [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
     `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
-    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
-    `qwen_vl`, …)."""
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -618,8 +616,6 @@ class ModelConfig:
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "QwenVLForConditionalGeneration":
-                self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
@@ -1551,6 +1547,11 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
+
+    @cached_property
+    def is_diffusion(self) -> bool:
+        """Detect discrete diffusion (dLLM) models from HF config."""
+        return getattr(self.hf_config, "canvas_length", None) is not None
 
     @property
     def uses_alibi(self) -> bool:

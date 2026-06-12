@@ -17,7 +17,8 @@ WORKDIR /workspace
 COPY requirements/build/rust.txt requirements/build/rust.txt
 RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
 
-# Copy only the Rust build inputs. The binary is the sole artifact we need.
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
@@ -212,9 +213,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # don't invalidate heavy dependency and UCX/NIXL layers.
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
 COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
