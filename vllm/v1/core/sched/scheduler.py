@@ -113,6 +113,10 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
+        # Diffusion models may not sample any tokens for a denoising step.
+        self.num_sampled_tokens_per_step = (
+            1 if not vllm_config.model_config.is_diffusion else 0
+        )
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -212,9 +216,9 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
-        self.num_spec_tokens = self.num_lookahead_tokens = 0
-        if speculative_config:
-            self.num_spec_tokens = speculative_config.num_speculative_tokens
+        self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_lookahead_tokens = 0
+        if speculative_config is not None:
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
@@ -425,7 +429,10 @@ class Scheduler(SchedulerInterface):
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
+                num_new_tokens,
+                self.max_model_len
+                - request.num_computed_tokens
+                - self.num_sampled_tokens_per_step,
             )
 
             # Schedule encoder inputs.
@@ -1487,9 +1494,12 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and generated_token_ids:
+            if scheduled_spec_token_ids and (
+                generated_token_ids or self.num_sampled_tokens_per_step == 0
+            ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_sampled = self.num_sampled_tokens_per_step
+                num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled

@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 
 
 class MinimaxM2ToolParser(ToolParser):
+    structural_tag_model = "minimax"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
