@@ -320,3 +320,31 @@ def test_lora_target_modules_default_none(serve_parser):
     """Test that lora-target-modules defaults to None"""
     args = serve_parser.parse_args(args=[])
     assert args.lora_target_modules is None
+
+
+### Tests for --enable-http2 flag
+
+
+def test_enable_http2_default(serve_parser):
+    """enable_http2 should be False when the flag is absent."""
+    args = serve_parser.parse_args(args=[])
+    assert args.enable_http2 is False
+
+
+def test_enable_http2_flag(serve_parser):
+    """--enable-http2 should set enable_http2 to True."""
+    args = serve_parser.parse_args(args=["--enable-http2"])
+    assert args.enable_http2 is True
+
+
+def test_enable_http2_not_set_by_other_ssl_flags(serve_parser):
+    """Setting SSL flags without --enable-http2 must not enable HTTP/2."""
+    args = serve_parser.parse_args(
+        args=[
+            "--ssl-certfile",
+            "/tmp/cert.pem",
+            "--ssl-keyfile",
+            "/tmp/key.pem",
+        ]
+    )
+    assert args.enable_http2 is False

@@ -278,6 +278,13 @@ class FrontendArgs(BaseFrontendArgs):
     ssl_ciphers: str | None = None
     """SSL cipher suites for HTTPS (TLS 1.2 and below only).
     Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
+    enable_http2: bool = False
+    """Enable HTTP/2 support using Hypercorn instead of Uvicorn. Requires
+    'hypercorn' and 'h2' packages to be installed (pip install hypercorn h2).
+    HTTP/2 multiplexes multiple requests over a single TCP connection reducing
+    latency for concurrent clients. TLS (ssl_keyfile + ssl_certfile) is
+    required for browser clients; plain-text HTTP/2 (h2c) works for direct
+    API clients."""
     root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])

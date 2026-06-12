@@ -23,16 +23,39 @@ from vllm.utils.network_utils import find_process_using_port
 logger = init_logger(__name__)
 
 
+class _HypercornAdapter:
+    """Thin adapter so terminate_if_errored() works uniformly with both
+    Hypercorn (asyncio.Event) and Uvicorn (server.should_exit) backends.
+    """
+
+    def __init__(self, shutdown_event: asyncio.Event) -> None:
+        self._shutdown_event = shutdown_event
+
+    @property
+    def should_exit(self) -> bool:
+        return self._shutdown_event.is_set()
+
+    @should_exit.setter
+    def should_exit(self, value: bool) -> None:
+        if value:
+            self._shutdown_event.set()
+
+    async def shutdown(self) -> None:
+        self._shutdown_event.set()
+
+
 async def serve_http(
     app: FastAPI,
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
+    enable_http2: bool = False,
     **uvicorn_kwargs: Any,
 ):
     """
-    Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
-    options.  Supports http header limits via h11_max_incomplete_event_size and
-    h11_max_header_count.
+    Start a FastAPI app. When enable_http2=True uses Hypercorn (requires the
+    'hypercorn' and 'h2' packages) to serve HTTP/2 with ALPN negotiation,
+    falling back to HTTP/1.1 for clients that don't support h2. Otherwise
+    uses Uvicorn (HTTP/1.1, default behaviour).
     """
     logger.info("Available routes are:")
     # post endpoints
@@ -55,6 +78,13 @@ async def serve_http(
             continue
 
         logger.info("Route: %s, Endpoint: %s", path, endpoint.__name__)
+
+    if enable_http2:
+        return await _serve_hypercorn(app, sock, enable_ssl_refresh, **uvicorn_kwargs)
+
+    # ------------------------------------------------------------------ #
+    # Uvicorn path (HTTP/1.1, default)                                     #
+    # ------------------------------------------------------------------ #
 
     # Extract header limit options if present
     h11_max_incomplete_event_size = uvicorn_kwargs.pop(
@@ -153,7 +183,127 @@ async def serve_http(
         watchdog_task.cancel()
 
 
-async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
+async def _serve_hypercorn(
+    app: FastAPI,
+    sock: socket.socket | None,
+    enable_ssl_refresh: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Serve using Hypercorn with HTTP/2 + HTTP/1.1 (ALPN negotiation).
+
+    Requires: pip install hypercorn h2
+    """
+    try:
+        from hypercorn.asyncio import serve as hypercorn_serve
+        from hypercorn.config import Config as HypercornConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "HTTP/2 support requires Hypercorn and h2. "
+            "Install them with: pip install hypercorn h2"
+        ) from exc
+
+    hconfig = HypercornConfig()
+    # Negotiate h2 first, fall back to HTTP/1.1 for clients that don't support h2
+    hconfig.alpn_protocols = ["h2", "http/1.1"]
+
+    host = kwargs.get("host") or "0.0.0.0"
+    port = kwargs.get("port", 8000)
+    if sock is not None:
+        # Pass pre-bound socket via file-descriptor URI (Hypercorn's API)
+        hconfig.bind = [f"fd://{sock.fileno()}"]
+    else:
+        hconfig.bind = [f"{host}:{port}"]
+
+    # Map SSL kwargs
+    if kwargs.get("ssl_certfile"):
+        hconfig.certfile = kwargs["ssl_certfile"]
+    if kwargs.get("ssl_keyfile"):
+        hconfig.keyfile = kwargs["ssl_keyfile"]
+    if kwargs.get("ssl_ca_certs"):
+        hconfig.ca_certs = kwargs["ssl_ca_certs"]
+
+    # Log level
+    if kwargs.get("log_level"):
+        hconfig.loglevel = kwargs["log_level"]
+
+    # Keep-alive timeout
+    if kwargs.get("timeout_keep_alive"):
+        hconfig.keep_alive_timeout = kwargs["timeout_keep_alive"]
+
+    loop = asyncio.get_running_loop()
+    h2_shutdown_event = asyncio.Event()
+    adapter = _HypercornAdapter(h2_shutdown_event)
+    # Expose same interface as uvicorn.Server so terminate_if_errored works
+    app.state.server = adapter
+
+    ssl_cert_refresher: SSLCertRefresher | None = None
+    if enable_ssl_refresh and kwargs.get("ssl_certfile"):
+        import ssl as _ssl
+
+        ssl_ctx = _ssl.create_default_context(_ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(
+            certfile=kwargs["ssl_certfile"],
+            keyfile=kwargs.get("ssl_keyfile"),
+        )
+        ssl_cert_refresher = SSLCertRefresher(
+            ssl_context=ssl_ctx,
+            key_path=kwargs.get("ssl_keyfile"),
+            cert_path=kwargs["ssl_certfile"],
+            ca_path=kwargs.get("ssl_ca_certs"),
+        )
+
+    sig_shutdown = asyncio.Event()
+
+    def signal_handler() -> None:
+        sig_shutdown.set()
+
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    server_task = loop.create_task(
+        hypercorn_serve(
+            app,  # type: ignore[arg-type]
+            hconfig,
+            shutdown_trigger=h2_shutdown_event.wait,
+        )
+    )
+
+    watchdog_task = loop.create_task(watchdog_loop(adapter, app.state.engine_client))
+
+    async def handle_shutdown() -> None:
+        await sig_shutdown.wait()
+        engine_client = app.state.engine_client
+        timeout = engine_client.vllm_config.shutdown_timeout
+        await loop.run_in_executor(
+            None, partial(engine_client.shutdown, timeout=timeout)
+        )
+        adapter.should_exit = True  # sets h2_shutdown_event
+        watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
+
+    shutdown_task = loop.create_task(handle_shutdown())
+
+    protocol = "https" if kwargs.get("ssl_certfile") else "http"
+    logger.info("Hypercorn HTTP/2 server listening on %s://%s:%s", protocol, host, port)
+
+    async def dummy_shutdown() -> None:
+        pass
+
+    try:
+        await server_task
+        return dummy_shutdown()
+    except asyncio.CancelledError:
+        logger.info("Shutting down Hypercorn HTTP/2 server.")
+        return adapter.shutdown()
+    finally:
+        shutdown_task.cancel()
+        watchdog_task.cancel()
+
+
+async def watchdog_loop(
+    server: uvicorn.Server | _HypercornAdapter, engine: EngineClient
+):
     """
     # Watchdog task that runs in the background, checking
     # for error state in the engine. Needed to trigger shutdown
@@ -165,7 +315,9 @@ async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
         terminate_if_errored(server, engine)
 
 
-def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
+def terminate_if_errored(
+    server: uvicorn.Server | _HypercornAdapter, engine: EngineClient
+):
     """
     See discussions here on shutting down a uvicorn server
     https://github.com/encode/uvicorn/discussions/1103
