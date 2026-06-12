@@ -36,6 +36,9 @@ from .protocol import (
     CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
+    EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
+    EmbeddingChatInputRequest,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
@@ -66,7 +69,15 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def pre_process_online(self, ctx: PoolingServeContext):
         if isinstance(ctx.request, CohereEmbedRequest):
             self._pre_process_cohere_online(ctx)
-        elif isinstance(ctx.request, EmbeddingChatRequest):
+        elif isinstance(
+            ctx.request,
+            (
+                EmbeddingChatRequest,
+                EmbeddingBatchChatRequest,
+                EmbeddingChatInputRequest,
+                EmbeddingBatchChatInputRequest,
+            ),
+        ):
             self._pre_process_openai_chat_online(ctx)
         else:
             super().pre_process_online(ctx)
@@ -370,7 +381,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
         return super().create_pooling_params(request)
 
     def _pre_process_openai_chat_online(
-        self, ctx: PoolingServeContext[EmbeddingChatRequest]
+        self,
+        ctx: PoolingServeContext[
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ],
     ) -> None:
         request = ctx.request
         self._validate_chat_template(
@@ -379,12 +396,22 @@ class EmbedIOProcessor(PoolingIOProcessor):
             trust_request_chat_template=self.trust_request_chat_template,
         )
 
-        all_messages = request.messages_batch or [request.messages]
+        if isinstance(
+            request, (EmbeddingBatchChatRequest, EmbeddingBatchChatInputRequest)
+        ):
+            all_messages = request.messages
+        else:
+            all_messages = [request.messages]
         ctx.engine_inputs = self._batch_render_openai_chat(request, all_messages)
 
     def _batch_render_openai_chat(
         self,
-        request: EmbeddingChatRequest,
+        request: (
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ),
         all_messages: Sequence[list[ChatCompletionMessageParam]],
     ) -> list[EngineInput]:
         renderer = self.renderer

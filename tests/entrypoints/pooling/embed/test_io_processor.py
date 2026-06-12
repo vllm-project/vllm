@@ -11,6 +11,9 @@ from vllm.entrypoints.pooling.embed.protocol import (
     CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
+    EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
+    EmbeddingChatInputRequest,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -30,11 +33,12 @@ class TestEmbeddingRequestParsing:
             }
         )
 
-        assert isinstance(request, EmbeddingChatRequest)
+        assert isinstance(request, EmbeddingChatInputRequest)
+        assert request.input == [{"role": "user", "content": "hello"}]
         assert request.messages == [{"role": "user", "content": "hello"}]
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
-    def test_batched_input_messages_parses_as_chat_request(self):
+    def test_batched_input_messages_parses_as_batch_chat_input_request(self):
         request = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
@@ -46,9 +50,12 @@ class TestEmbeddingRequestParsing:
             }
         )
 
-        assert isinstance(request, EmbeddingChatRequest)
-        assert request.messages == [{"role": "user", "content": "hello"}]
-        assert request.messages_batch == [
+        assert isinstance(request, EmbeddingBatchChatInputRequest)
+        assert request.input == [
+            [{"role": "user", "content": "hello"}],
+            [{"role": "user", "content": "goodbye"}],
+        ]
+        assert request.messages == [
             [{"role": "user", "content": "hello"}],
             [{"role": "user", "content": "goodbye"}],
         ]
@@ -64,6 +71,38 @@ class TestEmbeddingRequestParsing:
 
         assert isinstance(request, EmbeddingCompletionRequest)
         assert request.input == [[1, 2, 3], [4, 5]]
+
+    def test_messages_still_parses_as_chat_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingChatRequest)
+        assert request.messages == [{"role": "user", "content": "hello"}]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    def test_batched_messages_parses_as_batch_chat_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "messages": [
+                    [{"role": "user", "content": "hello"}],
+                    [{"role": "user", "content": "goodbye"}],
+                ],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingBatchChatRequest)
+        assert request.messages == [
+            [{"role": "user", "content": "hello"}],
+            [{"role": "user", "content": "goodbye"}],
+        ]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
 
 class TestResolveTruncation:
@@ -425,7 +464,19 @@ class TestPreProcessOpenAIEmbeddingChatOnline:
         return handler
 
     @staticmethod
-    def _make_context(request) -> PoolingServeContext[EmbeddingChatRequest]:
+    def _make_context(
+        request: (
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ),
+    ) -> PoolingServeContext[
+        EmbeddingChatRequest
+        | EmbeddingBatchChatRequest
+        | EmbeddingChatInputRequest
+        | EmbeddingBatchChatInputRequest
+    ]:
         return PoolingServeContext(
             request=request,
             pooling_params=PoolingParams(),
@@ -447,7 +498,7 @@ class TestPreProcessOpenAIEmbeddingChatOnline:
                 "cache_salt": "salt",
             }
         )
-        assert isinstance(request, EmbeddingChatRequest)
+        assert isinstance(request, EmbeddingBatchChatInputRequest)
 
         renderer = self._FakeRenderer()
         handler = self._make_handler(renderer)
@@ -462,7 +513,7 @@ class TestPreProcessOpenAIEmbeddingChatOnline:
         assert len(renderer.calls) == 1
 
         call = renderer.calls[0]
-        assert call["all_messages"] == request.messages_batch
+        assert call["all_messages"] == request.messages
         assert call["prompt_extras"] == {
             "mm_processor_kwargs": {"max_pixels": 1},
             "cache_salt": "salt",

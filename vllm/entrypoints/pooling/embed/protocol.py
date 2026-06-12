@@ -10,7 +10,7 @@ import builtins
 import struct
 import time
 from collections.abc import Sequence
-from typing import Any, Literal, TypeAlias, cast
+from typing import Annotated, Any, Literal, TypeAlias
 
 import pybase64 as base64
 from pydantic import BaseModel, Field, model_validator
@@ -22,6 +22,7 @@ from vllm.utils import random_uuid
 
 from ..base.protocol import (
     ChatRequestMixin,
+    ChatRequestOptionsMixin,
     CompletionRequestMixin,
     EmbeddingTokenizeParamsMixin,
     EmbedRequestMixin,
@@ -69,41 +70,7 @@ class EmbeddingChatRequest(
     EmbedRequestMixin,
     EmbeddingTokenizeParamsMixin,
 ):
-    messages_batch: list[list[ChatCompletionMessageParam]] | None = Field(
-        default=None,
-        exclude=True,
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_input_messages(cls, data):
-        if not isinstance(data, dict):
-            return data
-
-        messages_data = data.get("messages")
-        if _is_batched_chat_messages(messages_data):
-            messages_batch = cast(list[list[ChatCompletionMessageParam]], messages_data)
-            normalized = dict(data)
-            normalized["messages"] = messages_batch[0]
-            normalized["messages_batch"] = messages_batch
-            return normalized
-
-        if "messages" in data or "input" not in data:
-            return data
-
-        normalized = dict(data)
-        input_data = data["input"]
-        if _is_chat_messages(input_data):
-            normalized["messages"] = input_data
-        elif _is_batched_chat_messages(input_data):
-            messages_batch = cast(list[list[ChatCompletionMessageParam]], input_data)
-            normalized["messages"] = messages_batch[0]
-            normalized["messages_batch"] = messages_batch
-        else:
-            return data
-
-        normalized.pop("input")
-        return normalized
+    """OpenAI embeddings request with one top-level chat conversation."""
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -113,7 +80,87 @@ class EmbeddingChatRequest(
         )
 
 
-EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
+class EmbeddingBatchChatRequest(
+    PoolingBasicRequestMixin,
+    ChatRequestOptionsMixin,
+    EmbedRequestMixin,
+    EmbeddingTokenizeParamsMixin,
+):
+    """OpenAI embeddings request with batched top-level chat conversations.
+
+    Mirrors ``BatchChatCompletionRequest`` by keeping batched conversations in
+    ``messages`` instead of introducing a separate batch-specific field.
+    """
+
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            task="embed",
+            dimensions=self.dimensions,
+            use_activation=self.use_activation,
+        )
+
+
+class EmbeddingChatInputRequest(
+    EmbeddingChatRequest,
+):
+    """OpenAI embeddings request with one chat conversation in ``input``."""
+
+    input: list[ChatCompletionMessageParam]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_messages(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if "messages" in data or "input" not in data:
+            return data
+
+        input_data = data["input"]
+        if not _is_chat_messages(input_data):
+            return data
+
+        normalized = dict(data)
+        normalized["messages"] = input_data
+        return normalized
+
+
+class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
+    """OpenAI embeddings request with batched chat conversations in ``input``."""
+
+    input: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_input_messages(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if "messages" in data or "input" not in data:
+            return data
+
+        input_data = data["input"]
+        if not _is_batched_chat_messages(input_data):
+            return data
+
+        normalized = dict(data)
+        normalized["messages"] = input_data
+        return normalized
+
+
+EmbeddingRequest: TypeAlias = (
+    EmbeddingCompletionRequest
+    | EmbeddingChatRequest
+    | EmbeddingBatchChatRequest
+    | EmbeddingChatInputRequest
+    | EmbeddingBatchChatInputRequest
+)
 
 
 # ---------------------------------------------------------------------------
