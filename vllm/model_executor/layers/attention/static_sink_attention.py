@@ -245,9 +245,6 @@ class StaticSinkMLAAttention(MLAAttention, CustomOp):
             self.sliding_window,
         )
         if self.sliding_window is not None:
-            assert (
-                not self.use_sparse and self.indexer is None
-            )  # TODO(runze): debug only, remove later
             return SlidingWindowMLASpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
