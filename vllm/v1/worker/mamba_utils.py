@@ -202,6 +202,79 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
 
 
+@triton.jit
+def ds_conv_tail_copy_kernel(
+    state,
+    src_block_id,
+    dst_block_id,
+    dim: tl.constexpr,
+    state_len: tl.constexpr,
+    offset,
+    stride_block: tl.constexpr,
+    stride_dim: tl.constexpr,
+    stride_state: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+):
+    pid_d = tl.program_id(0)
+    pid_t = tl.program_id(1)
+    rows = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D)).to(tl.int64)
+    cols = (pid_t * BLOCK_T + tl.arange(0, BLOCK_T)).to(tl.int64)
+    # Large block offsets can exceed int32; keep pointer math in int64.
+    src_block_i64 = tl.full((), src_block_id, tl.int64)
+    dst_block_i64 = tl.full((), dst_block_id, tl.int64)
+    offset_i64 = tl.full((), offset, tl.int64)
+    stride_block_i64 = tl.full((), stride_block, tl.int64)
+    stride_dim_i64 = tl.full((), stride_dim, tl.int64)
+    stride_state_i64 = tl.full((), stride_state, tl.int64)
+    tail_len = state_len - offset
+    mask = (rows[:, None] < dim) & (cols[None, :] < tail_len)
+    src_offsets = (
+        src_block_i64 * stride_block_i64
+        + rows[:, None] * stride_dim_i64
+        + (cols[None, :] + offset_i64) * stride_state_i64
+    )
+    dst_offsets = (
+        dst_block_i64 * stride_block_i64
+        + rows[:, None] * stride_dim_i64
+        + cols[None, :] * stride_state_i64
+    )
+    src = state + src_offsets
+    dst = state + dst_offsets
+    values = tl.load(src, mask=mask, other=0)
+    tl.store(dst, values, mask=mask)
+
+
+def ds_conv_tail_copy(
+    state: torch.Tensor, src_block_id: int, dst_block_id: int, offset: int
+) -> None:
+    """Copy DS-layout conv tail from source block into destination prefix."""
+    if offset <= 0:
+        raise ValueError("ds_conv_tail_copy expects offset > 0")
+    if state.dim() != 3:
+        raise ValueError(f"expected 3D Mamba conv state, got {tuple(state.shape)}")
+    _, dim, state_len = state.shape
+    if offset >= state_len:
+        return
+    stride_block, stride_dim, stride_state = state.stride()
+    block_d = 16
+    block_t = 8
+    grid = (triton.cdiv(dim, block_d), triton.cdiv(state_len - offset, block_t))
+    ds_conv_tail_copy_kernel[grid](
+        state,
+        int(src_block_id),
+        int(dst_block_id),
+        int(dim),
+        int(state_len),
+        int(offset),
+        int(stride_block),
+        int(stride_dim),
+        int(stride_state),
+        BLOCK_D=block_d,
+        BLOCK_T=block_t,
+    )
+
+
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
     mamba_group_ids: list[int] = []
     mamba_specs: list[MambaSpec] = []
@@ -599,6 +672,15 @@ def collect_mamba_copy_meta(
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
+
+                if copy_spec.ds_conv_tail:
+                    ds_conv_tail_copy(
+                        state,
+                        copy_spec.src_block_id,
+                        dest_block_id,
+                        copy_spec.offset,
+                    )
+                    continue
 
                 src_ptrs_np[offset] = copy_spec.start_addr
                 dst_ptrs_np[offset] = state[dest_block_id].data_ptr()

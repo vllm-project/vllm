@@ -266,13 +266,22 @@ class MambaCopySpec:
     Data class specifying the memory-copy parameters for Mamba states used for
     prefix caching in align mode.
 
+    DS-layout conv tails are strided, so ``ds_conv_tail`` marks them for a
+    worker-side copy kernel.
+
     Attributes:
         start_addr (int): Starting address for the memory copy operation.
         num_elements (int): Number of elements to copy from the starting address.
+        ds_conv_tail (bool): Whether this is a DS-layout conv tail copy.
+        src_block_id (int): Source block id for DS-tail copies.
+        offset (int): Accepted-token offset for DS-tail copies.
     """
 
     start_addr: int
     num_elements: int
+    ds_conv_tail: bool = False
+    src_block_id: int = -1
+    offset: int = 0
 
 
 MambaStateCopyFunc: TypeAlias = Callable[
@@ -303,18 +312,19 @@ def get_conv_copy_spec(
     src_block_id = block_ids[cur_block_idx]
     offset = num_accepted_tokens - 1
     if is_conv_state_dim_first():
-        # DS layout: (num_blocks, dim, state_len) — state_len is last.
+        # DS layout: (num_blocks, dim, state_len).
         if offset > 0:
-            # Slicing along the last dim yields a non-contiguous view
-            # because features (dim) are strided by state_len.
-            raise NotImplementedError(
-                "DS conv state layout does not yet support speculative "
-                "decoding with mamba_cache_mode='align' "
-                "(num_accepted_tokens > 1)."
+            # The tail is strided across rows; copy it with a worker kernel.
+            return MambaCopySpec(
+                start_addr=0,
+                num_elements=0,
+                ds_conv_tail=True,
+                src_block_id=src_block_id,
+                offset=offset,
             )
         src_state = state[src_block_id]
     else:
-        # SD layout: (num_blocks, state_len, dim) — dim contiguous.
+        # SD layout: (num_blocks, state_len, dim).
         src_state = state[src_block_id, offset:]
     return MambaCopySpec(
         start_addr=src_state.data_ptr(), num_elements=src_state.numel()

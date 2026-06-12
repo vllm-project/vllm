@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.envs as envs
+import vllm.model_executor.layers.mamba.mamba_utils as mamba_layer_utils
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
@@ -20,6 +22,7 @@ from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
+    ds_conv_tail_copy,
     preprocess_mamba,
 )
 
@@ -30,6 +33,141 @@ _COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
+
+
+@pytest.fixture
+def set_conv_state_layout(monkeypatch):
+    def _set(layout: str | None):
+        monkeypatch.setattr(envs, "VLLM_SSM_CONV_STATE_LAYOUT", layout)
+        mamba_layer_utils.get_conv_state_layout.cache_clear()
+
+    yield _set
+    mamba_layer_utils.get_conv_state_layout.cache_clear()
+
+
+def test_get_conv_copy_spec_sd_layout_tail_is_contiguous(set_conv_state_layout):
+    set_conv_state_layout("SD")
+    state = torch.arange(3 * 5 * 7, dtype=torch.float32).reshape(3, 5, 7)
+    spec = get_conv_copy_spec(
+        state=state,
+        block_ids=[0, 1, 2],
+        cur_block_idx=1,
+        num_accepted_tokens=3,
+    )
+
+    expected = state[1, 2:]
+    assert not spec.ds_conv_tail
+    assert spec.start_addr == expected.data_ptr()
+    assert spec.num_elements == expected.numel()
+
+
+def test_get_conv_copy_spec_ds_layout_zero_offset_is_contiguous(
+    set_conv_state_layout,
+):
+    set_conv_state_layout("DS")
+    state = torch.arange(3 * 7 * 5, dtype=torch.float32).reshape(3, 7, 5)
+    spec = get_conv_copy_spec(
+        state=state,
+        block_ids=[0, 1, 2],
+        cur_block_idx=1,
+        num_accepted_tokens=1,
+    )
+
+    expected = state[1]
+    assert not spec.ds_conv_tail
+    assert spec.start_addr == expected.data_ptr()
+    assert spec.num_elements == expected.numel()
+
+
+def test_get_conv_copy_spec_ds_layout_tail_returns_strided_copy_spec(
+    set_conv_state_layout,
+):
+    set_conv_state_layout("DS")
+    state = torch.arange(3 * 7 * 5, dtype=torch.float32).reshape(3, 7, 5)
+    spec = get_conv_copy_spec(
+        state=state,
+        block_ids=[0, 1, 2],
+        cur_block_idx=1,
+        num_accepted_tokens=3,
+    )
+
+    assert spec.ds_conv_tail
+    assert spec.start_addr == 0
+    assert spec.num_elements == 0
+    assert spec.src_block_id == 1
+    assert spec.offset == 2
+
+
+def test_collect_mamba_copy_meta_uses_ds_tail_copy_for_ds_layout(
+    set_conv_state_layout,
+):
+    set_conv_state_layout("DS")
+    copy_bufs = MagicMock()
+    copy_bufs.src_ptrs.np = np.zeros(4, dtype=np.int64)
+    copy_bufs.dst_ptrs.np = np.zeros(4, dtype=np.int64)
+    copy_bufs.sizes.np = np.zeros(4, dtype=np.int32)
+    copy_bufs.offset = 0
+
+    kv_cache_config = MagicMock()
+    kv_cache_config.kv_cache_groups = [MagicMock(layer_names=["layer_0"])]
+    req_state = MagicMock()
+    req_state.block_ids = {0: [10, 11, 12]}
+    state = torch.empty(3, 7, 5)
+    forward_context = {"layer_0": MagicMock(kv_cache=[state])}
+
+    with patch("vllm.v1.worker.mamba_utils.ds_conv_tail_copy") as copy_mock:
+        collect_mamba_copy_meta(
+            copy_bufs=copy_bufs,
+            kv_cache_config=kv_cache_config,
+            mamba_state_copy_funcs=(get_conv_copy_spec,),
+            mamba_group_ids=[0],
+            src_block_idx=0,
+            dest_block_idx=2,
+            accept_token_bias=1,
+            req_state=req_state,
+            forward_context=forward_context,
+        )
+
+    copy_mock.assert_called_once_with(state, 10, 12, 1)
+    assert copy_bufs.offset == 0
+
+
+def test_ds_conv_tail_copy_rejects_nonpositive_offset():
+    with pytest.raises(ValueError, match="expects offset > 0"):
+        ds_conv_tail_copy(torch.empty(1, 2, 3), 0, 0, 0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("offset", [1, 2, 4])
+def test_ds_conv_tail_copy_matches_torch_reference(offset):
+    device = torch.device("cuda:0")
+    num_blocks, dim, state_len = 5, 7, 5
+    state = torch.arange(
+        num_blocks * dim * state_len,
+        dtype=torch.float32,
+        device=device,
+    ).reshape(num_blocks, dim, state_len)
+    src_block_id = 3
+    dst_block_id = 1
+    expected = state.clone()
+    expected[dst_block_id, :, : state_len - offset] = state[src_block_id, :, offset:]
+
+    ds_conv_tail_copy(state, src_block_id, dst_block_id, offset)
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(state, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_ds_conv_tail_copy_offset_at_state_len_is_noop():
+    device = torch.device("cuda:0")
+    state = torch.arange(3 * 4 * 5, dtype=torch.float32, device=device).reshape(3, 4, 5)
+    expected = state.clone()
+
+    ds_conv_tail_copy(state, src_block_id=2, dst_block_id=1, offset=5)
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(state, expected)
 
 
 def postprocess_mamba(
