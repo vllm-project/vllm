@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.lora.lora_model import LoRAModel
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -199,6 +200,35 @@ def test_load_dora_tensors(disable_lora_pin_memory):
         lora.lora_magnitude_vector,
         tensors["base_model.model.linear.lora_magnitude_vector"],
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_pack_dora_lora_weights() -> None:
+    dtype = torch.float32
+    rank = 2
+    loras = [
+        LoRALayerWeights(
+            f"proj_{i}",
+            rank=rank,
+            lora_alpha=rank,
+            lora_a=torch.full((rank, 4), 0.1 * (i + 1), dtype=dtype),
+            lora_b=torch.full((out_size, rank), 0.2 * (i + 1), dtype=dtype),
+            lora_magnitude_vector=torch.full((out_size,), i + 1, dtype=dtype),
+            use_dora=True,
+        )
+        for i, out_size in enumerate([4, 2, 2])
+    ]
+
+    packed_lora = PackedLoRALayerWeights.pack(loras)
+
+    assert packed_lora.use_dora
+    assert isinstance(packed_lora.lora_magnitude_vector, list)
+    for i, lora in enumerate(loras):
+        torch.testing.assert_close(packed_lora.lora_a[i], lora.lora_a)
+        torch.testing.assert_close(packed_lora.lora_b[i], lora.lora_b)
+        torch.testing.assert_close(
+            packed_lora.lora_magnitude_vector[i], lora.lora_magnitude_vector
+        )
 
 
 @pytest.mark.skip_global_cleanup

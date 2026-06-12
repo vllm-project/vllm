@@ -120,7 +120,9 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         self._raise_if_dora_unsupported(
             lora_magnitude_vector, "fully sharded LoRA"

@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
 
@@ -34,6 +35,12 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     )
 
     output = layer._get_quant_method().apply(layer.base_layer, x, bias)
+    if layer._dora_active_slots:
+        return layer._apply_lora_to_output(
+            x,
+            output,
+            bias_was_added=bias is not None,
+        )
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -277,17 +284,27 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     def expand_packed_lora(
         self,
-        lora_a: list[torch.Tensor],
-        lora_b: list[torch.Tensor],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+        lora_magnitude_vector: list[torch.Tensor | None] | None = None,
+    ) -> tuple[
+        list[torch.Tensor | None],
+        list[torch.Tensor | None],
+        list[torch.Tensor | None] | None,
+    ]:
         """
         Expand packed adapter groups when they don't match n_slices.
         E.g. in_proj_qkv (covers Q+K+V) + in_proj_z
         """
-        expanded_a: list[torch.Tensor] = []
-        expanded_b: list[torch.Tensor] = []
+        expanded_a: list[torch.Tensor | None] = []
+        expanded_b: list[torch.Tensor | None] = []
+        expanded_magnitude_vector: list[torch.Tensor | None] | None = (
+            [] if lora_magnitude_vector is not None else None
+        )
         start_idx = 0
-        for a_i, b_i in zip(lora_a, lora_b):
+        for group_idx, (a_i, b_i) in enumerate(zip(lora_a, lora_b)):
+            assert b_i is not None
+
             # Determine which output slices this b_i covers.
             b_rows, cu_rows, covered = b_i.shape[0], 0, 0
             for i in range(start_idx, self.n_slices):
@@ -307,31 +324,110 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 size = self.output_sizes[start_idx + j]
                 expanded_b.append(b_i[start : start + size, :])
                 expanded_a.append(a_i)
+                if expanded_magnitude_vector is not None:
+                    assert lora_magnitude_vector is not None
+                    magnitude_vector_i = lora_magnitude_vector[group_idx]
+                    expanded_magnitude_vector.append(
+                        None
+                        if magnitude_vector_i is None
+                        else magnitude_vector_i[start : start + size]
+                    )
                 start += size
             start_idx += covered
-        return expanded_a, expanded_b
+        return expanded_a, expanded_b, expanded_magnitude_vector
+
+    def _set_packed_dora_scale(
+        self,
+        index: int,
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+        lora_magnitude_vector: list[torch.Tensor | None],
+    ) -> None:
+        if self.tp_size != 1:
+            raise NotImplementedError("DoRA currently only supports TP=1.")
+        if not isinstance(self.base_layer.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError("DoRA is not supported for quantized layers.")
+        if not hasattr(self.base_layer, "weight"):
+            raise NotImplementedError(
+                "DoRA requires access to the unquantized base layer weight."
+            )
+
+        base_weight = self.base_layer.weight
+        output_offset = 0
+        has_dora = False
+        for i, output_size in enumerate(self.output_slices):
+            lora_a_i = lora_a[i]
+            lora_b_i = lora_b[i]
+            magnitude_vector_i = lora_magnitude_vector[i]
+            if lora_a_i is None and lora_b_i is None and magnitude_vector_i is None:
+                output_offset += output_size
+                continue
+            assert lora_a_i is not None
+            assert lora_b_i is not None
+            assert magnitude_vector_i is not None
+
+            dora_scale = self._get_dora_scale(
+                base_weight[output_offset : output_offset + output_size, :],
+                lora_a_i,
+                lora_b_i,
+                magnitude_vector_i,
+            )
+            self.dora_scale_stacked[
+                index, output_offset : output_offset + dora_scale.shape[0]
+            ].copy_(
+                dora_scale.to(dtype=self.dora_scale_stacked.dtype),
+                non_blocking=True,
+            )
+            output_offset += output_size
+            has_dora = True
+
+        if has_dora:
+            self.dora_enabled_stacked[index] = True
+            self._dora_active_slots.add(index)
 
     def set_lora(
         self,
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
-        self._raise_if_dora_unsupported(
-            lora_magnitude_vector, "packed LoRA layers"
-        )
         self.reset_lora(index)
+        assert isinstance(lora_a, list)
+        assert isinstance(lora_b, list)
+        assert len(lora_a) == len(lora_b)
+        if lora_magnitude_vector is not None:
+            if type(self.base_layer) is maybe_get_oot_by_class(
+                MergedColumnParallelLinear
+            ):
+                raise NotImplementedError(
+                    "DoRA is not supported for MergedColumnParallelLinear "
+                    "packed LoRA layers."
+                )
+            assert isinstance(lora_magnitude_vector, list)
+            assert len(lora_magnitude_vector) == len(lora_b)
 
         # Expand packed adapter groups when they don't match n_slices.
         # E.g. in_proj_qkv (covers Q+K+V) + in_proj_z as 2 groups for a
         # 4-slice layer: split b_qkv by output_sizes and replicate a_qkv.
-        if isinstance(lora_b, list) and len(lora_b) != self.n_slices:
-            lora_a, lora_b = self.expand_packed_lora(lora_a, lora_b)
+        if len(lora_b) != self.n_slices:
+            lora_a, lora_b, lora_magnitude_vector = self.expand_packed_lora(
+                lora_a, lora_b, lora_magnitude_vector
+            )
+
+        if lora_magnitude_vector is not None and self.tp_size > 1:
+            raise NotImplementedError("DoRA currently only supports TP=1.")
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
+
+        if lora_magnitude_vector is not None:
+            self._set_packed_dora_scale(
+                index, lora_a, lora_b, lora_magnitude_vector
+            )
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
@@ -540,7 +636,9 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         self._raise_if_dora_unsupported(
             lora_magnitude_vector, "fully sharded LoRA"
@@ -590,6 +688,20 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
             for i in range(len(lora_a))
         ]
 
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
+    ):
+        self._raise_if_dora_unsupported(
+            lora_magnitude_vector, "fully sharded LoRA"
+        )
+        super().set_lora(index, lora_a, lora_b)
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
 
@@ -632,7 +744,9 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         self._raise_if_dora_unsupported(
             lora_magnitude_vector, "fully sharded LoRA"
@@ -687,6 +801,20 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
             else None,
         ]
         return lora_a
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
+    ):
+        self._raise_if_dora_unsupported(
+            lora_magnitude_vector, "fully sharded LoRA"
+        )
+        super().set_lora(index, lora_a, lora_b)
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
@@ -760,7 +888,9 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         """Override to handle single tensor weights
         that need to be split into slices."""

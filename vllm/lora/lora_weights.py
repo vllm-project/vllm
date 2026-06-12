@@ -20,7 +20,9 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
         use_dora: bool = False,
         scaling: float | None = None,
     ) -> None:
@@ -111,6 +113,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         lora_alphas: list[int | None],
         lora_a: list[torch.Tensor | None],
         lora_b: list[torch.Tensor | None],
+        lora_magnitude_vector: list[torch.Tensor | None] | None = None,
+        use_dora: bool = False,
         scaling: list[float] | None = None,
     ) -> None:
         super().__init__(
@@ -119,6 +123,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             lora_alpha=0,
             lora_a=lora_a,
             lora_b=lora_b,
+            lora_magnitude_vector=lora_magnitude_vector,
+            use_dora=use_dora,
             scaling=scaling,  # type: ignore
         )
         self.lora_alphas = lora_alphas
@@ -137,11 +143,19 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
         first_lora = next(lora for lora in loras if lora is not None)
+        use_dora = any(lora is not None and lora.use_dora for lora in loras)
+        lora_magnitude_vector: list[torch.Tensor | None] | None = (
+            [] if use_dora else None
+        )
         for lora in loras:
             if lora is None:
+                if lora_magnitude_vector is not None:
+                    lora_magnitude_vector.append(None)
                 continue
-            if lora.use_dora:
-                raise NotImplementedError("DoRA is not supported for packed LoRA.")
+            assert lora.use_dora == use_dora
+            if lora_magnitude_vector is not None:
+                assert isinstance(lora.lora_magnitude_vector, torch.Tensor)
+                lora_magnitude_vector.append(lora.lora_magnitude_vector)
             lora.optimize()
         rank = first_lora.rank
         module_name = first_lora.module_name
@@ -151,6 +165,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora.lora_alpha if lora is not None else None for lora in loras],
             [lora.lora_a if lora is not None else None for lora in loras],
             [lora.lora_b if lora is not None else None for lora in loras],
+            lora_magnitude_vector,
+            use_dora=use_dora,
             scaling=[
                 1 if lora is not None else None  # type: ignore
                 for lora in loras

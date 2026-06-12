@@ -682,6 +682,296 @@ def test_linear_dora_scale_stacked(default_vllm_config, dist_init, device) -> No
     )
 
 
+def _create_test_qkv_dora_tensors(
+    dtype: torch.dtype,
+    device: torch.types.Device,
+) -> tuple[
+    torch.Tensor,
+    list[torch.Tensor],
+    list[torch.Tensor],
+    list[torch.Tensor],
+]:
+    base_weight = torch.tensor(
+        [
+            [0.5, -0.25, 0.75, 1.0],
+            [-1.0, 0.5, 0.25, -0.75],
+            [0.25, 1.25, -0.5, 0.5],
+            [1.0, -1.5, 0.5, 0.25],
+            [-0.5, 0.75, 1.25, -1.0],
+            [1.5, 0.25, -0.75, 0.5],
+            [0.75, -1.25, 1.0, -0.5],
+            [-1.0, -0.5, 0.25, 1.25],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+    lora_a = [
+        torch.tensor(
+            [[0.5, 0.25, -0.5, 1.0], [1.5, -0.25, 0.75, -1.0]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor(
+            [[-0.25, 0.75, 1.0, 0.5], [0.5, -1.0, 0.25, -0.75]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor(
+            [[1.0, -0.5, 0.25, 0.75], [-0.75, 0.5, 1.25, -0.25]],
+            dtype=dtype,
+            device=device,
+        ),
+    ]
+    lora_b = [
+        torch.tensor(
+            [[0.25, -0.5], [1.0, 0.5], [-0.75, 1.25], [0.5, -1.0]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor([[0.75, -0.25], [-1.0, 0.5]], dtype=dtype, device=device),
+        torch.tensor([[1.25, 0.5], [-0.5, -0.75]], dtype=dtype, device=device),
+    ]
+    dora_magnitude = [
+        torch.tensor([2.0, 3.0, 4.0, 5.0], dtype=dtype, device=device),
+        torch.tensor([1.5, 2.5], dtype=dtype, device=device),
+        torch.tensor([3.5, 4.5], dtype=dtype, device=device),
+    ]
+    return base_weight, lora_a, lora_b, dora_magnitude
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_packed_qkv_dora_scale_stacked(
+    default_vllm_config, dist_init, device
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    dtype = (
+        torch.float16
+        if current_platform.is_cuda_alike() or current_platform.is_xpu()
+        else torch.float32
+    )
+    max_loras = 2
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=4,
+        lora_dtype=dtype,
+    )
+    base_weight, lora_a, lora_b, dora_magnitude = _create_test_qkv_dora_tensors(
+        dtype, device
+    )
+
+    linear = QKVParallelLinear(
+        4,
+        2,
+        2,
+        total_num_kv_heads=1,
+        bias=False,
+        params_dtype=dtype,
+        prefix="dora_qkv",
+    )
+    linear.weight.data.copy_(base_weight)
+    lora_linear = MergedQKVParallelLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+
+    lora_linear.set_lora(
+        1,
+        lora_a=lora_a,
+        lora_b=lora_b,
+        lora_magnitude_vector=dora_magnitude,
+    )
+
+    expected_scales = []
+    offset = 0
+    for lora_a_i, lora_b_i, magnitude_i in zip(lora_a, lora_b, dora_magnitude):
+        output_size = lora_b_i.shape[0]
+        delta_weight = lora_b_i.float() @ lora_a_i.float()
+        merged_weight = base_weight[offset : offset + output_size].float()
+        merged_weight = merged_weight + delta_weight
+        expected_norm = torch.linalg.vector_norm(merged_weight, dim=1)
+        expected_scales.append(magnitude_i.float() / expected_norm)
+        offset += output_size
+    expected_scale = torch.cat(expected_scales)
+
+    assert lora_linear.dora_enabled_stacked[1]
+    torch.testing.assert_close(
+        lora_linear.dora_scale_stacked[1].float(),
+        expected_scale,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+    partial_lora_a = [None, lora_a[1], None]
+    partial_lora_b = [None, lora_b[1], None]
+    partial_dora_magnitude = [None, dora_magnitude[1], None]
+    lora_linear.set_lora(
+        0,
+        lora_a=partial_lora_a,
+        lora_b=partial_lora_b,
+        lora_magnitude_vector=partial_dora_magnitude,
+    )
+    expected_partial_scale = torch.ones_like(lora_linear.dora_scale_stacked[0]).float()
+    partial_offset = lora_b[0].shape[0]
+    partial_delta = lora_b[1].float() @ lora_a[1].float()
+    partial_merged = base_weight[
+        partial_offset : partial_offset + lora_b[1].shape[0]
+    ].float()
+    partial_merged = partial_merged + partial_delta
+    partial_norm = torch.linalg.vector_norm(partial_merged, dim=1)
+    expected_partial_scale[
+        partial_offset : partial_offset + lora_b[1].shape[0]
+    ] = dora_magnitude[1].float() / partial_norm
+    assert lora_linear.dora_enabled_stacked[0]
+    torch.testing.assert_close(
+        lora_linear.dora_scale_stacked[0].float(),
+        expected_partial_scale,
+        rtol=1e-3,
+        atol=1e-3,
+    )
+
+    lora_linear.reset_lora(1)
+    assert not lora_linear.dora_enabled_stacked[1]
+    torch.testing.assert_close(
+        lora_linear.dora_scale_stacked[1],
+        torch.ones_like(lora_linear.dora_scale_stacked[1]),
+    )
+
+
+@torch.inference_mode()
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="DoRA forward support is CUDA-only.",
+)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_packed_qkv_dora_forward(
+    default_vllm_config, dist_init, device, stage
+) -> None:
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    dtype = torch.float16
+    max_loras = 3
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=4,
+        lora_dtype=dtype,
+    )
+    punica_wrapper = get_punica_wrapper(16, 4, device, lora_config=lora_config)
+    base_weight, lora_a, lora_b, dora_magnitude = _create_test_qkv_dora_tensors(
+        dtype, device
+    )
+
+    linear = QKVParallelLinear(
+        4,
+        2,
+        2,
+        total_num_kv_heads=1,
+        bias=False,
+        params_dtype=dtype,
+        prefix="dora_qkv_forward",
+    )
+    linear.weight.data.copy_(base_weight)
+    lora_linear = MergedQKVParallelLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+    lora_linear.set_mapping(punica_wrapper)
+
+    standard_lora_a = [
+        torch.tensor(
+            [[-0.25, 0.75, 1.0, 0.5], [0.5, -1.0, 0.25, -0.75]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor(
+            [[0.5, 0.25, -0.5, 1.0], [1.5, -0.25, 0.75, -1.0]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor(
+            [[1.0, -0.5, 0.25, 0.75], [-0.75, 0.5, 1.25, -0.25]],
+            dtype=dtype,
+            device=device,
+        ),
+    ]
+    standard_lora_b = [
+        torch.tensor(
+            [[0.5, 0.25], [-0.5, 1.0], [1.25, -0.25], [0.75, 0.5]],
+            dtype=dtype,
+            device=device,
+        ),
+        torch.tensor([[0.25, -0.5], [1.0, 0.5]], dtype=dtype, device=device),
+        torch.tensor([[-0.75, 1.25], [0.5, -1.0]], dtype=dtype, device=device),
+    ]
+
+    dora_slot = 1
+    standard_slot = 2
+    lora_linear.set_lora(
+        dora_slot,
+        lora_a=lora_a,
+        lora_b=lora_b,
+        lora_magnitude_vector=dora_magnitude,
+    )
+    lora_linear.set_lora(
+        standard_slot,
+        lora_a=standard_lora_a,
+        lora_b=standard_lora_b,
+    )
+
+    x = torch.tensor(
+        [
+            [0.5, -1.0, 0.25, 1.5],
+            [-0.25, 0.75, 1.25, -0.5],
+            [0.75, -0.5, 1.5, 0.25],
+            [1.0, 0.5, -0.75, 0.25],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+    token_lora_ids = [1, 2, 0, 1]
+    lora_mapping = LoRAMapping(
+        token_lora_ids,
+        token_lora_ids,
+        is_prefill=stage,
+    )
+    punica_wrapper.update_metadata(lora_mapping, [None, 1, 2], max_loras, 512)
+
+    actual = lora_linear(x)[0]
+
+    expected = x.float() @ base_weight.float().T
+    dora_weight_slices = []
+    offset = 0
+    for lora_a_i, lora_b_i, magnitude_i in zip(lora_a, lora_b, dora_magnitude):
+        output_size = lora_b_i.shape[0]
+        delta_weight = lora_b_i.float() @ lora_a_i.float()
+        merged_weight = base_weight[offset : offset + output_size].float()
+        merged_weight = merged_weight + delta_weight
+        weight_norm = torch.linalg.vector_norm(merged_weight, dim=1, keepdim=True)
+        dora_weight_slices.append(
+            magnitude_i.float().unsqueeze(1) * merged_weight / weight_norm
+        )
+        offset += output_size
+    dora_weight = torch.cat(dora_weight_slices, dim=0)
+    dora_rows = torch.tensor([True, False, False, True], device=device)
+    expected[dora_rows] = x[dora_rows].float() @ dora_weight.T
+
+    standard_rows = torch.tensor([False, True, False, False], device=device)
+    standard_offset = 0
+    for lora_a_i, lora_b_i in zip(standard_lora_a, standard_lora_b):
+        output_size = lora_b_i.shape[0]
+        standard_delta = x[standard_rows].float() @ lora_a_i.float().T
+        expected[
+            standard_rows,
+            standard_offset : standard_offset + output_size,
+        ] += standard_delta @ lora_b_i.float().T
+        standard_offset += output_size
+
+    rtol, atol = TOLERANCES[actual.dtype]
+    torch.testing.assert_close(
+        actual, expected.to(dtype=actual.dtype), rtol=rtol, atol=atol
+    )
+
+
 @torch.inference_mode()
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),

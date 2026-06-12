@@ -174,7 +174,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     @staticmethod
     def _raise_if_dora_unsupported(
-        lora_magnitude_vector: torch.Tensor | None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ),
         feature: str,
     ) -> None:
         if lora_magnitude_vector is not None:
@@ -185,7 +187,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
-        lora_magnitude_vector: torch.Tensor | None = None,
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
@@ -203,6 +207,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b = self.slice_lora_b(lora_b)
 
         if lora_magnitude_vector is not None:
+            assert isinstance(lora_magnitude_vector, torch.Tensor)
             self._set_dora_scale(index, lora_a, lora_b, lora_magnitude_vector)
 
         self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
@@ -239,6 +244,26 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
 
         base_weight = self.base_layer.weight
+        dora_scale = self._get_dora_scale(
+            base_weight,
+            lora_a,
+            lora_b,
+            lora_magnitude_vector,
+        )
+        self.dora_scale_stacked[index, : dora_scale.shape[0]].copy_(
+            dora_scale.to(dtype=self.dora_scale_stacked.dtype),
+            non_blocking=True,
+        )
+        self.dora_enabled_stacked[index] = True
+        self._dora_active_slots.add(index)
+
+    @staticmethod
+    def _get_dora_scale(
+        base_weight: torch.Tensor,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor,
+    ) -> torch.Tensor:
         if base_weight.shape != (lora_b.shape[0], lora_a.shape[1]):
             raise ValueError(
                 "DoRA weight shapes are incompatible with the base layer: "
@@ -256,13 +281,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         merged_weight = base_weight.float() + delta_weight
         weight_norm = torch.linalg.vector_norm(merged_weight, dim=1)
         weight_norm = torch.clamp(weight_norm, min=torch.finfo(weight_norm.dtype).eps)
-        dora_scale = lora_magnitude_vector.float() / weight_norm
-        self.dora_scale_stacked[index, : dora_scale.shape[0]].copy_(
-            dora_scale.to(dtype=self.dora_scale_stacked.dtype),
-            non_blocking=True,
-        )
-        self.dora_enabled_stacked[index] = True
-        self._dora_active_slots.add(index)
+        return lora_magnitude_vector.float() / weight_norm
 
     def _get_dora_token_mask(
         self,
