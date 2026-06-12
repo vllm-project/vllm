@@ -924,22 +924,122 @@ def _apply_inv_rope_ref(
     return _apply_gptj_inv_rope_ref(x, positions, rotary_emb.cos_sin_cache, rope_dim)
 
 
-def rocm_inv_rope_einsum(
+@triton.jit
+def _inverse_rope_gptj_kernel(
+    o_ptr,  # [T, H, D] input
+    out_ptr,  # [T, H, D] bf16 output
+    pos_ptr,  # [T] positions
+    cos_sin_ptr,  # [P, rope_dim] fp32 (cos[:half] | sin[half:])
+    s_t,
+    s_h,  # input row strides (last dim contiguous)
+    os_t,
+    os_h,  # output row strides
+    cs_stride,  # cos_sin_cache row stride
+    NOPE: tl.constexpr,  # non-rope head dims (passed through)
+    HALF: tl.constexpr,  # rope_dim // 2
+    BLOCK_NOPE: tl.constexpr,
+    BLOCK_HALF: tl.constexpr,
+):
+    """Fused inverse GPT-J RoPE on the trailing rope_dim of each (token, head).
+
+    Mirrors ``DeepseekV4ScalingRotaryEmbedding.forward_native(inverse=True)``
+    for the GPT-J (non-neox) layout, writing bf16 directly. Replaces the
+    clone + index_select + repeat_interleave + neg + stack + cat + cast chain
+    (~10 small kernels) with a single launch.
+    """
+    t = tl.program_id(0)
+    h = tl.program_id(1)
+    in_base = t * s_t + h * s_h
+    out_base = t * os_t + h * os_h
+
+    # NoPE lanes pass through unchanged (only cast to bf16).
+    n = tl.arange(0, BLOCK_NOPE)
+    nmask = n < NOPE
+    vals = tl.load(o_ptr + in_base + n, mask=nmask)
+    tl.store(out_ptr + out_base + n, vals.to(tl.bfloat16), mask=nmask)
+
+    # RoPE lanes: out_even = a*cos + b*sin, out_odd = b*cos - a*sin
+    # (a = even lane, b = odd lane; sin negated for the inverse rotation).
+    pos = tl.load(pos_ptr + t).to(tl.int64)
+    k = tl.arange(0, BLOCK_HALF)
+    kmask = k < HALF
+    a = tl.load(o_ptr + in_base + NOPE + 2 * k, mask=kmask).to(tl.float32)
+    b = tl.load(o_ptr + in_base + NOPE + 2 * k + 1, mask=kmask).to(tl.float32)
+    cos = tl.load(cos_sin_ptr + pos * cs_stride + k, mask=kmask)
+    sin = tl.load(cos_sin_ptr + pos * cs_stride + HALF + k, mask=kmask)
+    out_even = a * cos + b * sin
+    out_odd = b * cos - a * sin
+    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(tl.bfloat16), mask=kmask)
+    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
+
+
+def _can_use_fused_inv_rope(
     rotary_emb: torch.nn.Module,
     o: torch.Tensor,
-    positions: torch.Tensor,
     rope_head_dim: int,
+) -> bool:
+    """Guard: only fuse the exactly-validated GPT-J standard layout."""
+    cos_sin_cache = getattr(rotary_emb, "cos_sin_cache", None)
+    return (
+        rope_head_dim > 0
+        and rope_head_dim % 2 == 0
+        and o.dim() == 3
+        and o.stride(-1) == 1
+        and not getattr(rotary_emb, "is_neox_style", False)
+        and getattr(rotary_emb, "rotary_dim", rope_head_dim) == rope_head_dim
+        and cos_sin_cache is not None
+        and cos_sin_cache.shape[-1] == rope_head_dim
+    )
+
+
+def _fused_inverse_rope_gptj(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_head_dim: int,
+) -> torch.Tensor:
+    """bf16 inverse GPT-J RoPE via a single fused Triton kernel."""
+    num_tokens, num_heads, head_dim = o.shape
+    out = torch.empty(
+        (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
+    )
+    if num_tokens == 0:
+        return out
+    _inverse_rope_gptj_kernel[(num_tokens, num_heads)](
+        o,
+        out,
+        positions,
+        cos_sin_cache,
+        o.stride(0),
+        o.stride(1),
+        out.stride(0),
+        out.stride(1),
+        cos_sin_cache.stride(0),
+        NOPE=head_dim - rope_head_dim,
+        HALF=rope_head_dim // 2,
+        BLOCK_NOPE=triton.next_power_of_2(head_dim - rope_head_dim),
+        BLOCK_HALF=triton.next_power_of_2(rope_head_dim // 2),
+    )
+    return out
+
+
+def _get_cached_wo_a_bf16(
+    wo_a: torch.nn.Module,
     n_local_groups: int,
     o_lora_rank: int,
-    wo_a: torch.nn.Module,
+    hidden_dim: int,
 ) -> torch.Tensor:
-    """Reference inverse-RoPE + WO_A einsum path used on ROCm."""
-    o_ref = _apply_inv_rope_ref(rotary_emb, o, positions, rope_head_dim).to(
-        torch.bfloat16
-    )
-    o_ref = o_ref.view(o.shape[0], n_local_groups, -1)
+    """Dequantize wo_a to bf16 once and cache it on the module.
 
-    hidden_dim = o_ref.shape[-1]
+    wo_a weights are static, so the fp8 -> fp32 -> (* block scale) -> bf16
+    dequant only needs to run once. Recomputing it every decode step shows up
+    in the profile as the largest copy/mul kernels (``direct_copy float`` ~55us
+    and ``MulFunctor float`` ~31us per two layers). SGLang / ATOM keep wo_a in
+    bf16 and feed a plain bf16 GEMM; this mirrors that.
+    """
+    cached = getattr(wo_a, "_dsv4_wo_a_bf16", None)
+    if cached is not None:
+        return cached
     if hasattr(wo_a, "weight_scale_inv"):
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
@@ -951,11 +1051,42 @@ def rocm_inv_rope_einsum(
             o_lora_rank,
             hidden_dim,
         )
-        wo_a_weight = (wo_a_weight * wo_a_scale).to(torch.bfloat16)
+        cached = (wo_a_weight * wo_a_scale).to(torch.bfloat16)
     else:
-        wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
+        cached = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.bfloat16
         )
+    wo_a._dsv4_wo_a_bf16 = cached
+    return cached
+
+
+def rocm_inv_rope_einsum(
+    rotary_emb: torch.nn.Module,
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    rope_head_dim: int,
+    n_local_groups: int,
+    o_lora_rank: int,
+    wo_a: torch.nn.Module,
+) -> torch.Tensor:
+    """Inverse-RoPE + WO_A bmm path used on ROCm.
+
+    Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16
+    wo_a weight so the per-step dequant disappears.
+    """
+    if _can_use_fused_inv_rope(rotary_emb, o, rope_head_dim):
+        o_ref = _fused_inverse_rope_gptj(
+            o, positions, rotary_emb.cos_sin_cache, rope_head_dim
+        )
+    else:
+        o_ref = _apply_inv_rope_ref(rotary_emb, o, positions, rope_head_dim).to(
+            torch.bfloat16
+        )
+    o_ref = o_ref.view(o.shape[0], n_local_groups, -1)
+
+    wo_a_weight = _get_cached_wo_a_bf16(
+        wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
+    )
 
     return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
 
