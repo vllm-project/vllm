@@ -252,13 +252,12 @@ def test_beam_search_structured_output(
     llm = LLM(
         model=model,
         dtype=dtype,
-        enforce_eager=True,
         max_model_len=512,
         structured_outputs_config=dict(
             backend="xgrammar",
             disable_any_whitespace=True,
         ),
-        **EXTRA_ENGINE_KWARGS,
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
     )
 
     params = BeamSearchParams(
