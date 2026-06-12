@@ -170,6 +170,37 @@ do_build() {
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
+    if [[ "$name" == "DeepEP" ]]; then
+        export EP_NCCL_ROOT_DIR="${EP_NCCL_ROOT_DIR:-/usr}"
+        export NCCL_DIR="${NCCL_DIR:-${EP_NCCL_ROOT_DIR}}"
+
+        python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+root = Path(os.environ["EP_NCCL_ROOT_DIR"])
+header = root / "include" / "nccl.h"
+if not header.exists():
+    raise SystemExit(f"NCCL header not found at {header}")
+
+text = header.read_text(errors="replace")
+macros = dict(re.findall(r"^#define\s+(NCCL_(?:MAJOR|MINOR|PATCH))\s+(\d+)", text,
+                         re.MULTILINE))
+version = ".".join(macros[name] for name in ("NCCL_MAJOR", "NCCL_MINOR",
+                                             "NCCL_PATCH"))
+print(f"Using NCCL root for DeepEP: {root}")
+print(f"Using NCCL header for DeepEP: {header}")
+print(f"Using NCCL header version for DeepEP: {version}")
+
+expected = os.environ.get("EXPECTED_NCCL_VERSION")
+if expected and version != expected:
+    raise SystemExit(
+        f"Expected NCCL header version {expected}, but found {version} at "
+        f"{header}")
+PY
+    fi
+
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
         eval "$extra_env" uv pip install --no-build-isolation -vvv .

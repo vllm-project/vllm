@@ -457,6 +457,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
+ARG NCCL_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -473,6 +474,7 @@ ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
+    export EXPECTED_NCCL_VERSION="${NCCL_VERSION%%-*}" && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
