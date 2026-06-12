@@ -1084,7 +1084,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
     # benchmarking and select the first valid config (walking past invalid
     # ones). Used to eliminate autotuning variability when measuring kernel
-    # performance and applied before running any kernel (in vllm/env_override.py)
+    # performance and applied before running any kernel.
     "VLLM_TRITON_FORCE_FIRST_CONFIG": lambda: (
         os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
         in ("1", "true")
