@@ -67,9 +67,11 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
+        "Qwen3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Qwen2MoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
-        "Qwen3ForCausalLM",
     }
 )
 
@@ -559,13 +561,13 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        architectures = getattr(model_config, "architectures", [])
-        if not any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
-        ):
+        if model_config.is_quantized:
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        architectures = getattr(model_config, "architectures", [])
+        return any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -2041,6 +2043,9 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
+
+        if self.parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
 
         if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
