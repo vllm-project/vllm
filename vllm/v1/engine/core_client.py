@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import gc
+import multiprocessing
 import queue
 import sys
 import uuid
@@ -691,10 +693,22 @@ class MPClient(EngineCoreClient):
         # Monitor engine core process liveness. If any die unexpectedly,
         # marks the engine as dead, and shuts down the client.
         def monitor_engine_cores():
+            sentinels = [proc.sentinel for proc in engine_processes]
+            died = multiprocessing.connection.wait(sentinels)
+
+            # the program exits before calling the gc,
+            # needs an explicit gc here to make sure the gc is done before the check
+            gc.collect()
+
             engine_manager.monitor_engine_liveness()
             _self = self_ref()
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
+
+            refs = gc.get_referrers(self_ref())
+            for r in refs:
+                logger.error("Object referencing to client. object: %s", r)                
+
             _self.resources.engine_dead = True
             logger.warning_once(
                 "[shutdown] MPClient: engine core exited unexpectedly; starting cleanup"
