@@ -3,6 +3,8 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 
+import importlib.util
+
 import pytest
 import torch
 
@@ -11,12 +13,23 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-    compressed_tensors_moe_w4a16_flydsl,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
+
+if not (current_platform.is_rocm() and on_gfx950()):
+    pytest.skip("This test can only run on ROCm and gfx950.", allow_module_level=True)
+
+aiter_available = importlib.util.find_spec("aiter") is not None
+
+if not aiter_available:
+    pytest.skip("These tests require AITER to run.", allow_module_level=True)
+
+from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import (  # noqa: E402
+    fused_flydsl_moe,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E402, E501
+    compressed_tensors_moe_w4a16_flydsl,
+)
 
 RoutingBuffers = tuple[
     torch.Tensor,  # sorted_token_ids
@@ -28,10 +41,6 @@ RoutingBuffers = tuple[
 ]
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_rocm() and on_gfx950()),
-    reason="FlyDSL MoE requires HIP device and gfx950 arch",
-)
 @pytest.mark.parametrize(
     "num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 )
