@@ -209,9 +209,10 @@ _ON_GFX9 = any(
 )  # TODO(JPVILLAM): Bubblegum patch to unlock gptoss
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
-_ON_GFX950 = any(
-    arch in _GCN_ARCH for arch in ["gfx950", "gfx1250"]
-)  # TODO(JPVILLAM): Bubblegum patch to unlock DSR1
+_ON_GFX950 = "gfx950" in _GCN_ARCH
+# any(
+#    arch in _GCN_ARCH for arch in ["gfx950", "gfx1250"]
+# )  # TODO(JPVILLAM): Bubblegum patch to unlock DSR1
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
 
