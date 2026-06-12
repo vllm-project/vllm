@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -68,6 +69,13 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+# DFlash draft fidelity: the reference extracts HF output_hidden_states, where
+# the entry after the FINAL target layer is the POST-final-norm hidden state
+# (all earlier entries are raw residual-stream values). Capturing the last aux
+# feature pre-norm degrades draft acceptance. Set this to 1 to restore the old
+# pre-norm behavior for A/B testing.
+_DFLASH_PRENORM_LAST_AUX = os.environ.get("VLLM_DFLASH_PRENORM_LAST_AUX", "0") == "1"
 
 
 class MiMoV2MLP(nn.Module):
@@ -595,12 +603,24 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+        # The DFlash reference uses the post-final-norm hidden state as the last
+        # aux feature (HF output_hidden_states[num_layers]). When that layer id
+        # is requested, skip its pre-norm residual capture in the loop and add
+        # the normed hidden state after self.norm below.
+        num_layers = len(self.layers)
+        post_norm_final_aux = (
+            num_layers in self.aux_hidden_state_layers
+            and not _DFLASH_PRENORM_LAST_AUX
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if post_norm_final_aux and layer_idx + 1 == num_layers:
+                continue
             self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
 
         if not get_pp_group().is_last_rank:
@@ -609,6 +629,8 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if post_norm_final_aux:
+            aux_hidden_states.append(hidden_states)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
