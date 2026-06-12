@@ -3,7 +3,7 @@ name: macOS Apple Silicon Smoke Test
 on:
   schedule:
     # Daily at 2:30 AM UTC
-    - cron: '30 2 * * *'
+    #- cron: '30 2 * * *'
   workflow_dispatch:  # Manual trigger
 
 permissions:

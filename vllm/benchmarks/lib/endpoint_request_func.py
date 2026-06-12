@@ -181,6 +181,7 @@ async def async_request_openai_completions(
         "max_tokens": request_func_input.output_len,
         "logprobs": request_func_input.logprobs,
         "stream": True,
+        "n": 1,
         "stream_options": {
             "include_usage": True,
         },
@@ -359,6 +360,7 @@ async def async_request_openai_chat_completions(
         "messages": messages,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
+        "n": 1,
         "stream_options": {
             "include_usage": True,
         },
