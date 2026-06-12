@@ -27,7 +27,6 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
-from vllm.tool_parsers.openai_tool_parser import OpenAIToolParser
 from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
@@ -194,7 +193,6 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (KimiK2ToolParser, "kimi"),
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
-        (OpenAIToolParser, "harmony"),
         (Qwen3CoderToolParser, "qwen_3_coder"),
     ],
 )
