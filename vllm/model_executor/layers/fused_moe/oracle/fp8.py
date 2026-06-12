@@ -20,8 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -320,54 +318,6 @@ def select_fp8_moe_backend(
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
-
-    # Handle explicit FlashInfer FP8 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
-            # If the user rejects FlashInfer remove those backends.
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
-            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-            if fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = Fp8MoeBackend.FLASHINFER_CUTLASS
-            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-            else:
-                raise ValueError(
-                    f"FlashInfer MOE backend {fi_backend} does not support FP8 MoE."
-                )
-            k_cls = backend_to_kernel_cls(backend)[0]
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
-        else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                Fp8MoeBackend.FLASHINFER_TRTLLM,
-                Fp8MoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                for k_cls in backend_to_kernel_cls(backend):
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-
-                    if supported:
-                        logger.info_once(_make_log_backend(backend))
-                        return backend, k_cls
-                    else:
-                        logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
-                "FlashInfer FP8 MoE backend supports the configuration."
-            )
 
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):

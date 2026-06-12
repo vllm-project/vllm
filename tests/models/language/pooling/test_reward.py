@@ -107,7 +107,7 @@ def test_prm_models(
         pytest.skip("CPU only supports V1")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.reward(math_step_prompts)
+        vllm_outputs = vllm_model.token_classify(math_step_prompts)
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_model = step_reward_patch_hf_model(hf_model)
@@ -146,7 +146,7 @@ def test_prm_models_with_golden_outputs(
         pytest.skip(f"No available golden outputs for {model}.")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.reward(math_step_prompts)
+        vllm_outputs = vllm_model.token_classify(math_step_prompts)
 
     golden_outputs = load_reward_outputs(FIXTURE_REWARD_RESULT[model])
 
