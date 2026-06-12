@@ -89,7 +89,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
-        invalid_block_ids = set[int]()
+        failed_recv_request_ids = set[str]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
@@ -151,7 +151,7 @@ class KVOutputAggregator:
                 combined_kv_cache_events.add_events(worker_kv_cache_events)
                 combined_kv_cache_events.increment_workers(1)
 
-            invalid_block_ids |= kv_output.invalid_block_ids
+            failed_recv_request_ids |= kv_output.failed_recv_request_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -163,7 +163,7 @@ class KVOutputAggregator:
             kv_connector_stats=aggregated_kv_connector_stats or None,
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
-            invalid_block_ids=invalid_block_ids,
+            failed_recv_request_ids=failed_recv_request_ids,
             expected_finished_count=self._expected_finished_count,
         )
 

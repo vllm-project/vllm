@@ -335,11 +335,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return finished_sending or None, finished_recving or None
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        agg_block_ids: set[int] = set()
+    def get_request_ids_with_load_errors(self) -> set[str]:
+        result: set[str] = set()
         for c in self._connectors:
-            agg_block_ids |= c.get_block_ids_with_load_errors()
-        return agg_block_ids
+            result.update(c.get_request_ids_with_load_errors())
+        return result
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""

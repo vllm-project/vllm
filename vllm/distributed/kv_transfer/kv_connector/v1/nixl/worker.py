@@ -433,12 +433,13 @@ class NixlConnectorWorker:
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
-        # Invalid blocks from failed NIXL operations (thread-safe queue of block ids)
-        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        # requests that skipped transfer (handshake or transfer failures)
+        # Requests that skipped transfer (handshake or transfer failures).
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        # Failed recv request IDs from the last get_finished() call,
+        # consumed by get_request_ids_with_load_errors().
+        self._last_failed_recv_reqs: set[str] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1796,6 +1797,13 @@ class NixlConnectorWorker:
             except queue.Empty:
                 break
 
+        assert not self._last_failed_recv_reqs, (
+            "_last_failed_recv_reqs not consumed; "
+            "get_request_ids_with_load_errors() was not called after "
+            "the previous get_finished()"
+        )
+        self._last_failed_recv_reqs = failed_recv_reqs
+
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
@@ -2001,17 +2009,12 @@ class NixlConnectorWorker:
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """
-        Handle a failed transfer by marking all (logical) blocks as invalid and
-        recording the failure.
+        Handle a failed transfer by recording the request ID.
 
         Args:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # Use .get() here as the metadata cleanup is handled by get_finished()
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
@@ -2543,20 +2546,19 @@ class NixlConnectorWorker:
             return self.xfer_stats.clone_and_reset()
         return None
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
+    def get_request_ids_with_load_errors(self) -> set[str]:
         """
-        Return and clear the set of block IDs that failed to load.
+        Return and clear the set of request IDs whose KV load failed.
 
-        This is called by the scheduler to identify blocks that need
-        to be retried after a NIXL transfer failure.
+        Must be called after get_finished(), which drains _failed_recv_reqs
+        and stages the IDs in _last_failed_recv_reqs.
         """
-        # Drain the queue (thread-safe, no lock needed).
-        result: set[int] = set()
-        while not self._invalid_block_ids.empty():
-            try:
-                result.update(self._invalid_block_ids.get_nowait())
-            except queue.Empty:
-                break
+        assert self._failed_recv_reqs.empty(), (
+            "get_request_ids_with_load_errors() must be called after "
+            "get_finished(), which drains _failed_recv_reqs"
+        )
+        result = self._last_failed_recv_reqs
+        self._last_failed_recv_reqs = set()
         return result
 
     def _evict_stale_engines(self) -> None:

@@ -392,10 +392,10 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 ### KV Load Failure Policy
 
-The `kv_load_failure_policy` setting controls how the system handles failures when the decoder instance loads KV cache blocks from the prefiller instance:
+The `kv_load_failure_policy` setting controls how the system handles failures when the decoder instance loads KV cache from the prefiller instance:
 
-- **fail** (default): Immediately fail the request with an error when KV load fails. This prevents performance degradation by avoiding recomputation of prefill work on the decode instance.
-- **recompute**: Recompute failed blocks locally on the decode instance. This may cause performance _jitter_ on decode instances as the scheduled prefill will delay and interfere with other decodes. Furthermore, decode instances are typically configured with low-latency optimizations.
+- **fail** (default): Immediately fail the request with an error when KV load fails. Any cached blocks for the failed request are evicted from the prefix cache to prevent other requests from reusing potentially corrupted data. This prevents performance degradation by avoiding recomputation of prefill work on the decode instance.
+- **recompute**: Recompute the full request locally on the decode instance from scratch. This may cause performance _jitter_ on decode instances as the scheduled prefill will delay and interfere with other decodes. Furthermore, decode instances are typically configured with low-latency optimizations.
 
 !!! warning
     Using `kv_load_failure_policy="recompute"` can lead to performance degradation in production deployments. When KV loads fail, the decode instance will execute prefill work with decode-optimized configurations, which is inefficient and defeats the purpose of disaggregated prefilling. This also increases tail latency for other ongoing decode requests.

@@ -2390,13 +2390,12 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     # Wait for handshake to fail
     time.sleep(0.3)
 
-    # Check that blocks were marked invalid
-    invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {1, 2, 3}
-
-    # Check that request appears in get_finished
+    # get_finished() must be called first to stage failed IDs
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
+
+    failed_reqs = connector.get_request_ids_with_load_errors()
+    assert request_id in failed_reqs
 
 
 @patch(
@@ -2444,13 +2443,12 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     time.sleep(0.1)
     connector.start_load_kv(dummy_ctx)
 
-    # check that blocks were marked invalid
-    invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {7, 8, 9}
-
-    # ensure request appears in get_finished
+    # get_finished() must be called first to stage failed IDs
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
+
+    failed_reqs = connector.get_request_ids_with_load_errors()
+    assert request_id in failed_reqs
 
 
 @patch(
@@ -2569,9 +2567,9 @@ def test_failed_request_skips_kv_postprocessing(
     # Metadata for the request should have been cleaned up.
     assert request_id not in worker._recving_metadata
 
-    # Blocks should have been marked as invalid.
-    invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {1, 2, 3}
+    # Request should have been reported as failed.
+    failed_reqs = connector.get_request_ids_with_load_errors()
+    assert request_id in failed_reqs
 
 
 @pytest.mark.parametrize(
