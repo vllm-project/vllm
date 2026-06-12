@@ -114,12 +114,10 @@ def _triton_w4a16_skinny_fmt_kernel(
     # ExLlama unshuffle shifts: shift[j] = (j//2)*4 + (j%2)*16
     # For 8 values: [0, 16, 4, 20, 8, 24, 12, 28]
     exllama_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16
-    # Tile across BLOCK_K: repeat the 8-element pattern BLOCK_K//8 times
     shifts_1d = tl.reshape(
         tl.broadcast_to(exllama_shifts_row[None, :], (BLOCK_K // 8, 8)),
         (BLOCK_K,),
     )
-    # Broadcast to [BLOCK_N, BLOCK_K]
     shifts_full = tl.broadcast_to(shifts_1d[None, :], (BLOCK_N, BLOCK_K))
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -128,46 +126,35 @@ def _triton_w4a16_skinny_fmt_kernel(
         offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
 
-        # ---- Load activations A: [BLOCK_M, BLOCK_K] ----
         a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
         mask_a = (offs_m[:, None] < M) & mask_k[None, :]
         a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
-        # ---- Load packed weights B: [BLOCK_N, BLOCK_K//8] int32 ----
         offs_k8 = k_start * (BLOCK_K // 8) + tl.arange(0, BLOCK_K // 8)
         b_ptrs = b_ptr + offs_n[:, None] * K8 + offs_k8[None, :]
         mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
         b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
 
-        # ---- Unpack int4 weights with ExLlama unshuffle ----
         b = tl.interleave(b_packed, b_packed)
         b = tl.interleave(b, b)
         b = tl.interleave(b, b)
-        b = (b >> shifts_full) & 0xF  # [BLOCK_N, BLOCK_K]
+        b = (b >> shifts_full) & 0xF
 
-        # ---- Load scales from [N, K//G] layout ----
         g_idx = (k_start * BLOCK_K) // group_size
         scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
         scale_mask = offs_n < N
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
-        # ---- Dequantize ----
         if HAS_ZP:
-            # Asymmetric: (nibble - zp_raw) * scale (single subtraction)
             zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
             zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
             b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
         else:
-            # Symmetric: (w - 8) * scale
             b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
 
-        # ---- Transpose to [BLOCK_K, BLOCK_N] for matmul ----
         b_fp_t = tl.trans(b_fp)
-
-        # ---- Accumulate: [BLOCK_M, BLOCK_K] @ [BLOCK_K, BLOCK_N] ----
         accumulator += tl.dot(a, b_fp_t, out_dtype=tl.float32)
 
-    # ---- Store output C: [BLOCK_M, BLOCK_N] ----
     c = accumulator.to(c_ptr.type.element_ty)
     c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
     mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
@@ -515,47 +502,32 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         w_q_raw = getattr(layer, self.w_q_name)
         w_s_raw = getattr(layer, self.w_s_name)
 
-        # Unpack raw weights and normalize to [N, K] int32
         unpacked = unpack_quantized_values_into_int32(
             w_q_raw.data, c.weight_type, packed_dim=w_q_raw.packed_dim
         )
-        # AWQ-converted weights arrive as (K, N) with output_dim=1;
+        # AWQ weights arrive as (K, N) with output_dim=1;
         # compressed-tensors arrive as (N, K) with output_dim=0.
         if getattr(w_q_raw, "output_dim", 0) != 0:
             unpacked = unpacked.t().contiguous()
 
-        # ---- Pack into skinny format: [N, K//8] ExLlama shuffle ----
         shuffled = pack_int4_exllama_shuffle(unpacked)
-
-        # Store as int8 for the skinny kernel; the Triton path reinterprets
-        # this same buffer as int32 via a view at apply time (single copy).
+        # Store as int8; Triton reinterprets via .view(torch.int32) at apply time.
         w_q_skinny = shuffled.contiguous().view(torch.int8)
 
-        # ---- Prepare skinny scales: normalize to [N, K//G] ----
         permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
         w_s_skinny = w_s_raw.data.contiguous()
 
-        # ---- Process zero-points for asymmetric quantization ----
         if c.zero_points:
             assert self.w_zp_name is not None
             w_zp_raw = getattr(layer, self.w_zp_name)
-            # Normalize zp layout to (N, num_groups)
             permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
             zp_unpacked = unpack_quantized_values_into_int32(
                 w_zp_raw.data, c.weight_type, packed_dim=0
             )
-            # zp_unpacked: [N, num_groups] with raw uint4 values [0..15]
-            # Store raw zero-points in activation dtype.
-            # Both kernels dequant as (nibble - zp_raw) * scale.
             w_zp = zp_unpacked.to(c.act_type).contiguous()
             self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
 
-        # ---- Store on layer ----
-        # Replace w_q with skinny int8 (primary weights for skinny kernel).
-        # The Triton kernel reinterprets this buffer as int32 via a view in
-        # apply_weights, so no separate int32 parameter is stored.
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
-        # Replace w_s with skinny scales
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
 
     def apply_weights(
