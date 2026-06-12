@@ -161,12 +161,6 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
-    enable_kv_transfer_bootstrap_isolation: bool = False
-    """If True, isolate short KV-transfer bootstrap requests from speculative
-    decode batches. This avoids mixing a residual bootstrap token from a
-    KVConnector request into an otherwise uniform speculative decode batch,
-    which would prevent full CUDA graph replay."""
-
     @staticmethod
     def default_factory(**kwargs):
         """

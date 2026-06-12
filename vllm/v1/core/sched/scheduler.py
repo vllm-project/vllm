@@ -229,13 +229,6 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
-        self.uniform_decode_query_len = 1 + self.num_spec_tokens
-        self.enable_kv_transfer_bootstrap_isolation = (
-            self.scheduler_config.enable_kv_transfer_bootstrap_isolation
-            and self.num_spec_tokens > 0
-            and self.connector is not None
-        )
-        self._force_kv_transfer_bootstrap_next_step = False
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -303,108 +296,24 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-    def _estimate_kv_transfer_bootstrap_computed_tokens(
-        self,
-        request: Request,
-    ) -> int | None:
-        """Estimate matched KV tokens without querying the connector."""
-        if not self.enable_kv_transfer_bootstrap_isolation:
-            return None
-
-        if request.num_computed_tokens > 0:
-            return request.num_computed_tokens
-
-        params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode"):
-            remote_num_tokens = params.get("remote_num_tokens")
-            if remote_num_tokens is not None:
-                return min(int(remote_num_tokens), request.num_prompt_tokens)
-            # Decode-side P/D requests are expected to have remote KV. If the
-            # exact token count is unavailable, treat the request as a candidate
-            # and let the normal scheduling path confirm before allocation.
-            return max(0, request.num_tokens - 1)
-
-        return None
-
-    def _is_kv_transfer_bootstrap_residual(
+    def _is_kv_transfer_spec_decode_handoff(
         self,
         request: Request,
         num_computed_tokens: int,
-        num_external_computed_tokens: int = 0,
     ) -> bool:
-        if not self.enable_kv_transfer_bootstrap_isolation:
-            return False
-
-        has_external_or_loaded_kv = (
-            num_external_computed_tokens > 0
-            or request.num_computed_tokens > 0
-            or self._estimate_kv_transfer_bootstrap_computed_tokens(request)
-            is not None
-        )
-        if not has_external_or_loaded_kv:
-            return False
-
-        residual_tokens = request.num_tokens - num_computed_tokens
-        return 0 < residual_tokens < self.uniform_decode_query_len
-
-    def _has_pending_kv_transfer_bootstrap(self) -> bool:
-        if not self.enable_kv_transfer_bootstrap_isolation:
-            return False
-
-        for request in itertools.chain(self.waiting, self.skipped_waiting):
-            # Only consider requests whose KV transfer has already completed
-            # (num_computed_tokens > 0). Requests with num_computed_tokens == 0
-            # are either fresh prefills or still waiting for async KV load;
-            # neither case produces a mixed batch in this step, and skipping
-            # running decode requests here would deadlock async connectors
-            # (NIXL, Mooncake, etc.) whose bootstrap residual only materializes
-            # after the async transfer finishes.
-            if request.num_computed_tokens == 0:
-                continue
-            residual_tokens = request.num_tokens - request.num_computed_tokens
-            if 0 < residual_tokens < self.uniform_decode_query_len:
-                return True
-        return False
-
-    def _sync_kv_transfer_bootstrap_only(self, local_bootstrap_only: bool) -> bool:
+        params = request.kv_transfer_params
         if (
-            not self.enable_kv_transfer_bootstrap_isolation
-            or self.parallel_config.data_parallel_size <= 1
+            not params
+            or not request.spec_token_ids
+            or request.num_output_tokens == 0
+            or num_computed_tokens < request.num_prompt_tokens
         ):
-            return local_bootstrap_only
+            return False
 
-        try:
-            import torch
-            import torch.distributed as dist
-
-            from vllm.distributed.parallel_state import get_dp_group
-
-            if not dist.is_available() or not dist.is_initialized():
-                return local_bootstrap_only
-
-            tensor = torch.tensor([int(local_bootstrap_only)], dtype=torch.int32)
-            dist.all_reduce(
-                tensor,
-                op=dist.ReduceOp.MAX,
-                group=get_dp_group().cpu_group,
-            )
-            return bool(tensor.item())
-        except Exception:
-            logger.debug(
-                "Failed to synchronize KV-transfer bootstrap isolation across DP "
-                "ranks; falling back to local scheduling decision.",
-                exc_info=True,
-            )
-            return local_bootstrap_only
-
-    def _scheduled_running_reqs_are_uniform_spec_decode(
-        self,
-        scheduled_running_reqs: list[Request],
-        num_scheduled_tokens: dict[str, int],
-    ) -> bool:
-        return bool(scheduled_running_reqs) and all(
-            num_scheduled_tokens[request.request_id] == self.uniform_decode_query_len
-            for request in scheduled_running_reqs
+        return bool(
+            params.get("_decode_bench_speculative_handoff")
+            or params.get("first_gen_token_ids")
+            or params.get("draft_token_ids")
         )
 
     def _mamba_block_aligned_split(
@@ -489,14 +398,6 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
-        local_bootstrap_only = (
-            self._force_kv_transfer_bootstrap_next_step
-            or self._has_pending_kv_transfer_bootstrap()
-        )
-        kv_transfer_bootstrap_only = self._sync_kv_transfer_bootstrap_only(
-            local_bootstrap_only
-        )
-        self._force_kv_transfer_bootstrap_next_step = False
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -511,11 +412,7 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while (
-            not kv_transfer_bootstrap_only
-            and req_index < len(self.running)
-            and token_budget > 0
-        ):
+        while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
             if (
@@ -858,6 +755,12 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
+                is_kv_transfer_spec_decode_handoff = (
+                    not load_kv_async
+                    and self._is_kv_transfer_spec_decode_handoff(
+                        request, num_computed_tokens
+                    )
+                )
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -868,9 +771,17 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_tokens_to_schedule = (
+                        request.num_tokens_with_spec
+                        if is_kv_transfer_spec_decode_handoff
+                        else request.num_tokens
+                    )
+                    num_new_tokens = num_tokens_to_schedule - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
+                    if (
+                        not is_kv_transfer_spec_decode_handoff
+                        and 0 < threshold < num_new_tokens
+                    ):
                         num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
@@ -883,6 +794,11 @@ class Scheduler(SchedulerInterface):
                         # we can stop the scheduling here.
                         break
 
+                    if (
+                        is_kv_transfer_spec_decode_handoff
+                        and num_new_tokens > token_budget
+                    ):
+                        break
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
@@ -915,31 +831,6 @@ class Scheduler(SchedulerInterface):
                     )
                     if num_new_tokens == 0:
                         break
-
-                is_kv_transfer_bootstrap_residual = (
-                    not load_kv_async
-                    and self._is_kv_transfer_bootstrap_residual(
-                        request,
-                        num_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-                )
-                if kv_transfer_bootstrap_only:
-                    if not is_kv_transfer_bootstrap_residual:
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
-                        continue
-                elif (
-                    is_kv_transfer_bootstrap_residual
-                    and self._scheduled_running_reqs_are_uniform_spec_decode(
-                        scheduled_running_reqs,
-                        num_scheduled_tokens,
-                    )
-                ):
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    self._force_kv_transfer_bootstrap_next_step = True
-                    break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
@@ -1058,6 +949,21 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                if is_kv_transfer_spec_decode_handoff and request.spec_token_ids:
+                    num_scheduled_spec_tokens = (
+                        num_new_tokens
+                        + num_computed_tokens
+                        - request.num_tokens
+                        - request.num_output_placeholders
+                    )
+                    if num_scheduled_spec_tokens > 0:
+                        spec_token_ids = request.spec_token_ids
+                        if len(spec_token_ids) > num_scheduled_spec_tokens:
+                            spec_token_ids = spec_token_ids[
+                                :num_scheduled_spec_tokens
+                            ]
+                        scheduled_spec_decode_tokens[request_id] = spec_token_ids
+                    request.spec_token_ids = []
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
