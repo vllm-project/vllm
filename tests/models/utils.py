@@ -486,6 +486,7 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "DiffusionGemmaForBlockDiffusion",
             )
             else 1
         )
@@ -558,7 +559,8 @@ def dummy_hf_overrides(
         )
 
     # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-    if hasattr(hf_config, "audio_config"):
+    # audio_config may exist but be None (e.g. audio-less Gemma4 variants).
+    if getattr(hf_config, "audio_config", None) is not None:
         hf_config.audio_config.update(
             {
                 "num_layers": 1,
