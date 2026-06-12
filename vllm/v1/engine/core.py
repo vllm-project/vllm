@@ -3,6 +3,7 @@
 import gc
 import os
 import queue
+import re
 import signal
 import threading
 import time
@@ -36,6 +37,7 @@ from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
 )
+from vllm.utils import get_local_ip
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
@@ -126,6 +128,7 @@ class EngineCore:
 
         # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
+
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -811,6 +814,7 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    ENGINE_CORE_THREAD_FINISH = b"ENGINE_CORE_THREAD_FINISH"
     addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")
@@ -831,11 +835,12 @@ class EngineCoreProc(EngineCore):
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
-
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.addresses = None
+        self.identity = identity
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -891,7 +896,7 @@ class EngineCoreProc(EngineCore):
             # model forward pass.
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             ready_event = threading.Event()
-            input_thread = threading.Thread(
+            self.input_thread = threading.Thread(
                 target=self.process_input_sockets,
                 args=(
                     addresses.inputs,
@@ -901,7 +906,7 @@ class EngineCoreProc(EngineCore):
                 ),
                 daemon=True,
             )
-            input_thread.start()
+            self.input_thread.start()
 
             self.output_thread = threading.Thread(
                 target=self.process_output_sockets,
@@ -917,7 +922,7 @@ class EngineCoreProc(EngineCore):
             # Don't complete handshake until DP coordinator ready message is
             # received.
             while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
+                if not self.input_thread.is_alive():
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
@@ -1434,10 +1439,12 @@ class EngineCoreProc(EngineCore):
 
             ready_event.set()
             del ready_event
-            while True:
+            flag = True
+            while flag:
                 for input_socket, _ in poller.poll():
+                    parts = input_socket.recv_multipart(copy=False)
                     # (RequestType, RequestData)
-                    type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    type_frame, *data_frames = parts
                     # NOTE(yongji): ignore READY message sent by DP coordinator
                     # that is used to notify newly started engines
                     if type_frame.buffer == b"READY":
@@ -1466,6 +1473,11 @@ class EngineCoreProc(EngineCore):
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
+
+                    if len(parts) == 2 and (b'resume' in bytes(parts[1].buffer)):
+                        logger.info(f"[snapshot] engine core input thread received resume, stop input thread")
+                        flag = False
+                        break  # 跳出内层循环
 
     def process_output_sockets(
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
@@ -1501,8 +1513,12 @@ class EngineCoreProc(EngineCore):
             )
             max_reuse_bufs = len(sockets) + 1
 
-            while True:
+            flag = True
+            while flag:
                 output = self.output_queue.get()
+                if output == EngineCoreProc.ENGINE_CORE_THREAD_FINISH:
+                    logger.info(f"[snapshot] engine core output thread received ENGINE_CORE_THREAD_FINISH, stop output thread")
+                    break
                 if output == EngineCoreProc.ENGINE_CORE_DEAD:
                     for socket in sockets:
                         socket.send(output)
@@ -1621,6 +1637,128 @@ class EngineCoreProc(EngineCore):
                 by_client[client_index].add(req_id)
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
+
+    def suspend(self, model_save_path=None):
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "start dump model" + "-"*20)
+        self.collective_rpc("dump_model", args=(model_save_path, ))
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "gc.collect()" + "-"*20)
+        gc.collect()
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_lock" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_lock")
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_backup" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_backup")
+
+    def device_unlock(self) -> None:
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_unlock" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_unlock")
+
+    def resume(self, data_parallel_master_ip:str|None = None, model_path=None):
+        # 刷新和coordinate的连接
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "stop input and output thread" + "-"*20)
+        self.output_queue.put(EngineCoreProc.ENGINE_CORE_THREAD_FINISH)
+        self.input_thread.join(timeout=9999)
+        self.output_thread.join(timeout=9999)
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "start input and output thread" + "-"*20)
+        self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
+        # coordinator_* only when DP Coordinator ZMQ is used; skip re.sub if unset or no new IP.
+        if (
+            self.addresses.coordinator_input is not None
+            and data_parallel_master_ip is not None
+        ):
+            self.addresses.coordinator_input = re.sub(
+                r"\d+\.\d+\.\d+\.\d+",
+                data_parallel_master_ip,
+                self.addresses.coordinator_input,
+            )
+        if (
+            self.addresses.coordinator_output is not None
+            and data_parallel_master_ip is not None
+        ):
+            self.addresses.coordinator_output = re.sub(
+                r"\d+\.\d+\.\d+\.\d+",
+                data_parallel_master_ip,
+                self.addresses.coordinator_output,
+            )
+
+        ready_event = threading.Event()
+        self.input_thread = threading.Thread(
+            target=self.process_input_sockets,
+            args=(
+                self.addresses.inputs,
+                self.addresses.coordinator_input,
+                self.identity,
+                ready_event,
+            ),
+            daemon=True,
+        )
+        self.input_thread.start()
+
+        self.output_thread = threading.Thread(
+            target=self.process_output_sockets,
+            args=(
+                self.addresses.outputs,
+                self.addresses.coordinator_output,
+                self.engine_index,
+            ),
+            daemon=True,
+        )
+        self.output_thread.start()
+
+        # Don't complete handshake until DP coordinator ready message is
+        # received.
+        while not ready_event.wait(timeout=10):
+            if not self.input_thread.is_alive():
+                raise RuntimeError("Input socket thread died during startup")
+            assert self.addresses.coordinator_input is not None
+            logger.info("Waiting for READY message from DP Coordinator...")
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_restore" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_restore")
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_unlock" + "-"*20)
+        self.collective_rpc("aclrt_snapshot_process_unlock")
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "after_snapshot_restore_update_info_for_worker" + "-"*20)
+        local_ip = get_local_ip()
+        os.environ['HCCL_IF_IP'] = local_ip
+        self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
+        self.collective_rpc("after_snapshot_restore_update_info_for_worker", args=(local_ip, data_parallel_master_ip,))
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild_group_resume" + "-"*20)
+        self.collective_rpc("rebuild_group_resume")
+
+        # Stateless DP process group exists only for DPEngineCoreProc (DP>1).
+        # For data_parallel_size==1, EngineCoreProc._init_data_parallel is a no-op
+        # and never sets dp_group; skip destroy/re-init.
+        dp_group = getattr(self, "dp_group", None)
+        if dp_group is not None:
+            logger.info(
+                f"[snapshot] [engine] " + "-" * 20 + "rebuild engie core dp_group" + "-" * 20
+            )
+            stateless_destroy_torch_distributed_process_group(dp_group)
+            # Pre-snapshot ports are stale in the new environment.  Clear the
+            # list so get_next_dp_init_port() falls back to
+            # data_parallel_master_port — the only value guaranteed identical
+            # across all DP engine-core processes (even on different nodes),
+            # because it was set once in __post_init__ and serialized to every
+            # process.  This ensures both sides attempt the same port.
+            self.vllm_config.parallel_config._data_parallel_master_port_list.clear()
+            self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
+        else:
+            logger.info(
+                "[snapshot] [engine] skip engine-core dp_group rebuild "
+                "(data_parallel_size==1 or non-DPEngineCoreProc)"
+            )
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "re_load_weights" + "-"*20)
+        self.collective_rpc("re_load_weights", args=(model_path, ))
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "recapture_graph" + "-"*20)
+        self.collective_rpc("recapture_graph")
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -1811,6 +1949,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

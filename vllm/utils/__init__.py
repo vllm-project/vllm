@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import socket
 import uuid
 
 import torch
@@ -47,3 +49,16 @@ def is_moe_layer(module: torch.nn.Module) -> bool:
                 return True
 
     return _check_bases(module.__class__)
+
+
+def is_restore() -> bool:
+    return os.path.exists("/root/.grusflag")
+
+
+def get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.1)
+    s.connect(("8.8.8.8", 80))
+    ip = s.getsockname()[0]
+    s.close()
+    return ip
