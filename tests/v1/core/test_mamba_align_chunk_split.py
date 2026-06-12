@@ -97,13 +97,15 @@ def _make_manager() -> KVCacheManager:
     )
 
 
-def _aligned_split(req, num_new, num_new_local_computed=0):
+def _aligned_split(
+    req, num_new, num_new_local_computed=0, num_external_computed=0, use_eagle=True
+):
     stub = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=MAMBA_BS),
-        use_eagle=True,  # MTP / EAGLE-family speculative decoding
+        use_eagle=use_eagle,  # MTP / EAGLE-family speculative decoding
     )
     return Scheduler._mamba_block_aligned_split(
-        stub, req, num_new, num_new_local_computed
+        stub, req, num_new, num_new_local_computed, num_external_computed
     )
 
 
@@ -142,9 +144,10 @@ def test_fragmented_prefill_chunk_does_not_poison_mamba_prefix_cache():
                 req.spec_token_ids = [7] * NUM_SPEC
                 num_new = 1 + NUM_SPEC
                 lookahead = 0
-            assert mgr.allocate_slots(
-                req, num_new, num_lookahead_tokens=lookahead
-            ) is not None
+            assert (
+                mgr.allocate_slots(req, num_new, num_lookahead_tokens=lookahead)
+                is not None
+            )
             budget -= num_new
             scheduled.append((req, c, num_new))
 
@@ -243,3 +246,52 @@ def test_fragmented_prefill_chunk_does_not_poison_mamba_prefix_cache():
                 cached_seen[req.request_id] = n_now
 
     assert not violations, "\n".join(violations)
+
+
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("num_external", [1, 368, MAMBA_BS - 1, MAMBA_BS + 17])
+def test_unaligned_external_tokens_realign_chunk_ends(use_eagle, num_external):
+    """A prefill starting at an unaligned offset must re-align its chunk ends.
+
+    Externally computed tokens (KV connector) need not be mamba-block
+    aligned. Rounding the chunk *length* down to a block multiple would then
+    keep every subsequent chunk end unaligned for the whole prefill — the
+    same mid-block snapshots in aligned slots that poison the prefix cache
+    in the budget-fragmentation scenario above. The split must instead align
+    the chunk *end position*, recovering boundary alignment on the first
+    chunk it schedules.
+    """
+    prompt_len = 5 * MAMBA_BS + 7
+    req = _make_request("ext", list(range(prompt_len)))
+
+    computed = num_external  # unaligned external KV-connector tokens
+    chunk_ends: list[int] = []
+    # Cycle through fragmenting budgets; the large one guarantees progress.
+    budgets = [364, 700, MAMBA_BS + 13, prompt_len]
+    for step in range(100):
+        if computed >= prompt_len:
+            break
+        if chunk_ends:
+            req.num_computed_tokens = computed
+            num_new = _aligned_split(
+                req,
+                min(prompt_len - computed, budgets[step % len(budgets)]),
+                use_eagle=use_eagle,
+            )
+        else:
+            # first schedule: external tokens are not yet part of
+            # request.num_computed_tokens
+            num_new = _aligned_split(
+                req,
+                min(prompt_len - computed, budgets[step % len(budgets)]),
+                num_external_computed=num_external,
+                use_eagle=use_eagle,
+            )
+        if num_new == 0:
+            continue  # deferred to a step with more budget
+        computed += num_new
+        chunk_ends.append(computed)
+
+    assert computed == prompt_len, f"prefill stalled at {computed}/{prompt_len}"
+    unaligned = [end for end in chunk_ends[:-1] if end % MAMBA_BS != 0]
+    assert not unaligned, f"intermediate chunk ends not block-aligned: {unaligned}"
