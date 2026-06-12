@@ -101,6 +101,9 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    image_tokens: int | None = None
+    audio_tokens: int | None = None
+    video_tokens: int | None = None
 
 
 class UsageInfo(OpenAIBaseModel):
