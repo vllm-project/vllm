@@ -360,6 +360,30 @@ class SingleTypeKVCacheManager(ABC):
         """
         return None
 
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        """
+        Pop the request's bookkeeping and return its blocks without
+        returning them to the block pool. The caller is responsible for
+        eventually passing the returned blocks to
+        `block_pool.free_blocks` (used by the scheduler to defer the
+        actual free until in-flight GPU steps that may still write these
+        blocks have completed).
+
+        Args:
+            request_id: The request ID.
+
+        Returns:
+            The request's blocks in the order they should be freed
+            (reversed, so that tail blocks are evicted first).
+        """
+        # Default to [] in case a request is freed (aborted) before alloc.
+        req_blocks = self.req_to_blocks.pop(request_id, [])
+        self.num_cached_block.pop(request_id, None)
+
+        # Free blocks in reverse order so that the tail blocks are
+        # freed first.
+        return req_blocks[::-1]
+
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.
@@ -367,15 +391,7 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             request_id: The request ID.
         """
-        # Default to [] in case a request is freed (aborted) before alloc.
-        req_blocks = self.req_to_blocks.pop(request_id, [])
-
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
-        ordered_blocks = reversed(req_blocks)
-
-        self.block_pool.free_blocks(ordered_blocks)
-        self.num_cached_block.pop(request_id, None)
+        self.block_pool.free_blocks(self.pop_blocks_for_free(request_id))
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -1194,11 +1210,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
 
-    def free(self, request_id: str) -> None:
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-        super().free(request_id)
+        return super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

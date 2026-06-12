@@ -36,6 +36,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -261,6 +262,27 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+
+        # Defer returning blocks to the pool (the ref_cnt decrement) until
+        # the output of the newest scheduled step has been processed.
+        # Bookkeeping (req_to_blocks etc.) is still cleared immediately
+        # so preempted requests can be rescheduled safely.
+        self._defer_block_free = bool(
+            self.scheduler_config.async_scheduling
+            and self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_consumer
+        )
+        # Sequence number of the newest step that will be executed.
+        self._sched_step_seq = 0
+        # Sequence number of the newest step whose output has been processed.
+        self._processed_step_seq = 0
+        # FIFO of (fence_seq, blocks): blocks become safe to free once
+        # _processed_step_seq >= fence_seq.
+        self._deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+        if self._defer_block_free:
+            logger.info(
+                "Deferred block freeing enabled (async scheduling + PD KV consumer)."
+            )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -983,6 +1005,14 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
+        # Assign a fence sequence number only to steps that will actually be
+        # executed (and thus have their output processed later); empty steps
+        # never reach update_from_output, so bumping the seq for them would
+        # strand deferred block frees.
+        if total_num_scheduled_tokens > 0:
+            self._sched_step_seq += 1
+            scheduler_output.sched_seq = self._sched_step_seq
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -1001,7 +1031,7 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        self.kv_cache_manager.free(request)
+        self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
@@ -1352,6 +1382,14 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # This step's output is back, so every GPU write enqueued by it
+        # (and earlier steps) has completed: deferred block frees fenced on
+        # it can now be returned to the pool.
+        if scheduler_output.sched_seq > self._processed_step_seq:
+            self._processed_step_seq = scheduler_output.sched_seq
+        if self._deferred_frees:
+            self._drain_deferred_frees()
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -1927,7 +1965,7 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
+        self._free_request_blocks(request)
         del self.requests[request.request_id]
 
     @property
@@ -1936,6 +1974,38 @@ class Scheduler(SchedulerInterface):
 
     def set_pause_state(self, pause_state: PauseState) -> None:
         self._pause_state = pause_state
+
+    def _free_request_blocks(self, request: Request):
+        """Free the request's KV blocks, deferring the return to the block
+        pool when an in-flight GPU step may still write them.
+
+        See the comment on `self._defer_block_free` in `__init__` for the
+        race this prevents. Bookkeeping is always cleared immediately;
+        only the ref_cnt decrement (block_pool.free_blocks) is deferred.
+        """
+        if not self._defer_block_free or (
+            self._processed_step_seq >= self._sched_step_seq
+        ):
+            # No step in flight (or deferral disabled): the pool can be
+            # updated immediately.
+            self.kv_cache_manager.free(request)
+            return
+        blocks = self.kv_cache_manager.pop_blocks_for_free(request)
+        if blocks:
+            self._deferred_frees.append((self._sched_step_seq, blocks))
+
+    def _drain_deferred_frees(self):
+        """Return deferred blocks whose fence step has completed.
+
+        Entries are appended with monotonically non-decreasing fences, so
+        stop at the first one that is still pending.
+        """
+        while self._deferred_frees:
+            fence, blocks = self._deferred_frees[0]
+            if fence > self._processed_step_seq:
+                break
+            self._deferred_frees.popleft()
+            self.kv_cache_manager.block_pool.free_blocks(blocks)
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
