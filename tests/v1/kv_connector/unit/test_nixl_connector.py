@@ -1064,7 +1064,7 @@ class TestNixlHandshake:
             worker.add_remote_agent(meta, remote_tp_size=1)
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
     def test_handshake_mixed_fa_mla_hetero_tp(self, default_vllm_config, dist_init):
@@ -1074,7 +1074,7 @@ class TestNixlHandshake:
         """
         vllm_config = create_vllm_config()
         with patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
             return_value=2,
         ):
             connector = NixlConnector(

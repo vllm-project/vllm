@@ -227,10 +227,7 @@ class NixlBaseConnectorWorker:
         Defaults to SPLIT when the per-region map is unset (e.g. tests that set
         block_len_per_layer without register_kv_caches).
         """
-        return (
-            region_idx < len(self._region_is_mla)
-            and self._region_is_mla[region_idx]
-        )
+        return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
     def __init__(
         self,
@@ -490,6 +487,15 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
+
+        # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
+        # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
+        # combining both (e.g. GQA main + MLA Eagle-3 draft).
+        self._region_is_mla = list[bool]()
+
+        # Enable different block lengths for different layers *only* when MLA is used.
+        # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
+        self.block_len_per_layer = list[int]()
 
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
@@ -890,14 +896,6 @@ class NixlBaseConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
-        # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
-        # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
-        # combining both (e.g. GQA main + MLA Eagle-3 draft).
-        self._region_is_mla = list[bool]()
-
-        # Enable different block lengths for different layers *only* when MLA is used.
-        # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
-        self.block_len_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -1249,10 +1247,7 @@ class NixlBaseConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            emits_v = (
-                self.transfer_topo.virtually_split_kv_in_blocks
-                and not replicated
-            )
+            emits_v = self.transfer_topo.virtually_split_kv_in_blocks and not replicated
             if emits_v:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
@@ -1603,12 +1598,11 @@ class NixlBaseConnectorWorker:
         # only allow the number of blocks to differ; SPLIT regions scale with
         # tp_ratio. Mamba uses the ssm_sizes counterpart, so skip block_len here.
         if not self._has_mamba:
-            assert len(self.block_len_per_layer) == len(
-                nixl_agent_meta.block_lens
-            ), "Number of KV layers must match between prefill and decode"
-            model_replicated = (
-                self.use_mla
-                or self.transfer_topo.is_kv_replicated(remote_engine_id)
+            assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
+                "Number of KV layers must match between prefill and decode"
+            )
+            model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
+                remote_engine_id
             )
             for i, local_len in enumerate(self.block_len_per_layer):
                 replicated = model_replicated or self._is_region_replicated(i)
@@ -1620,9 +1614,7 @@ class NixlBaseConnectorWorker:
                         f"remote={remote_len}, bsr={block_size_ratio})."
                     )
                 elif tp_ratio > 0:
-                    assert remote_len == (
-                        local_len * tp_ratio
-                    ) // block_size_ratio, (
+                    assert remote_len == (local_len * tp_ratio) // block_size_ratio, (
                         f"SPLIT region {i}: remote P KV block_len {remote_len} "
                         f"must equal local {local_len} * tp_ratio {tp_ratio} "
                         f"// block_size_ratio {block_size_ratio}."
@@ -2183,12 +2175,8 @@ class NixlBaseConnectorWorker:
         if virtually_split and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            half_block = (
-                virtually_split and not self._is_region_replicated(layer_idx)
-            )
-            block_len = self.block_len_per_layer[layer_idx] // (
-                2 if half_block else 1
-            )
+            half_block = virtually_split and not self._is_region_replicated(layer_idx)
+            block_len = self.block_len_per_layer[layer_idx] // (2 if half_block else 1)
         return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
