@@ -6,6 +6,9 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.models.minimax_m3.common.indexer import (
+    MiniMaxM3IndexerBackend,
+)
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
@@ -16,7 +19,6 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn_decode,
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
-    MiniMaxM3IndexerBackend,
     MiniMaxM3SparseBackend,
 )
 from vllm.platforms import current_platform
