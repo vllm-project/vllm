@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
 
 from .quant_utils import pack_cols, unpack_cols
@@ -222,8 +223,16 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
         getattr(layer, "input_size_per_partition", None) or layer.input_size
     )
 
+    # MarlinLinearKernel pads sub-tile output partitions at load time.
+    # Keep this pre-selection helper aligned with can_implement(), otherwise
+    # AutoRound/INC and AWQMarlin can incorrectly reject small-N layers that
+    # the Marlin kernel handles by padding and slicing back to the original N.
+    padded_output_size_per_partition = round_up(
+        output_size_per_partition, GPTQ_MARLIN_MIN_THREAD_N
+    )
+
     return check_marlin_supports_shape(
-        output_size_per_partition=output_size_per_partition,
+        output_size_per_partition=padded_output_size_per_partition,
         input_size_per_partition=input_size_per_partition,
         input_size=layer.input_size,
         group_size=group_size,

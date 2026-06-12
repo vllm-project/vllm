@@ -6,17 +6,29 @@ Run `pytest tests/kernels/quantization/test_marlin_gemm.py`.
 """
 
 import itertools
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import vllm.model_executor.kernels.linear.mixed_precision.marlin as marlin_module
+import vllm.model_executor.parameter as parameter_module
 from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
+    _pad_parameter_output_dim,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    MPLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MIN_THREAD_N,
+    check_marlin_supports_layer,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -41,6 +53,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_quantize_weights,
     quantize_weights,
     sort_weights,
+)
+from vllm.model_executor.parameter import (
+    GroupQuantScaleParameter,
+    PackedColumnParameter,
+    PackedvLLMParameter,
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -619,3 +636,237 @@ def test_marlin_gemm_with_bias(size_m):
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("orig_n", [32, 48, 96])
+def test_marlin_gemm_sub_tile_n_pad(orig_n):
+    """Check padded Marlin GEMM matches the unpadded reference output."""
+    quant_type = scalar_types.uint4b8
+    group_size = 128
+    size_m, size_k = 32, 1024
+
+    padded_n = (
+        (orig_n + GPTQ_MARLIN_MIN_THREAD_N - 1) // GPTQ_MARLIN_MIN_THREAD_N
+    ) * GPTQ_MARLIN_MIN_THREAD_N
+
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, orig_n))
+
+    b_weight_padded = torch.nn.functional.pad(b_weight, (0, padded_n - orig_n), value=0)
+
+    w_ref_padded, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        b_weight_padded, quant_type, group_size, False
+    )
+
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    output_padded = ops.marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        None,
+        marlin_s,
+        None,
+        None,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace,
+        quant_type,
+        size_m,
+        padded_n,
+        size_k,
+        is_k_full=True,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+
+    output = output_padded[..., :orig_n].contiguous()
+    output_ref = torch.matmul(a_input, w_ref_padded[:, :orig_n])
+
+    torch.accelerator.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+    assert max_diff < 0.04
+
+
+def test_marlin_supports_layer_uses_padded_output_n():
+    layer = SimpleNamespace(
+        input_size=2048,
+        input_size_per_partition=2048,
+        output_size=64,
+        output_size_per_partition=32,
+    )
+
+    assert check_marlin_supports_layer(layer, group_size=128)
+
+    unsupported_input_layer = SimpleNamespace(
+        input_size=2048,
+        input_size_per_partition=96,
+        output_size=64,
+        output_size_per_partition=32,
+    )
+
+    assert not check_marlin_supports_layer(unsupported_input_layer, group_size=128)
+
+
+def _noop_weight_loader(*args, **kwargs):
+    pass
+
+
+def test_marlin_output_padding_uses_parameter_layout(monkeypatch):
+    """Check output padding follows vLLM parameter layout metadata."""
+    output_dim_pad = 32
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    gptq_qweight = PackedvLLMParameter(
+        data=torch.ones(2, 32, dtype=torch.int32),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=0,
+        packed_factor=8,
+        weight_loader=_noop_weight_loader,
+    )
+    _pad_parameter_output_dim(gptq_qweight, output_dim_pad)
+    assert gptq_qweight.shape == (2, 64)
+    assert torch.count_nonzero(gptq_qweight[:, 32:]) == 0
+
+    compressed_tensors_qweight = PackedvLLMParameter(
+        data=torch.ones(32, 2, dtype=torch.int32),
+        input_dim=1,
+        output_dim=0,
+        packed_dim=1,
+        packed_factor=8,
+        weight_loader=_noop_weight_loader,
+    )
+    _pad_parameter_output_dim(compressed_tensors_qweight, output_dim_pad)
+    assert compressed_tensors_qweight.shape == (64, 2)
+    assert torch.count_nonzero(compressed_tensors_qweight[32:, :]) == 0
+
+    compressed_tensors_scales = GroupQuantScaleParameter(
+        data=torch.ones(32, 4, dtype=torch.float16),
+        input_dim=1,
+        output_dim=0,
+        weight_loader=_noop_weight_loader,
+    )
+    _pad_parameter_output_dim(compressed_tensors_scales, output_dim_pad)
+    assert compressed_tensors_scales.shape == (64, 4)
+    assert torch.count_nonzero(compressed_tensors_scales[32:, :]) == 0
+
+    packed_qzeros = PackedColumnParameter(
+        data=torch.ones(4, 4, dtype=torch.int32),
+        output_dim=1,
+        packed_dim=1,
+        packed_factor=8,
+        weight_loader=_noop_weight_loader,
+    )
+    _pad_parameter_output_dim(packed_qzeros, output_dim_pad)
+    assert packed_qzeros.shape == (4, 8)
+    assert torch.count_nonzero(packed_qzeros[:, 4:]) == 0
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+def test_marlin_output_padding_keeps_deferred_bias_unpadded(monkeypatch):
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    config = MPLinearLayerConfig(
+        full_weight_shape=(1024, 32),
+        partition_weight_shape=(1024, 32),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=128,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    kernel = MarlinLinearKernel(config, "qweight", "scales")
+    assert kernel.orig_output_size_per_partition == 32
+
+    layer = torch.nn.Module()
+    layer.qweight = PackedvLLMParameter(
+        data=torch.ones(128, 32, dtype=torch.int32),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=0,
+        packed_factor=8,
+        weight_loader=_noop_weight_loader,
+    )
+    layer.scales = GroupQuantScaleParameter(
+        data=torch.ones(8, 32, dtype=torch.float16),
+        input_dim=0,
+        output_dim=1,
+        weight_loader=_noop_weight_loader,
+    )
+    layer.bias = torch.nn.Parameter(torch.ones(32, dtype=torch.float16))
+    layer.g_idx_sort_indices = torch.empty(0, dtype=torch.int32)
+
+    monkeypatch.setattr(
+        marlin_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.empty(0, dtype=torch.int32),
+    )
+    monkeypatch.setattr(kernel, "_transform_param", lambda layer, name, transform: None)
+
+    permute_bias_shapes = []
+
+    def fake_marlin_permute_bias(bias):
+        permute_bias_shapes.append(tuple(bias.shape))
+        return bias
+
+    monkeypatch.setattr(marlin_module, "marlin_permute_bias", fake_marlin_permute_bias)
+
+    kernel.process_weights_after_loading(layer)
+    assert layer.bias.shape == (32,)
+    assert permute_bias_shapes == []
+
+    captured_bias_shape = None
+
+    def fake_apply_gptq_marlin_linear(**kwargs):
+        nonlocal captured_bias_shape
+        bias = kwargs["bias"]
+        captured_bias_shape = None if bias is None else tuple(bias.shape)
+        input_ = kwargs["input"]
+        return input_.new_zeros(
+            input_.shape[:-1] + (kwargs["output_size_per_partition"],)
+        )
+
+    monkeypatch.setattr(
+        marlin_module, "apply_gptq_marlin_linear", fake_apply_gptq_marlin_linear
+    )
+    kernel.workspace = torch.empty(0, dtype=torch.int32)
+    kernel.is_k_full = True
+
+    output = kernel.apply_weights(
+        layer,
+        torch.zeros(2, 1024, dtype=torch.float16),
+        layer.bias,
+    )
+
+    assert captured_bias_shape == (64,)
+    assert permute_bias_shapes == [(64,)]
+    assert output.shape == (2, 32)
+    assert layer.bias.shape == (32,)
+
+    padded_bias = torch.ones(64, dtype=torch.float16)
+    output = kernel.apply_weights(
+        layer,
+        torch.zeros(2, 1024, dtype=torch.float16),
+        padded_bias,
+    )
+    assert captured_bias_shape == (64,)
+    assert permute_bias_shapes == [(64,), (64,)]
+    assert output.shape == (2, 32)
