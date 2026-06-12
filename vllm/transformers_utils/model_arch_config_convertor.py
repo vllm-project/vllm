@@ -582,6 +582,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
+    "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,

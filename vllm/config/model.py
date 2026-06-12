@@ -1546,6 +1546,11 @@ class ModelConfig:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
 
+    @cached_property
+    def is_diffusion(self) -> bool:
+        """Detect discrete diffusion (dLLM) models from HF config."""
+        return getattr(self.hf_config, "canvas_length", None) is not None
+
     @property
     def uses_alibi(self) -> bool:
         cfg = self.hf_text_config

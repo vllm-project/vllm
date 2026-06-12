@@ -283,6 +283,7 @@ class Parser:
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         """Parse a complete model output, extracting reasoning and tool calls.
 
@@ -290,6 +291,7 @@ class Parser:
             model_output: The complete model-generated string.
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
+            model_output_token_ids: The generated raw output token IDs.
 
         Returns:
             A tuple of (reasoning, content, tool_calls).
@@ -678,6 +680,7 @@ class DelegatingParser(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(

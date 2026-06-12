@@ -34,6 +34,7 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -111,6 +112,10 @@ class Scheduler(SchedulerInterface):
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
+        )
+        # Diffusion models may not sample any tokens for a denoising step.
+        self.num_sampled_tokens_per_step = (
+            1 if not vllm_config.model_config.is_diffusion else 0
         )
 
         # Create KVConnector for the Scheduler. Note that each Worker
@@ -211,9 +216,9 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
-        self.num_spec_tokens = self.num_lookahead_tokens = 0
-        if speculative_config:
-            self.num_spec_tokens = speculative_config.num_speculative_tokens
+        self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_lookahead_tokens = 0
+        if speculative_config is not None:
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
@@ -241,6 +246,7 @@ class Scheduler(SchedulerInterface):
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
+            watermark=self.scheduler_config.watermark,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -423,7 +429,10 @@ class Scheduler(SchedulerInterface):
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
+                num_new_tokens,
+                self.max_model_len
+                - request.num_computed_tokens
+                - self.num_sampled_tokens_per_step,
             )
 
             # Schedule encoder inputs.
@@ -620,9 +629,44 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
+                    if (
+                        self.connector is not None
+                        and self.has_mamba_layers
+                        and isinstance(
+                            self.kv_cache_manager.coordinator,
+                            HybridKVCacheCoordinator,
+                        )
+                    ):
+                        computed, per_group_hits = (
+                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                                request.block_hashes,
+                                request.num_tokens - 1,
+                            )
+                        )
+                        new_computed_blocks = (
+                            self.kv_cache_manager.create_kv_cache_blocks(computed)
+                        )
+                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
+                        # num_new_local_computed_tokens should be the FA hit
+                        # length. This value is passed to the connector's
+                        # get_num_new_matched_tokens which computes:
+                        # external = total - local_computed.
+                        # Using the FA hit skips re-transferring FA blocks
+                        # already cached on D-side. The Mamba state (always
+                        # the last block) is transferred unconditionally by
+                        # _apply_prefix_caching in nixl/worker.py.
+                        num_new_local_computed_tokens = max(per_group_hits)
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                    else:
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
 
                     # In case of hybrid models, obtain hint for Marconi-style APC logic
                     if self.has_mamba_layers:
@@ -790,6 +834,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    has_scheduled_reqs=bool(self.running),
                 )
 
                 if new_blocks is None:
@@ -1435,9 +1480,12 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and generated_token_ids:
+            if scheduled_spec_token_ids and (
+                generated_token_ids or self.num_sampled_tokens_per_step == 0
+            ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_sampled = self.num_sampled_tokens_per_step
+                num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -2162,12 +2210,8 @@ class Scheduler(SchedulerInterface):
         )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
-        """Blocks in-flight prefills still need to finish (their reservation).
+        """Num blocks in-flight prefills still need to finish (their reservation)."""
 
-        Sums remaining full-ISL blocks over `self._inflight_prefills` (running
-        prefills + in-progress async loads). The candidate async load isn't yet
-        in the set, so it's naturally excluded.
-        """
         return sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
