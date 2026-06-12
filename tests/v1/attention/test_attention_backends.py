@@ -136,12 +136,15 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Create KV cache and populate in (2, num_blocks, ...) layout for easy
-    # flat indexing, then transpose to (num_blocks, 2, ...) layout.
+    # Standardized packed KV cache with logical shape
+    # (num_blocks, num_kv_heads, block_size, 2*head_size): K and V are packed
+    # along the content dim. Build in (num_blocks, block_size, num_kv_heads,
+    # 2*head_size) for easy flat per-token indexing, then transpose to the
+    # canonical logical layout.
     kv_cache = torch.zeros(
-        2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
+        num_blocks, block_size, num_kv_heads, 2 * head_size, dtype=dtype, device=device
     )
-    kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
+    kv_cache_flat = kv_cache.view(-1, num_kv_heads, 2 * head_size)
 
     # Populate the cache with the context tokens
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -150,14 +153,14 @@ def create_and_prepopulate_kv_cache(
         k_context, v_context = k_contexts[i], v_contexts[i]
         start = start_block_idx * block_size
         end = start + k_context.shape[0]
-        kv_cache_flat[0, start:end, ...] = k_context
-        kv_cache_flat[1, start:end, ...] = v_context
+        kv_cache_flat[start:end, :, :head_size] = k_context
+        kv_cache_flat[start:end, :, head_size:] = v_context
 
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
-    # Transpose to (num_blocks, 2, ...) layout
-    kv_cache = kv_cache.transpose(0, 1).contiguous()
+    # Transpose to canonical logical (num_blocks, num_kv_heads, block_size, 2*hs)
+    kv_cache = kv_cache.transpose(1, 2).contiguous()
 
     blocks_end = start_block_idx
 
