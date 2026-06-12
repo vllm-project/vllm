@@ -58,6 +58,13 @@ class StreamingXMLToolCallParser:
         self.last_completed_call_id = None
         self.current_function_name = None
         self.current_function_open = False
+        # Per-<tool_call> counter; each <function=...> maps to one OpenAI
+        # tool_call slot, so the 2nd+ function mints a fresh slot.
+        self.functions_in_tool_call = 0
+        # Track slot indices whose first delta (with id+name) has already
+        # been emitted, so _emit_delta can strip id from continuation
+        # deltas (OpenAI streaming protocol: id appears once per slot).
+        self._slots_with_id_emitted: set[int] = set()
         self.parameters = {}
         self.current_param_name = None
         self.current_param_value = ""
@@ -440,10 +447,13 @@ class StreamingXMLToolCallParser:
             if delta.tool_calls:
                 # For tool_calls, we need to intelligently merge arguments
                 for tool_call in delta.tool_calls:
-                    # Find if there's already a tool_call with the same call_id
+                    # Identify the slot by `index` (the OpenAI streaming
+                    # protocol's slot key). Matching by `id` would break
+                    # for continuation deltas, which carry only the
+                    # delta'd args + index and no id.
                     existing_call = None
                     for existing in merged_tool_calls:
-                        if existing.id == tool_call.id:
+                        if existing.index == tool_call.index:
                             existing_call = existing
                             break
 
@@ -589,7 +599,22 @@ class StreamingXMLToolCallParser:
         return processed
 
     def _emit_delta(self, delta: DeltaMessage):
-        """Emit Delta response (streaming output)"""
+        """Emit Delta response (streaming output).
+
+        Strips `id` from continuation deltas. Per the OpenAI streaming
+        protocol, `id` (like `name`) is emitted only on the first delta
+        announcing each tool_call slot; subsequent args/continuation
+        deltas must carry only `index` + `function.arguments`. Callers
+        construct deltas with `id=self.current_call_id` unconditionally;
+        this gateway is the single place that enforces the once-per-slot
+        invariant.
+        """
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                if tc.index in self._slots_with_id_emitted:
+                    tc.id = None
+                elif tc.id is not None:
+                    self._slots_with_id_emitted.add(tc.index)
         self.deltas.append(delta)
 
     def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
@@ -617,6 +642,13 @@ class StreamingXMLToolCallParser:
         if incoming_tag == "tool_call" and self.current_call_id:
             self._end_element("tool_call")
 
+    def _mint_new_tool_call_slot(self) -> None:
+        """Bump tool_call index, mint a fresh id, reset per-function state."""
+        self.parameters = {}
+        self.current_call_id = make_tool_call_id()
+        self.current_param_is_first = True
+        self.tool_call_index += 1
+
     def _start_element(self, name: str, attrs: dict[str, str]):
         """Handle XML start element events"""
 
@@ -628,14 +660,16 @@ class StreamingXMLToolCallParser:
             # automatically complete previous unclosed tags
             self._auto_close_open_parameter_if_needed("tool_call")
 
-            self.parameters = {}
-            self.current_call_id = make_tool_call_id()
-            self.current_param_is_first = True
-            self.tool_call_index += 1
+            self._mint_new_tool_call_slot()
+            self.functions_in_tool_call = 0
         elif name.startswith("function") or (name == "function"):
             # If missing tool_call, manually complete
             if not self.current_call_id:
                 self._start_element("tool_call", {})
+            # First function reuses <tool_call>'s slot; rest mint fresh.
+            self.functions_in_tool_call += 1
+            if self.functions_in_tool_call > 1:
+                self._mint_new_tool_call_slot()
             # Before opening new function,
             # automatically complete previous unclosed tags (parameter/function)
             self._auto_close_open_parameter_if_needed("function")
@@ -900,6 +934,13 @@ class StreamingXMLToolCallParser:
             self.start_quote_emitted = False
 
         elif name.startswith("function") or name == "function":
+            # Skip duplicate closes (auto-close paths, `</function></function>`).
+            # Out of scope: `</function>` without a matching `<function=...>`
+            # open -- the resulting tool_call has no name and is
+            # undispatchable; not worth extra state to balance its JSON.
+            # See test_malformed_function_close_without_open_does_not_crash.
+            if not self.current_function_open:
+                return
             # if there are parameters, close JSON object
             if self.parameters:
                 delta = DeltaMessage(
@@ -927,6 +968,10 @@ class StreamingXMLToolCallParser:
                 )
                 self._emit_delta(delta)
             self.current_function_open = False
+            # Clear so next <function=...> starts clean and the
+            # current_function_name-driven auto-close path no-ops.
+            self.parameters = {}
+            self.current_function_name = None
 
         elif name == "tool_call":
             # Before ending tool_call,
@@ -1130,6 +1175,8 @@ class StreamingXMLToolCallParser:
         self.current_call_id = None
         self.current_function_name = None
         self.current_function_open = False
+        self.functions_in_tool_call = 0
+        self._slots_with_id_emitted = set()
         self.parameters = {}
         self.current_param_name = None
         self.current_param_value = ""
