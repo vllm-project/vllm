@@ -767,23 +767,16 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            # Hand off remaining content to tool parser
-            reasoning_end = self.is_reasoning_end_streaming(
-                current_token_ids, delta_token_ids
-            )
-            # has_reasoning_ended() three-valued logic:
-            #   True  — reasoning end confirmed (overrides is_reasoning_end)
-            #   False — end NOT yet processed (blocks transition even if
-            #           token IDs matched, e.g. deferred terminal)
-            #   None  — unsupported (fall through to is_reasoning_end)
-            processed = (
-                self._reasoning_parser.has_reasoning_ended()
-                if self._reasoning_parser
-                else None
-            )
-            if not reasoning_end and processed is True:
-                reasoning_end = True
-            if reasoning_end and processed is not False:
+            reasoning_parser = self._reasoning_parser
+            if reasoning_parser is not None and reasoning_parser.engine_based_streaming:
+                should_transition = (
+                    reasoning_parser.has_engine_confirmed_reasoning_end()
+                )
+            else:
+                should_transition = self.is_reasoning_end_streaming(
+                    current_token_ids, delta_token_ids
+                )
+            if should_transition:
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if self._engine_based:

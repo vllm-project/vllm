@@ -104,7 +104,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         return self._parser_engine.adjust_request(request)
 
-    def has_reasoning_ended(self) -> bool | None:
+    def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
 
     def finish_streaming(self) -> DeltaMessage | None:

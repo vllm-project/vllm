@@ -59,18 +59,16 @@ class ReasoningParser:
         """
         return None
 
-    def has_reasoning_ended(self) -> bool | None:
-        """Whether the parser has finished processing the reasoning end.
+    def has_engine_confirmed_reasoning_end(self) -> bool:
+        """Whether the engine has confirmed the reasoning end transition.
 
-        Grammar-based parsers may defer terminal processing when the
-        detokenizer holds back text.  This method returns the parser's
+        Engine-based parsers may defer terminal processing when the
+        detokenizer holds back text.  This method returns the engine's
         *processed* state, not a raw token-ID check.
 
-        Returns ``None`` by default, meaning callers should fall back
-        to :meth:`is_reasoning_end`.  Subclasses override to return
-        ``True``/``False`` based on internal engine state.
+        Only called for parsers with ``engine_based_streaming = True``.
         """
-        return None
+        return False
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
