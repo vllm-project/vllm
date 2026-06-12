@@ -1359,7 +1359,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
 
-    if getattr(backend_cls, "requires_fp8_query_quantization", False):
+    if backend_cls.requires_fp8_query_quantization:
         return True
 
     return backend_cls.get_name() in (
@@ -1448,9 +1448,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 backend_cls = get_mla_prefill_backend(vllm_config)
             except Exception:  # noqa: BLE001
                 backend_cls = None
-            if backend_cls is not None and getattr(
-                backend_cls, "requires_fp8_query_quantization", False
-            ):
+            if backend_cls is not None and backend_cls.requires_fp8_query_quantization:
                 use_fp8 = True
                 logger.info_once(
                     "FP8 prefill attention auto-enabled: %s backend "
