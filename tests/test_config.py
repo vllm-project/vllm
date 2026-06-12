@@ -67,6 +67,20 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_v2_model_runner_selection_is_resolved_once(monkeypatch):
+    config = VllmConfig()
+
+    config.resolved_use_v2_model_runner = False
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    assert config.use_v2_model_runner is False
+
+    config.resolved_use_v2_model_runner = True
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", False)
+    assert config.use_v2_model_runner is True
+
+
 @pytest.mark.parametrize(
     ("model_config", "expected"),
     [

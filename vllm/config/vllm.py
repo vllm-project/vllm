@@ -383,6 +383,14 @@ class VllmConfig:
     remaining requests are aborted once the timeout is reached.
     """
 
+    resolved_use_v2_model_runner: bool | None = Field(default=None, repr=False)
+    """Resolved Model Runner V2 selection.
+
+    This is computed once during config initialization so scheduler and worker
+    processes do not independently re-evaluate process-local checks such as
+    Triton driver availability.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -465,6 +473,7 @@ class VllmConfig:
             vllm_factors.append(self.kernel_config.compute_hash())
         else:
             vllm_factors.append(None)
+        vllm_factors.append(self.use_v2_model_runner)
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -515,6 +524,11 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.resolved_use_v2_model_runner is not None:
+            return self.resolved_use_v2_model_runner
+        return self._compute_use_v2_model_runner()
+
+    def _compute_use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -756,6 +770,17 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
+        # Check if KV connector requires chunked prefill to be disabled.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
+            and self.scheduler_config.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
+            )
+
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
@@ -1319,6 +1344,8 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        if self.resolved_use_v2_model_runner is None:
+            self.resolved_use_v2_model_runner = self._compute_use_v2_model_runner()
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
 
