@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="ray-debug-qwen3-30b-tp2-pp2-dashboard-off-readiness-timeouts-v1"
+SCRIPT_VERSION="ray-debug-qwen3-30b-tp2-pp2-dashboard-off-readiness-timeouts-v2-cpus-fix"
 
 # This is a connectivity-first script.
 # It intentionally defaults Nsight worker profiling off so we can first prove:
@@ -35,6 +35,9 @@ REQUEST_RATE="${REQUEST_RATE:-1}"
 
 # Ray/vLLM layout: 2 nodes x 2 GPUs/node = 4 GPUs total, TP2 within node, PP2 across nodes.
 GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
+# Slurm sets SLURM_CPUS_PER_TASK, not necessarily CPUS_PER_TASK.
+# Define our own variable before any srun/ray start command so set -u cannot kill the job.
+CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-64}}"
 TP="${TP:-2}"
 PP="${PP:-2}"
 EP="${EP:-1}"
@@ -68,7 +71,7 @@ export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-${RAY_CGRAPH_GET_TIMEOU
 export RAY_CGRAPH_submit_timeout="${RAY_CGRAPH_submit_timeout:-1800}"
 
 # Default profiling off for connectivity debugging. Set NSYS_ENABLE=1 after this script works.
-export NSYS_ENABLE="${NSYS_ENABLE:-1}"
+export NSYS_ENABLE="${NSYS_ENABLE:-0}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-${NSYS_ENABLE}}"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
@@ -76,9 +79,10 @@ export VLLM_ITERATION_NVTX="${VLLM_ITERATION_NVTX:-1}"
 export VLLM_KV_CACHE_METRICS="${VLLM_KV_CACHE_METRICS:-1}"
 export VLLM_KV_CACHE_METRICS_SAMPLE="${VLLM_KV_CACHE_METRICS_SAMPLE:-0.01}"
 
+# NCCL/RDMA. Use broad mlx5 by default instead of over-constraining to mlx5_0.
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
 export NCCL_NET="${NCCL_NET:-IB}"
-export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5_0}"
+export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5}"
 export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,P2P,TUNING}"
@@ -457,7 +461,7 @@ REPO_ROOT=${REPO_ROOT}
 VENV_DIR=${VENV_DIR}
 TRACE_RUN_DIR=${TRACE_RUN_DIR}
 MODEL_ID=${MODEL_ID}
-TP=${TP} PP=${PP} GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} TOTAL_GPUS=${TOTAL_GPUS}
+TP=${TP} PP=${PP} GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} TOTAL_GPUS=${TOTAL_GPUS} CPUS_PER_TASK=${CPUS_PER_TASK}
 SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS} REQUEST_RATE=${REQUEST_RATE}
 RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY}
 NCCL_IB_HCA=${NCCL_IB_HCA} NCCL_NET=${NCCL_NET} NCCL_IB_DISABLE=${NCCL_IB_DISABLE}
