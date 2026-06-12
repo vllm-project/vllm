@@ -494,8 +494,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec,
-            FullAttentionSpec | ChunkedLocalAttentionSpec,
+            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
