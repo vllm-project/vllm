@@ -25,7 +25,7 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error};
+use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -75,11 +75,7 @@ pub async fn completions(
     {
         Ok(stream) => stream,
         Err(error) => {
-            return server_error!(
-                "failed to submit completion request: {}",
-                error.to_report_string()
-            )
-            .into_response();
+            return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
