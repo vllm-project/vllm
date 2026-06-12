@@ -396,9 +396,7 @@ class MultiprocExecutor(Executor):
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(
-            self.futures_queue,
-            get_response=get_response,
-            aggregate=aggregate,
+            self.futures_queue, get_response=get_response, aggregate=aggregate
         )
 
         return future if non_block else future.result()
@@ -980,6 +978,9 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
 
                 output = func(*args, **kwargs)
+
+                if output_rank is None or self.rank == output_rank:
+                    self.handle_output(output)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
@@ -989,10 +990,6 @@ class WorkerProc:
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
                     self.handle_output(e)
-                continue
-
-            if output_rank is None or self.rank == output_rank:
-                self.handle_output(output)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
