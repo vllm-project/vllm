@@ -63,6 +63,7 @@ from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_world_group,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -247,6 +248,24 @@ class NixlConnectorWorker:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
         logger.info("Initializing NIXL wrapper")
+
+        # Multi-node TP/PP deployments launched with `--headless` parse
+        # the CLI independently on each node, so the default-factory
+        # uuid4 in `KVTransferConfig.__post_init__` diverges across
+        # nodes that logically belong to the same engine. NIXL handshake
+        # validates that the remote agent reports the engine_id we
+        # expect, and any divergence surfaces as
+        #   "Remote NIXL agent engine ID mismatch."
+        # at decode time. Broadcast rank 0's engine_id over the engine
+        # world group so every worker in this engine agrees on identity
+        # before the NIXL agent is constructed (the wrapper's name is
+        # registered with the side channel during init).
+        if torch.distributed.is_initialized():
+            world_group = get_world_group()
+            if world_group.world_size > 1:
+                engine_id = world_group.broadcast_object(engine_id, src=0)
+                if vllm_config.kv_transfer_config is not None:
+                    vllm_config.kv_transfer_config.engine_id = engine_id
         logger.info("Initializing NIXL worker %s", engine_id)
 
         # Config.
