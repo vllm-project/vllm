@@ -174,14 +174,17 @@ class _FakeModelConfig:
 
 
 def _make_vllm_config(
-    *, extra_config: dict[str, object] | None = None
+    *,
+    extra_config: dict[str, object] | None = None,
+    rank: int = 0,
+    decode_context_parallel_size: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
-            rank=0,
-            decode_context_parallel_size=1,
+            rank=rank,
+            decode_context_parallel_size=decode_context_parallel_size,
             prefill_context_parallel_size=1,
         ),
         kv_transfer_config=_FakeKVTransferConfig(extra_config=extra_config),
@@ -230,13 +233,23 @@ def _install_fake_mooncake(monkeypatch, store_instance: MagicMock):
     return FakeReplicateConfig
 
 
-def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
+def _patch_worker_runtime(
+    monkeypatch,
+    *,
+    local_ip: str = "10.0.0.7",
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    dcp_size: int = 1,
+) -> None:
     single_rank_group = SimpleNamespace(world_size=1, rank_in_group=0)
+    # DCP groups are contiguous splits of the TP group (see
+    # parallel_state.py), so dcp_rank == tp_rank % dcp_size.
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=tp_rank % dcp_size)
     monkeypatch.setattr(worker, "get_mooncake_dp_engine_index", lambda _: 0)
-    monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(worker, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(worker, "get_tensor_model_parallel_world_size", lambda: tp_size)
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
-    monkeypatch.setattr(worker, "get_dcp_group", lambda: single_rank_group)
+    monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
 
 
@@ -856,6 +869,66 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
 
     assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
+
+
+@pytest.mark.parametrize("dcp_size", [1, 4])
+def test_worker_put_striding_covers_every_rank_get_namespace(
+    tmp_path, monkeypatch, dcp_size
+):
+    """Every key a rank GETs must have been PUT by some rank.
+
+    When num_kv_head < tp_size, ranks holding the same KV heads stripe
+    their PUTs across one shared key namespace. That dedup is only valid
+    when those ranks really share a namespace: with DCP > 1 each rank GETs
+    every key from its own ``@dcpN`` namespace, so striding must be
+    disabled.
+    """
+    tp_size = 4
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    # _FakeModelConfig has num_kv_head=1 < tp_size, which enables striding.
+    block_hashes = [f"hash-{i}".encode() for i in range(4)]
+    put_keys: set[str] = set()
+    get_keys_per_rank: dict[int, set[str]] = {}
+    for tp_rank in range(tp_size):
+        _patch_worker_runtime(
+            monkeypatch, tp_rank=tp_rank, tp_size=tp_size, dcp_size=dcp_size
+        )
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(rank=tp_rank, decode_context_parallel_size=dcp_size),
+            _make_kv_cache_config(),
+        )
+        db = w.token_dbs[0]
+        token_len = len(block_hashes) * db.block_size
+        keys = [
+            key.to_string() for _, _, key in db.process_tokens(token_len, block_hashes)
+        ]
+        assert len(keys) == len(block_hashes)
+        # PUT side: mirrors KVCacheStoreSendingThread's striding slice.
+        put_keys.update(keys[w.tp_rank % w.put_step :: w.put_step])
+        # GET side: KVCacheStoreRecvingThread fetches every key.
+        get_keys_per_rank[tp_rank] = set(keys)
+
+    for tp_rank, rank_keys in get_keys_per_rank.items():
+        missing = rank_keys - put_keys
+        assert not missing, (
+            f"tp_rank={tp_rank} would GET {len(missing)}/{len(rank_keys)} keys "
+            f"that no rank PUT (Mooncake OBJECT_NOT_FOUND): {sorted(missing)}"
+        )
 
 
 # ---------------------------------------------------------------------------
