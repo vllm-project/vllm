@@ -234,6 +234,13 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    # Caller should filter out non-linear layers (e.g., convolutions with >2D weights)
+    # before calling this function. This assertion ensures that contract is upheld.
+    assert len(layer.weight.shape) == 2, (
+        f"Expected 2D weight tensor for linear layer, got {layer.weight.shape}. "
+        "Non-linear layers should be filtered before dispatch."
+    )
+
     if layer.weight.ndim != 2:
         # this is not a linear layer
         # For now it should be a causal_conv1d op
@@ -304,9 +311,7 @@ def dispatch_cpu_unquantized_gemm(
             )
 
     # fallback case
-    layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
-        x, weight, bias
-    )
+    layer.cpu_linear = torch.nn.functional.linear
 
 
 def cpu_unquantized_gemm(
