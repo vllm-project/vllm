@@ -1,0 +1,40 @@
+# HPC attention backend benchmark configuration
+
+description: "HPC attention backend benchmark"
+
+model:
+  num_layers: 32
+  num_q_heads: 32
+  num_kv_heads: 4   # GQA with 8:1 ratio
+  head_dim: 128
+  block_size: 32    # HPC_ATTN requires block_size 32 or 64
+
+batch_specs:
+  # Pure decode (HPC_ATTN primary use case)
+  - "8q1s1k"        # 8 requests, 1k KV cache each
+  - "16q1s2k"       # 16 requests, 2k KV cache each
+  - "32q1s1k"       # 32 requests, 1k KV cache each
+  - "64q1s4k"       # 64 requests, 4k KV cache each
+
+  # Pure prefill
+  - "q512"          # Small prefill
+  - "q2k"           # Medium prefill
+  - "q4k"           # Large prefill
+
+  # Mixed prefill/decode
+  - "2q2k_8q1s1k"   # 2 prefill + 8 decode
+  - "4q1k_16q1s2k"  # 4 prefill + 16 decode
+
+backend: HPC_ATTN
+
+# backends:
+#   - TRITON_ATTN
+#   - FLASH_ATTN
+#   - FLASHINFER
+#   - HPC_ATTN
+
+cuda_graphs: true
+device: "cuda:0"
+repeats: 5
+warmup_iters: 3
+profile_memory: false
