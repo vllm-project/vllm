@@ -29,14 +29,25 @@ from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
 )
 from vllm.platforms import current_platform
 
-ROTARY_OP = torch.ops._C.rotary_embedding.default
-FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
+try:
+    ROTARY_OP = torch.ops._C.rotary_embedding.default
+except AttributeError:
+    ROTARY_OP = None  # vllm._C not compiled (source-only run)
 
-QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-}
+try:
+    FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
+except AttributeError:
+    FLASHINFER_ROTARY_OP = None
+
+QUANT_OPS: dict[QuantKey, OpOverload] = {}
+try:
+    QUANT_OPS[kFp8StaticTensorSym] = torch.ops._C.static_scaled_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8DynamicTensorSym] = torch.ops._C.dynamic_scaled_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8DynamicTokenSym] = (
+        torch.ops._C.dynamic_per_token_scaled_fp8_quant.default
+    )  # noqa: E501
+except AttributeError:
+    pass  # vllm._C not compiled (source-only run)
 
 if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -45,8 +56,10 @@ if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
-
-SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+try:
+    SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+except AttributeError:
+    SILU_MUL_OP = None
 
 
 class MatcherCustomOp(ABC):
