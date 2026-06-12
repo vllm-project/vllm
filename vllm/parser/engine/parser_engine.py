@@ -715,6 +715,9 @@ class ParserEngine(Parser):
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
 
+        if len(tool_call_deltas) > 1:
+            tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
+
         if self._deferred_content and not seen_tool_event:
             content_parts.insert(0, self._deferred_content)
             self._deferred_content = ""
@@ -850,6 +853,38 @@ class ParserEngine(Parser):
                     function=DeltaFunctionCall(arguments=remaining),
                 )
             )
+
+    # ── Tool-call delta coalescing ──────────────────────────────────────
+
+    @staticmethod
+    def _coalesce_tool_call_deltas(
+        deltas: list[DeltaToolCall],
+    ) -> list[DeltaToolCall]:
+        """Merge entries that share the same index into one per index."""
+        merged: dict[int, DeltaToolCall] = {}
+        for tc in deltas:
+            existing = merged.get(tc.index)
+            if existing is None:
+                merged[tc.index] = tc
+                continue
+            if tc.id is not None and existing.id is None:
+                existing.id = tc.id
+            if tc.type is not None and existing.type is None:
+                existing.type = tc.type
+            if tc.function is not None:
+                if existing.function is None:
+                    existing.function = tc.function
+                else:
+                    if tc.function.name is not None and existing.function.name is None:
+                        existing.function.name = tc.function.name
+                    if tc.function.arguments is not None:
+                        if existing.function.arguments is None:
+                            existing.function.arguments = tc.function.arguments
+                        else:
+                            existing.function.arguments += tc.function.arguments
+        if len(merged) == len(deltas):
+            return deltas
+        return list(merged.values())
 
     # ── Arg conversion helpers ─────────────────────────────────────────
 

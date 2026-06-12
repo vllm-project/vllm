@@ -19,7 +19,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaToolCall,
+    FunctionDefinition,
+)
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.engine.events import EventType, SemanticEvent
@@ -215,6 +219,141 @@ class TestEventsToDelta:
         assert delta is not None
         assert len(delta.tool_calls) == 1
         assert delta.tool_calls[0].id == "functions.get_weather:0"
+
+    def test_multiple_arg_chunks_same_batch_coalesced(self):
+        """Multiple events for the same tool in one batch must produce
+        at most one DeltaToolCall per index."""
+        engine = _make_engine()
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(
+                EventType.ARG_VALUE_CHUNK,
+                '{"city": ',
+                tool_index=0,
+            ),
+            SemanticEvent(
+                EventType.ARG_VALUE_CHUNK,
+                '"Tokyo"}',
+                tool_index=0,
+            ),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        indices = [tc.index for tc in delta.tool_calls]
+        assert len(indices) == len(set(indices)), (
+            f"Duplicate indices in tool_calls: {delta.tool_calls}"
+        )
+        assert delta.tool_calls[0].function.name == "get_weather"
+        assert delta.tool_calls[0].id is not None
+
+
+# ── TestCoalesceToolCallDeltas ──────────────────────────────────────
+
+
+class TestCoalesceToolCallDeltas:
+    """Unit tests for ParserEngine._coalesce_tool_call_deltas()."""
+
+    def test_no_duplicates_unchanged(self):
+        deltas = [
+            DeltaToolCall(
+                index=0,
+                id="a",
+                type="function",
+                function=DeltaFunctionCall(name="f"),
+            ),
+            DeltaToolCall(
+                index=1,
+                function=DeltaFunctionCall(arguments="{}"),
+            ),
+        ]
+        result = ParserEngine._coalesce_tool_call_deltas(deltas)
+        assert len(result) == 2
+        assert result[0].index == 0
+        assert result[1].index == 1
+
+    def test_name_and_args_same_index_merged(self):
+        deltas = [
+            DeltaToolCall(
+                index=0,
+                id="call_1",
+                type="function",
+                function=DeltaFunctionCall(name="get_weather"),
+            ),
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments='{"city":'),
+            ),
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments='"Tokyo"}'),
+            ),
+        ]
+        result = ParserEngine._coalesce_tool_call_deltas(deltas)
+        assert len(result) == 1
+        assert result[0].index == 0
+        assert result[0].id == "call_1"
+        assert result[0].type == "function"
+        assert result[0].function.name == "get_weather"
+        assert result[0].function.arguments == '{"city":"Tokyo"}'
+
+    def test_empty_list(self):
+        assert ParserEngine._coalesce_tool_call_deltas([]) == []
+
+    def test_single_element(self):
+        tc = DeltaToolCall(
+            index=0,
+            function=DeltaFunctionCall(name="f"),
+        )
+        result = ParserEngine._coalesce_tool_call_deltas([tc])
+        assert result == [tc]
+
+    def test_partial_duplicates(self):
+        deltas = [
+            DeltaToolCall(
+                index=0,
+                id="a",
+                type="function",
+                function=DeltaFunctionCall(name="f1"),
+            ),
+            DeltaToolCall(
+                index=1,
+                id="b",
+                type="function",
+                function=DeltaFunctionCall(name="f2"),
+            ),
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments='{"x":1}'),
+            ),
+        ]
+        result = ParserEngine._coalesce_tool_call_deltas(deltas)
+        assert len(result) == 2
+        assert result[0].index == 0
+        assert result[0].function.name == "f1"
+        assert result[0].function.arguments == '{"x":1}'
+        assert result[1].index == 1
+
+    def test_id_type_from_later_entry(self):
+        deltas = [
+            DeltaToolCall(
+                index=0,
+                function=DeltaFunctionCall(arguments='{"a":1}'),
+            ),
+            DeltaToolCall(
+                index=0,
+                id="call_1",
+                type="function",
+                function=DeltaFunctionCall(name="f"),
+            ),
+        ]
+        result = ParserEngine._coalesce_tool_call_deltas(deltas)
+        assert len(result) == 1
+        assert result[0].id == "call_1"
+        assert result[0].type == "function"
+        assert result[0].function.name == "f"
+        assert result[0].function.arguments == '{"a":1}'
 
 
 # ── TestContentWhitespaceHandling ────────────────────────────────────
