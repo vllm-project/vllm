@@ -1,5 +1,5 @@
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Mistral",
@@ -8,7 +8,7 @@ const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: Some(","),
     name_key: "name",
-    arguments_key: "arguments",
+    arguments_key: &["arguments"],
 };
 
 /// Tool parser for Mistral JSON-array tool calls.
@@ -35,7 +35,6 @@ impl MistralToolParser {
 }
 
 impl ToolParser for MistralToolParser {
-    /// Create a boxed Mistral tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -43,14 +42,16 @@ impl ToolParser for MistralToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    /// Push one decoded text chunk through the Mistral parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.inner.push(chunk)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.inner.parse_into(chunk, output)
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.inner.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.inner.reset()
     }
 }
 
@@ -61,7 +62,7 @@ mod tests {
 
     use super::MistralToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParseResult, ToolParser};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
         format!(r#"{{"name":"{function_name}","arguments":{arguments}}}"#)
@@ -74,34 +75,34 @@ mod tests {
     #[test]
     fn mistral_parse_complete_without_tool_call_keeps_text() {
         let mut parser = MistralToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn mistral_parse_complete_extracts_raw_json_arguments() {
         let mut parser = MistralToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;
-        let result = parser
+        let output = parser
             .parse_complete(&format!(
                 "Let me check.\n{}",
                 build_tool_calls(&[build_tool_call("get_weather", arguments)])
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "Let me check.\n");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.normal_text, "Let me check.\n");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn mistral_parse_complete_extracts_pretty_multiple_tool_calls() {
         let mut parser = MistralToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(
                 r#"I'll help.
 [TOOL_CALLS] [
@@ -113,7 +114,7 @@ mod tests {
             .unwrap();
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "I'll help.\n",
                 calls: [
                     ToolCallDelta {
@@ -133,21 +134,21 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
     fn mistral_does_not_validate_or_normalize_arguments() {
         let mut parser = MistralToolParser::new(&test_tools());
         let arguments = r#"{"location":"Tokyo",}"#;
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_calls(&[build_tool_call(
                 "get_weather",
                 arguments,
             )]))
             .unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -162,24 +163,24 @@ mod tests {
             "}] suffix",
         ];
 
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
             );
-            result.append(next);
+            output.append(next);
         }
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
-        assert_eq!(result.normal_text, "preface  suffix");
+        assert_eq!(output.normal_text, "preface  suffix");
         assert_eq!(
-            result.coalesce_calls().calls[0].arguments,
+            output.coalesce_calls().calls[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -193,30 +194,30 @@ mod tests {
         let chunks = split_by_chars(&input, 5);
         let mut parser = MistralToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert_eq!(output.normal_text, "hello ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]
     fn mistral_keeps_array_bracket_literal_inside_json_string() {
         let mut parser = MistralToolParser::new(&test_tools());
         let arguments = r#"{"text":"Array notation: arr[0] = value[1]"}"#;
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_calls(&[build_tool_call("echo", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn mistral_finish_fails_incomplete_tool_call() {
         let mut parser = MistralToolParser::new(&test_tools());
         parser
-            .push(r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"location""#)
+            .parse_chunk(r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"location""#)
             .unwrap();
 
         let error = parser.finish().unwrap_err();
@@ -229,7 +230,7 @@ mod tests {
     fn mistral_malformed_field_order_fails_fast() {
         let mut parser = MistralToolParser::new(&test_tools());
         let error = parser
-            .push(r#"[TOOL_CALLS] [{"arguments":{},"name":"get_weather"}]"#)
+            .parse_chunk(r#"[TOOL_CALLS] [{"arguments":{},"name":"get_weather"}]"#)
             .unwrap_err();
 
         expect![[r#"

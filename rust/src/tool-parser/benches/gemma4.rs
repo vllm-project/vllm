@@ -9,6 +9,7 @@ use utils::feed_parser;
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
+const LONG_TOOL_ARGUMENT_REPEATS: usize = 256;
 
 fn mixed_fixture() -> String {
     concat!(
@@ -46,6 +47,24 @@ fn mixed_fixture() -> String {
 fn long_normal_text_fixture() -> String {
     let line = "This is ordinary assistant text with no Gemma4 tool markers at all.\n";
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
+}
+
+fn long_tool_argument_fixture() -> String {
+    let line =
+        "<section><p>Literal } and <tool_call|> marker-shaped text inside content.</p></section>\n";
+    format!(
+        concat!(
+            "I will write the file.\n",
+            "<|tool_call>",
+            "call:write_file{{",
+            "path:<|\"|>index.html<|\"|>,",
+            "content:<|\"|>{}<|\"|>",
+            "}}",
+            "<tool_call|>",
+            "Done."
+        ),
+        line.repeat(LONG_TOOL_ARGUMENT_REPEATS)
+    )
 }
 
 fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
@@ -98,6 +117,7 @@ fn run_stream_group(
 fn bench_gemma4(c: &mut Criterion) {
     let tools = test_tools();
     let mixed_text = mixed_fixture();
+    let long_tool_argument = long_tool_argument_fixture();
     let long_normal_text = long_normal_text_fixture();
 
     run_stream_group(
@@ -108,6 +128,16 @@ fn bench_gemma4(c: &mut Criterion) {
         CHUNK_CHARS,
         "I will inspect the data before answering.\n Finished.",
         2,
+    );
+
+    run_stream_group(
+        c,
+        "gemma4/long_tool_argument",
+        &tools,
+        &long_tool_argument,
+        CHUNK_CHARS,
+        "I will write the file.\nDone.",
+        1,
     );
 
     run_stream_group(

@@ -70,7 +70,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
         if not is_local and not is_object_storage_path:
             download_safetensors_index_file_from_hf(
-                model_name_or_path, index_file, self.load_config.download_dir, revision
+                model_name_or_path,
+                index_file,
+                cache_dir=self.load_config.download_dir,
+                revision=revision,
             )
 
         if not hf_weights_files:

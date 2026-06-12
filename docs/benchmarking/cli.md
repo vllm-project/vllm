@@ -37,7 +37,7 @@ th {
 | HuggingFace-HumanEval | ✅ | ✅ | `openai/openai_humaneval` |
 | HuggingFace-GSM8K | ✅ | ✅ | `openai/gsm8k` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
-| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
@@ -231,12 +231,26 @@ vllm bench serve \
 
 #### Custom Image Dataset
 
-If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
+If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and can use "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
 
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
 {"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
 ```
+
+Every image listed in "image_files" is added to the request in the listed order after the prompt text. To preserve an interleaved order of text and images, use a "content" field with OpenAI-compatible content parts:
+
+```json
+{"content": [{"type": "text", "text": "Compare "}, {"type": "image", "image": "/path/to/image/folder/chart_a.png"}, {"type": "text", "text": " with "}, {"type": "image_url", "image_url": {"url": "/path/to/image/folder/chart_b.png"}}]}
+```
+
+The "image" shorthand accepts the same values as "image_files". The "image_url" field accepts either an OpenAI-style object with a "url" field or a URL string.
+
+By default, image references are sent to the serving endpoint as provided, with local image paths converted to `file://` URLs.
+
+If the benchmark client should load local and HTTP(S) images before sending requests, pass `--custom-ensure-client-side-data` to encode them as base64 data URLs on the client side.
+
+Existing `data:image/...` URLs are already self-contained and are kept unchanged.
 
 ```bash
 # need a model with vision capability here
@@ -245,13 +259,13 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 
 ```bash
 # run benchmarking script
-vllm bench serve--save-result --save-detailed \
+vllm bench serve --save-result --save-detailed \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name custom_image \
   --dataset-path <path-to-your-image-data-jsonl> \
-  --allowed-local-media-path /path/to/image/folder
+  --custom-ensure-client-side-data
 ```
 
 Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.
@@ -391,6 +405,47 @@ vllm bench serve \
 
 Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
+#### BFCL (Tool-Calling) Benchmark
+
+The Berkeley Function Calling Leaderboard (BFCL) dataset measures serving
+latency and throughput on realistic tool-calling traffic. Each request
+carries a per-sample `tools` schema and chat history, so the server must
+expose `/v1/chat/completions` with an auto-tool-choice parser enabled.
+The benchmark client always uses the `openai-chat` backend.
+
+Start a tool-parser-enabled server, then run the bench. For example, with
+`gpt-oss-20b`:
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b \
+    --enable-auto-tool-choice \
+    --tool-call-parser openai \
+    --reasoning-parser openai_gptoss
+
+# Client
+vllm bench serve \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model openai/gpt-oss-20b \
+    --dataset-name hf \
+    --dataset-path gorilla-llm/Berkeley-Function-Calling-Leaderboard \
+    --bfcl-categories simple,live_simple,multiple \
+    --num-prompts 200
+```
+
+`--bfcl-categories` is a comma-separated list of BFCL v3 category names
+(without the `BFCL_v3_` prefix or `.json` suffix). Defaults to
+`simple,live_simple,multiple`. Other supported non-multi-turn categories
+include `parallel`, `live_parallel`, `parallel_multiple`,
+`live_parallel_multiple`, `irrelevance`, `live_irrelevance`,
+`live_relevance`, `java`, `javascript`, and `rest`. Multi-turn categories
+are not yet supported.
+
+The dataset class normalizes BFCL's loose schema dialect (`dict` →
+`object`, `float` → `number`, `tuple` → `array`, `any` → `string`) so
+modern grammar backends accept the translated tool definitions.
+
 #### Other HuggingFaceDataset Examples
 
 ```bash
@@ -477,7 +532,7 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
-`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
 
 ```bash
 vllm bench serve \
@@ -907,6 +962,41 @@ vllm bench serve \
   --prefix-repetition-num-prefixes 5 \
   --prefix-repetition-output-len 128
 ```
+
+</details>
+
+### Replay Timed Traces
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Example of how to run traces which have timing information
+with them.
+
+#### Running MoonshotAI traces
+
+Start the server:
+
+```bash
+vllm serve Qwen/Qwen3.5-2B \
+--host 127.0.0.1 --port 8000
+```
+
+Run the benchmark:
+
+```bash
+# Download an example trace 
+# curl -L -o conversation_trace.jsonl \
+#https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl 
+
+vllm bench serve --model Qwen/Qwen3.5-2B \  
+--dataset-name=timed_trace --num-prompts 100 --host 127.0.0.1 \
+--port 8000 --dataset-path ./conversation_trace.jsonl \
+--ignore-eos  --self-timed --timed-trace-chunk-hash-size 512 \
+--timed-trace-sec-multiplier 0.001 
+```
+
+This will replay the first 100 lines from the trace file `conversation.jsonl`.  
 
 </details>
 

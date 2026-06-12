@@ -737,7 +737,7 @@ steps:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
       S3_BUCKET: "vllm-wheels"
-      VARIANT: "rocm722"
+      VARIANT: "rocm723"
 
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
@@ -846,7 +846,6 @@ steps:
         allow_failure: true
       - step: build-cpu-release-image-arm64
         allow_failure: true
-    if: build.env("NIGHTLY") != "1"
 
   - label: "Publish release images to DockerHub"
     depends_on:

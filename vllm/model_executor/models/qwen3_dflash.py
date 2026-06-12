@@ -469,17 +469,6 @@ class DFlashQwen3Model(nn.Module):
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             if "scale" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -509,7 +498,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        self.config.target_layer_count = target_layer_num
         self.model = DFlashQwen3Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),

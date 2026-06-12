@@ -31,7 +31,6 @@ The most fundamental application of classification models is to categorize input
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
-| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `Forrest20231206/ernie-3.0-base-zh-cls` | | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `jason9693/Qwen2.5-1.5B-apeach` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
@@ -299,7 +298,3 @@ Example configuration:
 ### Remove softmax from PoolingParams
 
 We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
-
-### Remove `logit_bias` and `logit_scale`
-
-`logit_bias` and `logit_scale` are deprecated aliases for `logit_mean` and `logit_sigma` respectively. When using `logit_scale`, it is automatically converted to `logit_sigma = 1/logit_scale`. These deprecated parameters will be removed in v0.21.

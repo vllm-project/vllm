@@ -326,15 +326,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
 
-    /// If True, enable handling of LoRA adapters.
-    #[arg(
-        long,
-        visible_alias = "no-enable-lora",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_lora: Option<Unsupported>,
-
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
@@ -453,15 +444,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
-    /// If set to True, enable prompt_tokens_details in usage.
-    #[arg(
-        long,
-        visible_alias = "no-enable-prompt-tokens-details",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_prompt_tokens_details: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -573,11 +555,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub allowed_headers: Option<Unsupported>,
 
-    /// If provided, the server will require one of these keys to be presented
-    /// in the header.
-    #[arg(long)]
-    pub api_key: Option<Unsupported>,
-
     /// The file path to the SSL key file.
     #[arg(long)]
     pub ssl_keyfile: Option<Unsupported>,
@@ -619,15 +596,6 @@ pub struct ServerUnsupportedArgs {
     /// add it to the server using `app.add_middleware()`.
     #[arg(long)]
     pub middleware: Option<Unsupported>,
-
-    /// If specified, API server will add X-Request-Id header to responses.
-    #[arg(
-        long,
-        visible_alias = "no-enable-request-id-headers",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_request_id_headers: Option<Unsupported>,
 
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
     #[arg(

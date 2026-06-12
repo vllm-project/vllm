@@ -29,6 +29,8 @@ __all__ = [
     "KimiAudioProcessor",
     "KimiK25Processor",
     "MiMoOmniProcessor",
+    "MiniCPMOProcessor",
+    "MiniCPMVProcessor",
     "MistralCommonPixtralProcessor",
     "MistralCommonVoxtralProcessor",
     "NanoNemotronVLProcessor",
@@ -38,7 +40,6 @@ __all__ = [
     "OpenVLAProcessor",
     "OvisProcessor",
     "Ovis2_5Processor",
-    "QwenVLProcessor",
     "Qwen3ASRProcessor",
     "Step3VLProcessor",
 ]
@@ -61,6 +62,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
     "KimiK25Processor": "vllm.transformers_utils.processors.kimi_k25",
     "MiMoOmniProcessor": "vllm.transformers_utils.processors.mimo_v2_omni",
+    "MiniCPMOProcessor": "vllm.transformers_utils.processors.minicpmo",
+    "MiniCPMVProcessor": "vllm.transformers_utils.processors.minicpmv",
     "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
     "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
     "Moondream3Processor": "vllm.transformers_utils.processors.moondream3",
@@ -71,7 +74,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OpenVLAProcessor": "vllm.transformers_utils.processors.openvla",
     "OvisProcessor": "vllm.transformers_utils.processors.ovis",
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
-    "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
     "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
 }
