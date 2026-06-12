@@ -1,17 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Skip Triton autotuning under VLLM_TRITON_FORCE_FIRST_CONFIG.
-
-When the env var is set, ``triton.runtime.autotuner.Autotuner.run`` is
-replaced so that, instead of benchmarking every candidate config, it
-walks them in declaration order and uses the first one that does not
-raise ``OutOfResources`` / ``CompileTimeAssertionFailure`` /
-``PTXASError``. The picked index is cached per ``(autotuner, key)`` so
-subsequent calls stay deterministic.
-
-Used to eliminate autotuning variability when measuring kernel
-performance.
-"""
+"""Skip Triton autotuning under VLLM_TRITON_FORCE_FIRST_CONFIG."""
 
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
