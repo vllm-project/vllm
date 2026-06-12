@@ -787,6 +787,7 @@ class xpu_ops:
         dynamic_causal: torch.Tensor | None = None,
         mask_mod: Callable | None = None,
         aux_tensors: list | None = None,
+        **kwargs,
     ):
         assert cu_seqlens_k is not None or seqused_k is not None, (
             "cu_seqlens_k or seqused_k must be provided"
