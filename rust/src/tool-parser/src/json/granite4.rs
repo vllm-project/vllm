@@ -149,12 +149,6 @@ impl ToolParser for Granite4ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    /// Granite 4 marks `<tool_call>` / `</tool_call>` as special tokens, so they
-    /// must survive decoding for the parser to see them.
-    fn preserve_special_tokens(&self) -> bool {
-        true
-    }
-
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
