@@ -108,6 +108,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
@@ -140,6 +141,7 @@ class MomeAttention(AttentionLayerBase, CustomOp):
         num_heads: int,
         num_local_heads: int,
         v_head_dim: int,
+        cache_alignment: int,
         vllm_config: VllmConfig,
         prefix: str,
     ):
@@ -154,6 +156,7 @@ class MomeAttention(AttentionLayerBase, CustomOp):
         self.v_head_dim = v_head_dim
         self.o_dim = num_local_heads * v_head_dim
         self.cache_head_size = q_lora_rank + kv_lora_rank + self.o_dim
+        self.cache_alignment = cache_alignment
         self.prefix = prefix
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
@@ -201,30 +204,29 @@ class MomeAttention(AttentionLayerBase, CustomOp):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    @property
-    def mamba_type(self) -> str:
-        return "mome"
-
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return ((self.q_lora_rank,), (self.kv_lora_rank,), (self.o_dim,))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         return (self.qa_conv.weight.dtype,) * 3
 
+    def _get_cache_window_size(self) -> int:
+        max_window_size = self.kernel_size - 1 + self.num_spec_tokens
+        return round_up(max_window_size, 8)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMomeSpec:
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        # FIXME(runze): block_size and sliding_window are hardcoded to be 8 now;
-        # make it general later
+        cache_window_size = self._get_cache_window_size()
         return SlidingWindowMomeSpec(
-            block_size=8,
+            block_size=cache_window_size,
             num_kv_heads=1,
             head_size=self.cache_head_size,
             dtype=kv_cache_dtype,
-            sliding_window=8,
+            sliding_window=cache_window_size,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
-            alignment=576,
+            alignment=self.cache_alignment,
             component_dims=(self.q_lora_rank, self.kv_lora_rank, self.o_dim),
         )
 
@@ -246,7 +248,7 @@ class MomeAttention(AttentionLayerBase, CustomOp):
             hidden_size = self.o_dim
         conv_weight = conv_weight.view(hidden_size, self.kernel_size)
         conv_state = self.kv_cache[state_indice]
-        torch.ops.vllm.mome_attention_fused_op(
+        torch.ops.vllm.mome_attention(
             hidden_states,
             conv_state,
             conv_weight,
@@ -257,7 +259,7 @@ class MomeAttention(AttentionLayerBase, CustomOp):
         return output
 
 
-def mome_attention_fused_op(
+def mome_attention(
     hidden_states: torch.Tensor,
     conv_state: torch.Tensor,
     conv_weight: torch.Tensor,
@@ -379,8 +381,8 @@ def mome_attention_fake(
 
 
 direct_register_custom_op(
-    op_name="mome_attention_fused_op",
-    op_func=mome_attention_fused_op,
+    op_name="mome_attention",
+    op_func=mome_attention,
     mutates_args=["conv_state", "output"],
     fake_impl=mome_attention_fake,
 )
@@ -538,6 +540,8 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
 
 class PanguIndexer(_DeepseekIndexer):
     def __init__(self, *args, **kwargs):
+        if current_platform.is_rocm():
+            raise NotImplementedError("PanguIndexer does not support ROCm.")
         super().__init__(*args, **kwargs)
         self.k_norm = RMSNorm(self.head_dim, self.config.rms_norm_eps)
         self.deepgemm_n_head = 32 if self.n_head <= 32 else 64
@@ -552,32 +556,21 @@ class PanguIndexer(_DeepseekIndexer):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        if current_platform.is_rocm():
-            kw, _ = self.wk_weights_proj(hidden_states)
-            k = kw[:, : self.head_dim]
-            weights = kw[:, self.head_dim :]
+        q_pe, q_nope = torch.split(
+            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = kw[:, : self.head_dim]
+        weights = kw[:, self.head_dim :]
 
-            k = self.k_norm(k)
+        k = self.k_norm(k)
+        k_pe, k_nope = torch.split(
+            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
 
-            rotary_emb(
-                positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
-            )
-        else:
-            q_pe, q_nope = torch.split(
-                q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-            )
-            kw, _ = self.wk_weights_proj(hidden_states)
-            k = kw[:, : self.head_dim]
-            weights = kw[:, self.head_dim :]
-
-            k = self.k_norm(k)
-            k_pe, k_nope = torch.split(
-                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-            )
-
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-            q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe.reshape(-1, self.rope_dim), k_nope], dim=-1)
@@ -929,6 +922,7 @@ class OpenPanguMLAAttention(nn.Module):
                 num_heads=self.num_heads,
                 num_local_heads=self.num_local_heads,
                 v_head_dim=self.v_head_dim,
+                cache_alignment=self.kv_lora_rank + self.qk_rope_head_dim,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mome_attn",
             )
@@ -2120,19 +2114,6 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
 
 
 class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
-    @classmethod
-    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
-        config = vllm_config.model_config.hf_config
-        return (
-            (config.q_lora_rank,),
-            (config.kv_lora_rank,),
-            (config.num_attention_heads * config.v_head_dim,),
-        )
-
-    @classmethod
-    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
-        return (vllm_config.model_config.dtype,) * 3
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config

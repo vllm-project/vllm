@@ -12,9 +12,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.torch_utils import (
-    kv_cache_dtype_str_to_dtype,
-)
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionType,
@@ -245,9 +243,6 @@ class StaticSinkMLAAttention(MLAAttention, CustomOp):
             self.sliding_window,
         )
         if self.sliding_window is not None:
-            assert (
-                not self.use_sparse and self.indexer is None
-            )  # TODO(runze): debug only, remove later
             return SlidingWindowMLASpec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
