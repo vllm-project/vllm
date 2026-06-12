@@ -273,13 +273,13 @@ class INCConfig(QuantizationConfig):
         else:
             use_marlin = False
         if use_marlin:
-            from vllm.model_executor.layers.quantization.awq_marlin import (
-                AWQMarlinConfig,
-                AWQMarlinLinearMethod,
-                AWQMarlinMoEMethod,
+            from vllm.model_executor.layers.quantization.auto_awq import (
+                AutoAWQConfig,
+                AutoAWQMarlinLinearMethod,
+                AutoAWQMoEMethod,
             )
 
-            quant_args_marlin = AWQMarlinConfig(
+            quant_args_marlin = AutoAWQConfig(
                 weight_bits=weight_bits,
                 group_size=group_size,
                 zero_point=not sym,
@@ -288,20 +288,21 @@ class INCConfig(QuantizationConfig):
                 modules_to_not_convert=[],
             )
         else:
-            from vllm.model_executor.layers.quantization.awq import (
-                AWQConfig,
-                AWQLinearMethod,
+            from vllm.model_executor.layers.quantization.auto_awq import (
+                AutoAWQConfig,
+                AutoAWQLinearMethod,
             )
 
-            quant_args = AWQConfig(
+            quant_args = AutoAWQConfig(
                 weight_bits=weight_bits,
                 group_size=group_size,
                 zero_point=not sym,
+                lm_head_quantized=False,
             )
 
         if isinstance(layer, RoutedExperts):
             if use_marlin:
-                return AWQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
+                return AutoAWQMoEMethod(quant_args_marlin, layer.moe_config)
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             config = {
@@ -315,9 +316,9 @@ class INCConfig(QuantizationConfig):
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if use_marlin:
-                return AWQMarlinLinearMethod(quant_args_marlin)
+                return AutoAWQMarlinLinearMethod(quant_args_marlin)
             else:
-                return AWQLinearMethod(quant_args)
+                return AutoAWQLinearMethod(quant_args)
         return None
 
     def apply_gptq_quant_layer(self, layer, prefix: str, backend: str = "auto"):

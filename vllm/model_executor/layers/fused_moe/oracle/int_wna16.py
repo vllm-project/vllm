@@ -916,14 +916,14 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQConfig,
+        )
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
-        from vllm.model_executor.layers.quantization.awq_marlin import (
-            AWQMarlinConfig,
-        )
 
-        if isinstance(quant_config, AWQMarlinConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             if w13_qzeros is None or w2_qzeros is None:
                 raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
 
@@ -958,7 +958,7 @@ def convert_to_wna16_moe_kernel_format(
             actorder = quant_config.actorder
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
+                "Marlin WNA16 MoE backend requires AutoAWQConfig, AutoGPTQConfig or "
                 f"QuantizationArgs, got {type(quant_config).__name__}."
             )
         if w13_g_idx is None or w2_g_idx is None:
