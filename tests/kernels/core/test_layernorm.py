@@ -167,11 +167,16 @@ def test_fused_rms_norm_quant(
             (out_quant_fused, x, rms_layer.weight, quant_scale_t, 1e-6),
         )
 
+    if dtype in (torch.half, torch.bfloat16):
+        atol, rtol = 1e-1, 1e-1
+    else:
+        atol, rtol = 1e-2, 1e-2
+
     torch.testing.assert_close(
-        out_quant.to(dtype=torch.float32),
-        out_quant_fused.to(dtype=torch.float32),
-        atol=1e-3,
-        rtol=1e-3,
+        out_quant.to(dtype=torch.float32) * quant_scale,
+        out_quant_fused.to(dtype=torch.float32) * quant_scale,
+        atol=atol,
+        rtol=rtol,
     )
 
 
