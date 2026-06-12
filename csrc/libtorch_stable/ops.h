@@ -14,7 +14,7 @@ inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
   STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");
 
   // Get the raw data pointer
-  void* data_ptr = const_cast<void*>(tensor.mutable_data_ptr());
+  void* data_ptr = tensor.mutable_data_ptr();
 
   // Create a new tensor from the raw data pointer
   return torch::stable::from_blob(data_ptr, tensor.sizes(), tensor.strides(),
@@ -397,7 +397,7 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0);
+    bool use_ue8m0);
 
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
