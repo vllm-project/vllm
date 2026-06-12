@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -563,6 +564,28 @@ class SpeculativeConfig:
 
         return hf_config
 
+    @staticmethod
+    def compose_draft_hf_overrides(
+        target_hf_overrides: HfOverrides | None,
+    ) -> Callable[[PretrainedConfig], PretrainedConfig]:
+        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+        Dict overrides are target-specific key patches and are not applied
+        to the draft.
+        """
+        if not callable(target_hf_overrides):
+            return SpeculativeConfig.hf_config_override
+
+        def composed(hf_config: PretrainedConfig) -> PretrainedConfig:
+            hf_config = SpeculativeConfig.hf_config_override(hf_config)
+            return target_hf_overrides(hf_config)
+
+        return composed
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -720,7 +743,12 @@ class SpeculativeConfig:
                 if self.method == "medusa":
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
-                    draft_hf_overrides = SpeculativeConfig.hf_config_override
+                    # Compose any callable hf_overrides set on the target so the
+                    # draft config receives the same transform (e.g. the test
+                    # shrink). Dict overrides stay target-only.
+                    draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
+                        self.target_model_config.hf_overrides
+                    )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
