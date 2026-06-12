@@ -10,6 +10,7 @@ from compressed_tensors.quantization import (
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEExpertsModular,
     RoutedExperts,
     SharedExperts,
 )
@@ -414,8 +415,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-        if not self.symmetric:
+        if w13_qzeros is not None:
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
+        if w2_qzeros is not None:
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)
@@ -437,9 +439,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            layer.workspace = marlin_make_workspace_new(
-                layer.w13_weight_g_idx.device, 4
-            )
+            if self.experts_cls is not None and issubclass(
+                self.experts_cls, FusedMoEExpertsModular
+            ):
+                layer.workspace = marlin_make_workspace_new(
+                    layer.w13_weight_g_idx.device, 4
+                )
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
         layer.w13_weight = layer.w13_weight_packed
