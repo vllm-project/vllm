@@ -53,7 +53,7 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-aiter_topK_meta_data = None
+aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -340,6 +340,31 @@ def rocm_aiter_fused_experts(
             moe_config.intermediate_size_per_partition
             - moe_config.intermediate_size_per_partition_unpadded
         )
+        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
+        # dispatch (currently pinned to v0.1.13.post1):
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
+        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
+        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
+        hidden_pad = hidden_pad // 128 * 128
+        intermediate_pad = (
+            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+        )
+
+        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
+        # for interleaved vs separated gate and up weights.
+        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
+        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
+        # which always sets `is_guinterleave=True`.
+        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        gate_mode = ""
+        if quant_config.use_mxfp4_w4a16:
+            try:
+                from aiter.ops.flydsl.moe_common import GateMode
+
+                gate_mode = GateMode.INTERLEAVE.value
+            except ImportError:
+                pass
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -357,8 +382,9 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=hidden_pad // 128 * 128,
-            intermediate_pad=intermediate_pad // 64 * 64 * 2,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
+            gate_mode=gate_mode,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
