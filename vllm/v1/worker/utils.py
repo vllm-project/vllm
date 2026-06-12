@@ -455,7 +455,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
 
 
 def bind_kv_cache(
-    kv_caches: dict[str, Any],
+    kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
@@ -510,14 +510,6 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        if isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 2:
-            attn_layer = forward_context[layer_name]
-            mla_cache, indexer_cache = kv_cache
-            attn_layer.kv_cache = mla_cache
-            indexer = getattr(attn_layer, "indexer", None)
-            if indexer is not None:
-                indexer.kv_cache = indexer_cache
-            continue
         forward_context[layer_name].kv_cache = kv_cache
 
 

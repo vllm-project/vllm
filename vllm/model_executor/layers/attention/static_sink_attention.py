@@ -13,7 +13,6 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import (
-    get_dtype_size,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -24,7 +23,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
@@ -72,97 +70,7 @@ def create_static_sink_attention_backend(
     underlying_impl = underlying_attn_backend.get_impl_cls()
     sink_impl = _get_static_sink_attn_impl_override().get(underlying_impl)
 
-    def reshape_kv_cache(
-        raw_tensor: torch.Tensor,
-        kv_cache_spec: AttentionSpec,
-        kv_cache_shape: tuple[int, ...],
-        kernel_num_blocks: int,
-        num_blocks: int,
-        num_blocks_per_kv_block: int,
-        kv_cache_stride_order: tuple[int, ...],
-    ):
-        dtype_size = get_dtype_size(kv_cache_spec.dtype)
-        assert kv_cache_spec.page_size_bytes % dtype_size == 0, (
-            "Static sink KV cache page size must be aligned to the cache dtype size."
-        )
-        raw_cache = raw_tensor.view(kv_cache_spec.dtype)
-        page_size = kv_cache_spec.page_size_bytes // dtype_size
-        indexer_head_size = getattr(kv_cache_spec, "indexer_head_size", None)
-
-        if indexer_head_size is not None:
-            assert getattr(kv_cache_spec, "cache_dtype_str", None) != "fp8_ds_mla", (
-                "Composite DSA MLA KV cache reshape for fp8_ds_mla requires a "
-                "backend-specific mixed-dtype layout."
-            )
-            assert num_blocks_per_kv_block == 1, (
-                "Composite DSA MLA KV cache requires logical and kernel block "
-                "sizes to match."
-            )
-            assert kv_cache_stride_order == tuple(range(len(kv_cache_shape))), (
-                "Composite DSA MLA KV cache only supports the default KV cache "
-                "stride order."
-            )
-
-            kv_cache_inner_stride = [1]
-            for size in reversed(kv_cache_shape[1:]):
-                kv_cache_inner_stride.insert(0, kv_cache_inner_stride[0] * size)
-            kv_cache_inner_stride = kv_cache_inner_stride[1:]
-            mla_cache = torch.as_strided(
-                raw_cache,
-                size=kv_cache_shape,
-                stride=(page_size, *kv_cache_inner_stride),
-            )
-
-            mla_page_size = (
-                kv_cache_spec.block_size
-                * kv_cache_spec.num_kv_heads
-                * kv_cache_spec.head_size
-            )
-            indexer_shape = (
-                num_blocks,
-                kv_cache_spec.block_size,
-                kv_cache_spec.num_kv_heads,
-                indexer_head_size,
-            )
-            indexer_inner_stride = [1]
-            for size in reversed(indexer_shape[1:]):
-                indexer_inner_stride.insert(0, indexer_inner_stride[0] * size)
-            indexer_inner_stride = indexer_inner_stride[1:]
-            indexer_cache = torch.as_strided(
-                raw_cache,
-                size=indexer_shape,
-                stride=(page_size, *indexer_inner_stride),
-                storage_offset=mla_page_size,
-            )
-            return (mla_cache, indexer_cache)
-
-        physical_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        expected_elements = 1
-        for size in physical_shape:
-            expected_elements *= size
-        expected_elements_per_block = expected_elements // kernel_num_blocks
-        if page_size <= expected_elements_per_block * num_blocks_per_kv_block:
-            return None
-
-        assert num_blocks_per_kv_block == 1, (
-            "Padded static sink KV cache pages require num_blocks_per_kv_block == 1."
-        )
-        inner_stride = [1]
-        for size in reversed(physical_shape[1:]):
-            inner_stride.insert(0, inner_stride[0] * size)
-        inner_stride = inner_stride[1:]
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-        return torch.as_strided(
-            raw_cache,
-            size=physical_shape,
-            stride=(page_size, *inner_stride),
-        ).permute(*inv_order)
-
-    overrides: dict[str, object] = {
-        "reshape_kv_cache": staticmethod(reshape_kv_cache),
-    }
+    overrides: dict[str, object] = {}
     if sink_impl is not None:
         overrides["get_impl_cls"] = lambda: sink_impl
 

@@ -6915,7 +6915,7 @@ class GPUModelRunner(
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        kv_caches: dict[str, Any] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
@@ -6981,20 +6981,6 @@ class GPUModelRunner(
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    reshape_kv_cache = getattr(attn_backend, "reshape_kv_cache", None)
-                    if reshape_kv_cache is not None:
-                        kv_cache = reshape_kv_cache(
-                            raw_tensor=raw_tensor,
-                            kv_cache_spec=kv_cache_spec,
-                            kv_cache_shape=kv_cache_shape,
-                            kernel_num_blocks=kernel_num_blocks,
-                            num_blocks=num_blocks,
-                            num_blocks_per_kv_block=num_blocks_per_kv_block,
-                            kv_cache_stride_order=kv_cache_stride_order,
-                        )
-                        if kv_cache is not None:
-                            kv_caches[layer_name] = kv_cache
-                            continue
                     # The allocation respects the backend-defined stride order
                     # to ensure the semantic remains consistent for each
                     # backend. We first obtain the generic kv cache shape and
