@@ -180,11 +180,17 @@ def triton_bf16_mla_sparse_interface(
     indices: torch.Tensor,  # [num_tokens, num_heads_kv, topk]
     sm_scale: float,
     d_v: int = 512,
+    block_dpe: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     out : [num_tokens, num_heads_q, d_v]
     max_logits : [num_tokens, num_heads_q]
     lse : logsumexp, [num_tokens, num_heads_q]
+
+    Args:
+        block_dpe: Size of positional embedding portion of dim_qk.
+            Set to 0 when q/kv contain only the nope latent (e.g. DSv4
+            prefill where RoPE is not split out).
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     _, num_heads_kv, _ = kv.shape
@@ -194,8 +200,8 @@ def triton_bf16_mla_sparse_interface(
     _, _, index_topk = indices.shape
 
     BLOCK_H = 16
-    BLOCK_DMODEL = 512
-    BLOCK_DPE = 64
+    BLOCK_DPE = block_dpe
+    BLOCK_DMODEL = dim_qk - BLOCK_DPE
     BLOCK_M = 32
     BLOCK_N = 16
     BLOCK_DV = 512

@@ -11,12 +11,12 @@ Sq      as Q sequence length
 Skv     as KV sequence length
 
 MLA has two possible ways of computing, a data-movement friendly approach and a
-compute friendly approach, we generally want to use the compute friendly
-approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1)
-and the data-movement friendly approach for "decode" (i.e. the ratio
-Sq / Skv is "large").
+compute friendly approach. We generally want to use the compute friendly
+approach for "prefill" (i.e. the ratio Sq / Skv is relatively large, often near
+1) and the data-movement friendly approach for "decode" (i.e. the ratio
+Sq / Skv is small, often near 0).
 
-NOTE what we deem small and large is currently determined by if its labelled
+NOTE what we deem small and large is currently determined by if it is labelled
 prefill or decode by the scheduler, but this is something we should probably
 tune.
 
@@ -28,7 +28,7 @@ Deepseek's MLA attention works the following way:
 * For decode (i.e. the memory friendly approach) the attention "simulates" a
 multi-head attention, while the compute is similar to multi-query attention.
 
-Below is example of both paths assuming batchsize = 1
+Below is an example of both paths assuming batch size = 1
 
 ## More Extent Definitions:
 
@@ -77,13 +77,13 @@ v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 
 // MHA with QK headdim = P + R
 //           V headdim = V
-//      spda_o shape [Sq, N, V]
-spda_o = scaled_dot_product_attention(
+//      sdpa_o shape [Sq, N, V]
+sdpa_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     v
 )
-return spda_o @ W_O
+return sdpa_o @ W_O
 
 NOTE: in the actual code,
     `kv_b_proj` is [W_UK; W_UV] concatenated per head
@@ -96,7 +96,7 @@ NOTE: in the actual code,
 Runtime
 q_c      = h_t @ W_DQ
 q_nope   = (q_c @ W_UQ).view(-1, N, P)
-ql_nope  = einsum("snh,lnh->snl", q, W_UK)
+ql_nope  = einsum("snh,lnh->snl", q_nope, W_UK)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
@@ -105,17 +105,17 @@ k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
 
 // MQA with QK headdim = Lkv + R
 //           V headdim = Lkv
-//      spda_o shape [Sq, N, Lkv]
+//      sdpa_o shape [Sq, N, Lkv]
 // NOTE: this is less compute-friendly since Lkv > P
 //       but is more data-movement friendly since its MQA vs MHA
-spda_o = scaled_dot_product_attention(
+sdpa_o = scaled_dot_product_attention(
     torch.cat([ql_nope, q_pe], dim=-1),
     torch.cat([kv_c, k_pe], dim=-1),
     kv_c
 )
 
-o = einsum("snl,lnv->snv", spda_o.reshape(-1, N, Lkv), W_UV)
-return o.view(-1, N * V) @ self.num_heads @ W_O
+o = einsum("snl,lnv->snv", sdpa_o.reshape(-1, N, Lkv), W_UV)
+return o.view(-1, N * V) @ W_O
 
 
 ## Chunked Prefill
@@ -153,7 +153,7 @@ curr_o, curr_lse = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([new_k_nope, new_k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     new_v,
-    casual=True,
+    causal=True,
     return_softmax_lse=True
 )
 
@@ -173,7 +173,7 @@ for chunk_idx in range(cdiv(C, MCC)):
                    cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)],
                    dim=-1),
         cache_v_chunk,
-        casual=False,
+        causal=False,
         return_softmax_lse=True
     )
 
@@ -200,6 +200,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -779,14 +780,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                        is_lse_base_on_e=True,
                     )
 
             # v_up projection
@@ -989,19 +990,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            # Convert from (B, N * V) to (N, B, V)
-            out = out.transpose(0, 1)
-
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
-
-            # Convert from (N, B, V) to (B, N * V)
-            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-
-            # Adjust output buffer shape back to the original (B, N * V)
-            N, B, V = out.shape
-            out.resize_((B, N * V))
-            out.copy_(out_new)  # Copy result
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
 
 
 def unified_mla_kv_cache_update(
@@ -1047,6 +1037,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
@@ -1362,6 +1353,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
+        "TOKENSPEED_MLA",
     )
 
 
@@ -1672,7 +1664,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     .unsqueeze(1)
                     .expand(-1, num_prefills)
                     * max_context_chunk
-                )
+                ).pin_memory()
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
@@ -1688,7 +1680,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
                 max_token_num_over_chunk = chunk_total_token.max().item()
                 token_to_seq_tensor_cpu = torch.zeros(
-                    [num_chunks, max_token_num_over_chunk], dtype=torch.int32
+                    [num_chunks, max_token_num_over_chunk],
+                    dtype=torch.int32,
+                    pin_memory=True,
                 )
                 range_idx = torch.arange(num_prefills, dtype=torch.int32)
                 for i in range(num_chunks):
@@ -1732,7 +1726,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
                         * padded_local_max_context_chunk_across_ranks
-                    )
+                    ).pin_memory()
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts
@@ -2051,6 +2045,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2126,18 +2121,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 
@@ -2161,6 +2157,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill_metadata.chunked_context.chunk_size is not None
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2232,18 +2229,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 

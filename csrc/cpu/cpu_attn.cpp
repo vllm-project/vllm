@@ -29,6 +29,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::NEON;
   } else if (isa_hint == "vxe") {
     isa = cpu_attention::ISA::VXE;
+  } else if (isa_hint == "rvv") {
+    isa = cpu_attention::ISA::RVV;
   } else if (isa_hint == "vsx") {
     isa = cpu_attention::ISA::VSX;
   } else {
@@ -131,6 +133,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::NEON;
     } else if (isa == "vxe") {
       return cpu_attention::ISA::VXE;
+    } else if (isa == "rvv") {
+      return cpu_attention::ISA::RVV;
     } else if (isa == "vsx") {
       return cpu_attention::ISA::VSX;
     } else {

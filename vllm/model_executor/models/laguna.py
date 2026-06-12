@@ -20,7 +20,10 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -666,7 +669,7 @@ class LagunaModel(nn.Module, EagleModelMixin):
         Returns mapping tuples of (param_name, weight_name, expert_id, shard_id)
         that handle both weights and quantization scales.
         """
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -719,20 +722,6 @@ class LagunaModel(nn.Module, EagleModelMixin):
                     )
                     param.data.copy_(narrow_weight)
                     loaded_params.add(name)
-                continue
-
-            # Handle KV cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                assert loaded_weight.numel() == 1, (
-                    f"KV scale numel {loaded_weight.numel()} != 1"
-                )
-                loaded_weight = loaded_weight.squeeze()
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
                 continue
 
             # Handle stacked params (QKV, gate_up for

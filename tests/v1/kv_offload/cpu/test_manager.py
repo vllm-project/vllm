@@ -17,15 +17,34 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
-def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
+def make_req_context(
+    req_id: str = "", kv_transfer_params: dict | None = None
+) -> ReqContext:
     """Create a ReqContext as production code would, from a request's params."""
-    return ReqContext(kv_transfer_params=kv_transfer_params)
+    return ReqContext(req_id=req_id, kv_transfer_params=kv_transfer_params)
 
 
 _EMPTY_REQ_CTX = make_req_context()
+
+
+def make_cpu_manager(
+    num_blocks: int = 4,
+    cache_policy: str = "lru",
+    enable_events: bool = False,
+    store_threshold: int = 0,
+    max_tracker_size: int = 64_000,
+) -> CPUOffloadingManager:
+    return CPUOffloadingManager(
+        num_blocks=num_blocks,
+        cache_policy=cache_policy,
+        enable_events=enable_events,
+        store_threshold=store_threshold,
+        max_tracker_size=max_tracker_size,
+    )
 
 
 @dataclass
@@ -109,7 +128,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
               candidate to make room for [3, 4, 5]
         - After complete_store([2, 3, 4, 5]), block 2 must still be present.
     """
-    manager = CPUOffloadingManager(
+    manager = make_cpu_manager(
         num_blocks=4,
         cache_policy=eviction_policy,
         enable_events=True,
@@ -143,14 +162,37 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
 
 
+def test_filter_reused_manager_reports_stores_skipped_counter():
+    manager = make_cpu_manager(
+        num_blocks=4,
+        cache_policy="lru",
+        store_threshold=2,
+    )
+
+    prepare_store_output = manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            keys_to_store=[],
+            store_block_ids=[],
+            evicted_keys=[],
+        ),
+    )
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[STORES_SKIPPED] == 3
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[STORES_SKIPPED] == 0
+
+
 def test_cpu_manager():
     """
     Tests CPUOffloadingManager with lru policy.
     """
     # initialize a CPU manager with a capacity of 4 blocks
-    cpu_manager = CPUOffloadingManager(
-        num_blocks=4, cache_policy="lru", enable_events=True
-    )
+    cpu_manager = make_cpu_manager(num_blocks=4, cache_policy="lru", enable_events=True)
 
     # prepare store [1, 2]
     prepare_store_output = cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -261,13 +303,50 @@ def test_cpu_manager():
     )
 
 
+def test_prepare_load_preserves_key_order():
+    """block_ids[i] must correspond to keys[i] (co-indexed invariant)."""
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    key_a, key_b, key_c = to_key(0), to_key(1), to_key(2)
+
+    # Store all three keys and learn their block ID assignments
+    store_output = manager.prepare_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    assert store_output is not None
+    assert isinstance(store_output.store_spec, CPULoadStoreSpec)
+    key_to_block_id = {
+        k: int(bid)
+        for k, bid in zip(store_output.keys_to_store, store_output.store_spec.block_ids)
+    }
+    manager.complete_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+
+    # Forward order: [a, b, c]
+    spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
+    assert isinstance(spec_fwd, CPULoadStoreSpec)
+    assert [int(x) for x in spec_fwd.block_ids] == [
+        key_to_block_id[key_a],
+        key_to_block_id[key_b],
+        key_to_block_id[key_c],
+    ]
+    manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
+
+    # Arbitrary permutation: [b, c, a]
+    spec_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
+    assert isinstance(spec_perm, CPULoadStoreSpec)
+    assert [int(x) for x in spec_perm.block_ids] == [
+        key_to_block_id[key_b],
+        key_to_block_id[key_c],
+        key_to_block_id[key_a],
+    ]
+    manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
+
+
 class TestARCPolicy:
     """Unit tests for CPUOffloadingManager with ARC eviction policy."""
 
     def _make_manager(
         self, num_blocks: int = 4, enable_events: bool = True
     ) -> tuple[CPUOffloadingManager, ARCCachePolicy]:
-        manager = CPUOffloadingManager(
+        manager = make_cpu_manager(
             num_blocks=num_blocks,
             cache_policy="arc",
             enable_events=enable_events,
@@ -565,14 +644,14 @@ class TestARCPolicy:
 
 def test_filter_reused_manager():
     """
-    Tests FilterReusedOffloadingManager with a CPUOffloadingManager.
+    Tests CPUOffloadingManager reuse filtering (store_threshold=2).
     """
-    lru_manager = CPUOffloadingManager(
-        num_blocks=4, cache_policy="lru", enable_events=True
-    )
-
-    manager = FilterReusedOffloadingManager(
-        backing=lru_manager, store_threshold=2, max_tracker_size=3
+    manager = make_cpu_manager(
+        num_blocks=4,
+        cache_policy="lru",
+        enable_events=True,
+        store_threshold=2,
+        max_tracker_size=3,
     )
 
     # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
