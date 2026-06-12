@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warmup and autotune helpers for FlashInfer sparse MLA backends."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -17,6 +17,7 @@ from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2GPUModelRunner
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -130,8 +131,9 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         warmup_executed = True
         if is_leader:
             if _uses_v2_model_runner(runner):
+                v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
-                    runner,
+                    v2_runner,
                     worker.execute_model,
                     worker.sample_tokens,
                     num_tokens,
@@ -143,8 +145,9 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                     runner._dummy_run(**dummy_run_kwargs)
         else:
             if _uses_v2_model_runner(runner):
+                v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
-                    runner,
+                    v2_runner,
                     worker.execute_model,
                     worker.sample_tokens,
                     num_tokens,
@@ -234,8 +237,9 @@ def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(worker, mixed_tokens)
     if not mixed_warmup_done:
         if _uses_v2_model_runner(runner):
+            v2_runner = cast("V2GPUModelRunner", runner)
             run_mixed_prefill_decode_warmup(
-                runner,
+                v2_runner,
                 worker.execute_model,
                 worker.sample_tokens,
                 mixed_tokens,

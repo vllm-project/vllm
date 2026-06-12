@@ -208,6 +208,7 @@ from vllm.config import (
     get_current_vllm_config,
     get_current_vllm_config_or_none,
 )
+from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     is_global_first_rank,
@@ -321,8 +322,8 @@ def _detect_output_quant_key(
 
 def _canonicalize_sparse_mla_kv_cache_dtype(
     attn_backend: type[AttentionBackend],
-    kv_cache_dtype: str,
-) -> str:
+    kv_cache_dtype: CacheDType,
+) -> CacheDType:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
         return "fp8_ds_mla"
@@ -384,7 +385,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
+            kv_cache_dtype: CacheDType = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
