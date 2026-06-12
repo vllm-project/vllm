@@ -63,7 +63,7 @@ class OutlinesBackend(StructuredOutputBackend):
             return self.cache[cache_key]
 
         index = compile_regex_with_timeout(
-            lambda: oc.Index(regex_string, vocabulary.inner),
+            lambda pat: oc.Index(pat, vocabulary.inner),
             regex_string,
         )
         self.cache[cache_key] = index

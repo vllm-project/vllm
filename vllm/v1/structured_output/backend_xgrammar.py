@@ -90,7 +90,7 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
-                lambda: self.compiler.compile_regex(grammar_spec),
+                self.compiler.compile_regex,
                 grammar_spec,
             )
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
@@ -282,7 +282,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.regex:
         try:
             compile_regex_with_timeout(
-                lambda: xgr.Grammar.from_regex(so_params.regex),
+                xgr.Grammar.from_regex,
                 so_params.regex,
             )
         except ValueError:

@@ -21,11 +21,11 @@ class TestCompileRegexWithTimeout:
     """Unit tests for the compile_regex_with_timeout utility."""
 
     def test_normal_regex_compiles_successfully(self):
-        result = compile_regex_with_timeout(lambda: "compiled", r"[a-z]+")
+        result = compile_regex_with_timeout(lambda pat: "compiled", r"[a-z]+")
         assert result == "compiled"
 
     def test_timeout_raises_value_error(self):
-        def slow_compile():
+        def slow_compile(pattern: str):
             time.sleep(10)
             return "never"
 
@@ -38,18 +38,18 @@ class TestCompileRegexWithTimeout:
     def test_timeout_disabled_when_zero(self):
         result = None
         with patch("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 0):
-            result = compile_regex_with_timeout(lambda: "no_timeout", r"(a+)+b")
+            result = compile_regex_with_timeout(lambda pat: "no_timeout", r"(a+)+b")
         assert result == "no_timeout"
 
     def test_compilation_error_propagates(self):
-        def failing_compile():
+        def failing_compile(pattern: str):
             raise RuntimeError("compilation failed")
 
         with pytest.raises(RuntimeError, match="compilation failed"):
             compile_regex_with_timeout(failing_compile, r"bad")
 
     def test_pattern_included_in_error_message(self):
-        def slow_compile():
+        def slow_compile(pattern: str):
             time.sleep(10)
             return "never"
 
@@ -61,7 +61,7 @@ class TestCompileRegexWithTimeout:
             compile_regex_with_timeout(slow_compile, pattern)
 
     def test_long_pattern_truncated_in_error(self):
-        def slow_compile():
+        def slow_compile(pattern: str):
             time.sleep(10)
             return "never"
 

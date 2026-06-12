@@ -45,7 +45,7 @@ _T = TypeVar("_T")
 CACHE = None
 
 
-def compile_regex_with_timeout(fn: Callable[[], _T], pattern: str) -> _T:
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
 
     Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
@@ -53,18 +53,20 @@ def compile_regex_with_timeout(fn: Callable[[], _T], pattern: str) -> _T:
     hanging the inference worker indefinitely.
 
     Args:
-        fn: Zero-argument callable that performs the regex compilation.
-        pattern: The regex pattern string (used only in error messages).
+        fn: Single-argument callable that takes the pattern and performs
+            the regex compilation.
+        pattern: The regex pattern string, passed to *fn* and included in
+            timeout error messages.
 
     Raises:
         ValueError: If compilation exceeds the configured timeout.
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
-        return fn()
+        return fn(pattern)
 
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn)
+    future = executor.submit(fn, pattern)
     try:
         result = future.result(timeout=timeout)
     except TimeoutError:
