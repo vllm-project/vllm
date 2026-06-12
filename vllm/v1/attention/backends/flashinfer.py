@@ -336,9 +336,11 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms, but on Blackwell,
-        # only support a page size of 16, 32, 64.
-        return [16, 32, 64]
+        # 16/32/64 are served by trtllm-gen static cubins or the FI native
+        # wrappers (any head config). Power-of-2 sizes >= 128 are served only by
+        # the trtllm-gen dynamic kernel, which requires GQA/MQA on Blackwell
+        # (not MHA); enforced in FlashInferMetadataBuilder.__init__.
+        return [16, 32, 64, 128, 256, 512, 1024]
 
     @staticmethod
     def get_name() -> str:
@@ -647,6 +649,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
+        # Page sizes >= 128 are served only by the trtllm-gen dynamic kernel,
+        # which requires Blackwell + GQA/MQA (num_qo_heads // num_kv_heads > 1),
+        # not MHA. We do not fall back to the FI native (FA2) kernels for large
+        # pages. Fail fast here rather than mid-serving. (Sizes returned by
+        # get_supported_kernel_block_sizes() are all power-of-2.)
+        if self.page_size >= 128:
+            if self.attention_config.use_trtllm_attention is False:
+                raise ValueError(
+                    f"FlashInfer page size {self.page_size} requires the "
+                    "trtllm-gen backend, but "
+                    "--attention-config.use_trtllm_attention is set to 0."
+                )
+            if not can_use_trtllm:
+                raise NotImplementedError(
+                    f"FlashInfer page size {self.page_size} requires the "
+                    "trtllm-gen backend (Blackwell with NVIDIA artifactory "
+                    "access and num_qo_heads % num_kv_heads == 0)."
+                )
+            if self.num_qo_heads // self.num_kv_heads <= 1:
+                raise NotImplementedError(
+                    f"FlashInfer page size {self.page_size} is only supported "
+                    "by the trtllm-gen dynamic kernel, which requires GQA/MQA "
+                    "(num_qo_heads // num_kv_heads > 1), not MHA."
+                )
+
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
@@ -917,6 +944,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native or TRTLLM)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
+        # Page sizes >= 128 require the trtllm-gen path (the init guard verified
+        # GQA/MQA on Blackwell); force trtllm for prefill too so it does not
+        # fall back to the native wrapper. <= 64 keeps auto-detection.
+        prefill_force_trtllm = (
+            True if page_size >= 128 else self.attention_config.use_trtllm_attention
+        )
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
@@ -926,7 +959,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
+            force_use_trtllm=prefill_force_trtllm,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )

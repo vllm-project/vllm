@@ -73,6 +73,8 @@ class RoutedExperts(PluggableLayer):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         swiglu_limit: float | None = None,
+        swiglu_alpha: float | None = None,
+        swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
     ):
@@ -104,6 +106,8 @@ class RoutedExperts(PluggableLayer):
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.swiglu_limit = swiglu_limit
+        self.swiglu_alpha = swiglu_alpha
+        self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters

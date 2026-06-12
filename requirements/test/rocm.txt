@@ -443,6 +443,8 @@ jsonpointer==3.1.0
     # via jsonschema
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   hypothesis-jsonschema
     #   mcp
     #   mistral-common

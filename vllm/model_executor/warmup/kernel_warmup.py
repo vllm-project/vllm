@@ -16,6 +16,9 @@ import vllm.envs as envs
 from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
+from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+    minimax_m3_msa_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -63,6 +66,8 @@ def kernel_warmup(worker: "Worker"):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

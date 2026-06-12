@@ -165,6 +165,10 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
+    "MiniMaxM3SparseForCausalLM": (
+        "vllm.models.minimax_m3",
+        "MiniMaxM3SparseForCausalLM",
+    ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
@@ -485,6 +489,10 @@ _MULTIMODAL_MODELS = {
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
+    "MiniMaxM3SparseForConditionalGeneration": (
+        "vllm.models.minimax_m3",
+        "MiniMaxM3SparseForConditionalGeneration",
+    ),
     "MiniMaxVL01ForConditionalGeneration": (
         "minimax_vl_01",
         "MiniMaxVL01ForConditionalGeneration",
@@ -622,6 +630,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
+    "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
