@@ -166,14 +166,14 @@ def test_op_absent_on_non_gfx1100(op_name):
 
 @not_gfx1100
 def test_rocm_moe_not_supported_on_non_gfx1100():
-    """rocm_moe.is_supported() must return False on non-gfx1100 hardware."""
+    """rocm_moe_rdna.is_supported() must return False on non-gfx1100 hardware."""
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-        rocm_moe,
+        rocm_moe_rdna,
     )
 
     wq = type("WQ", (), {"num_bits": 4})()
-    assert rocm_moe.is_supported(wq) is False, (
-        "rocm_moe.is_supported() returned True on non-gfx1100 — "
+    assert rocm_moe_rdna.is_supported(wq) is False, (
+        "rocm_moe_rdna.is_supported() returned True on non-gfx1100 — "
         "dispatch guard is broken"
     )
 
@@ -371,43 +371,43 @@ class TestMoEDispatchMocked:
     """Mock on_gfx1100() to False and verify RDNA3 MoE is unreachable."""
 
     def test_is_supported_false_when_mocked_cdna(self):
-        """rocm_moe.is_supported() must return False when not on gfx1100."""
+        """rocm_moe_rdna.is_supported() must return False when not on gfx1100."""
         from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe,
+            rocm_moe_rdna,
         )
 
         with patch("vllm.platforms.rocm.on_gfx1100", return_value=False):
-            assert rocm_moe.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
 
     @pytest.mark.parametrize("num_bits", [2, 3, 8, 16])
     def test_is_supported_rejects_non_w4(self, num_bits):
         """is_supported() rejects non-4-bit even before checking arch."""
         from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe,
+            rocm_moe_rdna,
         )
 
-        assert rocm_moe.is_supported(_FakeWeightQuant(num_bits=num_bits)) is False
+        assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=num_bits)) is False
 
     def test_is_supported_false_when_op_missing(self):
         """is_supported() returns False when the C++ op doesn't exist."""
         from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe,
+            rocm_moe_rdna,
         )
 
         fake_rocm_c = type("FakeRocmC", (), {"gptq_gemm_rdna3": None})()
         with patch.object(torch, "ops", create=True) as mock_ops:
             mock_ops._rocm_C = fake_rocm_c
-            assert rocm_moe.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
 
     def test_is_supported_false_when_rocm_c_absent(self):
         """is_supported() returns False when _rocm_C doesn't exist at all."""
         from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe,
+            rocm_moe_rdna,
         )
 
         fake_ops = type("FakeOps", (), {})()
         with patch.object(torch, "ops", fake_ops):
-            assert rocm_moe.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
 
 
 class TestDenseKernelSelectionMocked:
@@ -475,10 +475,10 @@ class TestDenseKernelSelectionMocked:
 
 
 class TestCompressedTensorsMoEDispatchGuard:
-    """Verify compressed_tensors_moe.py only enters rocm_moe under is_rocm()."""
+    """Verify compressed_tensors_moe.py only enters rocm_moe_rdna under is_rocm()."""
 
     def test_rocm_guard_in_dispatch_source(self):
-        """The rocm_moe import and call must be inside an is_rocm() check."""
+        """The rocm_moe_rdna import and call must be inside an is_rocm() check."""
         src = _read_pkg_source_or_skip(
             "model_executor",
             "layers",
@@ -498,6 +498,6 @@ class TestCompressedTensorsMoEDispatchGuard:
                         found_guard = True
                         break
                 assert found_guard, (
-                    f"L{i}: rocm_moe reference not protected by "
+                    f"L{i}: rocm_moe_rdna reference not protected by "
                     f"is_rocm() guard: {stripped}"
                 )

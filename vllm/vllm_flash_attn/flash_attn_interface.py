@@ -209,6 +209,7 @@ def flash_attn_varlen_func(
     # FA4 only
     mask_mod=None,
     aux_tensors=None,
+    dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -392,6 +393,7 @@ def flash_attn_varlen_func(
             page_table=block_table,
             softmax_scale=softmax_scale,
             causal=causal,
+            dynamic_causal=dynamic_causal,
             softcap=softcap,
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
