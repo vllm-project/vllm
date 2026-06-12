@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     FunctionCall,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -52,7 +55,6 @@ class Segment(NamedTuple):
     channel: str | None
     recipient: str | None
     delta: str
-    is_boundary: bool = False
     completed_message: Message | None = None
 
 
@@ -81,10 +83,8 @@ class HarmonyParser(DelegatingParser):
             )
 
         self._harmony_parser = get_streamable_parser_for_assistant()
-
-    @property
-    def messages(self) -> list[Message]:
-        return self._harmony_parser.messages
+        self._next_tool_call_index = 0
+        self._num_processed_messages = 0
 
     @property
     def state(self) -> HarmonyStreamState:
@@ -194,16 +194,68 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        raise NotImplementedError(
-            "HarmonyParser streaming parsing is deferred. "
-            "Use the existing harmony streaming path."
-        )
+        prev_recipient = self.current_recipient
+        result = self.process_chunk(delta_token_ids)
+        combined_content = ""
+        combined_reasoning = ""
+        tool_messages: list[DeltaToolCall] = []
+
+        for segment in result.segments:
+            if segment.completed_message is not None:
+                prev_recipient = None
+                continue
+
+            segment_type = _SegmentType.from_channel_and_recipient(
+                segment.channel, segment.recipient
+            )
+            match segment_type:
+                case _SegmentType.REASONING:
+                    combined_reasoning += segment.delta
+                case _SegmentType.CONTENT:
+                    combined_content += segment.delta
+                case _SegmentType.TOOL:
+                    assert segment.recipient is not None
+                    if prev_recipient != segment.recipient:
+                        tool_name = extract_function_from_recipient(segment.recipient)
+                        tool_messages.append(
+                            DeltaToolCall(
+                                # HarmonyParser does not use _stream_state;
+                                # "random" tool_call_id_type is always used
+                                id=make_tool_call_id(),
+                                type="function",
+                                function=DeltaFunctionCall(
+                                    name=tool_name,
+                                    arguments=segment.delta,
+                                ),
+                                index=self._next_tool_call_index,
+                            )
+                        )
+                        self._next_tool_call_index += 1
+                        prev_recipient = segment.recipient
+                    elif segment.delta:
+                        tool_call_index = self._next_tool_call_index - 1
+                        tool_messages.append(
+                            DeltaToolCall(
+                                index=tool_call_index,
+                                function=DeltaFunctionCall(arguments=segment.delta),
+                            )
+                        )
+
+        if not combined_content and not combined_reasoning and not tool_messages:
+            return None
+
+        delta_message = DeltaMessage()
+        if combined_content:
+            delta_message.content = combined_content
+        if combined_reasoning:
+            delta_message.reasoning = combined_reasoning
+        if tool_messages:
+            delta_message.tool_calls = tool_messages
+        return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
         if not token_ids:
             return ChunkResult(segments=[], reasoning_token_count=0)
-
-        from openai_harmony import StreamState
 
         segments: list[Segment] = []
         reasoning_token_count = 0
@@ -213,9 +265,10 @@ class HarmonyParser(DelegatingParser):
             recipient = self.current_recipient
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = None
-            is_boundary = self.state == StreamState.EXPECT_START
-            if is_boundary and self.messages:
-                completed_message = self.messages[-1]
+            _messages = self._harmony_parser.messages
+            if len(_messages) > self._num_processed_messages:
+                completed_message = _messages[self._num_processed_messages]
+                self._num_processed_messages += 1
 
             if channel == "analysis" or (
                 channel == "commentary" and recipient is not None
@@ -227,7 +280,6 @@ class HarmonyParser(DelegatingParser):
                     channel=channel,
                     recipient=recipient,
                     delta=delta,
-                    is_boundary=is_boundary,
                     completed_message=completed_message,
                 )
             )
