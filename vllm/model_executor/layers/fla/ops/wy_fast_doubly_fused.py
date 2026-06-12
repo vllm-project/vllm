@@ -32,10 +32,26 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import is_navi
+from .utils import is_navi, navi_gdn_prefill_config
 
 _DBLY_WARPS = [1, 2, 4] if is_navi else [2, 4, 8]
 _DBLY_STAGES = [1, 2] if is_navi else [1, 2, 3, 4]
+
+
+def _kkt_early_prune(configs, named_args, **kwargs):
+    # Pin the in-model-validated config for known navi GDN prefill shapes
+    # (table in utils.navi_gdn_prefill_config); other shapes fall through to
+    # the normal autotune list.  The autotuner's do_bench is unreliable on
+    # this iGPU and was picking num_warps=1; the pinned num_warps=2/
+    # num_stages=1 (with waves_per_eu=1 at the launch site) cuts this kernel
+    # ~9% in-model and also avoids an intermittent illegal-address fault
+    # seen at num_warps=4 for this shape.
+    pinned = navi_gdn_prefill_config(
+        "kkt", kwargs.get("H"), kwargs.get("K"), kwargs.get("V"), kwargs.get("BT")
+    )
+    if pinned is not None:
+        return [pinned[0]]
+    return configs
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -48,6 +64,7 @@ _DBLY_STAGES = [1, 2] if is_navi else [1, 2, 3, 4]
         for BV in ([32, 64] if is_navi else [32, 64, 128])
     ],
     key=["H", "K", "V", "BT", "IS_VARLEN"],
+    prune_configs_by={"early_config_prune": _kkt_early_prune},
 )
 @triton.jit(do_not_specialize=["T"])
 def kkt_solve_tril_recompute_w_u_kernel(
@@ -490,7 +507,15 @@ def fused_kkt_solve_tril_recompute_w_u_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
-    extra = {"waves_per_eu": 2} if is_navi else {}
+    # waves_per_eu is a ROCm launch-site kwarg: use the pinned value for
+    # known navi GDN prefill shapes, else keep wpe=2 (prior navi default).
+    pinned = navi_gdn_prefill_config("kkt", H, K, V, BT)
+    if pinned is not None:
+        extra = {"waves_per_eu": pinned[1]}
+    elif is_navi:
+        extra = {"waves_per_eu": 2}
+    else:
+        extra = {}
     kkt_solve_tril_recompute_w_u_kernel[(NT, B * H)](
         k=k,
         v=v,
