@@ -194,6 +194,10 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
   fixed_bf16x32_t reg;
 
+  explicit BF16Vec32()
+      : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_512, _bf16, LMUL_512)(
+            RVVI(__riscv_vmv_v_x_u16, LMUL_512)(0, VEC_ELEM_NUM))) {}
+
   explicit BF16Vec32(const void* ptr)
       : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_512, _bf16,
                   LMUL_512)(RVVI(__riscv_vle16_v_u16, LMUL_512)(
@@ -345,6 +349,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
   fixed_fp32x32_t reg_fp32;
+
+  explicit BF16Vec32()
+      : reg_fp32(RVVI(__riscv_vfmv_v_f_f32, LMUL_1024)(0.0f, VEC_ELEM_NUM)) {}
 
   explicit BF16Vec32(const void* ptr) {
     const uint16_t* u16 = static_cast<const uint16_t*>(ptr);
