@@ -392,8 +392,8 @@ class Qwen3CoderToolParser(ToolParser):
                 if self.current_tool_index >= tool_starts:
                     # No more tool calls
                     self.is_tool_call_started = False
-                # Continue processing next tool
-                return None
+                # Continue processing the current delta. It may contain the
+                # next tool call or trailing content after the closed call.
 
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
