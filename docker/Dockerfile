@@ -25,6 +25,9 @@
 ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
+# DeepEPv2 requires NCCL >= 2.30.4. NVIDIA does not publish a
+# 2.30.4+cuda13.0 package, so use the first available CUDA 13 package.
+ARG NCCL_VERSION=2.30.4-1+cuda13.2
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -102,6 +105,7 @@ FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG BUILD_OS
+ARG NCCL_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -148,6 +152,8 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
             sudo \
             python3-pip \
             libibverbs-dev \
+            libnccl-dev=${NCCL_VERSION} \
+            libnccl2=${NCCL_VERSION} \
             # GCC 10 was previously pinned to suppress spurious -Wredundant-move warnings
             # from CUTLASS (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519). That bug
             # was fixed in GCC 11. GCC >= 11.3 is now required because PyTorch's C++20 headers
@@ -621,6 +627,7 @@ FROM ${FINAL_BASE_IMAGE} AS vllm-base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
@@ -673,7 +680,6 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
-    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
@@ -688,10 +694,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     # Fixes nccl_allocator requiring nccl.h at runtime
     # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-    # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
-    # so we pin the version to match our CUDA version
-    NCCL_VER=$(apt-cache madison libnccl-dev | grep "+cuda${CUDA_VERSION_SHORT}" | head -1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libnccl-dev=${NCCL_VERSION} \
+        libnccl2=${NCCL_VERSION} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs

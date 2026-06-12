@@ -10,6 +10,9 @@
     "UBUNTU_VERSION": {
       "default": "22.04"
     },
+    "NCCL_VERSION": {
+      "default": "2.30.4-1+cuda13.2"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.2-devel-ubuntu22.04"
     },
