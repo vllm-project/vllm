@@ -32,7 +32,6 @@ partial-json-parser # used for parsing partial JSON outputs
 jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
 msgspec
-gguf >= 0.17.0
 mistral_common[image] >= 1.11.3
 opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml

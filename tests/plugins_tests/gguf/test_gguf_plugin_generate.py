@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests gguf models against unquantized models generations
-Note: To pass the test, quantization higher than Q4 should be used
+E2E tests for GGUF plugin functionality.
 """
 
 import os
 from typing import NamedTuple
 
 import pytest
-from huggingface_hub import hf_hub_download
-from pytest import MarkDecorator
 from transformers import AutoTokenizer
 
-from tests.quantization.utils import is_quant_method_supported
-
 from ...conftest import VllmRunner
+from ...models.utils import check_logprobs_close
 from ...utils import multi_gpu_test
-from ..utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -26,80 +21,24 @@ MAX_MODEL_LEN = 1024
 
 class GGUFTestConfig(NamedTuple):
     original_model: str
-    gguf_repo: str
-    gguf_filename: str
-    marks: list[MarkDecorator] = []
+    gguf_model_path: str  # Full path to .gguf file
 
-    @property
-    def gguf_model(self):
-        return hf_hub_download(self.gguf_repo, filename=self.gguf_filename)
-
-
-LLAMA_CONFIG = GGUFTestConfig(
-    original_model="meta-llama/Llama-3.2-1B-Instruct",
-    gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
-    gguf_filename="Llama-3.2-1B-Instruct-Q6_K.gguf",
-)
-
-QWEN2_CONFIG = GGUFTestConfig(
-    original_model="Qwen/Qwen2.5-1.5B-Instruct",
-    gguf_repo="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-    gguf_filename="qwen2.5-1.5b-instruct-q6_k.gguf",
-)
 
 QWEN3_CONFIG = GGUFTestConfig(
     original_model="Qwen/Qwen3-0.6B",
-    gguf_repo="unsloth/Qwen3-0.6B-GGUF",
-    gguf_filename="Qwen3-0.6B-BF16.gguf",
+    gguf_model_path="unsloth/Qwen3-0.6B-GGUF:Q8_0",
 )
 
-PHI3_CONFIG = GGUFTestConfig(
-    original_model="microsoft/Phi-3.5-mini-instruct",
-    gguf_repo="bartowski/Phi-3.5-mini-instruct-GGUF",
-    gguf_filename="Phi-3.5-mini-instruct-IQ4_XS.gguf",
+
+OLMOE_CONFIG = GGUFTestConfig(
+    original_model="allenai/OLMoE-1B-7B-0125",
+    gguf_model_path="allenai/OLMoE-1B-7B-0125-GGUF:Q6_K",
 )
 
-GPT2_CONFIG = GGUFTestConfig(
-    original_model="openai-community/gpt2-large",
-    gguf_repo="QuantFactory/gpt2-large-GGUF",
-    gguf_filename="gpt2-large.Q4_K_M.gguf",
-)
-
-STABLELM_CONFIG = GGUFTestConfig(
-    original_model="stabilityai/stablelm-3b-4e1t",
-    gguf_repo="afrideva/stablelm-3b-4e1t-GGUF",
-    gguf_filename="stablelm-3b-4e1t.q4_k_m.gguf",
-)
-
-STARCODER_CONFIG = GGUFTestConfig(
-    original_model="bigcode/starcoder2-3b",
-    gguf_repo="QuantFactory/starcoder2-3b-GGUF",
-    gguf_filename="starcoder2-3b.Q6_K.gguf",
-)
-
-DOLPHIN_CONFIG = GGUFTestConfig(
-    # Test VocabParallelEmbedding sharding issue.
-    original_model="cognitivecomputations/TinyDolphin-2.8-1.1b",
-    gguf_repo="tsunemoto/TinyDolphin-2.8-1.1b-GGUF",
-    gguf_filename="tinydolphin-2.8-1.1b.Q6_K.gguf",
-)
-
-GEMMA3_CONFIG = GGUFTestConfig(
-    original_model="google/gemma-3-270m-it",
-    gguf_repo="ggml-org/gemma-3-270m-it-qat-GGUF",
-    gguf_filename="gemma-3-270m-it-qat-Q4_0.gguf",
-)
 
 MODELS = [
-    # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
-    QWEN2_CONFIG,
     QWEN3_CONFIG,
-    PHI3_CONFIG,
-    GPT2_CONFIG,
-    STABLELM_CONFIG,
-    DOLPHIN_CONFIG,
-    GEMMA3_CONFIG,
-    # STARCODER_CONFIG, # broken
+    OLMOE_CONFIG,
 ]
 
 
@@ -121,7 +60,7 @@ def check_model_outputs(
 
     # Run gguf model.
     with vllm_runner(
-        model_name=model.gguf_model,
+        model_name=model.gguf_model_path,
         enforce_eager=True,
         tokenizer_name=model.original_model,
         dtype=dtype,
@@ -154,17 +93,10 @@ def check_model_outputs(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("gguf"),
-    reason="gguf is not supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "model",
-    [pytest.param(test_config, marks=test_config.marks) for test_config in MODELS],
-)
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("num_logprobs", [8])
 @pytest.mark.parametrize("tp_size", [1])
 def test_models(
     vllm_runner: type[VllmRunner],
@@ -180,11 +112,7 @@ def test_models(
     )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("gguf"),
-    reason="gguf is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("model", [LLAMA_CONFIG])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("num_logprobs", [5])
