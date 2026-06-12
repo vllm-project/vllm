@@ -5,6 +5,7 @@
 import copy
 from collections.abc import Callable
 from math import lcm
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -33,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -1021,6 +1023,66 @@ def test_prefill_hybrid_model_mamba_align():
     assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
 
     manager.free(req0)
+
+
+def test_hybrid_cache_mamba_align_shared_prefix_detection():
+    """Test shared prefix detection heuristic for mamba align cache mode
+
+    HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
+    uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split
+    enforces scheduling aligned with the common prefix.
+    """
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    hash_fn = sha256
+
+    # Request: 3 blocks
+    prefix = [i for i in range(3) for _ in range(block_size)]
+    req_0 = make_request("0", prefix, block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_0)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 0  # nothing cached yet
+    assert num_uncached_common == 0
+    manager.allocate_slots(req_0, 3 * block_size, 0, computed_blocks)
+
+    # Request: 3 blocks (shared with above) + 7 different tokens
+    req_1 = make_request("1", prefix + [100] * 7, block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_1)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 3 * block_size  # we should observe a 3-block cache hit
+    assert num_uncached_common == 0
+    manager.allocate_slots(req_1, 7, 3 * block_size, computed_blocks)
+
+    # Request: 3 blocks, but only 2 blocks shared (replace the last token in 3rd block):
+    req_2 = make_request("2", prefix[:-1] + [101], block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_2)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
+    assert num_uncached_common == 2 * block_size  # heuristic detects a shared prefix
+
+    # Next, validate scheduler logic for num_uncached_common_prefix_tokens > 0
+    # Create minimal mock with just the needed attributes
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size), use_eagle=False
+    )
+    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=req_2,
+        num_new_tokens=3 * block_size,
+        num_uncached_common_prefix_tokens=num_uncached_common,
+    )
+    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
+
+    manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
+    # Cleanup
+    manager.free(req_0)
+    manager.free(req_1)
+    manager.free(req_2)
 
 
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
