@@ -44,6 +44,14 @@ pub async fn generate(
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
+
+    if let Err(err) = validate::validate_token_id_ranges(
+        &body,
+        state.tokenizer_vocab_size(),
+        state.model_vocab_size(),
+    ) {
+        return err.into_response();
+    }
     let prepared = match prepare_generate_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),

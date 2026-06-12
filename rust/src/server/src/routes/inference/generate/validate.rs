@@ -1,5 +1,8 @@
 use super::types::GenerateRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::token_ids::{
+    validate_allowed_token_ids, validate_logit_bias_token_ids, validate_token_ids,
+};
 
 /// Enforce the minimal compatibility contract for the Rust token generate
 /// route.
@@ -47,11 +50,31 @@ pub(super) fn validate_request_compat(
     Ok(())
 }
 
+/// Reject out-of-vocab token ids, mirroring the OpenAI routes' `validate_token_id_ranges`.
+pub(super) fn validate_token_id_ranges(
+    request: &GenerateRequest,
+    tokenizer_vocab_size: usize,
+    model_vocab_size: Option<usize>,
+) -> Result<(), ApiError> {
+    let prompt_bound = tokenizer_vocab_size.max(model_vocab_size.unwrap_or(0));
+    validate_token_ids(&request.token_ids, prompt_bound)?;
+    validate_allowed_token_ids(
+        request.sampling_params.allowed_token_ids.as_deref(),
+        tokenizer_vocab_size,
+    )?;
+    validate_logit_bias_token_ids(
+        request.sampling_params.logit_bias.as_ref(),
+        model_vocab_size.unwrap_or(usize::MAX),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::validate_request_compat;
+    use std::collections::HashMap;
+
+    use super::{validate_request_compat, validate_token_id_ranges};
     use crate::routes::inference::generate::types::GenerateRequest;
 
     fn base_request() -> GenerateRequest {
@@ -96,5 +119,30 @@ mod tests {
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_token_id_ranges_rejects_oob_token_ids_and_params() {
+        let mut request = base_request();
+        request.token_ids = vec![5, 150];
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
+        request.token_ids = vec![5, 200];
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
+        // prompt bound is max(tokenizer, model): an id in [model, tokenizer) is accepted
+        request.token_ids = vec![150];
+        assert!(validate_token_id_ranges(&request, 200, Some(100)).is_ok());
+
+        // allowed_token_ids is bounded by the tokenizer vocab, logit_bias by the model vocab
+        let mut request = base_request();
+        request.sampling_params.allowed_token_ids = Some(vec![150]);
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_err());
+        request.sampling_params.allowed_token_ids = None;
+        request.sampling_params.logit_bias = Some(HashMap::from([(150, 1.0)]));
+        assert!(validate_token_id_ranges(&request, 200, Some(100)).is_err());
+
+        // unknown vocab sizes skip the check
+        request = base_request();
+        request.token_ids = vec![1_000_000];
+        assert!(validate_token_id_ranges(&request, usize::MAX, None).is_ok());
     }
 }
