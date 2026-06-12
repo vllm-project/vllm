@@ -21,7 +21,7 @@ if current_platform.is_rocm():
 else:
     on_gfx1100 = on_gfx1x = lambda: False  # noqa: E731
 
-# Group sizes the HIP skinny path of HybridW4A16LinearKernel instantiates.
+# Group sizes the HIP skinny path of RDNAHybridW4A16LinearKernel instantiates.
 _HYBRID_GROUP_SIZES = (32, 64, 128)
 
 
@@ -32,7 +32,7 @@ def _expected_rocm_kernel(weight_type, group_size: int) -> str:
     if on_gfx1100() and weight_type == scalar_types.uint4b8:
         return "RDNA3W4A16LinearKernel"
     if on_gfx1x() and group_size in _HYBRID_GROUP_SIZES:
-        return "HybridW4A16LinearKernel"
+        return "RDNAHybridW4A16LinearKernel"
     return "TritonW4A16LinearKernel"
 
 

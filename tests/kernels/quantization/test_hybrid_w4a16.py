@@ -26,7 +26,7 @@ device = "cuda"
 hybrid_module = importlib.import_module(
     "vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16"
 )
-HybridW4A16LinearKernel = hybrid_module.HybridW4A16LinearKernel
+RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
@@ -308,7 +308,7 @@ def test_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
         zero_points=False,
         has_g_idx=False,
     )
-    kernel = HybridW4A16LinearKernel(
+    kernel = RDNAHybridW4A16LinearKernel(
         config,
         w_q_param_name="weight_packed",
         w_s_param_name="weight_scale",
@@ -369,7 +369,7 @@ def test_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_init):
         zero_points=True,
         has_g_idx=False,
     )
-    kernel = HybridW4A16LinearKernel(
+    kernel = RDNAHybridW4A16LinearKernel(
         config,
         w_q_param_name="weight_packed",
         w_s_param_name="weight_scale",
@@ -416,7 +416,7 @@ def test_hybrid_can_implement_group_size(group_size, expected_ok):
         zero_points=False,
         has_g_idx=False,
     )
-    ok, _ = HybridW4A16LinearKernel.can_implement(config)
+    ok, _ = RDNAHybridW4A16LinearKernel.can_implement(config)
     assert ok is expected_ok
 
 

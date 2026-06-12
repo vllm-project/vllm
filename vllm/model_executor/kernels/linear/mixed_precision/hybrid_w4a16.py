@@ -24,7 +24,6 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -32,6 +31,31 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 SUPPORTED_GROUP_SIZES = [32, 64, 128]
+
+
+def _on_gfx12x() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx12x
+
+    return on_gfx12x()
+
+
+def _on_gfx1x() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1x
+
+    return on_gfx1x()
+
+
+def _on_gfx1151() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1151
+
+    return on_gfx1151()
+
 
 # Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
 # up to 5).  When M exceeds this AND K*M fits in LDS, the skinny kernel is
@@ -222,8 +246,7 @@ def triton_w4a16_skinny_fmt_gemm(
     # num_stages stays None unless a per-shape override sets it, so the
     # generic heuristics fall back to Triton's default pipeline depth.
     num_stages: int | None = None
-    cap = current_platform.get_device_capability()
-    if cap is not None and cap.major >= 12:
+    if _on_gfx12x():
         # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
         # using Llama-3.1-8B AWQ weight shapes with group_size=128.
         if M <= 32:
@@ -256,7 +279,7 @@ def triton_w4a16_skinny_fmt_gemm(
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 256, 64, 64, 8
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
-    elif on_gfx1x():
+    elif _on_gfx1151():
         # Tuned on gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts)
         # using Qwen3-4B weight shapes with group_size=128.
         # Per-shape overrides for known prefill regressions live in a small
@@ -369,27 +392,16 @@ def _hybrid_w4a16_apply_impl(
     cu_count: int,
     group_size: int,
 ) -> torch.Tensor:
-    """Dispatch between skinny GEMM and Triton based on batch size M.
-
-    Both paths read from the same skinny-format weight buffer; the Triton
-    kernel just reinterprets it as int32 via a view (no second copy):
-      w_q:     [N, K//2] int8 (ExLlama shuffle, for skinny kernel)
-      w_s:     [N, K//G] fp16/bf16 (skinny-layout scales)
-      w_zp:    [N, K//G] raw zero-points (zp_raw) in act dtype,
-               or None for symmetric. Both HIP skinny and Triton use this
-               single format: dequant = (nibble - zp_raw) * scale.
-
-    Registered as a custom op so torch.compile treats it as opaque.
-    """
+    """Dispatch between skinny GEMM and Triton based on batch size M."""
     import vllm._custom_ops as ops
 
     M = x_2d.shape[0]
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    # Use the HIP skinny kernel for small batch sizes (fast decode path),
-    # but only when K*M fits in LDS.  Otherwise fall through to Triton.
     if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS:
+        # record_function is not torch.compile-safe; use nullcontext when
+        # compiling to keep the op traceable.
         ctx = (
             nullcontext()
             if torch.compiler.is_compiling()
@@ -438,7 +450,7 @@ direct_register_custom_op(
 )
 
 
-class HybridW4A16LinearKernel(MPLinearKernel):
+class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     """Hybrid W4A16 kernel: HIP skinny for decode, Triton for prefill.
 
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
@@ -454,16 +466,16 @@ class HybridW4A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # Arch filtering is handled by can_implement (on_gfx1x check)
+        # Arch filtering is handled by can_implement (_on_gfx1x check)
         return 0
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "HybridW4A16LinearKernel only targets ROCm"
+            return False, "RDNAHybridW4A16LinearKernel only targets ROCm"
 
-        if not on_gfx1x():
-            return False, "HybridW4A16LinearKernel only targets gfx11/gfx12"
+        if not _on_gfx1x():
+            return False, "RDNAHybridW4A16LinearKernel only targets gfx11/gfx12"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (

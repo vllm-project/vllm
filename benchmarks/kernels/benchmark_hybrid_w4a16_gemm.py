@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Benchmark the HybridW4A16LinearKernel across decode and prefill shapes.
+Benchmark the RDNAHybridW4A16LinearKernel across decode and prefill shapes.
 
 Usage:
     python benchmark_int4_gemm.py
@@ -154,7 +154,9 @@ def prepare_shapes(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark HybridW4A16LinearKernel")
+    parser = argparse.ArgumentParser(
+        description="Benchmark RDNAHybridW4A16LinearKernel"
+    )
     parser.add_argument(
         "--models",
         nargs="+",
