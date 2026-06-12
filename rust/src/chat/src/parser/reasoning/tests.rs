@@ -13,6 +13,7 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
+    assert!(factory.contains(names::MISTRAL));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
@@ -79,6 +80,35 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
     assert_eq!(
         factory.resolve_name_for_model("mm-m3"),
         Some(names::MINIMAX_M3)
+    );
+}
+
+#[test]
+fn factory_routes_magistral_models_to_mistral_parser() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Magistral-Small-2506"),
+        Some(names::MISTRAL)
+    );
+    // Plain Mistral / Mixtral / Ministral-Instruct are not reasoning models and
+    // must not auto-select this parser.
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Mistral-7B-Instruct-v0.3"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Mixtral-8x7B-Instruct-v0.1"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Ministral-3-8B-Instruct-2512"),
+        None
+    );
+    // Reasoning, but deliberately not auto-routed (see the `magistral`
+    // registration); relies on explicit `--reasoning-parser mistral`.
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Ministral-3-8B-Reasoning-2512"),
+        None
     );
 }
 
