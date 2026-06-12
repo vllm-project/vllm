@@ -12,7 +12,7 @@ from tests.reasoning.utils import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
-PARSER_NAMES = ["qwen3", "qwen3_engine"]
+parser_name = "qwen3"
 start_token = "<think>"
 end_token = "</think>"
 
@@ -242,11 +242,9 @@ TEST_CASES = [
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-@pytest.mark.parametrize("parser_name", PARSER_NAMES)
 def test_reasoning(
     streaming: bool,
     param_dict: dict,
-    parser_name: str,
     qwen3_tokenizer,
 ):
     output = qwen3_tokenizer.tokenize(param_dict["output"])
@@ -309,12 +307,10 @@ MULTI_TOKEN_DELTA_CASES = [
 @pytest.mark.parametrize(
     "deltas, expected_reasoning, expected_content", MULTI_TOKEN_DELTA_CASES
 )
-@pytest.mark.parametrize("parser_name", PARSER_NAMES)
 def test_reasoning_streaming_multi_token_deltas(
     deltas: list[str],
     expected_reasoning: str | None,
     expected_content: str | None,
-    parser_name: str,
     qwen3_tokenizer,
 ):
     """Test that multi-token deltas don't leak <think> into reasoning."""
@@ -358,12 +354,10 @@ THINKING_DISABLED_CASES = [
 @pytest.mark.parametrize(
     "output, expected_reasoning, expected_content", THINKING_DISABLED_CASES
 )
-@pytest.mark.parametrize("parser_name", PARSER_NAMES)
 def test_reasoning_thinking_disabled(
     output: str,
     expected_reasoning: str | None,
     expected_content: str | None,
-    parser_name: str,
     qwen3_tokenizer,
 ):
     """When enable_thinking=False, output without </think> is all content."""

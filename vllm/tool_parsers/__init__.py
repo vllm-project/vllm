@@ -194,11 +194,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "apertus_tool_parser",
         "ApertusToolParser",
     ),
-    # Engine-based parser adapters (opt-in via --tool-call-parser=X_engine)
-    "qwen3_engine": (
-        "qwen3_engine_tool_parser",
-        "Qwen3EngineToolParser",
-    ),
 }
 
 
