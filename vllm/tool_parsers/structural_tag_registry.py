@@ -12,7 +12,9 @@ from xgrammar.openai_tool_call_schema import (
 )
 from xgrammar.structural_tag import (
     AnyTextFormat,
+    ConstStringFormat,
     JSONSchemaFormat,
+    SequenceFormat,
     TagFormat,
     TagsWithSeparatorFormat,
     TriggeredTagsFormat,
@@ -51,7 +53,6 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "qwen_3",
         "harmony",
         "deepseek_v3_2",
-        "minimax",
         "glm_4_7",
         "deepseek_v4",
     }
@@ -180,6 +181,84 @@ def get_hermes_structural_tag(
             tags=_hermes_tool_tags(tools),
             separator="",
             at_least_one=True,
+        )
+
+    return StructuralTag(format=suffix_tag)
+
+
+def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+    return [
+        TagFormat(
+            begin=f'<invoke name="{tool.function.name}">\n',
+            content=JSONSchemaFormat(
+                json_schema=_get_function_parameters(tool.function),
+                style="minimax_xml",
+            ),
+            end="</invoke>\n",
+        )
+        for tool in tools
+    ]
+
+
+@register_vllm_structural_tag("minimax")
+def get_minimax_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    del builtin_tools, reasoning
+
+    tool_call_begin = "<minimax:tool_call>\n"
+    tool_call_end = "</minimax:tool_call>"
+    tool_call_trigger = "<minimax:tool_call>"
+
+    tags = _minimax_tool_tags(tools)
+
+    if tool_choice == "auto":
+        suffix_tag = (
+            TriggeredTagsFormat(
+                triggers=[tool_call_trigger],
+                tags=[
+                    TagFormat(
+                        begin=tool_call_begin,
+                        content=TagsWithSeparatorFormat(
+                            tags=tags,
+                            separator="",
+                            at_least_one=True,
+                        ),
+                        end=tool_call_end,
+                    )
+                ],
+                excludes=["<think>", "</think>"],
+            )
+            if tags
+            else AnyTextFormat(excludes=["<think>", "</think>"])
+        )
+    elif tool_choice == "forced":
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value="\n" + tool_call_begin),
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                    stop_after_first=True,
+                ),
+                ConstStringFormat(value=tool_call_end),
+            ]
+        )
+    else:
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value="\n" + tool_call_begin),
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                ),
+                ConstStringFormat(value=tool_call_end),
+            ]
         )
 
     return StructuralTag(format=suffix_tag)
