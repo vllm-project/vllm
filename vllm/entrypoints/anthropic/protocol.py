@@ -53,7 +53,11 @@ class AnthropicContentBlock(BaseModel):
 class AnthropicMessage(BaseModel):
     """Message structure"""
 
-    role: Literal["user", "assistant"]
+    # Anthropic spec only allows user/assistant here, but some clients
+    # (e.g. recent Claude Code) inject role="system" entries inside the
+    # messages array. We accept it at parse time and hoist them into the
+    # top-level `system` field via AnthropicMessagesRequest's pre-validator.
+    role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 
@@ -102,6 +106,50 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
     top_p: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_system_messages(cls, data: Any) -> Any:
+        """Move role=system entries from `messages` into the top-level
+        `system` field. Some clients (e.g. recent Claude Code) put system
+        prompts inside the messages array even though the Anthropic spec
+        forbids it. We extract them here so the rest of the pipeline only
+        sees user/assistant turns."""
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+
+        extracted: list[Any] = []
+        remaining: list[Any] = []
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                extracted.append(msg.get("content"))
+            else:
+                remaining.append(msg)
+
+        if not extracted:
+            return data
+
+        existing = data.get("system")
+        merged: list[Any] = []
+        if isinstance(existing, str):
+            if existing:
+                merged.append({"type": "text", "text": existing})
+        elif isinstance(existing, list):
+            merged.extend(existing)
+
+        for content in extracted:
+            if isinstance(content, str):
+                if content:
+                    merged.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                merged.extend(content)
+
+        data["messages"] = remaining
+        data["system"] = merged
+        return data
 
     @field_validator("model")
     @classmethod
