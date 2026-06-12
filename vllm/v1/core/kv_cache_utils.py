@@ -598,8 +598,8 @@ def resolve_kv_cache_block_sizes(
 
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp * pcp``. Multiple groups: LCM of every
-      group's block size — context parallelism is not supported here.
+      the spec's logical block size. Multiple groups: LCM of every group's
+      logical block size.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
       ``cache_config.hash_block_size`` override if set, else the GCD of group
@@ -613,18 +613,25 @@ def resolve_kv_cache_block_sizes(
     pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
-        return bs, bs
+    if len(groups) <= 1:
+        logical_block_size = cache_config.block_size * dcp * pcp
+        return logical_block_size, logical_block_size
 
     if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
+        supports_context_parallel = all(
+            getattr(group.kv_cache_spec, "supports_context_parallel", False)
+            for group in groups
         )
+        if pcp != 1 or not supports_context_parallel:
+            raise ValueError(
+                "Hybrid KV cache groups with multiple block sizes do not "
+                "support context parallelism (dcp_world_size/pcp_world_size > 1)."
+            )
 
-    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-    scheduler_block_size = math.lcm(*group_block_sizes)
+    logical_block_sizes = tuple(
+        g.kv_cache_spec.logical_block_size(dcp, pcp) for g in groups
+    )
+    scheduler_block_size = math.lcm(*logical_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal
@@ -645,13 +652,13 @@ def resolve_kv_cache_block_sizes(
 
     requested = cache_config.hash_block_size
     hash_block_size = (
-        requested if requested is not None else math.gcd(*group_block_sizes)
+        requested if requested is not None else math.gcd(*logical_block_sizes)
     )
-    if any(bs % hash_block_size != 0 for bs in group_block_sizes):
+    if any(bs % hash_block_size != 0 for bs in logical_block_sizes):
         raise ValueError(
             f"Invalid hash_block_size={hash_block_size}; all KV cache group "
             f"block sizes must be divisible by hash_block_size. "
-            f"Got group block sizes={group_block_sizes}."
+            f"Got group block sizes={logical_block_sizes}."
         )
     return scheduler_block_size, hash_block_size
 
@@ -1396,6 +1403,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     alignment=spec.alignment,
                     compress_ratio=spec.compress_ratio,
                     model_version=spec.model_version,
+                    supports_context_parallel=spec.supports_context_parallel,
                 )
             elif isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(

@@ -26,10 +26,6 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    is_workspace_manager_initialized,
-)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -117,13 +113,6 @@ def _dcp_a2a_send_recv_buffers(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if is_workspace_manager_initialized():
-        send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
-            (shape, dtype),
-            (shape, dtype),
-        )
-        return send_buffer, recv_buffer
-
     return (
         torch.empty(shape, device=device, dtype=dtype),
         torch.empty(shape, device=device, dtype=dtype),

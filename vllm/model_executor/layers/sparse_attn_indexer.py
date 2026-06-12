@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -27,6 +28,8 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.context_parallel.collectives import dcp_global_topk
+from vllm.v1.context_parallel.layout import ContextParallelLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -35,6 +38,112 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _topk_per_row_prefill_dcp(
+    logits: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    topk_tokens: int,
+    layout: ContextParallelLayout,
+    has_local_kv: bool,
+) -> torch.Tensor:
+    num_rows = logits.shape[0]
+    local_indices = torch.full(
+        (num_rows, topk_tokens),
+        -1,
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    local_values = torch.full(
+        (num_rows, topk_tokens),
+        float("-inf"),
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    if has_local_kv:
+        ops.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            local_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
+        gather_indices = torch.clamp(local_indices, min=0).to(torch.int64)
+        gather_indices = gather_indices + cu_seqlen_ks.to(
+            device=logits.device
+        ).unsqueeze(1)
+        gather_indices = torch.clamp(gather_indices, max=logits.shape[1] - 1)
+        gathered_values = torch.gather(logits, 1, gather_indices)
+        local_values = torch.where(
+            local_indices >= 0,
+            gathered_values,
+            local_values,
+        )
+
+    global_indices = layout.local_to_global(local_indices)
+    _, global_indices = dcp_global_topk(
+        local_values,
+        global_indices,
+        topk_tokens,
+        get_dcp_group(),
+    )
+    return global_indices
+
+
+def _topk_per_row_decode_dcp(
+    logits: torch.Tensor,
+    seq_lens: torch.Tensor,
+    local_indices: torch.Tensor,
+    topk_tokens: int,
+    layout: ContextParallelLayout,
+) -> torch.Tensor:
+    num_rows = local_indices.shape[0]
+    if topk_tokens == 0:
+        return torch.empty(
+            (num_rows, 0),
+            dtype=torch.int32,
+            device=logits.device,
+        )
+
+    local_lens = seq_lens.reshape(-1)[:num_rows].to(device=logits.device)
+    valid = (local_indices >= 0) & (local_indices < local_lens.unsqueeze(1))
+    safe_indices = torch.clamp(local_indices, min=0, max=logits.shape[1] - 1)
+    local_values = torch.gather(logits, 1, safe_indices.to(torch.int64))
+    local_values = torch.where(
+        valid,
+        local_values,
+        torch.full_like(local_values, float("-inf")),
+    )
+    local_global_indices = layout.local_to_global(
+        torch.where(valid, local_indices, torch.full_like(local_indices, -1))
+    )
+
+    global_values, global_indices = dcp_global_topk(
+        local_values,
+        local_global_indices,
+        topk_tokens,
+        get_dcp_group(),
+    )
+    is_local = layout.owns(global_indices)
+
+    local_values = torch.where(
+        is_local,
+        global_values,
+        torch.full_like(global_values, float("-inf")),
+    )
+    local_order = torch.topk(local_values, k=topk_tokens, dim=-1).indices
+    local_global_indices = torch.gather(global_indices, 1, local_order)
+    local_valid = torch.gather(is_local, 1, local_order)
+    local_indices = layout.global_to_local(local_global_indices)
+    return torch.where(
+        local_valid,
+        local_indices,
+        torch.full_like(local_indices, -1),
+    ).to(torch.int32)
 
 
 def _gather_workspace_shapes(
@@ -193,7 +302,7 @@ def sparse_attn_indexer(
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
-            if not chunk.skip_kv_gather:
+            if chunk.has_local_kv and not chunk.skip_kv_gather:
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
                     k_quant,
@@ -218,7 +327,13 @@ def sparse_attn_indexer(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            if current_platform.is_xpu():
+            if not chunk.has_local_kv:
+                logits = torch.empty(
+                    (chunk.token_end - chunk.token_start, 1),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+            elif current_platform.is_xpu():
                 if q_scale_slice is not None:
                     raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
                 logits = torch.ops.vllm.xpu_fp8_mqa_logits(
@@ -244,16 +359,28 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            ops.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if attn_metadata_narrowed.cp_layout.enabled:
+                topk_indices.copy_(
+                    _topk_per_row_prefill_dcp(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        topk_tokens,
+                        attn_metadata_narrowed.cp_layout,
+                        chunk.has_local_kv,
+                    )
+                )
+            else:
+                ops.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -357,6 +484,17 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        if attn_metadata_narrowed.cp_layout.enabled:
+            topk_indices.copy_(
+                _topk_per_row_decode_dcp(
+                    logits,
+                    seq_lens,
+                    topk_indices,
+                    topk_tokens,
+                    attn_metadata_narrowed.cp_layout,
+                )
             )
 
         if decode_metadata.requires_padding:

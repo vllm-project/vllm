@@ -18,6 +18,11 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.context_parallel.layout import (
+    ContextParallelLayout,
+    cp_global_to_local_block,
+    cp_global_to_local_pos,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -90,6 +95,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=576 if is_flashmla else None,
             model_version="deepseek_v4",
+            supports_context_parallel=True,
         )
 
     def forward(self): ...
@@ -226,6 +232,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.decode_threshold = (
             self.reorder_batch_threshold + self.num_speculative_tokens
         )
+        self.cp_layout = ContextParallelLayout.from_config(self.vllm_config)
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
@@ -299,7 +306,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices.copy_(x, non_blocking=True)
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
-        is_valid_token.copy_(slot_mapping >= 0)
+        if self.cp_layout.enabled:
+            # In DCP, slot_mapping < 0 can mean either "not this rank's cache
+            # owner" or "padded graph row". Attention metadata needs the
+            # former but must still mask the latter.
+            num_real_tokens = int(query_start_loc_cpu[-1].item())
+            is_valid_token.fill_(False)
+            is_valid_token[:num_real_tokens].fill_(True)
+        else:
+            is_valid_token.copy_(slot_mapping >= 0)
 
         if num_decode_tokens > 0:
             self.decode_swa_lens[num_decode_tokens:] = 0
@@ -316,6 +331,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 block_table.stride(0),
                 self.block_size,
                 TRITON_BLOCK_SIZE=1024,
+                **self.cp_layout.triton_kwargs(),
             )
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
@@ -464,6 +480,9 @@ def _compute_swa_indices_and_lens_kernel(
     block_table_ptr,
     block_table_stride,
     block_size,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -485,24 +504,56 @@ def _compute_swa_indices_and_lens_kernel(
     start_pos = tl.maximum(pos - window_size + 1, 0)
     end_pos = pos + 1
 
-    swa_len = end_pos - start_pos
+    local_start = cp_global_to_local_pos(
+        start_pos,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
+    local_end = cp_global_to_local_pos(
+        end_pos,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
+
+    swa_len = local_end - local_start
     tl.store(swa_lens_ptr + token_idx, swa_len)
 
     for i in range(0, window_size, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
-        )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
-
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
         tl.store(
             swa_indices_ptr + token_idx * swa_indices_stride + offset,
-            slot_ids,
+            -1,
             mask=offset < window_size,
+        )
+
+        pos_offset = start_pos + offset
+        block_indices, block_offsets, is_local = cp_global_to_local_block(
+            pos_offset,
+            block_size,
+            DCP_WORLD_SIZE,
+            DCP_RANK,
+            CP_KV_CACHE_INTERLEAVE_SIZE,
+        )
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=(pos_offset < end_pos) & is_local,
+        )
+        slot_ids = block_numbers * block_size + block_offsets
+
+        local_offsets = (
+            cp_global_to_local_pos(
+                pos_offset,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            - local_start
+        )
+
+        tl.store(
+            swa_indices_ptr + token_idx * swa_indices_stride + local_offsets,
+            slot_ids,
+            mask=(pos_offset < end_pos) & is_local,
         )

@@ -16,8 +16,14 @@ from typing import Literal, NamedTuple
 import pytest
 import torch
 
+from tests.conftest import VllmRunner
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
-from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
+from tests.utils import (
+    RemoteOpenAIServer,
+    create_new_process_for_each_test,
+    multi_gpu_test,
+)
+from vllm import SamplingParams, TokensPrompt
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
@@ -26,6 +32,7 @@ from ..models.registry import HF_EXAMPLE_MODELS
 logger = init_logger("test_context_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
+DSV4_MODEL = os.getenv("VLLM_TEST_DSV4_MODEL")
 
 CP_TEST_MODELS = [
     # TODO support other models
@@ -292,3 +299,144 @@ def test_cp_generation(
         method="generate",
         is_multimodal=False,
     )
+
+
+# The full checkpoint is unavailable in public CI, so this E2E is opt-in.
+DSV4_BLOCK_SIZE = 256
+DSV4_INTERLEAVE = 4
+DSV4_DECODE_STEPS = 132
+DSV4_SHORT_PASSKEY_CASES = tuple(
+    (length, length // 2) for length in (63, 64, 65, 255, 256, 257, 4095, 4096, 4097)
+) + tuple((64, 16 + owner * DSV4_INTERLEAVE) for owner in range(4))
+DSV4_LONG_PASSKEY_CASES = (
+    (16384, 512),
+    *((65536, 32768 + owner * DSV4_INTERLEAVE) for owner in range(4)),
+    (131072, 65535),
+    (131072, 65536),
+    (262144, 131072),
+)
+
+
+def _dsv4_runner_kwargs(dcp_size: int) -> dict:
+    return {
+        "tensor_parallel_size": 4,
+        "decode_context_parallel_size": dcp_size,
+        "cp_kv_cache_interleave_size": DSV4_INTERLEAVE,
+        "enable_expert_parallel": True,
+        "moe_backend": "deep_gemm_mega_moe",
+        "all2all_backend": "deepep_high_throughput",
+        "kv_cache_dtype": "fp8_ds_mla",
+        "block_size": DSV4_BLOCK_SIZE,
+        "max_model_len": 262144 + 4 * DSV4_BLOCK_SIZE,
+        "max_num_batched_tokens": 4096,
+        "max_num_seqs": 16,
+        "enable_chunked_prefill": True,
+        "gpu_memory_utilization": 0.95,
+        "distributed_executor_backend": "mp",
+        "compilation_config": {"cudagraph_capture_sizes": [1, 16]},
+    }
+
+
+def _run_dsv4_passkeys(
+    runner: VllmRunner,
+    case_specs: tuple[tuple[int, int], ...],
+    max_tokens: int,
+) -> tuple[list[int], list[int]]:
+    tokenizer = runner.llm.get_tokenizer()
+
+    def encode(text: str) -> list[int]:
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    passkeys = [f" {letter}" for letter in "ABCDEFGHIJKLM"[: len(case_specs)]]
+    passkey_tokens = [encode(passkey) for passkey in passkeys]
+    assert all(len(tokens) == 1 for tokens in passkey_tokens)
+    passkey_ids = [tokens[0] for tokens in passkey_tokens]
+
+    header = encode("Remember the requested letter.\n")
+    filler = encode(" filler")
+    assert len(filler) == 1
+    query = encode("\nWhich letter?\nAnswer:")
+
+    prompts = []
+    for passkey, (context_len, position) in zip(passkeys, case_specs, strict=True):
+        marker = encode(f"\nRemember{passkey}.\n")
+        assert len(header) <= position <= context_len - len(marker) - len(query)
+        prompt = [filler[0]] * context_len
+        prompt[: len(header)] = header
+        prompt[position : position + len(marker)] = marker
+        prompt[-len(query) :] = query
+        prompts.append(TokensPrompt(prompt_token_ids=prompt))
+
+    outputs = runner.llm.generate(
+        prompts,
+        sampling_params=SamplingParams(
+            temperature=0,
+            max_tokens=max_tokens,
+            ignore_eos=True,
+            allowed_token_ids=passkey_ids,
+        ),
+    )
+    first_token_ids = []
+    for output in outputs:
+        token_ids = output.outputs[0].token_ids
+        assert len(token_ids) == max_tokens
+        first_token_ids.append(token_ids[0])
+    return passkey_ids, first_token_ids
+
+
+def _assert_dsv4_passkeys(
+    mode: str,
+    case_specs: tuple[tuple[int, int], ...],
+    expected: list[int],
+    actual: list[int],
+) -> None:
+    for (context_len, position), expected_id, actual_id in zip(
+        case_specs, expected, actual, strict=True
+    ):
+        assert actual_id == expected_id, (
+            f"{mode} passkey mismatch at context_len={context_len}, "
+            f"position={position}: expected token {expected_id}, got {actual_id}"
+        )
+
+
+@pytest.mark.slow_test
+@pytest.mark.skipif(
+    DSV4_MODEL is None,
+    reason="Set VLLM_TEST_DSV4_MODEL to a local DeepSeek-V4-Flash checkpoint.",
+)
+@multi_gpu_test(num_gpus=4)
+def test_deepseek_v4_dcp_end_to_end() -> None:
+    assert DSV4_MODEL is not None
+    reference: dict[str, list[int]] = {}
+
+    for dcp_size in (1, 2, 4):
+        with VllmRunner(DSV4_MODEL, **_dsv4_runner_kwargs(dcp_size)) as runner:
+            expected, actual = _run_dsv4_passkeys(
+                runner,
+                DSV4_SHORT_PASSKEY_CASES,
+                max_tokens=DSV4_DECODE_STEPS,
+            )
+            mode = "tp4" if dcp_size == 1 else f"tp4_dcp{dcp_size}"
+            if dcp_size == 1:
+                _assert_dsv4_passkeys(mode, DSV4_SHORT_PASSKEY_CASES, expected, actual)
+                reference["short"] = actual
+            else:
+                _assert_dsv4_passkeys(
+                    mode, DSV4_SHORT_PASSKEY_CASES, reference["short"], actual
+                )
+
+            if dcp_size == 2:
+                continue
+
+            expected, actual = _run_dsv4_passkeys(
+                runner,
+                DSV4_LONG_PASSKEY_CASES,
+                max_tokens=1,
+            )
+            if dcp_size == 1:
+                _assert_dsv4_passkeys(mode, DSV4_LONG_PASSKEY_CASES, expected, actual)
+                reference["long"] = actual
+            else:
+                _assert_dsv4_passkeys(
+                    mode, DSV4_LONG_PASSKEY_CASES, reference["long"], actual
+                )

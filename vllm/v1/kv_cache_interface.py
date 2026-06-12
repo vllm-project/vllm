@@ -98,7 +98,7 @@ class KVCacheSpec:
     A base class for specifying the KV cache format of one layer.
     """
 
-    # number of tokens in a block
+    # Number of tokens in one rank-local physical block.
     block_size: int
 
     @property
@@ -114,6 +114,14 @@ class KVCacheSpec:
     @property
     def storage_block_size(self) -> int:
         return self.block_size
+
+    def logical_block_size(
+        self,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> int:
+        """Global token span represented by one rank-local physical block."""
+        return self.block_size * dcp_world_size * pcp_world_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -163,6 +171,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    supports_context_parallel: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -274,6 +283,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            supports_context_parallel=specs[0].supports_context_parallel,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -409,6 +419,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            supports_context_parallel=all(
+                spec.supports_context_parallel for spec in specs
+            ),
         )
 
 
@@ -562,6 +575,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             * get_dtype_size(self.dtype)
         )
 
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        assert vllm_config.parallel_config.prefill_context_parallel_size == 1, (
+            "PCP not support sliding window MLA."
+        )
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=max_model_len,
+        )
+        return max_blocks * self.page_size_bytes
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
@@ -592,6 +617,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            supports_context_parallel=all(
+                spec.supports_context_parallel for spec in specs
+            ),
         )
 
     def is_uniform_with_collection(
