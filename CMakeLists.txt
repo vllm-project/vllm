@@ -20,6 +20,14 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_HIP_STANDARD 20)
 set(CMAKE_HIP_STANDARD_REQUIRED ON)
 
+# PyTorch headers require C++20; GCC < 11.3 has incomplete C++20 support.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "11.3")
+  message(FATAL_ERROR
+    "GCC >= 11.3 is required to build vLLM (found ${CMAKE_CXX_COMPILER_VERSION}). "
+    "PyTorch's C++20 headers require a compiler with full C++20 support. "
+    "See: https://github.com/pytorch/pytorch/pull/167929")
+endif()
+
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
@@ -114,20 +122,23 @@ endif()
 # CPU builds define the target before the early return)
 # This extension requires SABI 3.11 since it relies on Py_buffer support. Loading
 # failure is handled gracefully on vLLM side for lower Python versions.
+# Skip the target entirely on Python < 3.11 so the build doesn't break.
 #
-set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
-set(SPINLOOP_COMPILE_FLAGS "")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
+if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
+  set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
+  set(SPINLOOP_COMPILE_FLAGS "")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
+  endif()
+  define_extension_target(
+    spinloop
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+    COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
+    USE_SABI 3.11
+    WITH_SOABI)
 endif()
-define_extension_target(
-  spinloop
-  DESTINATION vllm
-  LANGUAGE CXX
-  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
-  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
-  USE_SABI 3.11
-  WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.

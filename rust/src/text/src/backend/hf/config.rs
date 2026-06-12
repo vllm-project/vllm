@@ -92,6 +92,7 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     max_position_embeddings: Option<u32>,
+    vocab_size: Option<u32>,
     num_attention_heads: Option<u32>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
@@ -177,6 +178,13 @@ impl ModelConfig {
     /// `text_config` may provide the value.
     pub fn model_type(&self) -> Option<&str> {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
+    }
+
+    /// Return the effective model vocabulary size, following the same simplified
+    /// text-config selection as `model_type`: the top-level config wins,
+    /// otherwise a single nested `text_config` may provide it.
+    pub fn vocab_size(&self) -> Option<u32> {
+        self.vocab_size.or_else(|| self.text_config.as_deref()?.vocab_size())
     }
 
     /// Reject partially nested `text_config` payloads that are unlikely to be
