@@ -150,3 +150,31 @@ fn factory_new_resolves_default_patterns() {
         Some(names::MINIMAX_M2)
     );
 }
+
+#[test]
+fn factory_uses_native_deepseek_v4_by_default() {
+    let factory = ToolParserFactory::new_with_options(false);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let error = parser.parse_complete(DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap_err();
+
+    assert!(error.to_string().contains("incomplete DeepSeek DSML tool call"));
+}
+
+#[test]
+fn factory_uses_dynamo_deepseek_v4_when_enabled() {
+    let factory = ToolParserFactory::new_with_options(true);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let result = parser.parse_complete(DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap();
+
+    assert_eq!(result.normal_text, "");
+    assert_eq!(result.calls.len(), 1);
+    assert_eq!(result.calls[0].name.as_deref(), Some("get_datetime"));
+    assert_eq!(result.calls[0].arguments, r#"{"timezone":"Asia/Shanghai"}"#);
+}
+
+const DEEPSEEK_V4_MISSING_OUTER_CLOSE: &str = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_datetime\">\n\
+<｜DSML｜parameter name=\"timezone\" string=\"true\">Asia/Shanghai</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
