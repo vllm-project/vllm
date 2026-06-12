@@ -756,7 +756,7 @@ def test_packed_qkv_dora_scale_stacked(
     max_loras = 2
     lora_config = LoRAConfig(
         max_loras=max_loras,
-        max_lora_rank=4,
+        max_lora_rank=8,
         lora_dtype=dtype,
     )
     base_weight, lora_a, lora_b, dora_magnitude = _create_test_qkv_dora_tensors(
@@ -856,7 +856,7 @@ def test_packed_qkv_dora_forward(
     max_loras = 3
     lora_config = LoRAConfig(
         max_loras=max_loras,
-        max_lora_rank=4,
+        max_lora_rank=8,
         lora_dtype=dtype,
     )
     punica_wrapper = get_punica_wrapper(16, 4, device, lora_config=lora_config)

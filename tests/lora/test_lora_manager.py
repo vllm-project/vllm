@@ -90,6 +90,24 @@ def create_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
+def create_dora(
+    lora_id: int, model: nn.Module, sub_modules: list[str], device: torch.device
+) -> LoRAModel:
+    loras: dict[str, LoRALayerWeights] = {}
+    for name in sub_modules:
+        w = model.get_submodule(name).weight
+        loras[name] = LoRALayerWeights(
+            name,
+            8,
+            16,
+            torch.rand([8, w.shape[1]], device=device),
+            torch.rand([w.shape[0], 8], device=device),
+            lora_magnitude_vector=torch.ones(w.shape[0], device=device),
+            use_dora=True,
+        )
+    return LoRAModel(lora_id, 8, loras)
+
+
 def create_packed_lora(
     lora_id: int,
     model: nn.Module,
@@ -429,6 +447,40 @@ def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device)
         "lm_head",
         "output",
     ]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_model_manager_deactivate_resets_dora_slot(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    model = dummy_model
+    model_lora = create_dora(1, model, ["dense1"], device=device)
+    manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+    )
+    lora_layer = manager.model.get_submodule("dense1")
+    assert isinstance(lora_layer, ColumnParallelLinearWithLoRA)
+
+    assert manager.add_adapter(model_lora)
+    assert manager.activate_adapter(1)
+    assert lora_layer.dora_enabled_stacked[0]
+    assert lora_layer._dora_active_slots == {0}
+
+    assert manager.remove_adapter(1)
+    assert manager.lora_index_to_id[0] is None
+    assert not lora_layer.dora_enabled_stacked[0]
+    assert not lora_layer._dora_active_slots
+    torch.testing.assert_close(
+        lora_layer.dora_scale_stacked[0],
+        torch.ones_like(lora_layer.dora_scale_stacked[0]),
+    )
 
 
 @pytest.mark.parametrize("device", DEVICES)

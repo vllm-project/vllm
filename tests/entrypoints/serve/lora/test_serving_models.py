@@ -114,6 +114,42 @@ async def test_unload_lora_adapter_success():
     response = await serving_models.unload_lora_adapter(request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
+    serving_models.engine_client.remove_lora.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_adapter_removes_frontend_entry_if_backend_evicted():
+    serving_models = await _async_serving_models_init()
+    request = LoadLoRAAdapterRequest(
+        lora_name="adapter1", lora_path="/path/to/adapter1"
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    serving_models.engine_client.remove_lora.return_value = False
+
+    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(request)
+    assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    assert len(serving_models.lora_requests) == 0
+    serving_models.engine_client.remove_lora.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_unload_lora_adapter_keeps_frontend_entry_on_backend_error():
+    serving_models = await _async_serving_models_init()
+    request = LoadLoRAAdapterRequest(
+        lora_name="adapter1", lora_path="/path/to/adapter1"
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    serving_models.engine_client.remove_lora.side_effect = RuntimeError("boom")
+
+    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InternalServerError"
+    assert len(serving_models.lora_requests) == 1
+    serving_models.engine_client.remove_lora.assert_called_once_with(1)
 
 
 @pytest.mark.asyncio

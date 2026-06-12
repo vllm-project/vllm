@@ -334,12 +334,17 @@ class LoRAModelManager:
             logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
+    def _reset_lora_slot(self, index: int) -> None:
+        for module in self.modules.values():
+            module.reset_lora(index)
+
     def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
         except ValueError:
-            pass
+            return
+        self._reset_lora_slot(index)
 
     def _add_adapter(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
@@ -379,9 +384,15 @@ class LoRAModelManager:
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
+        active_indices = [
+            index for index, lora_id in enumerate(self.lora_index_to_id)
+            if lora_id is not None
+        ]
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        for index in active_indices:
+            self._reset_lora_slot(index)
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:
