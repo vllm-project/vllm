@@ -24,9 +24,9 @@ logger = init_logger(__name__)
 
 
 def generate_mla_decode_kv_split_inputs() -> dict[CaseKey, tuple[Any, ...]]:
-    batch_sizes = [4]
+    batch_sizes = [1, 4, 8, 16, 128, 256]
     seq_lens = [512]
-    head_counts = [16]
+    head_counts = [16, 32]
     HEADS_PER_BLOCK = 4
     NUM_KV_SPLITS = 4
     PAGE_SIZE = 16
@@ -52,6 +52,7 @@ def generate_mla_decode_kv_split_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 latent_kv = torch.randn(
                     num_pages,
                     PAGE_SIZE,
+                    1,
                     latent_dim + rope_dim,
                     device="cuda",
                     dtype=torch.bfloat16,
@@ -111,7 +112,7 @@ def generate_mla_decode_kv_split_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                     rope_dim,
                     logit_cap,
                 )
-    print("GENERATED")
+    # print("GENERATED")
 
     return inputs
 
@@ -136,7 +137,7 @@ def pick_mla_decode_kv_split_config(
     """
     if not config_keys:
         return None
-    print("PICKER")
+    # print("PICKER")
     q_absorbed = args[0]
     b_seq_len = args[5]
 
@@ -175,16 +176,6 @@ def pick_mla_decode_kv_split_config(
     _pick_cache[cache_key] = result
     return result
 
-    # we want each thread block to handle a token's single head with a part of kv cache
-    """
-    the ides is to load a query's head per thread block
-    ie kernel launch grid = (batch, head, kv_split)
-    each thread block computes partial attention over a query's single head
-    over a piece of latent kv cache
-    the query is loaded once in thread block,
-    then latent vector will be loaded in a loop.
-    """
-
 
 def decode_grouped_att_m_fwd_baseline(
     q_absorbed: torch.Tensor,
@@ -205,17 +196,15 @@ def decode_grouped_att_m_fwd_baseline(
 
     arguments to the internal Triton configuration function.
     """
+    # print("BASELINE")
     sm_scale = float(sm_scale.item())
 
     # Handle logit_cap fallback cleanly
     logit_cap = float(logit_cap) if logit_cap is not None else 0.0
 
-    attn_out.zero_()
-
-
-"""
     # Invoke your complete function with all checks and the kernel launch
     from vllm.v1.attention.ops.triton_decode_attention import _decode_grouped_att_m_fwd
+
     _decode_grouped_att_m_fwd(
         q=q_absorbed,
         k_buffer=latent_kv,
@@ -229,8 +218,8 @@ def decode_grouped_att_m_fwd_baseline(
         logit_cap=logit_cap,
         k_scale=kv_dequant,
         v_scale=kv_dequant,
-        is_mla=True
-    ) """
+        is_mla=True,
+    )
 
 
 @register_kernel(
@@ -238,8 +227,8 @@ def decode_grouped_att_m_fwd_baseline(
     input_generator=generate_mla_decode_kv_split_inputs,
     helion_settings=helion.Settings(
         autotune_baseline_fn=decode_grouped_att_m_fwd_baseline,
-        print_output_code=True,
-        print_repro=True,
+        # print_output_code=True,
+        # print_repro=True,
     ),
 )
 def mla_decode_kv_split(
@@ -254,11 +243,11 @@ def mla_decode_kv_split(
     NUM_KV_SPLITS: int,  # no. of splits of kv_cache; determines -1 dim of launch grid
     PAGE_SIZE: int,  # page size: 16
     latent_dim: int,  # 512
-    rope_dim: hl.constexpr,  # 64
-    logit_cap: hl.constexpr = None,
-):
+    rope_dim: int,  # 64
+    logit_cap: float | None = None,
+) -> None:
     assert q_absorbed.ndim == 3
-    assert latent_kv.ndim == 3 and latent_kv.dtype == torch.float8_e4m3fn
+    assert latent_kv.ndim == 4 and latent_kv.dtype == torch.float8_e4m3fn
     batch = q_absorbed.shape[0]
     heads = q_absorbed.shape[1]
     heads_group = cdiv(heads, HEADS_PER_BLOCK)
@@ -268,7 +257,7 @@ def mla_decode_kv_split(
     HEADS_PER_BLOCK = hl.specialize(HEADS_PER_BLOCK)
 
     num_pages = latent_kv.shape[0]
-    latent_kv = latent_kv.reshape(num_pages * PAGE_SIZE, -1)
+    latent_kv = latent_kv.reshape(num_pages * PAGE_SIZE, heads, -1)
 
     grid = (batch, heads_group, NUM_KV_SPLITS)
 
@@ -307,7 +296,7 @@ def mla_decode_kv_split(
 
         if split_kv_end > split_kv_start:
             for kv_block in hl.tile(split_kv_start, split_kv_end, block_size=None):
-                offs_n = kv_block + hl.arange(0, kv_block.block_size)
+                offs_n = kv_block.begin + hl.arange(0, kv_block.block_size)
                 log_page_offs = offs_n // PAGE_SIZE
 
                 kv_page_number = hl.load(
@@ -322,14 +311,14 @@ def mla_decode_kv_split(
                 if rope_dim > 0:
                     k_latent = hl.load(
                         latent_kv,
-                        [kv_loc, hl.arange(latent_dim)],
+                        [kv_loc, 0, hl.arange(latent_dim)],
                         extra_mask=offs_n[:, None] < split_kv_end,
                     )
                     k_latent = (k_latent.to(torch.float32) * dequant).to(q_latent.dtype)
                     qk = hl.dot(q_latent, torch.transpose(k_latent, 0, 1))
                     k_rope = hl.load(
                         latent_kv,
-                        [kv_loc, hl.arange(latent_dim, latent_dim + rope_dim)],
+                        [kv_loc, 0, hl.arange(latent_dim, latent_dim + rope_dim)],
                         extra_mask=offs_n[:, None] < split_kv_end,
                     )
                     k_rope = (k_rope.to(torch.float32) * dequant).to(q_rope.dtype)
@@ -337,7 +326,7 @@ def mla_decode_kv_split(
                 else:
                     k_latent = hl.load(
                         latent_kv,
-                        [kv_loc, hl.arange(latent_dim)],
+                        [kv_loc, 0, hl.arange(latent_dim)],
                         extra_mask=offs_n[:, None] < split_kv_end,
                     )
                     k_latent = (k_latent.to(torch.float32) * dequant).to(q_latent.dtype)
@@ -370,14 +359,12 @@ def mla_decode_kv_split(
         hl.store(
             attn_out,
             [seq.begin, q_heads, split.begin, hl.arange(latent_dim)],
-            # acc / e_sum[:, None],
-            0.0,
+            acc / e_sum[:, None],
             extra_mask=mask_h[:, None],
         )
         hl.store(
             attn_out,
             [seq.begin, q_heads, split.begin, latent_dim],
-            # e_max + torch.log(e_sum),
-            0.0,
+            e_max + torch.log(e_sum),
             extra_mask=mask_h,
         )
