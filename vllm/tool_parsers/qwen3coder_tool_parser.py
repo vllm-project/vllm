@@ -120,6 +120,34 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
 
+    def _close_current_streaming_function(self, tool_text: str) -> str:
+        self.json_closed = True
+
+        func_start = tool_text.find(self.tool_call_prefix) + len(self.tool_call_prefix)
+        func_content_end = tool_text.find(self.function_end_token, func_start)
+        if func_content_end != -1:
+            func_content = tool_text[func_start:func_content_end]
+            try:
+                parsed_tool = self._parse_xml_function_call(
+                    func_content,
+                )
+                if parsed_tool and self.current_tool_index < len(
+                    self.prev_tool_call_arr
+                ):
+                    self.prev_tool_call_arr[self.current_tool_index]["arguments"] = (
+                        parsed_tool.function.arguments
+                    )
+            except Exception:
+                logger.debug(
+                    "Failed to parse tool call during streaming: %s",
+                    tool_text,
+                    exc_info=True,
+                )
+
+        self.in_function = False
+        self.accumulated_params = {}
+        return "}"
+
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
@@ -513,6 +541,8 @@ class Qwen3CoderToolParser(ToolParser):
 
             if json_fragments:
                 combined = "".join(json_fragments)
+                if not self.json_closed and self.function_end_token in tool_text:
+                    combined += self._close_current_streaming_function(tool_text)
 
                 if self.current_tool_index < len(self.streamed_args_for_tool):
                     self.streamed_args_for_tool[self.current_tool_index] += combined
@@ -539,33 +569,10 @@ class Qwen3CoderToolParser(ToolParser):
             # "}" and set in_function=False before the parameter loop
             # ever ran, causing the parameter to be silently dropped.
             if not self.json_closed and self.function_end_token in tool_text:
-                self.json_closed = True
-
-                func_start = tool_text.find(self.tool_call_prefix) + len(
-                    self.tool_call_prefix
-                )
-                func_content_end = tool_text.find(self.function_end_token, func_start)
-                if func_content_end != -1:
-                    func_content = tool_text[func_start:func_content_end]
-                    try:
-                        parsed_tool = self._parse_xml_function_call(
-                            func_content,
-                        )
-                        if parsed_tool and self.current_tool_index < len(
-                            self.prev_tool_call_arr
-                        ):
-                            self.prev_tool_call_arr[self.current_tool_index][
-                                "arguments"
-                            ] = parsed_tool.function.arguments
-                    except Exception:
-                        logger.debug(
-                            "Failed to parse tool call during streaming: %s",
-                            tool_text,
-                            exc_info=True,
-                        )
+                close_delta = self._close_current_streaming_function(tool_text)
 
                 if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[self.current_tool_index] += "}"
+                    self.streamed_args_for_tool[self.current_tool_index] += close_delta
                 else:
                     logger.warning(
                         "streamed_args_for_tool out of sync: index=%d len=%d",
@@ -577,14 +584,10 @@ class Qwen3CoderToolParser(ToolParser):
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
+                            function=DeltaFunctionCall(arguments=close_delta),
                         )
                     ]
                 )
-
-                self.in_function = False
-                self.json_closed = True
-                self.accumulated_params = {}
 
                 return result
 
