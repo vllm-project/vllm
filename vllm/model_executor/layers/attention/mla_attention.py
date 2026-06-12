@@ -1348,21 +1348,19 @@ def backend_supports_prefill_query_quantization() -> bool:
     - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
+    # FP8 prefill query quantization requires GB200 (device capability 100)
+    # for the necessary FP8 kernels at the moment.
+    if not current_platform.is_device_capability_family(100):
+        return False
+
     from vllm.config import get_current_vllm_config
     from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
     vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
 
-    # A backend that mandates FP8 Q always supports it (e.g. AITER ASM on
-    # gfx950, where the kernel rejects non-FP8 inputs).
     if getattr(backend_cls, "requires_fp8_query_quantization", False):
         return True
-
-    # FP8 prefill query quantization for the opt-in path currently requires
-    # GB200 (device capability 100) for the necessary FP8 kernels.
-    if not current_platform.is_device_capability_family(100):
-        return False
 
     return backend_cls.get_name() in (
         "FLASHINFER",
