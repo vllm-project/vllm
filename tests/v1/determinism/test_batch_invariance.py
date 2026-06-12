@@ -11,6 +11,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    is_device_capability_below_90,
     skip_unsupported,
 )
 
@@ -928,3 +929,149 @@ def LLM_with_max_seqs(
         # Enable for MOE models
         # enable_expert_parallel=True,
     )
+
+
+@skip_unsupported
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_prefix_cache_hit_preserves_batch_invariance(backend):
+    """
+    Same full prompt should produce identical output/logprobs whether:
+      1. it is run alone with no prefix-cache hit, or
+      2. its long prefix is already cached and it is run inside a larger batch.
+
+    This targets the case where prefix caching changes the effective prefill
+    length / block table / batch metadata, while the user-visible prompt is
+    identical.
+    """
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+    max_batch_size = int(os.getenv("VLLM_PREFIX_CACHE_BATCH_SIZE", "32"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+
+    # Make the shared prefix long enough to contain many full KV blocks.
+    prefix_len = int(os.getenv("VLLM_PREFIX_CACHE_PREFIX_LEN", "2048"))
+    suffix_len = int(os.getenv("VLLM_PREFIX_CACHE_SUFFIX_LEN", "512"))
+
+    common_prefix = _random_prompt(prefix_len, prefix_len + 64)
+    suffix = _random_prompt(suffix_len, suffix_len + 64)
+    needle_prompt = common_prefix + "\n\nQuestion:\n" + suffix
+
+    sp = SamplingParams(
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=16,
+        seed=12345,
+        logprobs=5,
+    )
+
+    attention_config = {"backend": backend}
+
+    llm = None
+    try:
+        llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=tp_size,
+            max_num_seqs=max_batch_size,
+            max_model_len=max_model_len,
+            dtype="auto",
+            gpu_memory_utilization=gpu_mem_util,
+            enable_prefix_caching=True,
+            enforce_eager=is_device_capability_below_90(),
+            attention_config=attention_config,
+        )
+
+        # ------------------------------------------------------------------
+        # Case A: full prompt, cache miss baseline.
+        # Since the cache is empty, this should prefill the whole needle prompt.
+        # ------------------------------------------------------------------
+        baseline_out = llm.generate([needle_prompt], sp, use_tqdm=False)
+        assert len(baseline_out) == 1
+
+        baseline_text = baseline_out[0].outputs[0].text
+        baseline_logprobs, baseline_tokens = _extract_step_logprobs(baseline_out[0])
+        if baseline_logprobs is None:
+            pytest.skip("Logprobs are not available on RequestOutput.")
+
+        # ------------------------------------------------------------------
+        # Warm the cache with the exact prefix.
+        # Important: prefix cache can only reuse a prefix starting at token 0.
+        # ------------------------------------------------------------------
+        warm_sp = SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1,
+            seed=1234,
+        )
+        llm.generate([common_prefix], warm_sp, use_tqdm=False)
+
+        # ------------------------------------------------------------------
+        # Case B: same full prompt, but now common_prefix should cache-hit.
+        # Mix it into a larger ragged batch to stress batch metadata / shapes.
+        # ------------------------------------------------------------------
+        prompts = []
+        needle_pos = random.randint(0, max_batch_size - 1)
+
+        for i in range(max_batch_size):
+            if i == needle_pos:
+                prompts.append(needle_prompt)
+            else:
+                # Ragged fillers make scheduling/batch shapes more different.
+                lo, hi = random.choice(
+                    [
+                        (16, 64),
+                        (256, 512),
+                        (1024, 2048),
+                        (2048, 4096),
+                    ]
+                )
+                prompts.append(_random_prompt(lo, hi))
+
+        cached_outs = llm.generate(prompts, sp, use_tqdm=False)
+        cached_needle = cached_outs[needle_pos]
+
+        assert cached_needle.prompt == needle_prompt
+        cached_text = cached_needle.outputs[0].text
+        cached_logprobs, cached_tokens = _extract_step_logprobs(cached_needle)
+        if cached_logprobs is None:
+            pytest.skip("Logprobs are not available on RequestOutput.")
+
+        # First compare sampled tokens/text.
+        assert cached_text == baseline_text, (
+            "Prefix-cache hit changed generated text for the same prompt.\n"
+            f"baseline_text={baseline_text!r}\n"
+            f"cached_text={cached_text!r}\n"
+        )
+
+        assert cached_tokens == baseline_tokens, (
+            "Prefix-cache hit changed generated token IDs for the same prompt.\n"
+            f"baseline_tokens={baseline_tokens}\n"
+            f"cached_tokens={cached_tokens}\n"
+        )
+
+        # Then compare logprobs bitwise.
+        assert len(cached_logprobs) == len(baseline_logprobs), (
+            "Different number of logprob steps.\n"
+            f"baseline={len(baseline_logprobs)}, "
+            f"cached={len(cached_logprobs)}"
+        )
+
+        for step, (a, b) in enumerate(zip(baseline_logprobs, cached_logprobs)):
+            if not torch.equal(a, b):
+                max_diff = torch.abs(a - b).max().item()
+                pytest.fail(
+                    "Prefix-cache hit violated batch invariance at "
+                    f"decode step {step}: max_diff={max_diff:.6e}\n"
+                    f"baseline_tokens={baseline_tokens}\n"
+                    f"cached_tokens={cached_tokens}\n"
+                    f"baseline_logprob={a.tolist()}\n"
+                    f"cached_logprob={b.tolist()}\n"
+                )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()
