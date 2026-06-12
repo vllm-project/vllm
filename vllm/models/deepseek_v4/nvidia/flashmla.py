@@ -20,7 +20,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -65,70 +64,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 "(FP8 decode kernel requires h_q in {64, 128})."
             )
         return 64 if num_heads <= 64 else 128
-
-    def _plan_prefill_chunks(
-        self,
-        seq_lens_cpu: torch.Tensor,
-        query_lens_cpu: torch.Tensor,
-        swa_only: bool,
-    ) -> list[tuple[int, int, int, int]]:
-        num_prefills = seq_lens_cpu.shape[0]
-        if num_prefills == 0:
-            return []
-
-        # we requires query_len <= max_num_batched_tokens
-        # based on gather_len = query_len + min(prefix_len, window_size - 1)
-        # so gather_len <= max_num_batched_tokens + window_size - 1
-        # here we calculate the worst budget of workspace area using max model len
-        max_workspace_area = self.PREFILL_CHUNK_SIZE * (
-            (0 if swa_only else cdiv(self.max_model_len, self.compress_ratio))
-            + self.window_size
-            + self.max_num_batched_tokens
-        )
-        prefix_lens_cpu = seq_lens_cpu - query_lens_cpu
-        gather_lens_cpu = query_lens_cpu + torch.clamp(
-            prefix_lens_cpu, min=0, max=self.window_size - 1
-        )
-        compressed_lens_cpu = (
-            torch.zeros_like(seq_lens_cpu)
-            if swa_only
-            else torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
-        )
-
-        chunks: list[tuple[int, int, int, int]] = []
-        chunk_start = 0
-        # plan chunks for each prefill, we will try to add as much requests as possible
-        while chunk_start < num_prefills:
-            chunk_max_compressed = int(compressed_lens_cpu[chunk_start].item())
-            chunk_max_gather = int(gather_lens_cpu[chunk_start].item())
-            chunk_end = chunk_start + 1
-
-            while chunk_end < num_prefills:
-                candidate_max_compressed = max(
-                    chunk_max_compressed, int(compressed_lens_cpu[chunk_end].item())
-                )
-                candidate_max_gather = max(
-                    chunk_max_gather, int(gather_lens_cpu[chunk_end].item())
-                )
-                candidate_width = candidate_max_compressed + candidate_max_gather
-                candidate_area = (chunk_end - chunk_start + 1) * candidate_width
-                if candidate_area > max_workspace_area:
-                    break
-                chunk_max_compressed = candidate_max_compressed
-                chunk_max_gather = candidate_max_gather
-                chunk_end += 1
-
-            chunks.append(
-                (
-                    chunk_start,
-                    chunk_end,
-                    chunk_max_compressed,
-                    chunk_max_compressed + chunk_max_gather,
-                )
-            )
-            chunk_start = chunk_end
-
-        return chunks
 
     def forward_mqa(
         self,
@@ -311,17 +246,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     ) -> None:
         swa_only = attn_metadata is None
 
-        num_prefills = swa_metadata.num_prefills
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         # Use pre-computed prefill metadata.
         seq_lens = swa_metadata.prefill_seq_lens
-        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
-        assert seq_lens_cpu is not None
         assert gather_lens is not None
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
@@ -330,10 +262,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
-        query_lens_cpu = (
-            query_start_loc_cpu[num_decodes + 1 : num_decodes + num_prefills + 1]
-            - query_start_loc_cpu[num_decodes : num_decodes + num_prefills]
-        ).to(dtype=torch.int32)
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -350,10 +278,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
-        chunk_plan = self._plan_prefill_chunks(
-            seq_lens_cpu=seq_lens_cpu,
-            query_lens_cpu=query_lens_cpu,
-            swa_only=swa_only,
+        chunk_plan = swa_metadata.get_prefill_chunk_plan(
+            compress_ratio=self.compress_ratio,
+            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
