@@ -2012,6 +2012,7 @@ class VllmConfig:
                 "eagle",
                 "eagle3",
                 "mtp",
+                "dflash",
                 "draft_model",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
