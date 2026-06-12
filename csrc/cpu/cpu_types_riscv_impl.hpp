@@ -163,6 +163,10 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   fixed_bf16x16_t reg;
 
+  explicit BF16Vec16()
+      : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_256, _bf16, LMUL_256)(
+            RVVI(__riscv_vmv_v_x_u16, LMUL_256)(0, VEC_ELEM_NUM))) {}
+
   explicit BF16Vec16(const void* ptr)
       : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_256, _bf16,
                   LMUL_256)(RVVI(__riscv_vle16_v_u16, LMUL_256)(
@@ -962,6 +966,11 @@ inline void fma(FP32Vec16& acc, const FP32Vec16& a, const FP32Vec16& b) {
 }
 
 #ifdef __riscv_zvfbfwma
+inline void fma(FP32Vec16& acc, BF16Vec16& a, BF16Vec16& b) {
+  acc.reg = RVVI(__riscv_vfwmaccbf16_vv_f32, LMUL_512)(acc.reg, a.reg, b.reg,
+                                                       FP32Vec16::VEC_ELEM_NUM);
+}
+
 inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
   fixed_bf16x16_t a_lo =
       RVVI4(__riscv_vlmul_trunc_v_bf16, LMUL_512, _bf16, LMUL_256)(a.reg);
