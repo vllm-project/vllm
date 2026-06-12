@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
+use super::utils::{parse_buffered_event, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -213,12 +213,12 @@ fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: (ws1, literal("name=")),
         attr_value,
         _: literal(">"),
-        take_until(0.., PARAMETER_END).map(xml_unescape),
+        take_until(0.., PARAMETER_END),
         _: literal(PARAMETER_END),
     )
     .parse_next(input)?;
 
-    Ok((name.trim().to_string(), value.into_owned()))
+    Ok((name.trim().to_string(), value.to_string()))
 }
 
 /// Parse a quoted or unquoted XML attribute value.
@@ -364,7 +364,24 @@ mod tests {
     }
 
     #[test]
-    fn minimax_m2_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+    fn minimax_m2_parse_complete_preserves_raw_entities_in_parameter_value() {
+        // The MiniMax-M2 chat template renders string parameter values RAW (no
+        // XML escaping), so a value the user wants to be the literal text
+        // "Tom &amp; Jerry &lt;3" is emitted verbatim. The parser must preserve
+        // it; xml_unescape currently decodes it, corrupting the bytes.
+        let mut parser = MinimaxM2ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(&build_tool_block(&[(
+                "get_weather",
+                vec![("city", "Tom &amp; Jerry &lt;3")],
+            )]))
+            .unwrap();
+        let args: Value = serde_json::from_str(&output.calls[0].arguments).unwrap();
+        assert_eq!(args["city"], json!("Tom &amp; Jerry &lt;3"));
+    }
+
+    #[test]
+    fn minimax_m2_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = MinimaxM2ToolParser::new(&test_tools());
         let output = parser
             .parse_complete(&build_tool_block(&[(
@@ -382,7 +399,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "city": "Seattle </parameter></invoke></minimax:tool_call>",
+                "city": "Seattle &lt;/parameter&gt;&lt;/invoke&gt;&lt;/minimax:tool_call&gt;",
                 "days": 5,
             })
         );

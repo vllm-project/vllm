@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::serve::ListenerExt as _;
-pub use config::{Config, CoordinatorMode, HttpListenerMode};
+pub use config::{ApiServerOptions, Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -91,8 +91,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
-            .with_log_requests(config.enable_log_requests)
-            .with_request_id_headers(config.enable_request_id_headers)
+            .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
             .with_api_keys(config.api_keys.clone()),
     ))
