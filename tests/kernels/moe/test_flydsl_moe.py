@@ -5,7 +5,6 @@
 
 import pytest
 import torch
-from aiter.ops.shuffle import shuffle_weight
 
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -13,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     compressed_tensors_moe_w4a16_flydsl,
 )
 from vllm.platforms import current_platform
@@ -28,12 +27,14 @@ RoutingBuffers = tuple[
     int,  # blocks
 ]
 
+
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and on_gfx950()),
     reason="FlyDSL MoE requires HIP device and gfx950 arch",
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256,
-                                        512, 1024, 2048, 4096, 8192, 16384])
+@pytest.mark.parametrize(
+    "num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+)
 @pytest.mark.parametrize("inter_dim", [256, 512])
 def test_flydsl_moe(num_tokens: int, inter_dim: int):
     device = "cuda"

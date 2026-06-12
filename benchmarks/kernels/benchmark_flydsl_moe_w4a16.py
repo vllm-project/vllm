@@ -2,20 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import torch
 import json
 import os
 
-from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-    compressed_tensors_moe_w4a16_flydsl,
-)
+import torch
 from aiter.test_common import run_perftest
+
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+    compressed_tensors_moe_w4a16_flydsl,
+)
 from vllm.platforms import current_platform
 
 RoutingBuffers = tuple[
@@ -29,11 +30,28 @@ RoutingBuffers = tuple[
 
 MODEL_PARAMS_TO_TUNE = [
     # (num_experts, inter_dim, hidden_size, topk)
-    (384, 256, 7168, 8), # Kimi K2.5 TP=8
-    (384, 512, 7168, 8), # Kimi K2.5 TP=4
+    (384, 256, 7168, 8),  # Kimi K2.5 TP=8
+    (384, 512, 7168, 8),  # Kimi K2.5 TP=4
 ]
 
-NUM_TOKENS_TO_TUNE = [1, 2, 4, 8, 16, 24, 32, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+NUM_TOKENS_TO_TUNE = [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+]
 
 TILE_M_SEARCH_SPACE = [16, 32, 64, 128, 256]
 TILE_N_SEARCH_SPACE = [16, 32, 64, 128, 256]
@@ -53,10 +71,14 @@ for tile_m in TILE_M_SEARCH_SPACE:
                             "tile_n": tile_n,
                             "tile_k": tile_k,
                             "tile_n2": tile_n2,
-                            "tile_k2": tile_k2
-                        })
+                            "tile_k2": tile_k2,
+                        }
+                    )
 
-def tune_flydsl_moe_w4a16(device: str = "cuda", num_iters: int = 100, num_warmup: int = 10):
+
+def tune_flydsl_moe_w4a16(
+    device: str = "cuda", num_iters: int = 100, num_warmup: int = 10
+):
     packed_factor = 8
     w13_num_shards = 2
     params_dtype = torch.bfloat16
@@ -68,9 +90,11 @@ def tune_flydsl_moe_w4a16(device: str = "cuda", num_iters: int = 100, num_warmup
         inter_dim = model_params[1]
         hidden_size = model_params[2]
         topk = model_params[3]
-        print(f"\nTuning: num_experts={num_experts}, inter_dim={inter_dim}, " \
-              f"hidden_size={hidden_size}, topk={topk}...\n")
-        
+        print(
+            f"\nTuning: num_experts={num_experts}, inter_dim={inter_dim}, "
+            f"hidden_size={hidden_size}, topk={topk}...\n"
+        )
+
         w2_scales_size = inter_dim
         num_groups_w2 = w2_scales_size // group_size
         num_groups_w13 = hidden_size // group_size
@@ -158,10 +182,14 @@ def tune_flydsl_moe_w4a16(device: str = "cuda", num_iters: int = 100, num_warmup
         tuned_config = {}
 
         for num_tokens in NUM_TOKENS_TO_TUNE:
-            score = torch.rand((num_tokens, num_experts), device=device, dtype=torch.float32)
+            score = torch.rand(
+                (num_tokens, num_experts), device=device, dtype=torch.float32
+            )
             topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
             topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
-            x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16, device=device)
+            x = torch.randn(
+                (num_tokens, hidden_size), dtype=torch.bfloat16, device=device
+            )
             us_best = float("inf")
             for tile_config in TILE_CONFIGS:
                 try:
@@ -198,45 +226,52 @@ def tune_flydsl_moe_w4a16(device: str = "cuda", num_iters: int = 100, num_warmup
                         group_size=group_size,
                         doweight_stage1=False,
                         scale_is_bf16=True,
-                        config=tile_config
+                        config=tile_config,
                     )
-                    torch.cuda.synchronize()
-                except:
-                    torch.cuda.synchronize()
+                    torch.accelerator.synchronize()
+                except Exception:
+                    torch.accelerator.synchronize()
                     continue
                 else:
                     us = _us.item()
                     if us < us_best:
                         out_ref = fused_experts(
-                                    x,
-                                    w13_weight_packed,
-                                    w2_weight_packed,
-                                    topk_weights=topk_weights,
-                                    topk_ids=topk_ids,
-                                    activation=MoEActivation.SILU,
-                                    apply_router_weight_on_input=False,
-                                    global_num_experts=num_experts,
-                                    expert_map=None,
-                                    quant_config=moe_quant_config,
-                                )
+                            x,
+                            w13_weight_packed,
+                            w2_weight_packed,
+                            topk_weights=topk_weights,
+                            topk_ids=topk_ids,
+                            activation=MoEActivation.SILU,
+                            apply_router_weight_on_input=False,
+                            global_num_experts=num_experts,
+                            expert_map=None,
+                            quant_config=moe_quant_config,
+                        )
                         try:
                             assert torch.allclose(out, out_ref, atol=0.5, rtol=0.1)
-                        except:
+                        except Exception:
                             continue
                         else:
-                            print(f"For [num_tokens={num_tokens}, num_experts={num_experts}, " \
-                                  f"inter_dim={inter_dim}] found new best " \
-                                  f"config={tile_config}, us={us:0.3f}")
+                            print(
+                                f"For [num_tokens={num_tokens}, num_experts={num_experts}, "  # noqa: E501
+                                f"inter_dim={inter_dim}] found new best "  # noqa: E501
+                                f"config={tile_config}, us={us:0.3f}"
+                            )
                             us_best = us
                             tuned_config[str(num_tokens)] = tile_config
             device_name = current_platform.get_device_name().replace(" ", "_")
-            tuned_config_file_name = f"E={num_experts},N={inter_dim},device_name={device_name}," \
-                                     f"dtype=int4_w4a16,backend=flydsl.json"
+            tuned_config_file_name = (
+                f"E={num_experts},N={inter_dim},device_name={device_name},"
+                f"dtype=int4_w4a16,backend=flydsl.json"
+            )
             tuner_dir_path = os.path.dirname(os.path.realpath(__file__))
             store_path = os.path.join(tuner_dir_path, tuned_config_file_name)
             with open(store_path, "w") as f:
                 json.dump(tuned_config, f, indent=4)
-            print(f"\nTuned config for num_tokens={num_tokens} was stored at {store_path}\n")
+            print(
+                f"\nTuned config for num_tokens={num_tokens} was stored at {store_path}\n"  # noqa: E501
+            )
+
 
 if __name__ == "__main__":
     tune_flydsl_moe_w4a16(device="cuda")
