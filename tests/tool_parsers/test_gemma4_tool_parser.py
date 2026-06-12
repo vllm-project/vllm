@@ -784,6 +784,97 @@ class TestStreamingExtraction:
         assert by_index[1]["name"] == "get_time"
         assert json.loads(by_index[1]["arguments"]) == {"timezone": "GMT"}
 
+    def test_streaming_mtp_multi_boundary_delta(self, parser, mock_request):
+        """#41967: one MTP-sized delta ends call 0 and starts call 1.
+
+        Speculative decoding can pack the end of the first tool call and the
+        start of the second into a single streaming delta. Emitting the second
+        call's header in a later delta is allowed, but the final reconstructed
+        tool calls must be complete: both indices present, each name sent once,
+        arguments correct, and nothing dropped, duplicated, or corrupted.
+        """
+        chunks = [
+            "<|tool_call>call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<tool_call|><|tool_call>call:getStationInfo{',
+            'location:<|"|>Piacenza<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        by_index = self._collect_tool_calls_by_index(results)
+
+        assert set(by_index) == {0, 1}
+        assert by_index[0]["name"] == "getStationInfo"
+        assert by_index[1]["name"] == "getStationInfo"
+        assert json.loads(by_index[0]["arguments"]) == {"location": "Milano"}
+        assert json.loads(by_index[1]["arguments"]) == {"location": "Piacenza"}
+
+        # No index repeats within a single delta (no duplication/corruption).
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                indexes = [tc.index for tc in delta.tool_calls]
+                assert len(indexes) == len(set(indexes))
+
+        # Each tool call's name is emitted exactly once across the stream.
+        name_indexes = []
+        for delta, _ in results:
+            for tc in delta.tool_calls if delta and delta.tool_calls else []:
+                func = tc.function
+                name = (
+                    func.get("name")
+                    if isinstance(func, dict)
+                    else getattr(func, "name", None)
+                )
+                if name:
+                    name_indexes.append(tc.index)
+        assert sorted(name_indexes) == [0, 1]
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#41967: the parser defers the second tool call's header to the "
+        "following delta, so a single crossing delta carries only index 0. "
+        "Final reconstruction is still correct (see test above).",
+    )
+    def test_streaming_mtp_multi_boundary_same_delta(self, parser, mock_request):
+        """Stricter #44741 expectation: the crossing delta emits both indices.
+
+        Kept as xfail to document that same-delta emission is not part of the
+        current contract; delayed emission of the second call is treated as
+        valid as long as the final reconstruction is correct.
+        """
+        chunks = [
+            "<|tool_call>call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<tool_call|><|tool_call>call:getStationInfo{',
+            'location:<|"|>Piacenza<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        crossing_delta = results[1][0]
+        assert crossing_delta is not None
+        assert {tc.index for tc in crossing_delta.tool_calls} == {0, 1}
+
+    def test_streaming_mtp_multi_boundary_split_delimiter(self, parser, mock_request):
+        """#41967: multi-boundary chunk that also splits a delimiter token.
+
+        Same as the multi-boundary case, but the ``<tool_call|>`` boundary is
+        split across chunks so the delta-buffering path runs together with the
+        multi-boundary handling. The final reconstruction must still be
+        complete and correct.
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<',
+            'tool_call|><|tool_call>call:getStationInfo{location:<|"|>Piacenza<|"|>}<',
+            "tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        by_index = self._collect_tool_calls_by_index(results)
+
+        assert set(by_index) == {0, 1}
+        assert json.loads(by_index[0]["arguments"]) == {"location": "Milano"}
+        assert json.loads(by_index[1]["arguments"]) == {"location": "Piacenza"}
+
     def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
         """Trailing bare boolean must not be streamed twice."""
         chunks = [
