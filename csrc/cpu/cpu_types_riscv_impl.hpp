@@ -962,6 +962,12 @@ inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
       RVVI4(__riscv_vlmul_trunc_v_bf16, LMUL_512, _bf16, LMUL_256)(b.reg);
   acc.reg = RVVI(__riscv_vfwmaccbf16_vv_f32, LMUL_512)(acc.reg, a_lo, b_lo,
                                                        FP32Vec16::VEC_ELEM_NUM);
+  fixed_bf16x16_t a_hi =
+      RVVI4(__riscv_vget_v_bf16, LMUL_512, _bf16, LMUL_256)(a.reg, 1);
+  fixed_bf16x16_t b_hi =
+      RVVI4(__riscv_vget_v_bf16, LMUL_512, _bf16, LMUL_256)(b.reg, 1);
+  acc.reg = RVVI(__riscv_vfwmaccbf16_vv_f32, LMUL_512)(acc.reg, a_hi, b_hi,
+                                                       FP32Vec16::VEC_ELEM_NUM);
 }
 #endif
 
