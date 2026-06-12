@@ -513,20 +513,22 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
                 CompressedTensorsMoEMethod,
             )
 
             # Check layer 0 MoE (should be quantized)
             layer_quantized = model.model.layers[0].mlp.experts
-            assert isinstance(layer_quantized, FusedMoE)
-            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+            assert isinstance(layer_quantized, MoERunner)
+            assert isinstance(layer_quantized._quant_method, CompressedTensorsMoEMethod)
 
             # Check layer 10 MoE (should be unquantized + ignored)
             layer_unquantized = model.model.layers[3].mlp.experts
-            assert isinstance(layer_unquantized, FusedMoE)
-            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+            assert isinstance(layer_unquantized, MoERunner)
+            assert isinstance(
+                layer_unquantized._quant_method, UnquantizedFusedMoEMethod
+            )
 
         llm.apply_model(check_model)
 
@@ -658,7 +660,7 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     ) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
                 CompressedTensorsW8A8Mxfp8MoEMethod,
             )
@@ -670,8 +672,10 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
 
             experts = layer.mlp.experts
-            assert isinstance(experts, FusedMoE)
-            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+            assert isinstance(experts, MoERunner)
+            assert isinstance(
+                experts._quant_method, CompressedTensorsW8A8Mxfp8MoEMethod
+            )
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)

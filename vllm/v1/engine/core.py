@@ -156,6 +156,9 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        self.check_for_draft_tokens = (
+            self.use_spec_decode or vllm_config.model_config.is_diffusion
+        )
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -177,13 +180,13 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {tp_rank: metadata}
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[int, Any] = {}
+                content: dict[tuple[int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata(content)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -475,8 +478,7 @@ class EngineCore:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
-        if not self.async_scheduling and self.use_spec_decode and model_executed:
-            # Take the draft token ids.
+        if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
@@ -575,18 +577,17 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # If we are doing speculative decoding with structured output,
-            # we need to get the draft token ids from the prior step before
-            # we can compute the grammar bitmask for the deferred request.
-            if self.use_spec_decode:
+            # When draft tokens are used with structured output, validate them
+            # before computing the grammar bitmask for the deferred request.
+            if self.check_for_draft_tokens:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
-                assert draft_token_ids is not None
-                # Update the draft token ids in the scheduler output to
-                # filter out the invalid spec tokens, which will be padded
-                # with -1 and skipped by the grammar bitmask computation.
-                self.scheduler.update_draft_token_ids_in_output(
-                    draft_token_ids, deferred_scheduler_output
-                )
+                if draft_token_ids is not None:
+                    # Update the draft token ids in the scheduler output to
+                    # filter out the invalid spec tokens, which will be padded
+                    # with -1 and skipped by the grammar bitmask computation.
+                    self.scheduler.update_draft_token_ids_in_output(
+                        draft_token_ids, deferred_scheduler_output
+                    )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(

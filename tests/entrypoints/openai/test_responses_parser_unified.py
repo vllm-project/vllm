@@ -3,8 +3,8 @@
 """Unit tests for ResponsesParser with the unified Parser interface.
 
 These tests verify that ResponsesParser correctly delegates to the unified
-Parser (via extract_response_outputs) instead of calling separate
-ReasoningParser / ToolParser instances directly.
+Parser (via parse) instead of calling separate ReasoningParser / ToolParser
+instances directly.
 """
 
 from collections.abc import Sequence
