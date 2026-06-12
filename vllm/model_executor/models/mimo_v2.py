@@ -47,9 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.flash_attn_diffkv import (
-    FlashAttentionDiffKVBackend,
-)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -292,11 +290,27 @@ class MiMoV2Attention(nn.Module):
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
 
-        # Use DiffKV backend when V has a different head dim than K
+        # Use DiffKV backend when V has a different head dim than K.
+        # Auto-pick FA-DiffKV when FA3/4 is usable on this device, else fall
+        # back to TRITON_ATTN_DIFFKV.  Users can force a choice via
+        # `--attention-backend <FLASH_ATTN_DIFFKV|TRITON_ATTN_DIFFKV>`.
         if self.v_head_dim != self.head_dim:
-            FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
-            attn_backend = FlashAttentionDiffKVBackend
-            logger.info_once("Using FlashAttentionDiffKVBackend for attention.")
+            requested = get_current_vllm_config().attention_config.backend
+            if requested is not None and requested.name.endswith("_DIFFKV"):
+                backend_enum = requested
+            else:
+                fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
+                if fa_backend.is_supported_on_current_device(
+                    head_size=self.head_dim,
+                    head_size_v=self.v_head_dim,
+                    has_sinks=self.attention_sink_bias is not None,
+                ):
+                    backend_enum = AttentionBackendEnum.FLASH_ATTN_DIFFKV
+                else:
+                    backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
+            attn_backend = backend_enum.get_class()
+            attn_backend.set_head_size_v(self.v_head_dim)
+            logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
             attn_backend = None
 
@@ -554,22 +568,6 @@ class MiMoV2Model(nn.Module):
                 continue
             if "mtp" in name:
                 continue
-
-            if self.quant_config is not None:
-                cache_scale_name = self.quant_config.get_cache_scale(name)
-                if cache_scale_name is not None and cache_scale_name in params_dict:
-                    param = params_dict[cache_scale_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-
-                    kv_scale = loaded_weight
-                    if kv_scale.dim() > 0 and kv_scale.numel() > 1:
-                        kv_scale = kv_scale.view(-1)[0]
-
-                    weight_loader(param, kv_scale)
-                    loaded_params.add(cache_scale_name)
-                    continue
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:

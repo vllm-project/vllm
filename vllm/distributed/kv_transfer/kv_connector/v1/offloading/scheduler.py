@@ -14,6 +14,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _TransferMetricName,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -259,9 +263,13 @@ def _create_req_context(req: Request) -> ReqContext:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, spec: OffloadingSpec):
+    def __init__(
+        self,
+        spec: OffloadingSpec,
+    ):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
+        self._connector_stats: OffloadingConnectorStats | None = None
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -563,7 +571,11 @@ class OffloadingConnectorScheduler:
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
-        num_hit_tokens = self._lookup(req_status)
+        num_hit_tokens: int | None
+        if request.skip_reading_prefix_cache:
+            num_hit_tokens = 0
+        else:
+            num_hit_tokens = self._lookup(req_status)
         req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
@@ -952,6 +964,39 @@ class OffloadingConnectorScheduler:
         if not isinstance(meta, OffloadingWorkerMetadata):
             assert meta is None
             meta = OffloadingWorkerMetadata()
+        if not meta.transfer_stats.is_empty():
+            transfer_stats = OffloadingConnectorStats()
+            if not meta.transfer_stats.load.is_empty():
+                transfer_stats.increase_counter(
+                    _TransferMetricName.LOAD_BYTES,
+                    meta.transfer_stats.load.bytes,
+                )
+                transfer_stats.increase_counter(
+                    _TransferMetricName.LOAD_TIME,
+                    meta.transfer_stats.load.time,
+                )
+                for size in meta.transfer_stats.load.sizes:
+                    transfer_stats.observe_histogram(
+                        _TransferMetricName.LOAD_SIZE, size
+                    )
+            if not meta.transfer_stats.store.is_empty():
+                transfer_stats.increase_counter(
+                    _TransferMetricName.STORE_BYTES,
+                    meta.transfer_stats.store.bytes,
+                )
+                transfer_stats.increase_counter(
+                    _TransferMetricName.STORE_TIME,
+                    meta.transfer_stats.store.time,
+                )
+                for size in meta.transfer_stats.store.sizes:
+                    transfer_stats.observe_histogram(
+                        _TransferMetricName.STORE_SIZE, size
+                    )
+            if self._connector_stats is None:
+                self._connector_stats = transfer_stats
+            else:
+                self._connector_stats.aggregate(transfer_stats)
+
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -989,6 +1034,19 @@ class OffloadingConnectorScheduler:
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 del self._req_status[job_status.req_id]
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = self._connector_stats
+        self._connector_stats = None
+
+        manager_stats = self.manager.get_stats()
+        if manager_stats is not None:
+            if stats is None:
+                stats = manager_stats
+            else:
+                stats.aggregate(manager_stats)
+
+        return stats
 
     def request_finished(
         self,

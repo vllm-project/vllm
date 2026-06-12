@@ -91,6 +91,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -103,6 +104,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -191,11 +193,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            if self.speculative_config.method == "eagle3":
-                # EAGLE3 may require auxiliary hidden states from target model outputs.
+            if self.speculative_config.method in ("eagle3", "dflash"):
+                # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
                 if self.use_pp:
-                    raise ValueError("EAGLE3 with pipeline parallel is not supported.")
+                    raise ValueError(
+                        f"{self.speculative_config.method} with pipeline parallel "
+                        "is not supported."
+                    )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -307,7 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
-            if self.speculator is not None:
+            if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.load_model(self.model)
                 eplb_models_added = self.eplb.maybe_register_speculator(
                     self.speculator, self.speculative_config, load_dummy_weights
@@ -457,7 +462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         check_attention_cp_compatibility(self.vllm_config)
-        if self.speculator is not None:
+        if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.model_state, self.kv_cache_config, self.block_tables
@@ -678,7 +683,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            captured_attn_states = self.cudagraph_manager.capture(
+            attn_states = self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
@@ -690,7 +695,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
-                self.speculator.capture(captured_attn_states)
+                self.speculator.capture(attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1206,6 +1211,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Only first PP rank prepares multimodal embeddings.
             # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
             # to obtain inputs_embeds, because the compiled model expects this input.
+            if self.lora_config is not None:
+                set_active_mm_loras(
+                    model=self.model,
+                    lora_manager=self.lora_manager,
+                    encoder_cache=self.encoder_cache,
+                    req_id_to_index=self.req_states.req_id_to_index,
+                    lora_state=self.lora_state,
+                    scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                )
             inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs, input_batch
             )

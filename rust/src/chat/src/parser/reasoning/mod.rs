@@ -6,7 +6,8 @@ pub use vllm_reasoning_parser::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
     KimiReasoningParser, MiniMaxM2ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser,
-    ReasoningDelta, ReasoningError, ReasoningParser, Step3ReasoningParser,
+    ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
+    Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -25,7 +26,9 @@ pub mod names {
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
+    pub const SEED_OSS: &str = "seed_oss";
     pub const STEP3: &str = "step3";
+    pub const STEP3P5: &str = "step3p5";
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
@@ -61,7 +64,9 @@ impl ReasoningParserFactory {
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
-            .register_parser::<Step3ReasoningParser>(names::STEP3);
+            .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
+            .register_parser::<Step3ReasoningParser>(names::STEP3)
+            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5);
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
@@ -77,7 +82,14 @@ impl ReasoningParserFactory {
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
+            // step3p5 patterns must precede `step3`: substring matching would
+            // otherwise route step3p5 IDs to step3.
+            .register_pattern("step-3p5", names::STEP3P5)
+            .register_pattern("step3p5", names::STEP3P5)
+            .register_pattern("step-3.5", names::STEP3P5)
             .register_pattern("step3", names::STEP3)
+            .register_pattern("seed-oss", names::SEED_OSS)
+            .register_pattern("seedoss", names::SEED_OSS)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
             .register_pattern("cohere", names::COHERE_CMD)

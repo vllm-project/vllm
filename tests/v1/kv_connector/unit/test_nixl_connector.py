@@ -20,6 +20,7 @@ import torch
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineTransferInfo,
     KVOutputAggregator,
     TransferTopology,
     get_current_attn_backend,
@@ -196,13 +197,6 @@ class FakeNixlWrapper:
 
     def get_xfer_telemetry(self, handle: int) -> dict:
         return get_default_xfer_telemetry()
-
-    ############################################################
-    # Follow are for changing the behavior during testing.
-    ############################################################
-
-    def set_cycles_before_xfer_done(self, cycles: int):
-        """Set the number of cycles before a transfer is considered done."""
 
 
 @contextlib.contextmanager
@@ -578,10 +572,7 @@ class TestNixlHandshake:
         """Test case where multiple xfers are initiated to the same engine.
 
         This test triggers the connector to load remote KV for the same
-        `request_id`. The transfer is not done immediately due to
-        `set_cycles_before_xfer_done`, so there is a state where there are
-        multiple transfer states for the same `request_id`, and `get_finished`
-        should handle it correctly (wait for all transfers to be done).
+        `request_id`.
         """
         vllm_config = create_vllm_config()
 
@@ -598,7 +589,6 @@ class TestNixlHandshake:
         )
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
-        worker.nixl_wrapper.set_cycles_before_xfer_done(3)
         # simulate handshake
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
@@ -1304,7 +1294,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     # Worker stats with transfer metrics
     worker_stats = NixlKVConnectorStats()
     worker_stats.record_transfer(get_default_xfer_telemetry())
-    worker_stats.data["remote_tokens"] = []
 
     # Scheduler stats with custom metric (needs dummy transfer to avoid being skipped)
     scheduler_stats = NixlKVConnectorStats()
@@ -1314,7 +1303,6 @@ def test_scheduler_kv_connector_stats_aggregation():
             "post_duration": [0],
             "bytes_transferred": [0],
             "num_descriptors": [0],
-            "remote_tokens": [128],
         }
     )
 
@@ -1355,7 +1343,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     ).scheduler_stats.kv_connector_stats
     nixl_stats = final_stats["NixlConnector"]
     assert nixl_stats.num_successful_transfers == 2
-    assert nixl_stats.data["remote_tokens"] == [128]
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
@@ -1377,7 +1364,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     timeout = 6
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
         kv_connector_extra_config={"kv_lease_duration": timeout},
     )
     llm_kwargs = {
@@ -1858,6 +1845,11 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
         worker.dst_xfer_side_handles = {"engine1": {0: 789}}
         worker._remote_agents = {"engine1": {0: "agent1"}}
+        # _cleanup_remote_engine (called by shutdown) also clears these:
+        worker.kv_caches_base_addr["engine1"] = {0: [0xABC]}
+        worker.dst_num_blocks["engine1"] = 50
+        worker.tp_mappings["engine1"] = MagicMock()
+        worker._engine_last_active["engine1"] = time.perf_counter()
         worker._registered_descs = ["desc1", "desc2"]
 
         mock_listener.is_alive.return_value = False
@@ -1886,6 +1878,118 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         assert mock_dereg.call_count == 2
         mock_dereg.assert_any_call("desc1")
         mock_dereg.assert_any_call("desc2")
+
+
+# ── TTL-based remote engine eviction tests ──────────────────────────
+
+
+def _setup_worker_with_remote_engine(
+    engine_ttl: float = 10.0,
+) -> tuple[Any, str]:
+    """Create a worker with one remote engine registered."""
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"engine_ttl": engine_ttl},
+    )
+    worker = NixlConnectorWorker(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        make_kv_cache_config(block_size=16),
+    )
+
+    engine_id = "remote-engine-1"
+    worker._remote_agents[engine_id] = {0: "agent_0", 1: "agent_1"}
+    worker.dst_xfer_side_handles[engine_id] = {0: 100, 1: 200}
+    worker.kv_caches_base_addr[engine_id] = {0: [0xABC]}
+    worker.dst_num_blocks[engine_id] = 50
+    worker.tp_mappings[engine_id] = MagicMock()
+    worker._engine_last_active[engine_id] = time.perf_counter()
+
+    worker.transfer_topo = MagicMock()
+
+    return worker, engine_id
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_engine_ttl_eviction(default_vllm_config, dist_init):
+    """Stale engines are evicted when TTL expires."""
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+
+    with (
+        patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem,
+    ):
+        # Make the engine stale.
+        worker._engine_last_active[engine_id] = time.perf_counter() - 20.0
+
+        worker._evict_stale_engines()
+
+        assert engine_id not in worker._remote_agents
+        assert engine_id not in worker.dst_xfer_side_handles
+        assert engine_id not in worker.kv_caches_base_addr
+        assert engine_id not in worker.dst_num_blocks
+        assert engine_id not in worker.tp_mappings
+        assert engine_id not in worker._engine_last_active
+        worker.transfer_topo.unregister_remote_engine.assert_called_with(engine_id)
+
+        assert mock_rel.call_count == 2
+        mock_rel.assert_any_call(100)
+        mock_rel.assert_any_call(200)
+
+        assert mock_rem.call_count == 2
+        mock_rem.assert_any_call("agent_0")
+        mock_rem.assert_any_call("agent_1")
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_engine_ttl_disabled(default_vllm_config, dist_init):
+    """Eviction is disabled when engine_ttl <= 0."""
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=0.0)
+
+    # Make the engine stale.
+    worker._engine_last_active[engine_id] = time.perf_counter() - 9999.0
+
+    worker._evict_stale_engines()
+
+    # Nothing should be evicted.
+    assert engine_id in worker._remote_agents
+    assert engine_id in worker.dst_xfer_side_handles
+
+
+def test_transfer_topology_unregister():
+    """TransferTopology.unregister_remote_engine removes the engine."""
+    topo = TransferTopology(
+        tp_rank=0,
+        tp_size=1,
+        block_size=16,
+        engine_id="local",
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=4,
+        attn_backends=[FlashAttentionBackend],
+    )
+
+    info = EngineTransferInfo(
+        remote_tp_size=1,
+        remote_block_size=16,
+        remote_block_len=64,
+        remote_physical_blocks_per_logical=1,
+    )
+    topo.register_remote_engine("remote-1", info)
+    assert topo.get_engine_info("remote-1") is info
+
+    topo.unregister_remote_engine("remote-1")
+    with pytest.raises(KeyError):
+        topo.get_engine_info("remote-1")
+
+    # Idempotent: no error on double-unregister
+    topo.unregister_remote_engine("remote-1")
 
 
 @patch(
@@ -2751,3 +2855,50 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_both' should emit a deprecation log warning."""
+    from unittest.mock import patch
+
+    from vllm.logger import _print_warning_once
+
+    _print_warning_once.cache_clear()
+
+    vllm_config = create_vllm_config(kv_role="kv_both")
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+    ) as mock_logger:
+        mock_logger.warning_once = mock_logger.warning_once
+        NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+
+    mock_logger.warning_once.assert_called_once()
+    msg = mock_logger.warning_once.call_args[0][0]
+    assert "kv_role='kv_both'" in msg
+    assert "deprecated" in msg
+
+
+def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
+    from unittest.mock import patch
+
+    for role in ("kv_consumer", "kv_producer"):
+        vllm_config = create_vllm_config(kv_role=role)
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+        ) as mock_logger:
+            NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+
+        (
+            mock_logger.warning_once.assert_not_called(),
+            (f"kv_role={role!r} should not emit deprecation warning"),
+        )
