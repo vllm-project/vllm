@@ -137,15 +137,6 @@ pub(super) fn validate_request_compat(
         "repetition_detection is not supported.",
     )?;
 
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
-
     Ok(())
 }
 

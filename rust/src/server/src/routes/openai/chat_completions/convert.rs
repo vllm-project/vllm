@@ -33,6 +33,8 @@ pub(super) struct PreparedRequest {
 pub(super) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
@@ -82,6 +84,12 @@ pub(super) fn prepare_chat_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let requested_logprobs = request.logprobs;
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
@@ -154,6 +162,7 @@ pub(super) fn prepare_chat_request(
         response_model,
         options: ResponseOptions {
             include_usage,
+            include_continuous_usage,
             requested_logprobs,
             include_prompt_logprobs,
             include_reasoning,
@@ -375,8 +384,8 @@ mod tests {
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent, Tool,
-        ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
+        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -454,6 +463,46 @@ mod tests {
         );
         assert!(prepared.chat_request.tools.is_empty());
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_stream_usage_and_token_format_options() {
+        let mut request = base_request();
+        request.return_tokens_as_token_ids = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.options.include_usage);
+        assert!(prepared.options.include_continuous_usage);
+        assert!(prepared.options.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_chat_request_gates_continuous_usage_on_include_usage() {
+        let mut request = base_request();
+        request.stream_options = Some(StreamOptions {
+            include_usage: None,
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
     }
 
     #[test]

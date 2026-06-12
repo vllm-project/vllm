@@ -396,8 +396,9 @@ class MMEncoderAttention(CustomOp):
         if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
             raise ValueError(
                 "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
-                "cuDNN backend with cuDNN >= 9.17.1 on a GPU with native "
-                "FP8 support."
+                "cuDNN backend with cuDNN >= 9.17.1 on Blackwell (SM 100) "
+                "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
+                "not available on Hopper (H100/H200) or earlier."
             )
 
         self.fp8_enabled = True
