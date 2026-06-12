@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.engine.protocol import StreamingInput
-from vllm.outputs import RequestOutput
+from vllm.outputs import STREAM_FINISHED, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
@@ -170,3 +170,73 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_empty_streaming_input_no_engine_crash():
+    """Test that an empty streaming input completes cleanly without errors.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34532:
+    When a realtime client sends final=True without any audio data, the
+    streaming input generator is empty. Previously this would send a
+    placeholder final request to the engine with no multimodal data, crashing
+    models that require multimodal input at every step (e.g. VoxtralRealtime).
+
+    The fix: when no inputs are processed from the stream, signal completion
+    via STREAM_FINISHED directly without sending any request to the engine.
+    """
+    request_id = "test_empty_stream"
+    sampling_params = SamplingParams(
+        max_tokens=1,
+        output_kind=RequestOutputKind.DELTA,
+        skip_clone=True,
+    )
+
+    llm = MagicMock(spec=AsyncLLM)
+    llm._run_output_handler = MagicMock()
+
+    # Mock input processor - returns a final_req with a string request_id
+    final_req = MagicMock()
+    final_req.request_id = "internal-req-id"
+    final_req.external_req_id = None
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs.return_value = final_req
+
+    # Track whether _add_request was called (it should NOT be for empty stream)
+    add_request_calls = []
+
+    async def mock_add_request(*args, **kwargs):
+        add_request_calls.append(args)
+
+    llm._add_request = mock_add_request
+
+    # Bind real _add_streaming_input_request
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm, AsyncLLM
+    )
+
+    # Empty input stream - yields nothing
+    async def empty_stream() -> AsyncGenerator[StreamingInput, None]:
+        return
+        yield  # type: ignore[misc]  # make it a generator
+
+    queue = await llm._add_streaming_input_request(
+        request_id,
+        empty_stream(),
+        sampling_params,
+    )
+
+    # Wait for handle_inputs background task to complete
+    if queue._input_stream_task is not None:
+        await queue._input_stream_task
+
+    # _add_request should NOT have been called - no engine interaction
+    assert len(add_request_calls) == 0, (
+        "_add_request should not be called for empty streaming input"
+    )
+
+    # Queue should contain STREAM_FINISHED to signal clean completion
+    output = queue.get_nowait()
+    assert output is STREAM_FINISHED, (
+        "Empty streaming input should put STREAM_FINISHED in queue"
+    )
