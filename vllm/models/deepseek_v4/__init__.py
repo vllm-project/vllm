@@ -14,10 +14,10 @@ from .quant_config import DeepseekV4FP8Config
 # Pick the per-platform implementation. The NVIDIA branch is the static
 # default that mypy sees; the ROCm/XPU branches override at runtime and are
 # kept type-compatible via ``# type: ignore[assignment]``.
-if TYPE_CHECKING:
-    from .nvidia.model import DeepseekV4ForCausalLM
-    from .nvidia.mtp import DeepSeekV4MTP
-elif False and current_platform.is_rocm():
+# if TYPE_CHECKING:
+#     from .nvidia.model import DeepseekV4ForCausalLM
+#     from .nvidia.mtp import DeepSeekV4MTP
+if False and current_platform.is_rocm():
     from .amd.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .amd.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 elif False and current_platform.is_cuda():

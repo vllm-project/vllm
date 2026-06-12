@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
@@ -188,6 +189,15 @@ class DeepseekSparseSWAMetadata:
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
 
+    # Pre-computed C128A topk metadata. Populated only when the model has at
+    # least one compress_ratio == 128 attention layer (the main MLA reads
+    # these from the SWA metadata, since the SWA cache is shared across all
+    # layer types and the V3.2-derived FlashMLASparseMetadata carried by the
+    # main backend doesn't have these fields).
+    c128a_global_decode_topk_indices: torch.Tensor | None = None
+    c128a_decode_topk_lens: torch.Tensor | None = None
+    c128a_prefill_topk_indices: torch.Tensor | None = None
+
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache.
@@ -263,6 +273,37 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
+        # C128A topk-indices buffers. The DeepseekV4 main MLA reads these
+        # off the SWA metadata (the SWA cache layer is shared across all
+        # attention layers, and the V3.2-derived FlashMLA metadata carried
+        # by the main backend doesn't have these fields). Allocated up front
+        # for CUDA graph address stability — only when the model actually
+        # has at least one C128A layer.
+        self._has_c128a = _LAYER_TYPE_C128A in self._layer_types
+        if self._has_c128a:
+            from vllm.models.deepseek_v4.sparse_mla import _C128A_TOPK_ALIGNMENT
+
+            max_model_len = self.vllm_config.model_config.max_model_len
+            c128a_max_compressed = cdiv(max_model_len, 128)
+            c128a_max_compressed = (
+                cdiv(c128a_max_compressed, _C128A_TOPK_ALIGNMENT)
+                * _C128A_TOPK_ALIGNMENT
+            )
+            self.c128a_max_compressed = c128a_max_compressed
+            self.c128a_global_decode_buffer = torch.empty(
+                (max_tokens, c128a_max_compressed),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.c128a_decode_lens_buffer = torch.empty(
+                max_tokens, dtype=torch.int32, device=self.device,
+            )
+            self.c128a_prefill_buffer = torch.empty(
+                (max_tokens, c128a_max_compressed),
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     def build(
         self,
         common_prefix_len: int,
@@ -332,6 +373,47 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # resulting plan for the rest of the step.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
 
+        # C128A topk indices for the main MLA attention (only when the model
+        # uses compress_ratio=128 layers). Per-token, layer-agnostic — one
+        # call per build() covers all C128A consumers. Inherits this build's
+        # decode/prefill split (so MTP-aware threshold is preserved
+        # automatically, unlike the V4-specific FlashMLA builder which
+        # recomputes the split with a non-MTP threshold).
+        c128a_fields: dict[str, torch.Tensor | None] = {}
+        if self._has_c128a:
+            from vllm.models.deepseek_v4.sparse_mla import (
+                build_c128a_topk_metadata,
+            )
+
+            assert common_attn_metadata.positions is not None, (
+                "C128A metadata build requires common_attn_metadata.positions"
+            )
+            num_total = num_decode_tokens + num_prefill_tokens
+            if num_total > 0:
+                block_size_c128a = self.block_size // 128
+                global_decode, decode_lens, prefill_local = (
+                    build_c128a_topk_metadata(
+                        common_attn_metadata.positions[:num_total],
+                        128,
+                        num_decode_tokens,
+                        token_to_req_indices,
+                        block_table[:num_decodes],
+                        block_size_c128a,
+                        slot_mapping,
+                        self.c128a_global_decode_buffer,
+                        self.c128a_decode_lens_buffer,
+                        self.c128a_prefill_buffer,
+                        max_compressed_tokens=self.c128a_max_compressed,
+                    )
+                )
+                if num_decode_tokens > 0:
+                    c128a_fields["c128a_global_decode_topk_indices"] = (
+                        global_decode.view(num_decode_tokens, 1, -1)
+                    )
+                    c128a_fields["c128a_decode_topk_lens"] = decode_lens
+                if num_prefill_tokens > 0:
+                    c128a_fields["c128a_prefill_topk_indices"] = prefill_local
+
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
@@ -351,6 +433,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
             **deepseek_v4_fields,
+            **c128a_fields,
         )
 
     def build_tile_scheduler(

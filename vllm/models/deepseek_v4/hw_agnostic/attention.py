@@ -73,8 +73,18 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+# Triton replacements for the FlashMLA / NVCC / DeepGEMM kernels on the
+# hw-agnostic path. Imported directly from the XPU/AMD vendor branches
+# pending a proper move into common/ops/ (see study doc §47/§49).
+from vllm.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
+from vllm.models.deepseek_v4.xpu.xpu_qnorm_rope_kv_fp8_insert import (
+    xpu_qnorm_rope_kv_fp8_insert,
+)
+from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import xpu_sparse_decode_fp8
 
 logger = init_logger(__name__)
 
@@ -196,13 +206,21 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self._wo_a_act_quant.use_deep_gemm_supported = False
         self.wo_b = mla_modules.wo_b
 
-        # Pick fp8_einsum recipe based on GPU arch:
-        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
-        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        cap = current_platform.get_device_capability()
-        assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
+        # FP8 fp8_einsum recipe selection — only needed by the legacy
+        # (non-Triton) o-projection path. SM90: FP32 block scales stay
+        # [g, r/128, d/128] → sfb_gran_mn=128. SM100: INT32 packed scales
+        # become [g, r, ...] → sfb_gran_mn=1. The Triton bring-up
+        # (VLLM_HW_AGNOSTIC_TRITON=1, default) uses rocm_inv_rope_einsum
+        # and skips this entirely — the get_device_capability() check
+        # used to hard-fail on non-CUDA backends.
+        if not envs.VLLM_HW_AGNOSTIC_TRITON:
+            cap = current_platform.get_device_capability()
+            assert cap is not None, (
+                "DeepseekV4 attention legacy path requires a CUDA device; "
+                "set VLLM_HW_AGNOSTIC_TRITON=1 for the Triton path"
+            )
+            self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
+            self._tma_aligned_scales = cap.major >= 10
 
         self.rotary_emb = mla_modules.rotary_emb
         self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
@@ -303,8 +321,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
         o = o_padded[:, : self.n_local_heads, :]
 
-        # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
+        # O projection. Two implementations selected by VLLM_HW_AGNOSTIC_TRITON:
+        #   1 (default) — BF16 inverse RoPE + reference einsum + wo_b. Same
+        #                 path AMD and XPU use; FP8 einsum (DeepGEMM) bypassed.
+        #   0           — FP8 inverse RoPE + DeepGEMM fp8_einsum + wo_b.
+        if envs.VLLM_HW_AGNOSTIC_TRITON:
             z = rocm_inv_rope_einsum(
                 self.rotary_emb,
                 o,
@@ -316,7 +337,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             return self.wo_b(z.flatten(1))
 
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
+        # Legacy: O projection: inverse RoPE + FP8 quant + einsum + wo_b
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             positions,
@@ -327,10 +348,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             rope_dim=self.rope_head_dim,
             tma_aligned_scales=self._tma_aligned_scales,
         )
-
         wo_a_fp8 = self.wo_a.weight
         wo_a_scale = self.wo_a.weight_scale_inv
-
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
             device=o.device,
@@ -345,7 +364,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             "bhr,hdr->bhd",
             list(self._einsum_recipe),
         )
-
         return self.wo_b(z.flatten(1))
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
@@ -541,16 +559,40 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
-        swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
         # The runner's positions buffer is already int64 — no cast needed.
         assert positions.dtype == torch.int64
 
-        # Horizontally fused:
-        #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE,
-        #            zero-filling the padding head slots; the kernel returns
-        #            the padded q tensor.
-        #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
-        # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
+        if envs.VLLM_HW_AGNOSTIC_TRITON:
+            # Triton fused: per-head Q RMSNorm + GPT-J RoPE on Q, RoPE on KV,
+            # then UE8M0 FP8 quant + paged cache insert. Reuses the XPU kernel;
+            # works on any Triton-bearing backend.
+            xpu_qnorm_rope_kv_fp8_insert(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
+            # The XPU kernel does not pad q; the FlashMLA NVCC op did. Pad here
+            # so the downstream MLA buffers (allocated at padded_heads) stay
+            # valid.
+            if self.n_local_heads < self.padded_heads:
+                return F.pad(
+                    q,
+                    (0, 0, 0, self.padded_heads - self.n_local_heads),
+                    value=0.0,
+                )
+            return q
+
+        # Legacy: NVCC fused custom op — Q side: q_head_norm (per-head
+        # RMSNorm, no weight) + GPT-J RoPE, zero-filling padding head slots
+        # and returning the padded q tensor. KV side: GPT-J RoPE + UE8M0 FP8
+        # quant + paged cache insert. kv is unchanged; mla_attn reads kv
+        # solely via swa_kv_cache.
+        swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
         return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q,
             kv,
@@ -839,50 +881,50 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
-                # C128A: pre-computed during metadata build.
-                topk_indices = attn_metadata.c128a_global_decode_topk_indices
-                topk_lens = attn_metadata.c128a_decode_topk_lens
+                # C128A: pre-computed during metadata build. Lives on the SWA
+                # metadata (DeepseekSparseSWAMetadata), not on the FlashMLA
+                # metadata.
+                topk_indices = swa_metadata.c128a_global_decode_topk_indices
+                topk_lens = swa_metadata.c128a_decode_topk_lens
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
+        assert swa_indices is not None and swa_lens is not None
 
-        if current_platform.is_rocm():
-            rocm_forward_decode_fallback(
+        if envs.VLLM_HW_AGNOSTIC_TRITON:
+            # Triton sparse-MLA decode (XPU implementation): on-the-fly
+            # UE8M0 FP8 → BF16 dequant of the paged FlashMLA cache, then
+            # the BF16 sparse attention kernel. Same fp8_ds_mla page
+            # layout as FlashMLA.
+            xpu_sparse_decode_fp8(
                 q=q,
                 kv_cache=kv_cache,
-                swa_k_cache=self.swa_cache_layer.kv_cache,
+                swa_kv_cache=self.swa_cache_layer.kv_cache,
                 swa_only=swa_only,
                 topk_indices=topk_indices,
                 topk_lens=topk_lens,
                 swa_indices=swa_indices,
                 swa_lens=swa_lens,
                 attn_sink=self.attn_sink,
-                scale=self.scale,
+                softmax_scale=self.scale,
                 head_dim=self.head_dim,
                 nope_head_dim=self.nope_head_dim,
                 rope_head_dim=self.rope_head_dim,
-                output=output,
+                out=output,
             )
             return
 
-        # We treat queries in the same seq as different queries
-        # and later we only attend by generated indices.
-        # q arrives pre-padded to self.padded_heads by the outer wrapper.
+        # Legacy FlashMLA decode path. q arrives pre-padded to
+        # self.padded_heads by the outer wrapper.
         q = q.unsqueeze(1)
-
-        # Prepare SWA cache (num_blocks, swa_block_size, 1, head_bytes)
-        # Use unsqueeze to preserve strides (handles padded blocks correctly)
+        # Prepare SWA cache (num_blocks, swa_block_size, 1, head_bytes).
+        # Use unsqueeze to preserve strides (handles padded blocks).
         swa_cache = self.swa_cache_layer.kv_cache.unsqueeze(-2)
-        # Reshape KV cache to (num_blocks, block_size, 1, head_bytes)
         if kv_cache is not None:
             kv_cache = kv_cache.unsqueeze(-2)
 
-        # One FlashMLASchedMeta per layer type, shared across all same-type
-        # layers within this decode step. The first forward call per type
-        # triggers the in-kernel planner (allocating tile_scheduler_metadata
-        # and num_splits via PyTorch's graph-aware allocator so CUDA graph
-        # capture reuses the same addresses on replay); subsequent same-type
-        # layers see have_initialized=True and skip the planner.
+        # One FlashMLASchedMeta per layer type, shared across all
+        # same-type layers within this decode step.
         if self.compress_ratio <= 1:
             tile_metadata = swa_metadata.tile_sched_swaonly
         elif self.compress_ratio == 4:
@@ -901,7 +943,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             "allocate one for this layer type."
         )
 
-        out, _ = flash_mla_with_kvcache(
+        flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
             block_table=None,
@@ -955,9 +997,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 topk_indices = self.topk_indices_buffer[num_decode_tokens:]
                 topk_indices = topk_indices[:num_prefill_tokens]
             else:
-                # C128A: pre-computed during metadata build.
-                assert attn_metadata is not None
-                topk_indices = attn_metadata.c128a_prefill_topk_indices
+                # C128A: pre-computed during metadata build. Lives on the SWA
+                # metadata (DeepseekSparseSWAMetadata), not on the FlashMLA
+                # metadata.
+                topk_indices = swa_metadata.c128a_prefill_topk_indices
+                assert topk_indices is not None
             top_k = topk_indices.shape[-1]
             # Compressed region must fit the full compressed pool (seq_len //
             # compress_ratio), not just top_k. top_k bounds how many indices
@@ -1029,19 +1073,28 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
-            if current_platform.is_rocm():
-                rocm_sparse_attn_prefill(
+            if envs.VLLM_HW_AGNOSTIC_TRITON:
+                # Triton sparse-MLA prefill (XPU style): the gathered kv
+                # workspace is already BF16, so we go straight to
+                # triton_bf16_mla_sparse_interface. The kernel uses the
+                # indices (with -1 padding past combined_lens) as the
+                # position cutoff, so combined_lens is not passed
+                # separately. attn_sink is not consumed by this kernel —
+                # match the XPU reference (study doc §46.3 lists this as
+                # a known gap of the BF16 kernel vs FlashMLA's sink path).
+                kv_ws = kv[:chunk_size].reshape(-1, 1, q.shape[-1])
+                out_chunk, _, _ = triton_bf16_mla_sparse_interface(
                     q=q[query_start:query_end],
-                    kv=kv.view(-1, 1, q.shape[-1]),
+                    kv=kv_ws,
                     indices=combined_indices.unsqueeze(1),
-                    topk_length=combined_lens,
-                    scale=self.scale,
-                    head_dim=self.head_dim,
-                    attn_sink=self.attn_sink,
-                    output=output[query_start:query_end],
+                    sm_scale=self.scale,
+                    d_v=q.shape[-1],
+                    block_dpe=0,
                 )
+                output[query_start:query_end] = out_chunk
             else:
-                output_chunk, _, _ = flash_mla_sparse_fwd(
+                # Legacy FlashMLA sparse prefill.
+                flash_mla_sparse_fwd(
                     q=q[query_start:query_end],
                     kv=kv.view(-1, 1, q.shape[-1]),
                     indices=combined_indices.unsqueeze(1),
