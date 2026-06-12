@@ -15,9 +15,11 @@ from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.model_manager import LoRALoadedState
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.v1.notifications import LoRALoadEvent
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
@@ -28,6 +30,8 @@ logger = init_logger(__name__)
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
+    _last_lora_loaded_state: LoRALoadedState | None = None
+
     def load_lora_model(
         self,
         model: nn.Module,
@@ -286,3 +290,25 @@ class LoRAModelRunnerMixin:
     def list_loras(self) -> set[int]:
         self._ensure_lora_enabled()
         return self.lora_manager.list_adapters()
+
+    def take_lora_load_event(
+        self, lora_config: LoRAConfig | None
+    ) -> LoRALoadEvent | None:
+        """Return a load event if the set of loaded adapters changed since
+        the last call, else None. The loaded set churns far slower than
+        engine .step(), so unchanged does not notify; the unchanged path
+        costs three small set copies and an equality check."""
+        if lora_config is None or not hasattr(self, "lora_manager"):
+            return None
+        state = self.lora_manager.get_loaded_state()
+        if state == self._last_lora_loaded_state:
+            return None
+        self._last_lora_loaded_state = state
+        gpu_adapters, cpu_adapters, pinned_adapters = (
+            self.lora_manager.get_loaded_names(state)
+        )
+        return LoRALoadEvent(
+            gpu_adapters=gpu_adapters,
+            cpu_adapters=cpu_adapters,
+            pinned_adapters=pinned_adapters,
+        )
