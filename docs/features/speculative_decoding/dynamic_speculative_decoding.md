@@ -2,7 +2,7 @@
 
 ## Why is Dynamic SD needed?
 
-SD methods need to verify K tokens for each sequence during decoding. As BS increases, the effective BS becomes BS *K which increases the compute requirement during verification. When this BS*K goes beyond a critical BS then SD negatively impacts the TPOT. DSD helps by tuning down the K to an optimal value such that we continue to reap the benefits from SD.
+SD methods need to verify K tokens for each sequence during decoding. As BS increases, the effective BS becomes BS\*K which increases the compute requirement during verification. When this BS\*K goes beyond a critical BS then SD negatively impacts the decode speed (TPOT). DSD helps by tuning the K to an optimal value such that we continue to reap the benefits from SD.
 
 ## Use cases
 
