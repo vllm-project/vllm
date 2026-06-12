@@ -100,7 +100,7 @@ fn build_router_with_options(
             .route("/server_info", get(server_info::server_info))
     }
 
-    let enable_request_id_headers = state.enable_request_id_headers;
+    let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())

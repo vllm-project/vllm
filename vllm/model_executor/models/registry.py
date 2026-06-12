@@ -140,9 +140,7 @@ _TEXT_GENERATION_MODELS = {
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
-    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
@@ -400,6 +398,10 @@ _MULTIMODAL_MODELS = {
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
+    ),
+    "DiffusionGemmaForBlockDiffusion": (
+        "diffusion_gemma",
+        "DiffusionGemmaForConditionalGeneration",
     ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
     "Gemma4UnifiedForConditionalGeneration": (
@@ -713,8 +715,10 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "ErnieModel": "0.23.0",
     "ErnieForSequenceClassification": "0.23.0",
     "ErnieForTokenClassification": "0.23.0",
+    "InternLM2VEForCausalLM": "0.23.0",
     "QWenLMHeadModel": "0.23.0",
     "QwenVLForConditionalGeneration": "0.23.0",
+    "InternLMForCausalLM": "0.23.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
