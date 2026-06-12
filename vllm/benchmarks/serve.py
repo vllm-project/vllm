@@ -92,6 +92,51 @@ async def get_first_model_from_server(
             ) from e
 
 
+# Type: metric_name -> [(labels_str, value_str), ...]
+PrometheusMetrics = dict[str, list[tuple[str, str]]]
+
+
+def _parse_prometheus_text(text: str) -> PrometheusMetrics:
+    """Parse Prometheus exposition text into a dict of metric samples.
+
+    Returns a dict mapping bare metric names (without labels) to a list
+    of (labels_string, value_string) tuples.  Values are kept as strings;
+    conversion is left to the consumer.
+    """
+    metrics: PrometheusMetrics = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        name_and_labels, value_str = parts
+        brace = name_and_labels.find("{")
+        if brace >= 0:
+            bare_name = name_and_labels[:brace]
+            labels = name_and_labels[brace + 1 :].rstrip("}")
+        else:
+            bare_name = name_and_labels
+            labels = ""
+        metrics.setdefault(bare_name, []).append((labels, value_str))
+    return metrics
+
+
+async def fetch_prometheus_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> PrometheusMetrics | None:
+    """Fetch and parse Prometheus metrics from the server's /metrics endpoint."""
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            return _parse_prometheus_text(await response.text())
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
 @dataclass
 class SpecDecodeMetrics:
     """Speculative decoding metrics from the server's Prometheus endpoint."""
@@ -102,68 +147,47 @@ class SpecDecodeMetrics:
     accepted_per_pos: dict[int, int]
 
 
-async def fetch_spec_decode_metrics(
-    base_url: str, session: aiohttp.ClientSession
+def parse_spec_decode_metrics(
+    metrics: PrometheusMetrics,
 ) -> SpecDecodeMetrics | None:
-    """Fetch speculative decoding metrics from the server's Prometheus endpoint.
+    """Extract speculative decoding metrics from parsed Prometheus data."""
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
+    accepted_per_pos: dict[int, int] = {}
+    found_spec_decode = False
 
-    Returns None if speculative decoding is not enabled or metrics are not available.
-    """
-    metrics_url = f"{base_url}/metrics"
-    try:
-        async with session.get(metrics_url) as response:
-            if response.status != 200:
-                return None
-            text = await response.text()
+    for name, samples in metrics.items():
+        if not name.startswith("vllm:spec_decode") or not name.endswith("_total"):
+            continue
+        found_spec_decode = True
+        for labels, value_str in samples:
+            with contextlib.suppress(ValueError):
+                if "num_drafts" in name:
+                    num_drafts += int(float(value_str))
+                elif "num_draft_tokens" in name:
+                    num_draft_tokens += int(float(value_str))
+                elif "num_accepted_tokens_per_pos" in name:
+                    pos_label = 'position="'
+                    if pos_label in labels:
+                        start = labels.index(pos_label) + len(pos_label)
+                        end = labels.index('"', start)
+                        pos = int(labels[start:end])
+                        accepted_per_pos[pos] = accepted_per_pos.get(pos, 0) + int(
+                            float(value_str)
+                        )
+                elif "num_accepted_tokens" in name:
+                    num_accepted_tokens += int(float(value_str))
 
-            num_drafts = 0
-            num_draft_tokens = 0
-            num_accepted_tokens = 0
-            accepted_per_pos: dict[int, int] = {}
-            found_spec_decode = False
-
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.startswith("vllm:spec_decode"):
-                    # Extract metric name (before labels) to avoid matching
-                    # substrings inside label values.
-                    parts = line.split(None, 1)
-                    metric_name = parts[0].split("{")[0]
-                    if not metric_name.endswith("_total"):
-                        continue
-                    found_spec_decode = True
-                    with contextlib.suppress(ValueError):
-                        if "num_drafts" in metric_name:
-                            num_drafts += int(float(parts[-1]))
-                        elif "num_draft_tokens" in metric_name:
-                            num_draft_tokens += int(float(parts[-1]))
-                        elif "num_accepted_tokens_per_pos" in metric_name:
-                            pos_label = 'position="'
-                            if pos_label in line:
-                                start = line.index(pos_label) + len(pos_label)
-                                end = line.index('"', start)
-                                pos = int(line[start:end])
-                                val = int(float(parts[-1]))
-                                accepted_per_pos[pos] = (
-                                    accepted_per_pos.get(pos, 0) + val
-                                )
-                        elif "num_accepted_tokens" in metric_name:
-                            num_accepted_tokens += int(float(parts[-1]))
-
-            if not found_spec_decode:
-                return None
-
-            return SpecDecodeMetrics(
-                num_drafts=num_drafts,
-                num_draft_tokens=num_draft_tokens,
-                num_accepted_tokens=num_accepted_tokens,
-                accepted_per_pos=accepted_per_pos,
-            )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    if not found_spec_decode:
         return None
+
+    return SpecDecodeMetrics(
+        num_drafts=num_drafts,
+        num_draft_tokens=num_draft_tokens,
+        num_accepted_tokens=num_accepted_tokens,
+        accepted_per_pos=accepted_per_pos,
+    )
 
 
 class TaskType(Enum):
@@ -800,7 +824,10 @@ async def benchmark(
     else:
         print("Self timing is set, using the timestamps from the trace file.")
 
-    spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
+    prom_before = await fetch_prometheus_metrics(base_url, session)
+    spec_decode_metrics_before = (
+        parse_spec_decode_metrics(prom_before) if prom_before else None
+    )
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -886,7 +913,10 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
+    prom_after = await fetch_prometheus_metrics(base_url, session)
+    spec_decode_metrics_after = (
+        parse_spec_decode_metrics(prom_after) if prom_after else None
+    )
     spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
         delta_drafts = (
