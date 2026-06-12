@@ -936,7 +936,7 @@ def _converter_config(
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=converter,
-        strip_trailing_quotes=True,
+        stream_arg_deltas=True,
     )
 
 
@@ -976,7 +976,7 @@ def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
 
 
 class TestArgDeltaWithConverter:
-    """Exercise _compute_arg_delta with arg_converter + strip_trailing_quotes.
+    """Exercise _compute_arg_delta with arg_converter + stream_arg_deltas.
 
     The startswith guard on line 814 of parser_engine.py validates that
     converted JSON grows prefix-monotonically across streaming ticks.

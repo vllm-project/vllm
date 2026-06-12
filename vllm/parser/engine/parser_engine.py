@@ -111,7 +111,7 @@ class ParserEngine(Parser):
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
-        self._strip_trailing_quotes = parser_engine_config.strip_trailing_quotes
+        self._stream_arg_deltas = parser_engine_config.stream_arg_deltas
         self._strip_trailing_reasoning_ws = (
             parser_engine_config.strip_trailing_reasoning_whitespace
         )
@@ -858,7 +858,7 @@ class ParserEngine(Parser):
         if converter is None:
             return raw_delta
 
-        if not self._strip_trailing_quotes:
+        if not self._stream_arg_deltas:
             return None
 
         structural = self._arg_structural_chars

@@ -157,7 +157,7 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             ),
         },
         arg_converter=_qwen3_arg_converter,
-        strip_trailing_quotes=False,
+        stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
     )

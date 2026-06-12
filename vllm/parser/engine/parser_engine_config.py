@@ -84,7 +84,7 @@ class ParserEngineConfig:
 
     arg_converter: Callable[[str, bool], str] | None = None
 
-    strip_trailing_quotes: bool = True
+    stream_arg_deltas: bool = True
 
     tool_args_json: bool = True
 

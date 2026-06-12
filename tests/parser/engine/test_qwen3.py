@@ -316,6 +316,36 @@ class TestStreaming:
         parsed = json.loads(args_text)
         assert parsed == {"city": "Tokyo", "unit": "celsius"}
 
+    def test_streaming_args_arrive_incrementally(self, parser, mock_request):
+        """Arguments must stream as intermediate deltas, not batch at
+        tool-end."""
+        chunks = [
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "<parameter=unit>celsius</parameter>\n",
+            "<parameter=days>5</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        arg_deltas: list[str] = []
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        arg_deltas.append(tc.function.arguments)
+
+        assert len(arg_deltas) > 1, (
+            f"Expected arguments across multiple deltas, got {len(arg_deltas)}: "
+            f"{arg_deltas}"
+        )
+        concatenated = "".join(arg_deltas)
+        parsed = json.loads(concatenated)
+        assert parsed == {"city": "Tokyo", "unit": "celsius", "days": "5"}
+
     def test_streaming_text_before_tool(self, parser, mock_request):
         chunks = [
             "Let me check ",
