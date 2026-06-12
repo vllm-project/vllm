@@ -688,10 +688,6 @@ class ParserEngine(Parser):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
 
-        if self._deferred_content:
-            content_parts.append(self._deferred_content)
-            self._deferred_content = ""
-
         seen_tool_event = False
         for event in events:
             match event.type:
@@ -718,6 +714,10 @@ class ParserEngine(Parser):
                     self._handle_tool_end(event, tool_call_deltas)
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
+
+        if self._deferred_content and not seen_tool_event:
+            content_parts.insert(0, self._deferred_content)
+            self._deferred_content = ""
 
         content_str = "".join(content_parts)
 

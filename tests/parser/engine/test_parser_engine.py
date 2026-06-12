@@ -361,6 +361,38 @@ class TestPostToolContentDeferral:
         assert delta.content == "hello"
         assert delta.tool_calls
 
+    def test_deferred_content_not_flushed_during_arg_continuation(self):
+        """Deferred content from batch N must not mix with arg-continuation
+        tool events in batch N+1 — that creates a DeltaMessage with both
+        content and nameless tool_calls, which crashes the Responses API
+        state machine (name=None → Pydantic ValidationError)."""
+        engine = _make_engine()
+        engine._content_has_nonws = True
+
+        batch1 = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"city":', tool_index=0),
+            SemanticEvent(EventType.TEXT_CHUNK, "\n"),
+        ]
+        delta1 = engine._events_to_delta(batch1)
+        assert delta1 is not None
+        assert delta1.tool_calls
+        assert delta1.content is None
+
+        batch2 = [
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, '"NYC"}', tool_index=0),
+        ]
+        delta2 = engine._events_to_delta(batch2)
+        assert delta2 is not None
+        assert delta2.tool_calls
+        assert delta2.content is None
+
+        flush = engine._events_to_delta([])
+        assert flush is not None
+        assert flush.content == "\n"
+        assert not flush.tool_calls
+
 
 # ── TestFixArgTypes ──────────────────────────────────────────────────
 
