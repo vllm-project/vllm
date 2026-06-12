@@ -10,6 +10,25 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="Only used by ROCm"
 )
 
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return bool(_ON_GFX950)
+    except Exception:
+        return False
+
+
+# The flash-decode split-K decode path is only tuned for AMD gfx950; other
+# architectures take the fallback decode kernel, so its tests are skipped there.
+requires_gfx950 = pytest.mark.skipif(
+    not _on_gfx950(),
+    reason="split-K decode kernel is only tuned for AMD gfx950",
+)
+
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
@@ -154,6 +173,20 @@ def _ref_sparse_decode_ragged(
                 probs = torch.softmax(scores, dim=0)
             out[query_idx, head_idx] = torch.sum(probs[:, None] * kv, dim=0)
     return out.to(torch.bfloat16)
+
+
+def _ragged_from_rows(
+    rows: list[list[int]], device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flatten per-query slot lists into ragged (indices, indptr) tensors."""
+    flat = [slot for row in rows for slot in row]
+    indptr = [0]
+    for row in rows:
+        indptr.append(indptr[-1] + len(row))
+    return (
+        torch.tensor(flat, dtype=torch.int32, device=device),
+        torch.tensor(indptr, dtype=torch.int32, device=device),
+    )
 
 
 def _ref_combine_topk_swa_ragged(
@@ -375,3 +408,110 @@ def test_combine_topk_swa_indices_ragged() -> None:
     )
     torch.testing.assert_close(actual_indptr, expected_indptr)
     torch.testing.assert_close(actual_lens, expected_lens)
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_decode_num_splits_heuristic(monkeypatch) -> None:
+    """Split-count heuristic added with the flash-decode split-K decode path."""
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    # Pin the CU count so the heuristic is deterministic off-device.
+    monkeypatch.setattr(mod, "_decode_cu_count", lambda: 256)
+
+    # A batch that already fills the device should not be split.
+    assert mod._decode_num_splits(256, 1, avg_main_len=128.0, avg_extra_len=0.0) == 1
+    # A tiny batch on a large device should split to add parallelism.
+    assert mod._decode_num_splits(2, 1, avg_main_len=256.0, avg_extra_len=0.0) > 1
+
+    # The chosen count always stays within the searched [1, 16] range, and a
+    # zero-length workload never splits (no work to parallelize).
+    for num_queries in (1, 4, 24, 224, 1024):
+        splits = mod._decode_num_splits(
+            num_queries, 1, avg_main_len=512.0, avg_extra_len=128.0
+        )
+        assert 1 <= splits <= 16
+    assert mod._decode_num_splits(2, 1, avg_main_len=0.0, avg_extra_len=0.0) >= 1
+
+
+@requires_gfx950
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("with_extra", [True, False])
+@pytest.mark.parametrize("with_sink", [True, False])
+@torch.inference_mode()
+def test_sparse_attn_decode_split_k_kernel(
+    monkeypatch, num_splits: int, with_extra: bool, with_sink: bool
+) -> None:
+    """Flash-decode split-K decode path (partial + reduce kernels).
+
+    This path is the gfx950 production path (``_ON_GFX950``), so the test only
+    runs on gfx950. The split count is pinned so the partial/reduce kernels are
+    exercised across split counts. ``num_splits=8`` drives splits past the
+    shortest segment length, covering the empty-split edge case handled by the
+    reduce kernel.
+    """
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    block_size = 4
+    num_heads = 3
+
+    main_rows = [[0, 2, 4, 6, 1, 3, 7, 5], [4, 1, 6, 0, 2]]
+    num_queries = len(main_rows)
+    q = (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    main_kv = torch.randn(8, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
+    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
+
+    extra_rows: list[list[int]] | None = None
+    extra_cache: torch.Tensor | None = None
+    extra_indices: torch.Tensor | None = None
+    extra_indptr: torch.Tensor | None = None
+    if with_extra:
+        rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
+        extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+        extra_rows = rows
+        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+        extra_indices, extra_indptr = _ragged_from_rows(rows, device)
+
+    attn_sink = (
+        torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
+        if with_sink
+        else None
+    )
+    scale = HEAD_DIM**-0.5
+
+    # Pin the split count so each parametrized value is exercised deterministically.
+    monkeypatch.setattr(mod, "_decode_num_splits", lambda *args, **kwargs: num_splits)
+
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=main_rows,
+        scale=scale,
+        attn_sink=attn_sink,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
