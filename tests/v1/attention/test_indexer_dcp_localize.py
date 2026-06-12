@@ -7,8 +7,10 @@ causal bounds into per-DCP-rank local KV counts."""
 import pytest
 import torch
 
-from vllm.v1.attention.backends.mla.indexer import dcp_localize_seq_lens
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    dcp_localize_seq_lens,
+    get_dcp_local_seq_lens,
+)
 
 
 def _brute_force_local_count(bound: int, rank: int, world: int, ilv: int) -> int:
