@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _TransferMetricName,
 )
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -92,6 +92,24 @@ def get_sliding_window_size_in_blocks(
 
     assert isinstance(kv_cache_spec, FullAttentionSpec)
     return None
+
+
+def resolve_mamba_align_size(spec: "OffloadingSpec") -> int | None:
+    """Scan all KV cache groups in *spec* and return the single mamba alignment
+    size, or None if no group requires mamba alignment.
+
+    For MambaSpec groups in "align" cache mode the hit window must be rounded
+    down to a multiple of the offloaded block size. Asserts that all such
+    groups agree on the same value.
+    """
+    mamba_align_size: int | None = None
+    for idx, gpu_block_size in enumerate(spec.gpu_block_size):
+        kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+            offload_block_size = gpu_block_size * spec.block_size_factor
+            assert mamba_align_size is None or mamba_align_size == offload_block_size
+            mamba_align_size = offload_block_size
+    return mamba_align_size
 
 
 class SchedulerOffloadConfig(NamedTuple):
@@ -290,6 +308,7 @@ class OffloadingConnectorScheduler:
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._mamba_align_size: int | None = resolve_mamba_align_size(spec)
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
@@ -408,6 +427,12 @@ class OffloadingConnectorScheduler:
             # for sliding window attention, we must reduce by 1 to make sure
             # we still have a hit after reduction
             max_hit_size_tokens -= 1
+            if self._mamba_align_size is not None:
+                # Constrain hit-window to the mamba block size.
+                max_hit_size_tokens = round_down(
+                    max_hit_size_tokens, self._mamba_align_size
+                )
+
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
@@ -571,7 +596,11 @@ class OffloadingConnectorScheduler:
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
-        num_hit_tokens = self._lookup(req_status)
+        num_hit_tokens: int | None
+        if request.skip_reading_prefix_cache:
+            num_hit_tokens = 0
+        else:
+            num_hit_tokens = self._lookup(req_status)
         req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)

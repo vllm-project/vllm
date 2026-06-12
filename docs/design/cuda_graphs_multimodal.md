@@ -82,6 +82,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 | Architecture | Models | CG for Image | CG for Video |
 | ------------ | ------ | ------------ | ------------ |
+| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | - |
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
@@ -111,6 +112,14 @@ Enable encoder CUDA Graphs via `compilation_config`:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
+  --compilation-config '{"cudagraph_mm_encoder": true}'
+```
+
+For `Llama 4` (image only):
+
+```bash
+vllm serve meta-llama/Llama-4-Scout-17B-16E-Instruct \
+  --limit-mm-per-prompt '{"image": 1}' \
   --compilation-config '{"cudagraph_mm_encoder": true}'
 ```
 
