@@ -399,6 +399,10 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "DiffusionGemmaForBlockDiffusion": (
+        "diffusion_gemma",
+        "DiffusionGemmaForConditionalGeneration",
+    ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
     "Gemma4UnifiedForConditionalGeneration": (
         "gemma4_unified",
