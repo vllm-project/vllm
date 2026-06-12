@@ -50,7 +50,8 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
