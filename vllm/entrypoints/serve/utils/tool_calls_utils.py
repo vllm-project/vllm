@@ -19,9 +19,14 @@ _ChatCompletionResponseChoiceT = TypeVar(
 def maybe_filter_parallel_tool_calls(
     choice: _ChatCompletionResponseChoiceT, request: ChatCompletionRequest
 ) -> _ChatCompletionResponseChoiceT:
-    """Filter to first tool call only when parallel_tool_calls is False."""
+    """Filter to first tool call only when parallel_tool_calls is False.
 
-    if request.parallel_tool_calls:
+    An explicit ``parallel_tool_calls: null`` means "unspecified" and resolves
+    to the documented default (``true``), same as omitting the field — only an
+    explicit ``false`` trims the response.
+    """
+
+    if request.parallel_tool_calls is not False:
         return choice
 
     if isinstance(choice, ChatCompletionResponseChoice) and choice.message.tool_calls:
