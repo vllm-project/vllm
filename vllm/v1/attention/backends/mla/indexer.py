@@ -34,6 +34,31 @@ from vllm.v1.worker.cp_utils import get_total_cp_world_size
 logger = init_logger(__name__)
 
 
+def dcp_localize_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    """Map global causal bounds to this DCP rank's local KV counts.
+
+    Interleaved ownership: global position j belongs to rank
+    (j // interleave_size) % dcp_world_size, so the result counts the
+    positions < bound owned by this rank. Equivalent to
+    get_dcp_local_seq_lens for a single rank, but purely elementwise: it
+    accepts a tensor of any shape (e.g. per-token expanded bounds, where
+    consecutive entries may land on different ranks), allocates no
+    intermediate (num_requests, world_size) tiling, and is CUDA-graph
+    safe (no device sync). Identity when dcp_world_size == 1.
+    """
+    ilv = cp_kv_cache_interleave_size
+    grp = dcp_world_size * ilv
+    full = seq_lens // grp
+    rem = seq_lens - full * grp
+    extra = (rem - dcp_rank * ilv).clamp_(0, ilv)
+    return full * ilv + extra
+
+
 @triton.jit
 def _prepare_uniform_decode_kernel(
     seq_lens_ptr,
@@ -277,17 +302,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
-        if self.dcp_world_size > 1:
-            # Mirror AttentionMetadataBuilder._init_reorder_batch_threshold
-            # (which this builder does not call): under DCP the threshold is
-            # forced back to 1 so that multi-token (MTP/spec-decode) requests
-            # are classified as prefills. This keeps the decode/prefill split
-            # coherent with the runner-wide reorder threshold (min over
-            # builders, where the sparse MLA builder is likewise forced to 1)
-            # and routes multi-token queries through the prefill path, whose
-            # ke formula handles DCP-local lengths; the decode-path expansion
-            # formulas do not.
-            self.reorder_batch_threshold = 1
+        # Under DCP this matches the sparse MLA builder's threshold (which
+        # declares supports_dcp_with_varlen only for
+        # cp_kv_cache_interleave_size == 1): for interleave_size > 1 that
+        # builder drops back to 1 and spec-decode is rejected at startup
+        # (check_attention_cp_compatibility), so multi-token decode rows can
+        # only coexist with DCP when both builders agree on the split.
         # NOTE: SM100 datacenter GPUs support any next_n natively via the
         # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
         # caches). Outside the SM100 family the FP8
@@ -370,6 +390,36 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=self.device,
             )
+
+    def _dcp_localize_decode_seq_lens(
+        self,
+        seq_lens: torch.Tensor,
+        num_decodes: int,
+        seq_lens_is_buffer_view: bool,
+    ) -> torch.Tensor:
+        """Map per-token global causal bounds to this DCP rank's local counts.
+
+        See dcp_localize_seq_lens for the ownership formula. This wrapper
+        only handles where the result lands: in place into the expansion
+        buffer, or into the persistent buffer on the plain decode path.
+        """
+        local = dcp_localize_seq_lens(
+            seq_lens,
+            self.dcp_rank,
+            self.dcp_world_size,
+            self.cp_kv_cache_interleave_size,
+        )
+        if seq_lens_is_buffer_view:
+            # seq_lens aliases decode_seq_lens_buffer (the expansion wrote
+            # it); overwrite in place to keep the CG address stable.
+            seq_lens.copy_(local)
+            return seq_lens
+        # Plain decode path: seq_lens aliases common_attn_metadata.seq_lens.
+        # Copy into the (otherwise unused here) persistent buffer instead of
+        # mutating shared state.
+        buf = self.decode_seq_lens_buffer[:num_decodes]
+        buf.copy_(local)
+        return buf
 
     def _prepare_decode_tensors(
         self,
@@ -616,26 +666,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            if dcp_local_seq_lens is not None:
-                # Under DCP the decode kernels operate on this rank's local
-                # KV shard, so use the local sequence lengths.
-                seq_lens = dcp_local_seq_lens[:num_decodes]
-            else:
-                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
-            if dcp_local_seq_lens is not None:
-                # With DCP, reorder_batch_threshold is forced back to 1 in
-                # this builder's __init__ (mirroring
-                # AttentionMetadataBuilder._init_reorder_batch_threshold), so
-                # MTP/spec-decode tokens take the prefill path and the
-                # multi-token expansion formulas below must never be reached
-                # with local lengths.
-                assert max_decode_len == 1, (
-                    "Sparse MLA indexer with DCP expects single-token "
-                    "decodes (MTP/spec-decode goes through the prefill path)"
-                )
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len <= next_n
 
@@ -654,15 +688,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             )
 
+            # True iff seq_lens aliases decode_seq_lens_buffer (flatten or
+            # native wrote it); False iff it aliases common_attn_metadata.
+            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
+                not use_native and max_decode_len > 1
+            )
+
+            if dcp_local_seq_lens is not None:
+                # _prepare_decode_tensors produced per-token global causal
+                # bounds (or per-request global lengths on the plain decode
+                # path). Under DCP the decode kernels operate on this rank's
+                # interleaved KV shard, so reduce each bound to the number of
+                # positions this rank owns. The map must be applied per token
+                # AFTER the expansion: ownership of consecutive positions
+                # alternates between ranks, so localize(L) - k differs from
+                # localize(L - k).
+                seq_lens = self._dcp_localize_decode_seq_lens(
+                    seq_lens,
+                    num_decodes,
+                    seq_lens_is_buffer_view=seq_lens_is_buffer_view,
+                )
+
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
             if self.compress_ratio > 1:
-                # True iff seq_lens aliases decode_seq_lens_buffer (flatten or
-                # native wrote it); False iff it aliases common_attn_metadata.
-                seq_lens_is_local_view = (use_native and next_n > 1) or (
-                    not use_native and max_decode_len > 1
-                )
-                if seq_lens_is_local_view:
+                if seq_lens_is_buffer_view:
                     seq_lens //= self.compress_ratio
                 else:
                     # Copy to avoid mutating shared state; keeps CG address stable.
