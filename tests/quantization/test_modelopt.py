@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -13,16 +14,20 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config import set_current_vllm_config
 from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
+    ModelOptFp8LinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 
@@ -59,6 +64,68 @@ def _mock_lm_head() -> Mock:
     lm_head = Mock(spec=ParallelLMHead)
     lm_head.__class__ = ParallelLMHead
     return lm_head
+
+
+class _UnsupportedTiedWeightMethod(QuantizeMethodBase):
+    def create_weights(
+        self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
+    ):
+        raise AssertionError("create_weights should not be called")
+
+    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
+        raise AssertionError("apply should not be called")
+
+    def tie_weight(
+        self, target_layer: torch.nn.Module, source_layer: torch.nn.Module
+    ) -> None:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support tying weights"
+        )
+
+
+def _make_modelopt_fp8_lm_head_and_embedding():
+    config = ModelOptFp8Config(
+        quant_method="FP8",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
+
+    with (
+        patch(
+            "vllm.model_executor.layers.vocab_parallel_embedding."
+            "get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.layers.vocab_parallel_embedding."
+            "get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.init_fp8_linear_kernel",
+            return_value=MagicMock(),
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        lm_head = ParallelLMHead(
+            8,
+            4,
+            quant_config=config,
+            prefix="lm_head",
+        )
+        embed_tokens = VocabParallelEmbedding(8, 4)
+
+    return lm_head, embed_tokens
 
 
 def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
@@ -124,6 +191,43 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_tied_lm_head_uses_unquantized_embedding_method():
+    lm_head, embed_tokens = _make_modelopt_fp8_lm_head_and_embedding()
+
+    assert isinstance(lm_head.quant_method, ModelOptFp8LinearMethod)
+    assert "weight_scale" in lm_head._parameters
+    assert "input_scale" in lm_head._parameters
+
+    lm_head = lm_head.tie_weights(embed_tokens)
+
+    assert lm_head.weight is embed_tokens.weight
+    assert lm_head.quant_method is embed_tokens.quant_method
+    assert isinstance(lm_head.quant_method, UnquantizedEmbeddingMethod)
+    assert "weight_scale" not in lm_head._parameters
+    assert "input_scale" not in lm_head._parameters
+
+
+def test_modelopt_cleanup_quant_state_only_supports_parallel_lm_head():
+    lm_head, _ = _make_modelopt_fp8_lm_head_and_embedding()
+
+    with pytest.raises(NotImplementedError, match="only supports cleaning"):
+        lm_head.quant_method.cleanup_quant_state(torch.nn.Linear(4, 4))
+
+
+def test_lm_head_tie_weights_fails_for_unsupported_quantized_embedding_method():
+    lm_head, embed_tokens = _make_modelopt_fp8_lm_head_and_embedding()
+    original_weight = lm_head.weight
+    embed_tokens.quant_method = _UnsupportedTiedWeightMethod()
+
+    with pytest.raises(NotImplementedError, match="does not support tying weights"):
+        lm_head.tie_weights(embed_tokens)
+
+    assert lm_head.weight is original_weight
+    assert isinstance(lm_head.quant_method, ModelOptFp8LinearMethod)
+    assert "weight_scale" not in lm_head._parameters
+    assert "input_scale" not in lm_head._parameters
 
 
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():

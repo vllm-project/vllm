@@ -435,7 +435,24 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         )
 
 
-class ModelOptFp8LinearMethod(LinearMethodBase):
+class ModelOptLinearMethodBase(LinearMethodBase):
+    """Base class for ModelOpt linear methods."""
+
+    def cleanup_quant_state(self, layer: torch.nn.Module) -> None:
+        if not isinstance(layer, ParallelLMHead):
+            raise NotImplementedError(
+                f"{type(self).__name__} only supports cleaning quantization "
+                f"state for {ParallelLMHead.__name__}, got "
+                f"{type(layer).__name__}"
+            )
+        for name in tuple(layer._parameters):
+            if name not in ("weight", "bias"):
+                delattr(layer, name)
+        for name in tuple(layer._buffers):
+            delattr(layer, name)
+
+
+class ModelOptFp8LinearMethod(ModelOptLinearMethodBase):
     """Linear method for Model Optimizer static quantization.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale. Future support might be added for dynamic
@@ -530,7 +547,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
-class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
+class ModelOptFp8PcPtLinearMethod(ModelOptLinearMethodBase):
     """Linear method for ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoints.
 
     Expected checkpoint structure (per Linear):
@@ -611,7 +628,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
-class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
+class ModelOptFp8PbWoLinearMethod(ModelOptLinearMethodBase):
     """Linear method for ModelOpt FP8_PB_WO checkpoints.
 
     ModelOpt exports `weight_scale` as a 4D tensor:
@@ -1100,7 +1117,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
-class ModelOptNvFp4LinearMethod(LinearMethodBase):
+class ModelOptNvFp4LinearMethod(ModelOptLinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
     Supports loading NVFP4 checkpoints with the following structure:
 
@@ -1232,7 +1249,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
-class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
+class ModelOptNvFp4W4A16LinearMethod(ModelOptLinearMethodBase):
     """Linear method for ModelOpt NVFP4 W4A16.
 
     4-bit NVFP4 weights, fp16/bf16 activations. Loads ModelOpt-style names
@@ -1746,7 +1763,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         )
 
 
-class ModelOptMxFp8LinearMethod(LinearMethodBase):
+class ModelOptMxFp8LinearMethod(ModelOptLinearMethodBase):
     """Linear method for ModelOpt MXFP8 quantization."""
 
     def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
