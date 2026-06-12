@@ -44,6 +44,7 @@ anyio==4.13.0
     #   watchfiles
 apache-tvm-ffi==0.1.10
     # via
+    #   -c requirements/rocm.txt
     #   tilelang
     #   xgrammar
 arctic-inference==0.1.1
@@ -1366,7 +1367,7 @@ word2number==1.1
     # via lm-eval
 wrapt==2.1.2
     # via smart-open
-xgrammar==0.2.0
+xgrammar==0.2.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
