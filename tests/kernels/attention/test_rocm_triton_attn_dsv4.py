@@ -515,32 +515,52 @@ def test_sparse_attn_decode_split_k_kernel(
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
 # ---------------------------------------------------------------------------
 
 
-def _make_cos_sin_cache(
-    max_pos: int, rope_dim: int, device: torch.device
+# Cache rows = max_position_embeddings * scaling_factor.
+_ROTARY_MAX_POS = 1024
+_ROTARY_SCALING_FACTOR = 4.0
+_ROTARY_CACHE_LEN = int(_ROTARY_MAX_POS * _ROTARY_SCALING_FACTOR)
+
+
+def _make_dsv4_rotary(device: torch.device):
+    """The official DSv4 rotary embedding, sized down for unit tests."""
+    from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+        DeepseekV4ScalingRotaryEmbedding,
+    )
+
+    # The model loader constructs layers under a default-device context;
+    # mirror that so the fp32 cos_sin_cache lands on the GPU.
+    with torch.device(device):
+        rotary_emb = DeepseekV4ScalingRotaryEmbedding(
+            head_size=ROPE_HEAD_DIM,
+            rotary_dim=ROPE_HEAD_DIM,
+            max_position_embeddings=_ROTARY_MAX_POS,
+            base=10000,
+            is_neox_style=False,
+            scaling_factor=_ROTARY_SCALING_FACTOR,
+            dtype=torch.bfloat16,
+            mscale=1.0,
+            mscale_all_dim=1.0,
+        )
+    rotary_emb = rotary_emb.to(device)
+    assert rotary_emb.cos_sin_cache.shape == (_ROTARY_CACHE_LEN, ROPE_HEAD_DIM)
+    return rotary_emb
+
+
+def _inv_rope_via_rotary_native(
+    rotary_emb: torch.nn.Module,
+    o: torch.Tensor,
+    positions: torch.Tensor,
 ) -> torch.Tensor:
-    """fp32 cos_sin_cache laid out as [P, rope_dim] = cos[:half] | sin[half:]."""
-    half = rope_dim // 2
-    angles = torch.rand(max_pos, half, dtype=torch.float32, device=device) * 6.2831853
-    return torch.cat((angles.cos(), angles.sin()), dim=-1)
-
-
-class _FakeGPTJRotary(torch.nn.Module):
-    """Minimal stand-in for DeepseekV4ScalingRotaryEmbedding (GPT-J layout).
-
-    No ``forward_native`` so the reference path falls back to the in-module
-    pure-PyTorch ``_apply_gptj_inv_rope_ref``.
-    """
-
-    def __init__(self, cos_sin_cache: torch.Tensor, rotary_dim: int) -> None:
-        super().__init__()
-        self.cos_sin_cache = cos_sin_cache
-        self.is_neox_style = False
-        self.rotary_dim = rotary_dim
+    """Reference: the official ``forward_native(inverse=True)`` path."""
+    expected, _ = rotary_emb.forward_native(positions, o.clone(), None, inverse=True)
+    return expected.to(torch.bfloat16)
 
 
 class _FakeWoA(torch.nn.Module):
@@ -559,27 +579,25 @@ class _FakeWoA(torch.nn.Module):
 @pytest.mark.parametrize("num_heads", [1, 8])
 @pytest.mark.parametrize("pos_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
-def test_fused_inverse_rope_gptj_matches_reference(
-    num_tokens: int, num_heads: int, pos_dtype: torch.dtype
+def test_fused_inverse_rope_gptj_matches_rotary_native(
+    num_tokens: int, num_heads: int, pos_dtype: torch.dtype, default_vllm_config
 ) -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _apply_gptj_inv_rope_ref,
-        _fused_inverse_rope_gptj,
-    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
 
     device = torch.device("cuda")
     torch.manual_seed(0)
-    max_pos = 4096
-    cos_sin_cache = _make_cos_sin_cache(max_pos, ROPE_HEAD_DIM, device)
+    rotary_emb = _make_dsv4_rotary(device)
     o = torch.randn(
         num_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
     )
-    positions = torch.randint(0, max_pos, (num_tokens,), dtype=pos_dtype, device=device)
-
-    actual = _fused_inverse_rope_gptj(o, positions, cos_sin_cache, ROPE_HEAD_DIM)
-    expected = _apply_gptj_inv_rope_ref(o, positions, cos_sin_cache, ROPE_HEAD_DIM).to(
-        torch.bfloat16
+    positions = torch.randint(
+        0, _ROTARY_CACHE_LEN, (num_tokens,), dtype=pos_dtype, device=device
     )
+
+    actual = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+    )
+    expected = _inv_rope_via_rotary_native(rotary_emb, o, positions)
 
     assert actual.dtype == torch.bfloat16
     assert actual.shape == o.shape
@@ -590,26 +608,24 @@ def test_fused_inverse_rope_gptj_matches_reference(
 
 
 @torch.inference_mode()
-def test_fused_inverse_rope_gptj_empty() -> None:
+def test_fused_inverse_rope_gptj_empty(default_vllm_config) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
 
     device = torch.device("cuda")
-    cos_sin_cache = _make_cos_sin_cache(16, ROPE_HEAD_DIM, device)
+    rotary_emb = _make_dsv4_rotary(device)
     o = torch.empty(0, 8, HEAD_DIM, dtype=torch.bfloat16, device=device)
     positions = torch.empty(0, dtype=torch.int32, device=device)
 
-    out = _fused_inverse_rope_gptj(o, positions, cos_sin_cache, ROPE_HEAD_DIM)
+    out = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+    )
     assert out.shape == (0, 8, HEAD_DIM)
     assert out.dtype == torch.bfloat16
 
 
 @torch.inference_mode()
-def test_rocm_inv_rope_einsum_fused_matches_reference() -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _apply_gptj_inv_rope_ref,
-        _can_use_fused_inv_rope,
-        rocm_inv_rope_einsum,
-    )
+def test_rocm_inv_rope_einsum_matches_rotary_native(default_vllm_config) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
     device = torch.device("cuda")
     torch.manual_seed(2)
@@ -617,10 +633,8 @@ def test_rocm_inv_rope_einsum_fused_matches_reference() -> None:
     n_local_groups = num_heads
     o_lora_rank = 16
     hidden_dim = num_heads * HEAD_DIM // n_local_groups  # 512
-    max_pos = 4096
 
-    cos_sin_cache = _make_cos_sin_cache(max_pos, ROPE_HEAD_DIM, device)
-    rotary_emb = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM)
+    rotary_emb = _make_dsv4_rotary(device)
     o = (
         torch.randn(
             num_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
@@ -628,77 +642,23 @@ def test_rocm_inv_rope_einsum_fused_matches_reference() -> None:
         * 0.125
     )
     positions = torch.randint(
-        0, max_pos, (num_tokens,), dtype=torch.int32, device=device
+        0, _ROTARY_CACHE_LEN, (num_tokens,), dtype=torch.int32, device=device
     )
     weight = (
         torch.randn(n_local_groups * o_lora_rank, hidden_dim, device=device) * 0.125
     ).to(torch.bfloat16)
     wo_a = _FakeWoA(weight)
 
-    # Sanity: this configuration must actually take the fused path.
-    assert _can_use_fused_inv_rope(rotary_emb, o, ROPE_HEAD_DIM)
-
     actual = rocm_inv_rope_einsum(
         rotary_emb, o, positions, ROPE_HEAD_DIM, n_local_groups, o_lora_rank, wo_a
     )
 
-    o_ref = _apply_gptj_inv_rope_ref(o, positions, cos_sin_cache, ROPE_HEAD_DIM).to(
-        torch.bfloat16
-    )
+    o_ref = _inv_rope_via_rotary_native(rotary_emb, o, positions)
     o_ref = o_ref.view(num_tokens, n_local_groups, -1)
     wo_a_ref = weight.view(n_local_groups, o_lora_rank, hidden_dim).to(torch.bfloat16)
     expected = torch.einsum("tgd,grd->tgr", o_ref, wo_a_ref)
 
     assert actual.shape == (num_tokens, n_local_groups, o_lora_rank)
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@torch.inference_mode()
-def test_rocm_inv_rope_einsum_fallback_matches_reference() -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _apply_inv_rope_ref,
-        _can_use_fused_inv_rope,
-        rocm_inv_rope_einsum,
-    )
-
-    device = torch.device("cuda")
-    torch.manual_seed(3)
-    num_tokens, num_heads = 4, 8
-    n_local_groups = num_heads
-    o_lora_rank = 16
-    hidden_dim = num_heads * HEAD_DIM // n_local_groups
-    max_pos = 4096
-
-    cos_sin_cache = _make_cos_sin_cache(max_pos, ROPE_HEAD_DIM, device)
-    rotary_emb = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM)
-    # Non-contiguous last dim disqualifies the fused kernel -> PyTorch fallback.
-    o = (
-        torch.randn(
-            num_tokens, HEAD_DIM, num_heads, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    ).transpose(1, 2)
-    positions = torch.randint(
-        0, max_pos, (num_tokens,), dtype=torch.int32, device=device
-    )
-    weight = (
-        torch.randn(n_local_groups * o_lora_rank, hidden_dim, device=device) * 0.125
-    ).to(torch.bfloat16)
-    wo_a = _FakeWoA(weight)
-
-    assert not _can_use_fused_inv_rope(rotary_emb, o, ROPE_HEAD_DIM)
-
-    actual = rocm_inv_rope_einsum(
-        rotary_emb, o, positions, ROPE_HEAD_DIM, n_local_groups, o_lora_rank, wo_a
-    )
-
-    o_ref = _apply_inv_rope_ref(rotary_emb, o, positions, ROPE_HEAD_DIM).to(
-        torch.bfloat16
-    )
-    o_ref = o_ref.view(num_tokens, n_local_groups, -1)
-    wo_a_ref = weight.view(n_local_groups, o_lora_rank, hidden_dim).to(torch.bfloat16)
-    expected = torch.einsum("tgd,grd->tgr", o_ref, wo_a_ref)
-
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
@@ -770,48 +730,3 @@ def test_get_cached_wo_a_bf16_fp8_blockscale_caches() -> None:
 
     # Second call returns the same cached object.
     assert _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim) is out
-
-
-@torch.inference_mode()
-def test_can_use_fused_inv_rope_guard() -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _can_use_fused_inv_rope
-
-    device = torch.device("cuda")
-    cos_sin_cache = _make_cos_sin_cache(32, ROPE_HEAD_DIM, device)
-    o = torch.randn(4, 8, HEAD_DIM, dtype=torch.bfloat16, device=device)
-
-    good = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM)
-    assert _can_use_fused_inv_rope(good, o, ROPE_HEAD_DIM)
-
-    # neox-style layout is not supported by the fused kernel.
-    neox = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM)
-    neox.is_neox_style = True
-    assert not _can_use_fused_inv_rope(neox, o, ROPE_HEAD_DIM)
-
-    # rotary_dim must equal rope_head_dim (only the trailing dims are rotated).
-    mismatched = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM + 2)
-    assert not _can_use_fused_inv_rope(mismatched, o, ROPE_HEAD_DIM)
-
-    # Missing cos_sin_cache disables fusion.
-    no_cache = _FakeGPTJRotary(cos_sin_cache, ROPE_HEAD_DIM)
-    no_cache.cos_sin_cache = None
-    assert not _can_use_fused_inv_rope(no_cache, o, ROPE_HEAD_DIM)
-
-    # cos_sin_cache width must match rope_head_dim.
-    bad_cache = _FakeGPTJRotary(
-        _make_cos_sin_cache(32, ROPE_HEAD_DIM + 2, device), ROPE_HEAD_DIM
-    )
-    assert not _can_use_fused_inv_rope(bad_cache, o, ROPE_HEAD_DIM)
-
-    # Odd rope_head_dim is rejected.
-    odd_cache = _FakeGPTJRotary(
-        _make_cos_sin_cache(32, ROPE_HEAD_DIM + 1, device), ROPE_HEAD_DIM + 1
-    )
-    assert not _can_use_fused_inv_rope(odd_cache, o, ROPE_HEAD_DIM + 1)
-
-    # Non-3D / non-contiguous-last-dim inputs are rejected.
-    assert not _can_use_fused_inv_rope(good, o.reshape(4, 8 * HEAD_DIM), ROPE_HEAD_DIM)
-    o_t = torch.randn(4, HEAD_DIM, 8, dtype=torch.bfloat16, device=device).transpose(
-        1, 2
-    )
-    assert not _can_use_fused_inv_rope(good, o_t, ROPE_HEAD_DIM)

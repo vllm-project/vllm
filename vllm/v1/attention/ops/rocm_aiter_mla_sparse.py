@@ -874,56 +874,6 @@ def _expand_2d_block_scales(
     return scale
 
 
-def _apply_gptj_inv_rope_ref(
-    x: torch.Tensor,
-    positions: torch.Tensor,
-    cos_sin_cache: torch.Tensor,
-    rope_dim: int,
-) -> torch.Tensor:
-    if rope_dim == 0 or x.numel() == 0:
-        return x
-    half_rot = rope_dim // 2
-    nope_dim = x.shape[-1] - rope_dim
-    dtype = x.dtype
-    x = x.to(torch.float32)
-    cache = cos_sin_cache.index_select(0, positions.to(torch.long))
-    cos = cache[:, :half_rot].to(torch.float32)
-    sin = cache[:, half_rot : 2 * half_rot].to(torch.float32)
-    view_shape = (positions.shape[0],) + (1,) * (x.dim() - 2) + (half_rot,)
-    cos = cos.view(view_shape)
-    sin = sin.view(view_shape)
-    rope = x[..., nope_dim:]
-    y_even = rope[..., 0::2]
-    y_odd = rope[..., 1::2]
-    rope_out = torch.stack(
-        (y_even * cos + y_odd * sin, y_odd * cos - y_even * sin),
-        dim=-1,
-    ).flatten(-2)
-    x = x.clone()
-    x[..., nope_dim:] = rope_out
-    return x.to(dtype)
-
-
-def _apply_inv_rope_ref(
-    rotary_emb: torch.nn.Module,
-    x: torch.Tensor,
-    positions: torch.Tensor,
-    rope_dim: int,
-) -> torch.Tensor:
-    if hasattr(rotary_emb, "forward_native"):
-        try:
-            query, _ = rotary_emb.forward_native(
-                positions,
-                x.clone(),
-                None,
-                inverse=True,
-            )
-            return query
-        except TypeError:
-            pass
-    return _apply_gptj_inv_rope_ref(x, positions, rotary_emb.cos_sin_cache, rope_dim)
-
-
 @triton.jit
 def _inverse_rope_gptj_kernel(
     o_ptr,  # [T, H, D] input
@@ -973,25 +923,6 @@ def _inverse_rope_gptj_kernel(
     tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
 
 
-def _can_use_fused_inv_rope(
-    rotary_emb: torch.nn.Module,
-    o: torch.Tensor,
-    rope_head_dim: int,
-) -> bool:
-    """Guard: only fuse the exactly-validated GPT-J standard layout."""
-    cos_sin_cache = getattr(rotary_emb, "cos_sin_cache", None)
-    return (
-        rope_head_dim > 0
-        and rope_head_dim % 2 == 0
-        and o.dim() == 3
-        and o.stride(-1) == 1
-        and not getattr(rotary_emb, "is_neox_style", False)
-        and getattr(rotary_emb, "rotary_dim", rope_head_dim) == rope_head_dim
-        and cos_sin_cache is not None
-        and cos_sin_cache.shape[-1] == rope_head_dim
-    )
-
-
 def _fused_inverse_rope_gptj(
     o: torch.Tensor,
     positions: torch.Tensor,
@@ -999,6 +930,16 @@ def _fused_inverse_rope_gptj(
     rope_head_dim: int,
 ) -> torch.Tensor:
     """bf16 inverse GPT-J RoPE via a single fused Triton kernel."""
+    assert o.dim() == 3 and o.stride(-1) == 1, (
+        "_fused_inverse_rope_gptj expects a [T, H, D] input with a contiguous last dim"
+    )
+    assert rope_head_dim > 0 and rope_head_dim % 2 == 0, (
+        f"_fused_inverse_rope_gptj expects an even rope_head_dim, got {rope_head_dim}"
+    )
+    assert cos_sin_cache.shape[-1] == rope_head_dim, (
+        "_fused_inverse_rope_gptj expects cos_sin_cache laid out as "
+        f"[P, {rope_head_dim}] = cos | sin, got {tuple(cos_sin_cache.shape)}"
+    )
     num_tokens, num_heads, head_dim = o.shape
     out = torch.empty(
         (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
@@ -1074,14 +1015,9 @@ def rocm_inv_rope_einsum(
     Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16
     wo_a weight so the per-step dequant disappears.
     """
-    if _can_use_fused_inv_rope(rotary_emb, o, rope_head_dim):
-        o_ref = _fused_inverse_rope_gptj(
-            o, positions, rotary_emb.cos_sin_cache, rope_head_dim
-        )
-    else:
-        o_ref = _apply_inv_rope_ref(rotary_emb, o, positions, rope_head_dim).to(
-            torch.bfloat16
-        )
+    o_ref = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, rope_head_dim
+    )
     o_ref = o_ref.view(o.shape[0], n_local_groups, -1)
 
     wo_a_weight = _get_cached_wo_a_bf16(
