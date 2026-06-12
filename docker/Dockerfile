@@ -387,6 +387,39 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         python3 use_existing_torch.py --prefix; \
     fi
 
+# Precompiled-wheel passthrough early-out (intarweb fork carry).
+#
+# When build-args advertise a published wheel for the current source SHA
+# (VLLM_USE_PRECOMPILED + VLLM_MERGE_BASE_COMMIT non-empty), setup.py's
+# precompiled_build_ext / precompiled_build_rust classes already short-circuit
+# the local CUDA compile and fetch the wheel from the published index instead.
+# That logic is upstream as of the precompiled-wheel feature landing; this
+# carry adds:
+#
+#   1. An explicit Dockerfile-stage log line so it's obvious from `docker build`
+#      output that the fast path is engaged (vs. silently observing a 5-minute
+#      build instead of a 5-hour one and wondering whether something broke).
+#   2. A defensive `mkdir -p /workspace/dist` so the downstream
+#      `COPY --from=csrc-build /workspace/dist /precompiled-wheels` never sees
+#      a missing directory if upstream's setup.py path ever changes where it
+#      lands extracted artifacts.
+#
+# Fail-loud on wheel-fetch failure is enforced by setup.py:
+#   - precompiled_wheel_utils.fetch_metadata_for_variant() asserts wheels/repo_url non-None
+#   - urllib.urlretrieve() raises HTTPError/URLError on 404 / network failure
+#   - precompiled_wheel_utils.determine_wheel_url() raises ValueError on missing path
+# So a missing wheel produces a non-zero exit from `python3 setup.py bdist_wheel`;
+# this Dockerfile carry does NOT need to add wrapper error-checking on top.
+RUN if [ -n "${VLLM_USE_PRECOMPILED:-}" ] && [ -n "${VLLM_MERGE_BASE_COMMIT:-}" ]; then \
+        echo "[csrc-build] precompiled-wheel passthrough engaged" \
+        && echo "[csrc-build]   VLLM_USE_PRECOMPILED=${VLLM_USE_PRECOMPILED}" \
+        && echo "[csrc-build]   VLLM_MERGE_BASE_COMMIT=${VLLM_MERGE_BASE_COMMIT}" \
+        && echo "[csrc-build]   setup.py will fetch from published wheel index; local C compile will be skipped" \
+        && mkdir -p /workspace/dist; \
+    else \
+        echo "[csrc-build] precompiled-wheel build-args not set; falling through to source compile path"; \
+    fi
+
 # Provision one bare Python per `requires-python` entry; cmake reads
 # DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. See
 # cmake/external_projects/deepgemm.cmake for the full picture.
