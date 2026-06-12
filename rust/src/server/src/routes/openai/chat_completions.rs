@@ -25,7 +25,7 @@ use vllm_engine_core_client::protocol::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
@@ -77,11 +77,7 @@ pub async fn chat_completions(
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
-                return server_error!(
-                    "failed to submit chat request: {}",
-                    error.to_report_string()
-                )
-                .into_response();
+                return chat_submit_error("failed to submit chat request", error).into_response();
             }
         };
 

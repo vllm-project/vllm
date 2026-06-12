@@ -248,6 +248,32 @@ def make_async(
     return _async_wrapper
 
 
+def make_async_with_semaphore(
+    func: Callable[P, T],
+    executor: ThreadPoolExecutor,
+) -> Callable[P, Awaitable[T]]:
+    """
+    Take a blocking function, and run it on in an executor thread.
+
+    This function prevents the blocking function from blocking the
+    asyncio event loop.
+    The code in this function needs to be thread safe.
+
+    The function is wrapped in a semaphore to limit the number of
+    concurrent executions making it easier to cancel tasks before they start.
+    """
+
+    semaphore = asyncio.Semaphore(executor._max_workers)
+
+    async def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        loop = asyncio.get_event_loop()
+        p_func = partial(func, *args, **kwargs)
+        async with semaphore:
+            return await loop.run_in_executor(executor, p_func)
+
+    return _async_wrapper
+
+
 def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
     if in_loop(loop):
         function(*args)
