@@ -741,11 +741,14 @@ class ParserEngine(Parser):
         reasoning = "".join(reasoning_parts) or None
 
         if content or tool_call_deltas or reasoning:
-            return DeltaMessage(
-                content=content,
-                reasoning=reasoning,
-                tool_calls=tool_call_deltas,
-            )
+            kwargs: dict[str, object] = {}
+            if content is not None:
+                kwargs["content"] = content
+            if reasoning is not None:
+                kwargs["reasoning"] = reasoning
+            if tool_call_deltas:
+                kwargs["tool_calls"] = tool_call_deltas
+            return DeltaMessage(**kwargs)
         return None
 
     def _ensure_slot(self, idx: int) -> None:

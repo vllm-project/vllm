@@ -202,6 +202,41 @@ class TestEventsToDelta:
         assert delta.reasoning == "thinking..."
         assert delta.content == "answer"
 
+    @pytest.mark.parametrize(
+        "events,expected,excluded",
+        [
+            (
+                [SemanticEvent(EventType.TEXT_CHUNK, "Hello world")],
+                "content",
+                ["tool_calls", "reasoning"],
+            ),
+            (
+                [SemanticEvent(EventType.REASONING_CHUNK, "Let me think")],
+                "reasoning",
+                ["tool_calls", "content"],
+            ),
+            (
+                [
+                    SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+                    SemanticEvent(EventType.TOOL_NAME, "fn", tool_index=0),
+                    SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"k":1}', tool_index=0),
+                    SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+                ],
+                "tool_calls",
+                ["content", "reasoning"],
+            ),
+        ],
+        ids=["content_only", "reasoning_only", "tool_call_only"],
+    )
+    def test_delta_excludes_unset_fields(self, events, expected, excluded):
+        engine = _make_engine()
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        dumped = delta.model_dump(exclude_unset=True)
+        assert expected in dumped
+        for field in excluded:
+            assert field not in dumped
+
     def test_kimi_k2_tool_call_id_includes_func_name(self):
         engine = _make_engine()
         engine._stream_state.tool_call_id_type = "kimi_k2"
