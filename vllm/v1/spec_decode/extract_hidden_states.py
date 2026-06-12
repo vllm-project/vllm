@@ -18,6 +18,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.spec_decode.utils import first_slot_mapping_if_ubatched
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -249,9 +250,10 @@ class ExtractHiddenStatesProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
-        slot_mappings: dict[str, torch.Tensor] | None = None,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ) -> None:
         assert self.model is not None, "Model must be initialized before dummy_run"
+        slot_mappings = first_slot_mapping_if_ubatched(slot_mappings)
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
                 num_tokens, use_cudagraphs=use_cudagraphs
