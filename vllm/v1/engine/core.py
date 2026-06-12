@@ -52,6 +52,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
@@ -155,6 +156,9 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        self.check_for_draft_tokens = (
+            self.use_spec_decode or vllm_config.model_config.is_diffusion
+        )
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -176,13 +180,13 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {tp_rank: metadata}
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[int, Any] = {}
+                content: dict[tuple[int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata(content)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -234,6 +238,9 @@ class EngineCore:
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
+
+        # register all kvcache specs in enginecore process.
+        register_all_kvcache_specs(vllm_config)
 
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
@@ -471,8 +478,7 @@ class EngineCore:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
-        if not self.async_scheduling and self.use_spec_decode and model_executed:
-            # Take the draft token ids.
+        if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
@@ -571,18 +577,17 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # If we are doing speculative decoding with structured output,
-            # we need to get the draft token ids from the prior step before
-            # we can compute the grammar bitmask for the deferred request.
-            if self.use_spec_decode:
+            # When draft tokens are used with structured output, validate them
+            # before computing the grammar bitmask for the deferred request.
+            if self.check_for_draft_tokens:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
-                assert draft_token_ids is not None
-                # Update the draft token ids in the scheduler output to
-                # filter out the invalid spec tokens, which will be padded
-                # with -1 and skipped by the grammar bitmask computation.
-                self.scheduler.update_draft_token_ids_in_output(
-                    draft_token_ids, deferred_scheduler_output
-                )
+                if draft_token_ids is not None:
+                    # Update the draft token ids in the scheduler output to
+                    # filter out the invalid spec tokens, which will be padded
+                    # with -1 and skipped by the grammar bitmask computation.
+                    self.scheduler.update_draft_token_ids_in_output(
+                        draft_token_ids, deferred_scheduler_output
+                    )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
@@ -604,6 +609,7 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        logger.debug_once("[shutdown] EngineCore: tearing down local resources")
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -618,6 +624,7 @@ class EngineCore:
         # Tear down distributed state initialized in this EngineCore process
         # before it exits and release cached memory.
         cleanup_dist_env_and_memory()
+        logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
@@ -1168,6 +1175,11 @@ class EngineCoreProc(EngineCore):
             signal_callback = SignalCallback(wakeup_engine)
 
             def signal_handler(signum, frame):
+                signal_name = signal.Signals(signum).name
+                logger.info(
+                    "[shutdown] EngineCore: trigger received signal=%s",
+                    signal_name,
+                )
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
                 signal_callback.trigger()
 
@@ -1177,7 +1189,7 @@ class EngineCoreProc(EngineCore):
             engine_core.run_busy_loop()
 
         except SystemExit:
-            logger.debug("EngineCore exiting.")
+            logger.info_once("[shutdown] EngineCore: exiting busy loop")
             raise
         except Exception as e:
             if engine_core is None:
@@ -1281,13 +1293,21 @@ class EngineCoreProc(EngineCore):
 
         if self.shutdown_state == EngineShutdownState.REQUESTED:
             shutdown_timeout = self.vllm_config.shutdown_timeout
+            mode = "abort" if shutdown_timeout == 0 else "drain"
 
-            logger.info("Shutdown initiated (timeout=%d)", shutdown_timeout)
+            logger.info(
+                "[shutdown] EngineCore: start mode=%s timeout=%ds",
+                mode,
+                shutdown_timeout,
+            )
 
             if shutdown_timeout == 0:
                 num_requests = self.scheduler.get_num_unfinished_requests()
                 if num_requests > 0:
-                    logger.info("Aborting %d requests", num_requests)
+                    logger.info(
+                        "[shutdown] EngineCore: aborting in-flight requests count=%d",
+                        num_requests,
+                    )
                 aborted_reqs = self.scheduler.finish_requests(
                     None, RequestStatus.FINISHED_ABORTED
                 )
@@ -1296,7 +1316,8 @@ class EngineCoreProc(EngineCore):
                 num_requests = self.scheduler.get_num_unfinished_requests()
                 if num_requests > 0:
                     logger.info(
-                        "Draining %d in-flight requests (timeout=%ds)",
+                        "[shutdown] EngineCore: draining in-flight requests "
+                        "count=%d timeout=%ds",
                         num_requests,
                         shutdown_timeout,
                     )
@@ -1305,7 +1326,10 @@ class EngineCoreProc(EngineCore):
 
         # Exit when no work remaining
         if not self.has_work():
-            logger.info("Shutdown complete")
+            logger.info(
+                "[shutdown] EngineCore: request processing complete; "
+                "starting resource teardown"
+            )
             return False
 
         return True
@@ -1349,7 +1373,10 @@ class EngineCoreProc(EngineCore):
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False
 
-        logger.info("Rejecting request %s (server shutting down)", request.request_id)
+        logger.debug(
+            "[shutdown] EngineCore: rejecting new request request_id=%s",
+            request.request_id,
+        )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
         return True
 
@@ -1359,7 +1386,10 @@ class EngineCoreProc(EngineCore):
         if self.shutdown_state == EngineShutdownState.RUNNING:
             return False
 
-        logger.warning("Rejecting utility call %s (server shutting down)", method_name)
+        logger.warning(
+            "[shutdown] EngineCore: rejecting utility call method=%s",
+            method_name,
+        )
         output = UtilityOutput(call_id, failure_message="Server shutting down")
         self.output_queue.put_nowait(
             (client_idx, EngineCoreOutputs(utility_output=output))
