@@ -314,111 +314,35 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# _C extension
+# Legacy _C extension (ROCm only — CUDA ops migrated to _C_stable_libtorch)
 #
 
-set(VLLM_EXT_SRC
-  "csrc/quantization/activation_kernels.cu"
-  "csrc/torch_bindings.cpp")
-
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
-
-  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v4.4.2")
-
-  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
-  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
-    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
-  endif()
-
-  if(VLLM_CUTLASS_SRC_DIR)
-    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
-      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
-    endif()
-    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
-    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
-  else()
-    FetchContent_Declare(
-        cutlass
-        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG ${CUTLASS_REVISION}
-        GIT_PROGRESS TRUE
-
-        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
-    )
-  endif()
-  FetchContent_MakeAvailable(cutlass)
-
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_EXT_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-
-  # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
-    set(SRCS
-      "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
-      "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
-    message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
-        AND ES_MXFP8_GROUPED_MM_ARCHS)
-      message(STATUS "Not building ES MXFP8 grouped kernels as CUDA Compiler version is "
-                     "not >= 12.8.")
-    else()
-      message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
-                     "in CUDA target architectures.")
-    endif()
-  endif()
-
-
-
-# if CUDA endif
-endif()
-
-if (VLLM_GPU_LANG STREQUAL "HIP")
-  # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
-  # TODO: Remove the cuda_view when ROCm upgrade to torch 2.11.
-  list(APPEND VLLM_EXT_SRC
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  set(VLLM_EXT_SRC
+    "csrc/torch_bindings.cpp"
     "csrc/custom_quickreduce.cu"
     "csrc/cuda_view.cu"
-    "csrc/libtorch_stable/cuda_utils_kernels.cu"
-  )
-# if ROCM endif
+    "csrc/libtorch_stable/cuda_utils_kernels.cu")
+
+  message(STATUS "Enabling C extension.")
+  define_extension_target(
+    _C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    USE_SABI 3
+    WITH_SOABI)
+
+  # If CUTLASS is compiled on NVCC >= 12.5, it by default uses
+  # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
+  # driver API. This causes problems when linking with earlier versions of CUDA.
+  # Setting this variable sidesteps the issue by calling the driver directly.
+  target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 endif()
-
-message(STATUS "Enabling C extension.")
-define_extension_target(
-  _C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  USE_SABI 3
-  WITH_SOABI)
-
-# If CUTLASS is compiled on NVCC >= 12.5, it by default uses
-# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
-# driver API. This causes problems when linking with earlier versions of CUDA.
-# Setting this variable sidesteps the issue by calling the driver directly.
-target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
@@ -427,6 +351,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/activation_kernels.cu"
+    "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
@@ -453,6 +378,65 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+
+    # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
+    set(CUTLASS_REVISION "v4.4.2")
+
+    # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+    if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+      set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+    endif()
+
+    if(VLLM_CUTLASS_SRC_DIR)
+      if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+        get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+      endif()
+      message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+      FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+    else()
+      FetchContent_Declare(
+          cutlass
+          GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+          # Please keep this in sync with CUTLASS_REVISION line above.
+          GIT_TAG ${CUTLASS_REVISION}
+          GIT_PROGRESS TRUE
+
+          # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+          # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+          # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+          GIT_SHALLOW TRUE
+      )
+    endif()
+    FetchContent_MakeAvailable(cutlass)
+
+    # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    endif()
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
+      set(SRCS
+        "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+        "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${SRCS}"
+        CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
+      list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
+      message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
+    else()
+      if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
+          AND ES_MXFP8_GROUPED_MM_ARCHS)
+        message(STATUS "Not building ES MXFP8 grouped kernels as CUDA Compiler version is "
+                       "not >= 12.8.")
+      else()
+        message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
+                       "in CUDA target architectures.")
+      endif()
+    endif()
+
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
@@ -955,7 +939,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
-    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
@@ -989,7 +972,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
-    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
