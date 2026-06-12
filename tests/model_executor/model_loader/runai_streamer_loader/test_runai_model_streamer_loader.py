@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import types
+from unittest.mock import patch
+
 import pytest
 
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader import runai_streamer_loader as rsl
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -53,3 +57,24 @@ def test_runai_model_loader_download_files_gcs(
     with vllm_runner(test_gcs_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
+
+
+def test_runai_passes_revision_by_name():
+    # revision must reach download_safetensors_index_file_from_hf as the
+    # ``revision`` keyword, not the positional ``subfolder`` slot.
+    fake_self = types.SimpleNamespace(
+        load_config=types.SimpleNamespace(download_dir="/cache", ignore_patterns=[])
+    )
+    with (
+        patch.object(rsl, "is_runai_obj_uri", return_value=False),
+        patch.object(rsl, "download_weights_from_hf", return_value="/folder"),
+        patch.object(
+            rsl, "list_safetensors", return_value=["/folder/model.safetensors"]
+        ),
+        patch.object(rsl, "download_safetensors_index_file_from_hf") as mock_idx,
+    ):
+        rsl.RunaiModelStreamerLoader._prepare_weights(fake_self, "org/model", "myrev")
+
+    mock_idx.assert_called_once()
+    assert mock_idx.call_args.kwargs.get("revision") == "myrev"
+    assert "myrev" not in mock_idx.call_args.args

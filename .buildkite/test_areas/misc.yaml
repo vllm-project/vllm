@@ -138,10 +138,25 @@ steps:
     - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
     - tests/v1/kv_connector/extract_hidden_states_integration
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+
+- label: Extract Hidden States Integration (2 GPUs)
+  key: extract-hidden-states-integration-2-gpus
+  timeout_in_minutes: 20
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s -m 'distributed' v1/kv_connector/extract_hidden_states_integration
 
 - label: Regression
   key: regression
@@ -293,6 +308,7 @@ steps:
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - tests/test_envs.py
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
@@ -300,24 +316,25 @@ steps:
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
-  - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/tokenizers_
   - tests/parser
   - tests/transformers_utils
   - tests/config
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_envs.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
-  - pytest -v -s tokenizers_
   - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
   - pytest -v -s tool_parsers
+  - pytest -v -s tokenizers_
   - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config

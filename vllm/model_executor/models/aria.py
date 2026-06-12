@@ -335,8 +335,8 @@ class AriaTextModel(LlamaModel, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts.w13_weight": ["experts.fc1.weight"],
-        "experts.w2_weight": ["experts.fc2.weight"],
+        "experts.routed_experts.w13_weight": ["experts.fc1.weight"],
+        "experts.routed_experts.w2_weight": ["experts.fc2.weight"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

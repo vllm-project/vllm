@@ -140,6 +140,16 @@ impl ChatLlm {
         self
     }
 
+    /// Tokenizer vocabulary size.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.text.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size, else `None`.
+    pub fn model_vocab_size(&self) -> Option<usize> {
+        self.text.model_vocab_size()
+    }
+
     /// Expose the underlying text facade for raw text-generation routes such as
     /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {
@@ -272,6 +282,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }
