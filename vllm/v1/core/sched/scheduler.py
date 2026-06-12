@@ -56,7 +56,6 @@ from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -770,7 +769,7 @@ class Scheduler(SchedulerInterface):
                         and token_budget >= 1 + self.num_spec_tokens
                     ):
                         scheduled_spec_decode_tokens[request_id] = [
-                            PLACEHOLDER_TOKEN_ID
+                            0
                         ] * self.num_spec_tokens
                         num_new_tokens += self.num_spec_tokens
 
