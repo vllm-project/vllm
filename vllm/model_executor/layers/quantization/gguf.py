@@ -437,6 +437,24 @@ class GGUFLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
+    @staticmethod
+    def _canonical_shard_order(shard_id: list) -> list:
+        # Return shard ids in declared layout order, regardless of GGUF stream order.
+        has_str = any(isinstance(s, str) for s in shard_id)
+        has_int = any(isinstance(s, int) for s in shard_id)
+        assert not (has_str and has_int), (
+            f"shard_id {shard_id} mixes string and integer slot ids; "
+            "QKV (q/k/v) and MergedColumn (int) schemes must not be combined."
+        )
+        if has_str:
+            canonical = [s for s in ("q", "k", "v") if s in shard_id]
+            assert len(canonical) == len(shard_id), (
+                f"shard_id {shard_id} contains keys outside {{'q', 'k', 'v'}}."
+            )
+        else:
+            canonical = sorted(shard_id)
+        return canonical
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -499,11 +517,12 @@ class GGUFLinearMethod(LinearMethodBase):
         qweight = layer.qweight
         shard_id_map = qweight.shard_id_map
         shard_id = qweight.shard_id
+        # Skip single-slot layers: no merge needed, and shard_offset_map is
+        # not built for them (TP>1 may land only one slot on this rank).
         if len(data_container := qweight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
-            assert len(dtype) == 1, ValueError(
-                f"Data container has mixed dtypes: {dtype}"
-            )
+            if len(dtype) != 1:
+                raise ValueError(f"Data container has mixed dtypes: {dtype}")
             dtype = next(iter(dtype))
             # concat dim0 and pad dim1
             padded_side = max(x.size(1) for x in data_container)
@@ -515,17 +534,33 @@ class GGUFLinearMethod(LinearMethodBase):
             )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
+            # Place each slot at the offset its declared index implies, not
+            # the offset its position in the GGUF stream implies. The old
+            # code summed sizes of data_container[:id_in_container], which
+            # is stream order; that's wrong whenever the GGUF file emits
+            # slots out of declared order (we hit this with slot 3 before
+            # slots 0/1/2 on a Qwen3.5 GDN attn_qkv).
+            cur = 0
+            canonical_shard_id = GGUFLinearMethod._canonical_shard_order(shard_id)
+            for idx in canonical_shard_id:
                 id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+                shard = data_container[id_in_container]
+                start = cur
+                end = cur + shard.size(0)
+                size = shard.size(1)
+                padded_data[start:end, :size] = shard
                 shard_offset_map[idx] = (start, end, size)
+                cur = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
-            set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
+            set_weight_attrs(
+                padded_param,
+                {
+                    "shard_offset_map": shard_offset_map,
+                    "canonical_shard_id": canonical_shard_id,
+                },
+            )
             layer.register_parameter("qweight", padded_param)
 
     def apply(
@@ -537,11 +572,13 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # Iterate in canonical (declared) slot order, matching the
+            # layout _create_padded_weight_param produced. The order is
+            # computed once at load time and stashed on the param so the
+            # forward path stays free of per-call sorting.
             qweight = layer.qweight
             result = []
-            for idx in shard_id:
+            for idx in qweight.canonical_shard_id:
                 start, end, offset = layer.qweight.shard_offset_map[idx]
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(
