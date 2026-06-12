@@ -15,8 +15,9 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
+use crate::metrics::{LoraInfoExporter, LoraLoadedExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
+use crate::protocol::notifications::EngineNotification;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
@@ -345,6 +346,7 @@ pub(crate) async fn run_output_dispatcher_loop(
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
     let mut lora_info = LoraInfoExporter::default();
+    let mut lora_loaded = LoraLoadedExporter::default();
 
     let result: Result<()> = async {
         loop {
@@ -401,6 +403,21 @@ pub(crate) async fn run_output_dispatcher_loop(
                     // request tracking instead.
                     let (running, waiting) = inner.lora_adapter_states();
                     lora_info.update(&METRICS.scheduler, running, waiting);
+
+                    if let Some(engine_notifications) = batch.engine_notifications.as_ref() {
+                        for event in engine_notifications {
+                            match event {
+                                EngineNotification::LoraLoadEvent(event) => {
+                                    lora_loaded.update(
+                                        &METRICS.scheduler,
+                                        inner.model_name(),
+                                        batch.engine_index,
+                                        event,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;

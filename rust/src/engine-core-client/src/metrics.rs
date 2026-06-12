@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
     EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, LoraAdapterNames,
-    LoraInfoLabels, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
-    WaitingReasonLabels,
+    LoraInfoLabels, LoraLoadedLabels, LoraLoadedLevel, SchedulerLogStatsAccumulator,
+    SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
+use crate::protocol::notifications::LoraLoadEvent;
 use crate::protocol::stats::SchedulerStats;
 use crate::transport::ConnectedEngine;
 
@@ -274,6 +276,69 @@ impl LoraInfoExporter {
     }
 }
 
+/// Exports the loaded-LoRA-adapter gauges from
+/// `EngineNotification::LoraLoadEvent` events.
+///
+/// Each event carries the complete current state for one engine, so the
+/// exporter diffs against the previously emitted series to drop adapters
+/// that were evicted since the last event.
+#[derive(Default)]
+pub(crate) struct LoraLoadedExporter {
+    current: HashMap<u32, BTreeSet<LoraLoadedLabels>>,
+}
+
+impl LoraLoadedExporter {
+    pub(crate) fn update(
+        &mut self,
+        metrics: &SchedulerMetrics,
+        model_name: impl Into<String>,
+        engine: u32,
+        event: &LoraLoadEvent,
+    ) {
+        let model_name = model_name.into();
+
+        let engine_labels = EngineLabels {
+            model_name: model_name.clone(),
+            engine,
+        };
+        metrics
+            .lora_gpu_adapters
+            .get_or_create(&engine_labels)
+            .set(event.gpu_adapters.len() as u64);
+        metrics
+            .lora_cpu_adapters
+            .get_or_create(&engine_labels)
+            .set(event.cpu_adapters.len() as u64);
+
+        let gpu: BTreeSet<&str> = event.gpu_adapters.iter().map(String::as_str).collect();
+        let pinned: BTreeSet<&str> = event.pinned_adapters.iter().map(String::as_str).collect();
+        let next: BTreeSet<LoraLoadedLabels> = event
+            .cpu_adapters
+            .iter()
+            .map(|adapter_name| LoraLoadedLabels {
+                model_name: model_name.clone(),
+                engine,
+                adapter_name: adapter_name.clone(),
+                level: if gpu.contains(adapter_name.as_str()) {
+                    LoraLoadedLevel::Gpu
+                } else {
+                    LoraLoadedLevel::Cpu
+                },
+                pinned: pinned.contains(adapter_name.as_str()),
+            })
+            .collect();
+
+        let prev = self.current.entry(engine).or_default();
+        for stale in prev.difference(&next) {
+            metrics.lora_adapter_loaded.remove(stale);
+        }
+        for labels in &next {
+            metrics.lora_adapter_loaded.get_or_create(labels).set(1);
+        }
+        *prev = next;
+    }
+}
+
 fn now_unix_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -306,6 +371,75 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn lora_loaded_emits_levels_and_clears_stale() {
+        use crate::metrics::LoraLoadedExporter;
+        use crate::protocol::notifications::LoraLoadEvent;
+
+        let metrics = Metrics::new();
+        let mut exporter = LoraLoadedExporter::default();
+
+        // Family iteration order is not deterministic; sort for snapshots.
+        let loaded_series = |rendered: &str| {
+            let mut lines = rendered
+                .lines()
+                .filter(|l| l.starts_with("vllm:lora_adapter_loaded{"))
+                .collect::<Vec<_>>();
+            lines.sort_unstable();
+            lines.join("\n")
+        };
+
+        // "a" active on GPU and pinned, "b" only in the CPU cache.
+        exporter.update(
+            &metrics.scheduler,
+            "model",
+            0,
+            &LoraLoadEvent {
+                gpu_adapters: vec!["a".to_string()],
+                cpu_adapters: vec!["a".to_string(), "b".to_string()],
+                pinned_adapters: vec!["a".to_string()],
+            },
+        );
+        let rendered = metrics.render().unwrap();
+        expect![[r#"
+            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="gpu",pinned="true"} 1
+            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="b",level="cpu",pinned="false"} 1"#]]
+        .assert_eq(&loaded_series(&rendered));
+        assert!(
+            rendered
+                .contains(r#"vllm:num_gpu_loaded_lora_adapters{model_name="model",engine="0"} 1"#)
+        );
+        assert!(
+            rendered
+                .contains(r#"vllm:num_cpu_loaded_lora_adapters{model_name="model",engine="0"} 2"#)
+        );
+
+        // "a" evicted from GPU to CPU (and unpinned), "b" evicted entirely:
+        // the stale series must disappear.
+        exporter.update(
+            &metrics.scheduler,
+            "model",
+            0,
+            &LoraLoadEvent {
+                gpu_adapters: vec![],
+                cpu_adapters: vec!["a".to_string()],
+                pinned_adapters: vec![],
+            },
+        );
+        let rendered = metrics.render().unwrap();
+        expect![[r#"
+            vllm:lora_adapter_loaded{model_name="model",engine="0",adapter_name="a",level="cpu",pinned="false"} 1"#]]
+        .assert_eq(&loaded_series(&rendered));
+        assert!(
+            rendered
+                .contains(r#"vllm:num_gpu_loaded_lora_adapters{model_name="model",engine="0"} 0"#)
+        );
+        assert!(
+            rendered
+                .contains(r#"vllm:num_cpu_loaded_lora_adapters{model_name="model",engine="0"} 1"#)
+        );
     }
 
     #[test]

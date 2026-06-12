@@ -97,6 +97,20 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
 
 
+class LoRALoadEvent(
+    msgspec.Struct,
+    tag="lora_load_event",
+    omit_defaults=True,
+):
+    gpu_adapters: list[str] = []
+    cpu_adapters: list[str] = []
+    pinned_adapters: list[str] = []
+
+
+# Union of engine-level event types; mirrors vllm/v1/notifications.py.
+EngineNotification = LoRALoadEvent
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,
@@ -110,6 +124,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    engine_notifications: list[EngineNotification] | None = None
 
 
 request = EngineCoreRequest(
@@ -196,6 +211,13 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+    engine_notifications=[
+        LoRALoadEvent(
+            gpu_adapters=["alpha"],
+            cpu_adapters=["alpha", "beta"],
+            pinned_adapters=["alpha"],
+        )
+    ],
 )
 
 

@@ -11,6 +11,7 @@ import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.notifications import EngineNotification
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVConnectorKVEvents
@@ -268,6 +269,11 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Rare worker-originated engine events (e.g. LoRA load events),
+    # forwarded by the engine core to frontends on
+    # EngineCoreOutputs.engine_notifications. None on the vast majority of steps.
+    worker_notifications: list[EngineNotification] | None = None
 
     # Per-step routed experts data captured by the worker.
     # ``routing_data`` shape: (num_scheduled_tokens, num_layers,

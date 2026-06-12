@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.notifications import LoRALoadEvent
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 else:
     SchedulerOutput = object
@@ -173,6 +174,12 @@ class WorkerBase:
 
     def list_loras(self) -> set[int]:
         raise NotImplementedError
+
+    def take_lora_load_event(self) -> "LoRALoadEvent | None":
+        """Return a load event if the set of loaded adapters changed since
+        the last call. Workers without LoRA load reporting (e.g. TPU)
+        return None."""
+        return None
 
     @property
     def vocab_size(self) -> int:

@@ -2530,6 +2530,24 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         "req-1",
                     },
                 ),
+                engine_notifications: Some(
+                    [
+                        LoraLoadEvent(
+                            LoraLoadEvent {
+                                gpu_adapters: [
+                                    "alpha",
+                                ],
+                                cpu_adapters: [
+                                    "alpha",
+                                    "beta",
+                                ],
+                                pinned_adapters: [
+                                    "alpha",
+                                ],
+                            },
+                        ),
+                    ],
+                ),
             },
         )
     "#]]

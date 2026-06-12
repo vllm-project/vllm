@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypeVar
 
 import torch
@@ -55,6 +56,20 @@ class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
 
 
 class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
+
+
+@dataclass
+class LoRALoadedState:
+    """Adapter int ids resident in each tier of a LoRA manager's caches."""
+
+    active_ids: set[int]
+    """Adapters activated into GPU slots."""
+
+    registered_ids: set[int]
+    """Adapters resident in the CPU cache (superset of `active_ids`)."""
+
+    pinned_ids: set[int]
+    """Adapters pinned in the caches."""
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -351,6 +366,13 @@ class LoRAModelManager:
             "Pinning is not supported in LoRAModelManager. "
             "Use LRUCacheLoRAModelManager for pinning"
         )  # type: ignore
+
+    def get_loaded_state(self) -> LoRALoadedState:
+        return LoRALoadedState(
+            active_ids=set(self._active_adapters),
+            registered_ids=set(self._registered_adapters),
+            pinned_ids=set(),
+        )
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # Default to the main language model wrapper
@@ -1226,6 +1248,15 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             self.activate_adapter(lora_id)
 
         self._active_adapters.pin(lora_id)
+
+    def get_loaded_state(self) -> LoRALoadedState:
+        # Iterate the LRU caches directly: the .cache property copies the
+        # whole backing dict per access, and this runs on every step.
+        return LoRALoadedState(
+            active_ids=set(self._active_adapters),
+            registered_ids=set(self._registered_adapters),
+            pinned_ids=set(self._registered_adapters.pinned_items),
+        )
 
 
 def create_lora_manager(

@@ -9,6 +9,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::notifications::EngineNotification;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -158,6 +159,9 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
+    /// Rare engine-level event notifications (see `notifications.rs`).
+    #[serde(default)]
+    engine_notifications: Option<Vec<EngineNotification>>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -174,6 +178,7 @@ pub struct RequestBatchOutputs {
     pub scheduler_stats: Option<Box<SchedulerStats>>,
     pub timestamp: f64,
     pub finished_requests: Option<BTreeSet<String>>,
+    pub engine_notifications: Option<Vec<EngineNotification>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -243,7 +248,8 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
     fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
-            || value.finished_requests.is_some();
+            || value.finished_requests.is_some()
+            || value.engine_notifications.is_some();
 
         match (
             has_request_payload,
@@ -257,6 +263,7 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
                 scheduler_stats: value.scheduler_stats,
                 timestamp: value.timestamp,
                 finished_requests: value.finished_requests,
+                engine_notifications: value.engine_notifications,
             }
             .into()),
             (false, Some(_), None, None) => Ok(UtilityCallOutput {
@@ -295,6 +302,7 @@ impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
                 scheduler_stats: batch.scheduler_stats,
                 timestamp: batch.timestamp,
                 finished_requests: batch.finished_requests,
+                engine_notifications: batch.engine_notifications,
                 ..Default::default()
             },
             EngineCoreOutputs::Utility(utility) => Self {
@@ -358,6 +366,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::protocol::notifications::LoraLoadEvent;
     use crate::protocol::output::EngineCoreOutput;
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
@@ -438,6 +447,41 @@ mod tests {
                         {
                             "req-1",
                         },
+                    ),
+                    engine_notifications: None,
+                },
+            )
+        "#]]
+        .assert_debug_eq(&EngineCoreOutputs::try_from(outputs).unwrap());
+    }
+
+    #[test]
+    fn engine_core_outputs_classify_event_only_as_request_batch() {
+        let outputs = WireEngineCoreOutputs {
+            engine_notifications: Some(vec![EngineNotification::LoraLoadEvent(
+                LoraLoadEvent::default(),
+            )]),
+            ..Default::default()
+        };
+
+        expect_test::expect![[r#"
+            RequestBatch(
+                RequestBatchOutputs {
+                    engine_index: 0,
+                    outputs: [],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    finished_requests: None,
+                    engine_notifications: Some(
+                        [
+                            LoraLoadEvent(
+                                LoraLoadEvent {
+                                    gpu_adapters: [],
+                                    cpu_adapters: [],
+                                    pinned_adapters: [],
+                                },
+                            ),
+                        ],
                     ),
                 },
             )

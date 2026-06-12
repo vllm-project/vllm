@@ -88,6 +88,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.notifications import LoRALoadEvent
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -1113,6 +1114,9 @@ class Worker(WorkerBase):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
+
+    def take_lora_load_event(self) -> "LoRALoadEvent | None":
+        return self.model_runner.take_lora_load_event(self.vllm_config.lora_config)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
