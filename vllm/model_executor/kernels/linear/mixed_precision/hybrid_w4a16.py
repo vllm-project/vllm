@@ -280,10 +280,19 @@ def _select_skinny_gfx11_config(
         # exactly as production via pack_skinny_int4, so the K%4096 cliff is
         # already dodged -- no cliff special-casing needed here).
         tall = K >= 2 * N  # tall-K (down_proj-like)
+        # very wide N with small K (e.g. gemma gate_up 32768x2048): memory-bound,
+        # wants the small square tile at tiny M, not BM=16.
+        vwide_smallk = N >= 8192 and K <= 2048
         if M <= 16:  # BM=16: more M-tiles fill the CUs at tiny M
-            block_m, block_n, block_k, num_warps = 16, 64, 128, 4
+            if N <= 1024 or vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 16, 64, 128, 4
         elif M <= 32:
-            block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            if vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
         elif M <= 64:
             if tall or N >= 4 * K:  # tall or very wide
                 block_m, block_n, block_k, num_warps = 32, 64, 128, 4
@@ -294,7 +303,9 @@ def _select_skinny_gfx11_config(
                 block_m, block_n, block_k, num_warps = 32, 128, 64, 4
             elif N >= 16384:  # very wide N
                 block_m, block_n, block_k, num_warps = 128, 128, 32, 8
-            else:  # square
+            elif K <= 2048:  # small-K square needs BLOCK_K=128
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # larger square
                 block_m, block_n, block_k, num_warps = 64, 128, 32, 4
         elif M <= 256:
             block_m, block_n, block_k, num_warps = 128, 128, 32, 8
