@@ -17,7 +17,7 @@ else()
   FetchContent_Declare(
     fmha_sm100
     GIT_REPOSITORY https://github.com/vllm-project/MSA.git
-    GIT_TAG e32b23be48ccdbab952ff68db9fa31dc12733084
+    GIT_TAG 544eee5e09ae2dfa774d5b06739013f9b7402c57
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
@@ -32,22 +32,19 @@ message(STATUS "fmha_sm100 is available at ${fmha_sm100_SOURCE_DIR}")
 
 add_custom_target(fmha_sm100)
 
-install(DIRECTORY "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/"
+install(FILES
+  "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/__init__.py"
+  "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/sparse.py"
   DESTINATION vllm/third_party/fmha_sm100
+  COMPONENT fmha_sm100)
+
+install(DIRECTORY "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/cute/"
+  DESTINATION vllm/third_party/fmha_sm100/cute
   COMPONENT fmha_sm100
   FILES_MATCHING
-    PATTERN "cutlass" EXCLUDE
+    REGEX "/__pycache__(/.*)?$" EXCLUDE
+    REGEX ".*\\.pyc$" EXCLUDE
+    PATTERN "example.py" EXCLUDE
+    PATTERN "test_*.py" EXCLUDE
     PATTERN "*.py"
-    PATTERN "*.cu"
-    PATTERN "*.cuh"
-    PATTERN "*.h"
-    PATTERN "*.hpp"
-    PATTERN "*.inl"
-    PATTERN "*.jinja"
-    PATTERN "VERSION"
-    PATTERN "*.md"
-    PATTERN "*.ini"
-    PATTERN "*.txt"
-    PATTERN "Makefile"
-    PATTERN "__pycache__" EXCLUDE
-    PATTERN "*.pyc" EXCLUDE)
+    PATTERN "build_k2q_csr.cu")

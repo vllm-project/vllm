@@ -1167,18 +1167,8 @@ package_data = {
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
-        # fmha_sm100 sparse CuTe-DSL package data (vendored via cmake)
-        "third_party/fmha_sm100/**/*.cu",
-        "third_party/fmha_sm100/**/*.cuh",
-        "third_party/fmha_sm100/**/*.h",
-        "third_party/fmha_sm100/**/*.hpp",
-        "third_party/fmha_sm100/**/*.inl",
-        "third_party/fmha_sm100/**/*.jinja",
-        "third_party/fmha_sm100/**/VERSION",
-        "third_party/fmha_sm100/**/*.md",
-        "third_party/fmha_sm100/**/*.ini",
-        "third_party/fmha_sm100/**/*.txt",
-        "third_party/fmha_sm100/**/Makefile",
+        # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
+        "third_party/fmha_sm100/cute/src/sm100/build_k2q_csr/build_k2q_csr.cu",
     ]
 }
 
