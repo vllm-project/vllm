@@ -150,6 +150,12 @@ class SchedulerConfig:
     of requests when GPU memory is scarce. Must be in the range [0.0, 1.0); 0.0
     (the default) disables the watermark."""
 
+    mamba_align_single_block_prefill: bool = False
+    """If True, when mamba_cache_mode is "align", cap each cacheable prefill
+    scheduler step to one scheduler block. This preserves a real Mamba state
+    snapshot at every block boundary while allowing max_num_batched_tokens to
+    remain large for global batching and static buffer sizing."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
