@@ -1040,7 +1040,16 @@ class NixlConnectorWorker:
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        try:
+            self.nixl_wrapper.register_memory(
+                descs,
+                backends=self.nixl_backends,
+            )
+        except KeyError as e:
+            raise RuntimeError(
+                    f"NIXL backend '{e}' is unavailable. "
+                    f"Requested backends: {self.nixl_backends}."
+            ) from e
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
