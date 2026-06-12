@@ -7109,7 +7109,8 @@ class GPUModelRunner(
                 + kv_cache_spec.num_speculative_blocks
             )
         if get_kv_cache_spec_kind(kv_cache_spec) != KVCacheSpecKind.MAMBA:
-            return cdiv(self.model_config.max_model_len, kv_cache_spec.block_size)
+            max_model_len = max(self.max_model_len, self.max_encoder_len)
+            return cdiv(max_model_len, kv_cache_spec.block_size)
         return cdiv(
             kv_cache_spec.max_memory_usage_bytes(self.vllm_config),
             kv_cache_spec.page_size_bytes,
