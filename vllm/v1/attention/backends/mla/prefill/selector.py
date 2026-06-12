@@ -70,10 +70,9 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
-    elif device_capability.major == 9 and device_capability.minor == 5:
-        # AMD gfx950 (MI350). AITER ASM is preferred when the FP8 KV cache
-        # is enabled; validate_configuration filters it out otherwise so the
-        # selector falls through to FlashAttention.
+    elif device_capability.major == 9 and device_capability.minor == 5:  # gfx950/MI350
+        # AITER ASM is preferred with FP8 KV cache-.
+        # Will fall through to FA if not using FP8 KV.
         return [
             MLAPrefillBackendEnum.AITER_ASM,
             MLAPrefillBackendEnum.FLASH_ATTN,
