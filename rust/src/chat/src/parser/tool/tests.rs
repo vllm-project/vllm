@@ -157,6 +157,10 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("ibm-granite/granite-20b-functioncalling"),
         Some(names::GRANITE_20B_FC)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
+        Some(names::GRANITE4)
+    );
 
     assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
