@@ -217,7 +217,7 @@ def rocm_unquantized_gemm_impl(
             out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
+    if use_aiter_triton_gemm(n, m, k, x.dtype) and weight.is_contiguous():
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -265,12 +265,18 @@ def rocm_unquantized_gemm_impl(
             with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
                 out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
-        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+        elif (
+            m % 4 == 0
+            and n == 1
+            and k <= 8192
+            and bias is None
+            and weight.is_contiguous()
+        ):
             with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
                 out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if rocm_aiter_ops.is_tgemm_enabled():
+    if rocm_aiter_ops.is_tgemm_enabled() and weight.is_contiguous():
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)

@@ -27,11 +27,16 @@ def test_rocm_compressed_tensors_w4a16_e2e(
     vllm_runner, example_prompts, model_path, max_tokens
 ):
     # Use fp16 activations for maximum compatibility.
-    # gpu_memory_utilization=0.5: 0.3 left a negative KV-cache budget on the
-    # gfx11 CI runner (Available KV cache memory: -0.53 GiB) because torch +
-    # MIOpen reserve ~hundreds of MB on top of the weights.
+    # gpu_memory_utilization=0.35: must satisfy two constraints simultaneously:
+    #   1. High enough that vLLM has a non-negative KV-cache budget after
+    #      torch + MIOpen reserve memory on top of the model weights.
+    #   2. Low enough that (1 - gmu) > baseline_vram_ratio so that
+    #      _wait_for_rocm_memory_release can clear after teardown.
+    #      On Strix Halo CI runners amdsmi reports 512 MiB dedicated VRAM with
+    #      ~314 MiB (61%) in use at ROCm baseline; threshold = 1 - 0.35 = 0.65
+    #      gives a 332 MiB ceiling, safely above the 314 MiB floor.
     with vllm_runner(
-        model_path, dtype="float16", gpu_memory_utilization=0.5
+        model_path, dtype="float16", gpu_memory_utilization=0.35
     ) as vllm_model:
         # Note: we cannot assert HybridW4A16LinearKernel is selected here
         # because V1 engine runs the model in a subprocess and apply_model
