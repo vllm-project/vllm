@@ -13,6 +13,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -187,6 +188,9 @@ class Cohere2MoeAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            # Defer TP all-reduce to the decoder layer so attention and MLP
+            # outputs can be reduced together.
+            reduce_results=False,
             prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
@@ -287,11 +291,32 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Match cohere-copy-06-09: routed FusedMoE only; shared experts run
+        # separately in forward() and are combined at the model layer.
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=params_dtype,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            quant_config=quant_config,
+            tp_size=tp_size,
+            prefix=f"{prefix}.experts",
+            custom_routing_function=self.custom_routing_function,
+        )
+
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
+            # When routed output is already TP-reduced (kernel or FusedMoE
+            # runner), shared experts must reduce separately too.
+            routed_output_is_reduced = (
+                self.tp_size > 1 or self.experts.runner._fused_output_is_reduced
+            )
             self.shared_experts = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=config.intermediate_size * config.num_shared_experts,
                 quant_config=quant_config,
+                reduce_results=routed_output_is_reduced,
                 prefix=f"{prefix}.shared_experts",
             )
             self.shared_expert_combination_strategy = getattr(
@@ -304,29 +329,19 @@ class Cohere2Moe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
-        self.experts = FusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=params_dtype,
-            renormalize=getattr(config, "norm_topk_prob", True),
-            quant_config=quant_config,
-            tp_size=tp_size,
-            prefix=f"{prefix}.experts",
-            custom_routing_function=self.custom_routing_function,
-            shared_experts=self.shared_experts,
-        )
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
+        # FusedMoE may modify hidden_states, so run shared experts first.
+        if self.shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
-        # FusedMoE handles shared expert overlap internally and returns
-        # shared_output + routed_output when shared_experts is set.
         final_hidden_states = self.experts(hidden_states, router_logits)
-        if self.shared_expert_combination_strategy == "average":
-            final_hidden_states = final_hidden_states / 2
+        if self.shared_experts is not None:
+            if self.shared_expert_combination_strategy == "average":
+                final_hidden_states = (final_hidden_states + shared_output) / 2
+            else:
+                final_hidden_states = final_hidden_states + shared_output
         return final_hidden_states.view(orig_shape)
 
 
@@ -341,6 +356,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
 
         self.self_attn = Cohere2MoeAttention(
@@ -359,7 +375,6 @@ class Cohere2MoeDecoderLayer(nn.Module):
                     config, "prefix_dense_intermediate_size", config.intermediate_size
                 ),
                 quant_config=quant_config,
-                reduce_results=True,
                 prefix=f"{prefix}.mlp",
             )
         else:
@@ -384,7 +399,26 @@ class Cohere2MoeDecoderLayer(nn.Module):
         )
         hidden_states_mlp = self.mlp(hidden_states)
 
-        hidden_states = residual + hidden_states_attention + hidden_states_mlp
+        if self.tp_size > 1:
+            if isinstance(self.mlp, Cohere2MoeMLP):
+                parallel_block_output = tensor_model_parallel_all_reduce(
+                    hidden_states_attention + hidden_states_mlp
+                )
+            elif isinstance(self.mlp, Cohere2Moe):
+                # FusedMoE runner TP-reduces routed output when tp>1, so only
+                # reduce attention here and add the already-reduced MoE output.
+                hidden_states_attention = tensor_model_parallel_all_reduce(
+                    hidden_states_attention
+                )
+                parallel_block_output = hidden_states_attention + hidden_states_mlp
+            else:
+                raise ValueError(
+                    f"Unknown layer type {type(self.mlp)} for tp all reduce."
+                )
+        else:
+            parallel_block_output = hidden_states_attention + hidden_states_mlp
+
+        hidden_states = residual + parallel_block_output
         return hidden_states, residual
 
 
