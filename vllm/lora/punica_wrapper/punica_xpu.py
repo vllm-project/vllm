@@ -111,12 +111,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         token_lora_indices = self._get_token_lora_indices(x)
         # After tensor-parallel all-gather (non-fully-sharded LoRA), x may
-        # have been gathered along the rank dim and x.size(1) can be
-        # max_lora_rank * tp_size.  The XPU C++ kernel strictly requires
-        # inputs.size(1) == lora_b_weights.size(-1), so truncate to the
-        # actual rank used by this weight slice, mirroring what the triton
-        # kernel does on GPU (it reads only K = lora_b_weights[0].shape[-1]
-        # elements).
+        # have been gathered along the rank dim so x.size(1) == max_lora_rank
+        # * tp_size, while lora_b only uses max_lora_rank elements. The XPU
+        # C++ kernel requires inputs.size(1) == lora_b.size(-1), so truncate
+        # to the actual rank. x[:, :rank] is non-contiguous, hence the copy.
         rank = w_t_all.size(-1)
         if x.size(1) != rank:
             x = x[:, :rank].contiguous()
