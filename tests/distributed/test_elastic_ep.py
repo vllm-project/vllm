@@ -78,7 +78,11 @@ def _base_serve_args(use_async_eplb: bool = False) -> list[str]:
         "--eplb-config.num_redundant_experts",
         "0",
         "--eplb-config.use_async",
-        "false",
+        "true" if use_async_eplb else "false",
+        "--eplb-config.step_interval",
+        "10",
+        "--eplb-config.window_size",
+        "5",
         "--data-parallel-backend",
         "ray",
         "--data-parallel-size",
@@ -86,12 +90,6 @@ def _base_serve_args(use_async_eplb: bool = False) -> list[str]:
         "--api-server-count",
         "1",
     ]
-    args.extend(
-        [
-            "--eplb-config.use_async",
-            "true" if use_async_eplb else "false",
-        ]
-    )
 
     leader_address = os.environ.get("LEADER_ADDRESS")
     if leader_address:
