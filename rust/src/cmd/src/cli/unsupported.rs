@@ -444,15 +444,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
-    /// If set to True, enable prompt_tokens_details in usage.
-    #[arg(
-        long,
-        visible_alias = "no-enable-prompt-tokens-details",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_prompt_tokens_details: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -563,11 +554,6 @@ pub struct ServerUnsupportedArgs {
     /// Allowed headers.
     #[arg(long)]
     pub allowed_headers: Option<Unsupported>,
-
-    /// If provided, the server will require one of these keys to be presented
-    /// in the header.
-    #[arg(long)]
-    pub api_key: Option<Unsupported>,
 
     /// The file path to the SSL key file.
     #[arg(long)]
