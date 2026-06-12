@@ -438,8 +438,7 @@ class DelegatingParser(Parser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         if (
-            not isinstance(request, ChatCompletionRequest)
-            or self._tool_parser is None
+            self._tool_parser is None
             or self._tool_parser.structural_tag_model is None
             or not request.tools
         ):
@@ -448,7 +447,10 @@ class DelegatingParser(Parser):
         need_tool_calling = (
             request.tool_choice == "auto"
             or request.tool_choice == "required"
-            or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            or isinstance(
+                request.tool_choice,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            )
         )
         if not need_tool_calling:
             return request
@@ -464,7 +466,10 @@ class DelegatingParser(Parser):
         request.structured_outputs = StructuredOutputsParams(
             structural_tag=structural_tag,
         )
-        request.response_format = None
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
         return request
 
     def extract_reasoning_streaming(
