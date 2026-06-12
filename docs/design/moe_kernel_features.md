@@ -42,7 +42,7 @@ th {
     1. All types: mxfp4, nvfp4, int4, int8, fp8
     2. A,T quantization occurs after dispatch.
     3. All quantization happens after dispatch.
-    4. Controlled by different env vars (`VLLM_FLASHINFER_MOE_BACKEND` "throughput" or "latency")
+    4. Controlled by `--moe-backend` (`flashinfer_cutlass` or `flashinfer_trtllm`)
     5. This is a no-op dispatcher that can be used to pair with any modular experts to produce a modular kernel that runs without dispatch or combine. These cannot be selected via environment variable. These are generally use for testing or adapting an expert subclass to the `fused_experts` API.
     6. This depends on the experts implementation.
 
