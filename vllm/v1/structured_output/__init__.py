@@ -388,6 +388,9 @@ class StructuredOutputManager:
         # starts past the reasoning-end marker.
         all_token_ids = request.all_token_ids
         if new_token_ids:
+            # The tokens were already appended this step, so the step window
+            # starts exactly len(new_token_ids) from the end.
+            start = len(all_token_ids) - len(new_token_ids)
             delta_ids: Iterable[int] = new_token_ids
         else:
             delta_from = (
@@ -402,6 +405,26 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
             structured_req.reasoning_ended = True
 
+            # Locate the reasoning-end marker within the step once; both
+            # branches below rely on it. Everything up to and including the
+            # marker is reasoning content and must never reach the grammar.
+            step_tokens = (
+                new_token_ids
+                if new_token_ids
+                else list(itertools.islice(all_token_ids, start, None))
+            )
+            end_offset = self._find_reasoning_end_offset(
+                reasoner, itertools.islice(all_token_ids, start), step_tokens
+            )
+            # When the marker cannot be pinned to a single token (e.g. a
+            # multi-token marker only recognized on the full delta),
+            # conservatively treat the whole step as reasoning content.
+            structured_req.reasoning_end_token_index = (
+                start + end_offset
+                if end_offset is not None
+                else len(all_token_ids) - 1
+            )
+
             # Reasoning just ended this step. Defer FSM advance until the next
             # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
             # advancing on the closing boundary token can accept tokens that still
@@ -414,13 +437,9 @@ class StructuredOutputManager:
                 and structured_req.structured_output_key[0]
                 == StructuredOutputOptions.STRUCTURAL_TAG
             ):
-                # The scheduler will advance the grammar with this step's
-                # tokens right away, but the step still contains reasoning
-                # content up to and including the end marker. Record where
-                # it ends so trim_reasoning_for_advance() can drop it.
-                structured_req.reasoning_end_token_index = (
-                    self._find_reasoning_end_index(reasoner, all_token_ids, start)
-                )
+                # The scheduler advances the grammar with this step's tokens
+                # right away; trim_reasoning_for_advance() uses the recorded
+                # index to drop the reasoning prefix.
                 return True
 
             # Deferred backends still need the post-marker tail of this step's
@@ -428,38 +447,48 @@ class StructuredOutputManager:
             # step's bitmask preparation sees grammar at its initial state and
             # the model can emit a duplicate opening token (e.g. "{{") when
             # reasoning ended inside a spec-decode window.
-            if new_token_ids:
-                for idx, token in enumerate(new_token_ids):
-                    if reasoner.is_reasoning_end_streaming([], [token]):
-                        post_marker = list(new_token_ids[idx + 1 :])
-                        if post_marker:
-                            structured_req.grammar.accept_tokens(
-                                request.request_id, post_marker
-                            )
-                        break
+            if new_token_ids and end_offset is not None:
+                post_marker = list(new_token_ids[end_offset + 1 :])
+                grammar = structured_req.grammar
+                if post_marker and grammar is not None:
+                    if not grammar.accept_tokens(request.request_id, post_marker):
+                        # These tokens were sampled before the grammar became
+                        # active and are not guaranteed valid; tolerate the
+                        # rejection like grammar_bitmask does post-marker.
+                        logger.warning(
+                            "Grammar rejected post-reasoning tokens %s for "
+                            "request %s; continuing without the advance.",
+                            post_marker,
+                            request.request_id,
+                        )
 
         return False
 
     @staticmethod
-    def _find_reasoning_end_index(
-        reasoner: "ReasoningParser", all_token_ids: list[int], start: int
-    ) -> int:
-        """Locates the last reasoning token within ``all_token_ids[start:]``.
+    def _find_reasoning_end_offset(
+        reasoner: "ReasoningParser",
+        prefix_tokens: Iterable[int],
+        step_tokens: list[int],
+    ) -> int | None:
+        """Locates the last reasoning token within ``step_tokens``.
+
+        Args:
+            reasoner: The request's reasoning parser.
+            prefix_tokens: Tokens that precede ``step_tokens`` in the
+                request, used as streaming context for the parser.
+            step_tokens: The tokens produced by the current step.
 
         Returns:
-            The absolute index of the token at which
-            ``is_reasoning_end_streaming`` first fires. Falls back to the
-            final index when no single token triggers the detection (e.g.
-            a multi-token marker only recognized on the full delta), which
-            conservatively treats the whole step as reasoning content.
+            The offset within ``step_tokens`` of the token at which
+            ``is_reasoning_end_streaming`` first fires, or None when no
+            single token triggers the detection.
         """
-        prefix = list(itertools.islice(all_token_ids, start))
-        for idx in range(start, len(all_token_ids)):
-            token = all_token_ids[idx]
+        prefix = list(prefix_tokens)
+        for offset, token in enumerate(step_tokens):
             prefix.append(token)
             if reasoner.is_reasoning_end_streaming(prefix, [token]):
-                return idx
-        return len(all_token_ids) - 1
+                return offset
+        return None
 
     def trim_reasoning_for_advance(
         self, request: "Request", new_token_ids: list[int]
