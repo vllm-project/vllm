@@ -73,6 +73,19 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
+def register_exception_handlers(app: FastAPI) -> None:
+    app.exception_handler(HTTPException)(http_exception_handler)
+    app.exception_handler(RequestValidationError)(validation_exception_handler)
+    app.exception_handler(EngineGenerateError)(engine_error_handler)
+    app.exception_handler(EngineDeadError)(engine_error_handler)
+    app.exception_handler(GenerationError)(generation_error_handler)
+    app.exception_handler(VLLMValidationError)(exception_handler)
+    app.exception_handler(ValueError)(exception_handler)
+    app.exception_handler(TypeError)(exception_handler)
+    app.exception_handler(OverflowError)(exception_handler)
+    app.exception_handler(Exception)(exception_handler)
+
+
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -246,13 +259,7 @@ def build_app(
         allow_headers=args.allowed_headers,
     )
 
-    app.exception_handler(HTTPException)(http_exception_handler)
-    app.exception_handler(RequestValidationError)(validation_exception_handler)
-    app.exception_handler(EngineGenerateError)(engine_error_handler)
-    app.exception_handler(EngineDeadError)(engine_error_handler)
-    app.exception_handler(GenerationError)(generation_error_handler)
-    app.exception_handler(VLLMValidationError)(exception_handler)
-    app.exception_handler(Exception)(exception_handler)
+    register_exception_handlers(app)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
