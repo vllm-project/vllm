@@ -664,8 +664,9 @@ class FlexAttentionMetadata:
         ]
 
         custom_hint = self.block_sparsity_hint is not None
+        batch_invariant = envs.VLLM_BATCH_INVARIANT
 
-        if self.sliding_window or custom_hint:
+        if self.sliding_window or custom_hint or batch_invariant:
             device = used_pages.device
             assert self.doc_ids is not None
             token_indices = torch.arange(
@@ -694,6 +695,20 @@ class FlexAttentionMetadata:
                     self.block_size,
                 )
                 used_pages.masked_fill_(~hint_mask, 0)
+            if batch_invariant:
+                # The number of candidate KV blocks for a query token must
+                # depend only on that token's own position, not on the
+                # overall request length. Otherwise the same prefix tokens
+                # can be assigned a different number of candidate blocks
+                # depending on what else is in the request (e.g. a cache
+                # miss vs. a cache hit followed by a longer suffix), which
+                # changes the number of online-softmax merge steps and
+                # breaks bitwise-identical outputs across requests.
+                needed_blocks = (logical_q_idx + self.block_size) // self.block_size
+                beyond_needed = (
+                    self.logical_block_ids[None, :] >= needed_blocks[:, None]
+                )
+                used_pages.masked_fill_(beyond_needed, 0)
 
         used_pages_padded = pad_to_multiple(
             used_pages, multiple=self.q_block_size, dim=0
