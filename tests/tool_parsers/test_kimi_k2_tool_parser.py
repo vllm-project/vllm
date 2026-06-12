@@ -605,6 +605,63 @@ class TestAdjustRequest:
             expected_reasoning_prefix
         )
 
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "calculate"}},
+        ],
+    )
+    @pytest.mark.parametrize(
+        "enable_in_reasoning,thinking",
+        [(False, True), (True, True), (True, False), (False, False)],
+    )
+    def test_forced_choice_grammar_from_tool_parser_couples_to_prefix(
+        self, monkeypatch, parser, tool_choice, enable_in_reasoning, thinking
+    ):
+        # Parser-owned grammar is claimed (reasoning_ended=True engine side) iff
+        # the structural tag has NO reasoning prefix. With no prefix the engine
+        # would otherwise defer the bitmask during reasoning, so the forced tool
+        # would not be enforced from token 0. With a prefix (reasoning on),
+        # enable_in_reasoning drives the grammar from token 0 instead, and the
+        # flag is left unset so the reasoning parser can still extract reasoning
+        # (setting it would suppress extraction and leak </think> into content).
+        monkeypatch.setattr(
+            "vllm.tool_parsers.kimi_k2_tool_parser."
+            "get_enable_structured_outputs_in_reasoning",
+            lambda: enable_in_reasoning,
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice=tool_choice,
+            chat_template_kwargs={"thinking": thinking},
+        )
+
+        result = parser.adjust_request(request)
+
+        has_prefix = _has_reasoning_prefix(_structural_tag_format(result))
+        expected_gftp = not (enable_in_reasoning and thinking)
+        assert has_prefix is (enable_in_reasoning and thinking)
+        assert result._grammar_from_tool_parser is expected_gftp
+        # The invariant: parser-owned grammar iff no reasoning prefix.
+        assert result._grammar_from_tool_parser is (not has_prefix)
+
+    def test_grammar_from_tool_parser_not_set_without_structural_tag(self, parser):
+        # tool_choice="none" takes the base adjust_request path and must not
+        # claim parser-owned grammar (the engine keeps its reasoning gate).
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "What is 2 + 2?"}],
+            tools=[_calculator_tool()],
+            tool_choice="none",
+        )
+
+        result = parser.adjust_request(request)
+
+        assert result._grammar_from_tool_parser is False
+
     def test_structural_tag_reasoning_prefix_ignores_include_reasoning_visibility(
         self, monkeypatch, parser
     ):

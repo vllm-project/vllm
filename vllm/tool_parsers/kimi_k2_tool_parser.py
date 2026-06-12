@@ -117,12 +117,24 @@ class KimiK2ToolParser(ToolParser):
     def get_structural_tag(self, request: ChatCompletionRequest):
         chat_template_kwargs = request.chat_template_kwargs or {}
         thinking = bool(chat_template_kwargs.get("thinking", True))
-        return get_model_structural_tag(
+        reasoning = get_enable_structured_outputs_in_reasoning() and thinking
+        structural_tag = get_model_structural_tag(
             model="kimi_k2",
             tools=request.tools,
             tool_choice=request.tool_choice,
-            reasoning=(get_enable_structured_outputs_in_reasoning() and thinking),
+            reasoning=reasoning,
         )
+        # Parser-owned grammar from the first generated token, but only when the
+        # tag has no reasoning prefix (``reasoning`` is False). In that case the
+        # engine would otherwise defer the bitmask during reasoning and the
+        # forced tool would not be enforced from token 0, so we set
+        # ``reasoning_ended=True`` here. When the tag *does* carry a
+        # ``<think>...</think>`` prefix (reasoning on), ``enable_in_reasoning``
+        # already drives the grammar from token 0; leaving this flag unset lets
+        # the reasoning parser extract the reasoning content (setting it would
+        # suppress extraction and leak ``</think>`` into ``content``).
+        request._grammar_from_tool_parser = not reasoning
+        return structural_tag
 
     def extract_tool_calls(
         self,
