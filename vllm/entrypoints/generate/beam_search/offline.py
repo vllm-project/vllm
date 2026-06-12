@@ -30,6 +30,10 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+# Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
+# MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
+_MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+
 
 _bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
@@ -218,16 +222,16 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_key is not None
                 and structured_output_bitmask is not None
             )
-            beam_params = self._build_beam_sampling_params(
+            beam_entries = self._build_beam_sampling_params(
                 all_beams,
                 base_sampling_params,
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
             )
-            active_indices = [i for i, p in enumerate(beam_params) if p is not None]
-            for i, p in enumerate(beam_params):
-                if p is None:
+            active_indices = [i for i, e in enumerate(beam_entries) if e is not None]
+            for i, e in enumerate(beam_entries):
+                if e is None:
                     beam = all_beams[i]
                     assert beam.orig_prompt["type"] != "enc_dec"
                     prompt_len = len(beam.orig_prompt["prompt_token_ids"])
@@ -245,7 +249,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             active_beams = [all_beams[i] for i in active_indices]
             active_params: Sequence[SamplingParams | PoolingParams] = [
-                beam_params[i]  # type: ignore[misc]
+                beam_entries[i][0]  # type: ignore[index]
                 for i in active_indices
             ]
         else:
@@ -271,12 +275,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         # Logprobs are computed from raw logits before
         # allowed_token_ids masking, so they may contain
-        # tokens outside the grammar's allowed set.
+        # tokens outside the grammar's allowed set. This filtering is also
+        # the only grammar enforcement for beams whose allowed set exceeds
+        # the engine-side allowed_token_ids cap.
         allowed_sets: list[set[int] | None] = [None] * len(all_beams)
         if structured_output_backend is not None:
-            for idx, p in zip(active_indices, active_params):
-                if isinstance(p, SamplingParams) and p.allowed_token_ids:
-                    allowed_sets[idx] = set(p.allowed_token_ids)
+            for i, entry in enumerate(beam_entries):
+                if entry is not None:
+                    allowed_sets[i] = set(entry[1])
 
         for (start, end), instance in zip(instance_start_and_end, instances_batch):
             instance_new_beams = []
@@ -393,14 +399,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         backend: StructuredOutputBackend,
         structured_output_key: tuple,
         bitmask: torch.Tensor,
-    ) -> list[SamplingParams | None]:
-        """Build per-beam SamplingParams with allowed_token_ids from grammar.
+    ) -> list[tuple[SamplingParams, list[int]] | None]:
+        """Build per-beam SamplingParams and allowed token IDs from grammar.
 
         Returns None for beams where the grammar has terminated.
         """
         vocab_size = self.model_config.get_vocab_size()
         request_type, grammar_spec = structured_output_key
-        result: list[SamplingParams | None] = []
+        result: list[tuple[SamplingParams, list[int]] | None] = []
 
         for beam in beams:
             # Fresh grammar per beam, replaying generated tokens.
@@ -425,13 +431,21 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 result.append(None)
                 continue
 
+            # The engine caps the size of allowed_token_ids. While the
+            # grammar still allows more tokens than the cap (e.g. inside
+            # free-form strings), skip the engine-side constraint and rely
+            # on the logprobs filtering in _beam_search_step instead.
             beam_params = SamplingParams(
                 logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
-                allowed_token_ids=allowed_ids,
+                allowed_token_ids=(
+                    allowed_ids
+                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
+                    else None
+                ),
                 skip_clone=True,
             )
-            result.append(beam_params)
+            result.append((beam_params, allowed_ids))
 
         return result
