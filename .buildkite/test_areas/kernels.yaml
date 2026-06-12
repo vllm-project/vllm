@@ -237,7 +237,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion==1.0.0
+    - pip install helion==1.1.0
     - pytest -v -s kernels/helion/
 
  
