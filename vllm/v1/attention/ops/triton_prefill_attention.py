@@ -250,10 +250,13 @@ def _is_rdna() -> bool:
 
 
 def get_block_size(dtype: torch.dtype, head_dim: int | None = None) -> int:
-    # Gemma3 SigLIP ViT (head_dim=72) on gfx1151: cold-L2 sweep across
-    # BM in {16,32,64,128} x NW in {1,2,4,8} found BM=32 + NW=2 fastest.
+    """Query-tile size BLOCK_M (also the KV tile unless get_block_n differs)."""
+    # SigLIP / Qwen3-VL ViT (head_dim=72) on gfx1151: with the split-D kernel
+    # (D covered as 64+16, see _split_head_dim) a re-sweep over BM x BN x NW
+    # found BM=64 (with BN=32, NW=4) fastest -- ~20% over the BM=BN=32/NW=2
+    # tile that was optimal for the old next_pow2(72)=128 kernel.
     if _is_rdna() and head_dim == 72 and dtype in (torch.bfloat16, torch.float16):
-        return 32
+        return 64
     if dtype == torch.float32:
         return 32
     elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
@@ -268,6 +271,15 @@ def get_block_size(dtype: torch.dtype, head_dim: int | None = None) -> int:
         return 64
 
 
+def get_block_n(dtype: torch.dtype, head_dim: int | None = None) -> int:
+    """KV-tile size BLOCK_N. Defaults to BLOCK_M (square tile); the head_dim=72
+    split-D ViT path wants an asymmetric BM=64 / BN=32 tile (a wider KV tile
+    regressed; see the get_block_size sweep note)."""
+    if _is_rdna() and head_dim == 72 and dtype in (torch.bfloat16, torch.float16):
+        return 32
+    return get_block_size(dtype, head_dim)
+
+
 def get_num_warps(head_dim: int) -> int:
     """Get optimal number of warps based on architecture and head dimension."""
     if _is_rdna():
@@ -275,9 +287,10 @@ def get_num_warps(head_dim: int) -> int:
         # Tested on Radeon 8060S (gfx1151) with Qwen2.5-VL-7B.
         # Tested configs: Block in {16,32,64}, Warps in {2,4,8,16}.
         if head_dim == 72:
-            # Gemma3 SigLIP. Cold-L2 sweep: BM=32 + NW=2 + WE=6 best (~6.8 ms
-            # vs 9.1 ms at NW=8 on a B=1,S=4096,H=16,D=72 bf16 call).
-            return 2
+            # SigLIP / Qwen3-VL, split-D kernel: re-sweep picked BM=64 + BN=32
+            # + NW=4 + WE=6 (~2.95 ms vs 3.67 ms at the old BM=32/NW=2 on a
+            # B=1,S=3520,H=16,D=72 bf16 call).
+            return 4
         return 8
     else:
         return 4 if head_dim <= 64 else 8
@@ -328,7 +341,8 @@ def context_attention_fwd(
     """
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
 
-    BLOCK = get_block_size(q.dtype, head_dim=Lk)
+    block_m = get_block_size(q.dtype, head_dim=Lk)
+    block_n = get_block_n(q.dtype, head_dim=Lk)
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
@@ -337,7 +351,7 @@ def context_attention_fwd(
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
-    grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
+    grid = (batch, head, triton.cdiv(max_input_len, block_m))
     num_warps = get_num_warps(Lk)
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
@@ -367,10 +381,10 @@ def context_attention_fwd(
         o.stride(0),
         o.stride(1),
         kv_group_num=kv_group_num,
-        BLOCK_M=BLOCK,
+        BLOCK_M=block_m,
         BLOCK_DMODEL=block_dmodel,
         BLOCK_DMODEL_TAIL=block_dmodel_tail,
-        BLOCK_N=BLOCK,
+        BLOCK_N=block_n,
         IS_CAUSAL=is_causal,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
