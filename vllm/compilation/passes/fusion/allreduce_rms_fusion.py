@@ -155,6 +155,7 @@ if flashinfer_comm is not None:
         scale_factor: torch.Tensor | None = None,
         weight_bias: float = 0.0,
     ) -> None:
+        # handle transformers backend passing outer batch dim.
         if allreduce_in.dim() != 2:
             hidden = allreduce_in.shape[-1]
             allreduce_in = allreduce_in.view(-1, hidden)
