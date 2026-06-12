@@ -5,7 +5,6 @@
 Dispatches through aiter.mla_prefill_ps_asm_fwd -> aiter.mla_reduce_v1.
 """
 
-import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -29,10 +28,6 @@ logger = init_logger(__name__)
 _FP8_PREFILL_TILE_Q = 256
 # K-side tiling granularity required by the PS scheduler.
 _KVLEN_GRANULARITY = 128
-# Compute-unit count on gfx950/MI350 (multi_processor_count is always 256).
-# Hardcoded because torch.cuda.get_device_properties() is slow to call on the
-# per-forward metadata path; the value is fixed for the only supported arch.
-_GFX950_CU_NUM = 256
 
 
 class AiterAsmPrefillBackend(MLAPrefillBackend):
@@ -217,19 +212,17 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         max_qlen).
 
         num_partial_tiles (which sizes the per-call logits/attn_lse scratch in
-        _run_kernel) is computed from a tight host-side bound, NOT from the
-        info call's reduce_partial_map_size. The info bound is
-        qo_tile_cnt * (max_kv_split + cus_per_cluster); its max_kv_split =
-        ceil(max_kvlen/128) factor assumes every q-tile splits into max_kv_split
-        partials, but the scheduler distributes total KV units across thread
-        groups and emits at most one carryover work-item per TG, so the true
-        per-cluster partial count is QT + tgs_per_cluster, independent of KV
-        length (QT = sum over sequences of ceil(qlen/qlen_granularity)). For a
-        long-context chunk at large batch the info bound over-counts by ~256x,
-        which made logits balloon to hundreds of GB and fault on allocation at
-        high concurrency. The tight bound keeps it proportional to the query
-        side only. Both QT and tgs_per_cluster are pure host arithmetic, so the
-        sizing path stays sync-free.
+        _run_kernel) is read from device truth: reduce_indptr[-1], the actual
+        number of partials the scheduler emitted. This costs one DtoH sync, but
+        it is paid once per chunk per forward (this method runs once in
+        prepare_metadata and its result is reused by all ~30 MLA layers), not
+        per layer. Device truth is exact: it never under-counts (unlike the
+        earlier sync-free host bound qt + tgs_per_cluster, which under-counted
+        noncausal long-context at large batch and let the kernel write past
+        logits/attn_lse, causing the 256-concurrency MAF), and it stays far
+        below the info call's loose reduce_partial_map_size (which over-counts by
+        ~256x for long context and previously ballooned logits to hundreds of
+        GB).
 
         Buffers are read-only after the build: the kernel reads work_indptr/
         work_info/reduce_* and writes only the per-call logits/attn_lse/out
@@ -291,22 +284,25 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
-        # Tight, sync-free upper bound on the per-cluster partial-tile count:
-        # QT (sum over sequences of ceil(qlen/qlen_granularity)) plus one
-        # carryover per thread group in a cluster. partial_o_loc resets per
-        # cluster and is identical across clusters, so this bounds the highest
-        # partial slot the kernel writes; logits/attn_lse are sized to
-        # num_partial_tiles * tile_q rows. Computed on the CPU qo_indptr (no
-        # device read). See the method docstring for why this replaces the
-        # info call's loose reduce_partial_map_size.
-        q_seq_lens = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
-        qt = int(
-            ((q_seq_lens + (_FP8_PREFILL_TILE_Q - 1)) // _FP8_PREFILL_TILE_Q)
-            .sum()
-            .item()
-        )
-        tgs_per_cluster = _GFX950_CU_NUM // math.gcd(num_head_k, _GFX950_CU_NUM)
-        num_partial_tiles = qt + tgs_per_cluster
+        # Device-truth partial-tile count: the scheduler has already written the
+        # actual number of emitted partials into reduce_indptr[-1]. The prefill
+        # ASM kernel writes a tile_q-row partial at partial_o_loc = tile_q *
+        # partial_tile_idx, and partial_tile_idx is exactly what reduce_indptr[-1]
+        # counts, so this is the precise number of partial slots the kernel
+        # touches. logits/attn_lse are sized to num_partial_tiles * tile_q rows.
+        #
+        # We accept one DtoH sync here. It is paid once per chunk per forward
+        # (this method runs from prepare_metadata, whose result is reused by all
+        # ~30 MLA layers), not per layer. The earlier host bound
+        # (qt + tgs_per_cluster) was sync-free but could UNDER-count noncausal
+        # long-context chunks at large batch, letting the kernel write past
+        # logits/attn_lse and corrupt a neighboring allocation (the 256-conc
+        # MAF). Device truth never under-counts. It also stays far below the
+        # info call's loose reduce_partial_map_size (which over-counts by ~256x
+        # for long context and previously ballooned logits to hundreds of GB),
+        # so out/final_lse (sized by total_q, not this) and logits/attn_lse all
+        # stay correctly sized.
+        num_partial_tiles = int(reduce_indptr[-1].item())
 
         return {
             "work_indptr": work_indptr,
