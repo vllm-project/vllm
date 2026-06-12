@@ -13,7 +13,7 @@ import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -27,12 +27,22 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.server_utils import (
+from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.utils.api_utils import (
+    cli_env_setup,
+    log_non_default_args,
+    log_version_and_model,
+    process_lora_modules,
+)
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.server_utils import (
     engine_error_handler,
     exception_handler,
     generation_error_handler,
@@ -42,18 +52,7 @@ from vllm.entrypoints.openai.server_utils import (
     log_response,
     validation_exception_handler,
 )
-from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
-)
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
-from vllm.entrypoints.utils import (
-    cli_env_setup,
-    log_non_default_args,
-    log_version_and_model,
-    process_lora_modules,
-)
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -189,11 +188,16 @@ def build_app(
 
     register_models_api_router(app)
 
-    from vllm.entrypoints.sagemaker.api_router import (
+    from vllm.entrypoints.serve.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
 
     register_sagemaker_api_router(app, supported_tasks, model_config)
+
+    if envs.VLLM_SERVER_DEV_MODE:
+        from vllm.entrypoints.serve import register_vllm_dev_api_routers
+
+        register_vllm_dev_api_routers(app)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (
@@ -207,12 +211,6 @@ def build_app(
         )
 
         attach_disagg_router(app)
-
-        from vllm.entrypoints.serve.rlhf.api_router import (
-            attach_router as attach_rlhf_router,
-        )
-
-        attach_rlhf_router(app)
 
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
@@ -253,16 +251,17 @@ def build_app(
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
+    app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from vllm.entrypoints.openai.server_utils import AuthenticationMiddleware
+        from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
 
         app.add_middleware(AuthenticationMiddleware, tokens=tokens)
 
     if args.enable_request_id_headers:
-        from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware
+        from vllm.entrypoints.serve.utils.server_utils import XRequestIdMiddleware
 
         app.add_middleware(XRequestIdMiddleware)
 
@@ -322,6 +321,13 @@ async def init_app_state(
     set_enable_structured_outputs_in_reasoning(
         vllm_config.structured_outputs_config.enable_in_reasoning
     )
+
+    if args.tool_call_parser is not None:
+        from vllm.parser.metrics import init_parser_metrics
+
+        init_parser_metrics(
+            model_name=cast(str, vllm_config.model_config.served_model_name)
+        )
 
     if supported_tasks is None:
         warnings.warn(
