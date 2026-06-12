@@ -10,9 +10,11 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    make_load_weights_safe_for_reload,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.reload.meta import (
@@ -331,6 +333,201 @@ def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
     assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
     assert layer.conv_weights.untyped_storage().data_ptr() == (
         layer.conv1d.weight.untyped_storage().data_ptr()
+    )
+
+
+class _LayoutSwapMethod(QuantizeMethodBase):
+    """Mimics `UnquantizedFusedMoEMethod` for the FlashInfer CUTLASS backend.
+
+    `process_weights_after_loading` swaps the two halves of `layer.weight`
+    in place, modelling `swap_w13_to_w31`. The per-shard weight loader writes
+    the first half on `shard_id="w1"` and the second half on `shard_id="w3"`
+    — same convention as `FusedMoE._load_w13`. The combination triggers
+    https://github.com/vllm-project/vllm/issues/42821 when `load_weights`
+    is called a second time without re-routing through the layerwise reload
+    pipeline.
+    """
+
+    def create_weights(self, layer, *args, **kwargs):  # pragma: no cover
+        return
+
+    def apply(self, layer, *args, **kwargs):  # pragma: no cover
+        return layer.weight
+
+    def process_weights_after_loading(self, layer):
+        # Swap halves of layer.weight in place (analog of `swap_w13_to_w31`).
+        # After loading checkpoint-format `[w1; w3]`, the swap produces
+        # `[w3; w1]` which is the kernel-expected layout.
+        n = layer.weight.shape[0] // 2
+        swapped = torch.cat(
+            [layer.weight.data[n:].clone(), layer.weight.data[:n].clone()], dim=0
+        )
+        layer.weight.data.copy_(swapped)
+
+
+class _LayoutSwapLayer(torch.nn.Module):
+    """Layer with a sharded checkpoint weight loader + destructive process step."""
+
+    def __init__(self, half_size: int = 2):
+        super().__init__()
+        self._half_size = half_size
+        self.weight = torch.nn.Parameter(
+            torch.zeros(2 * half_size, dtype=torch.float32)
+        )
+
+        def shard_loader(param, loaded_weight, shard_id):
+            if shard_id == "w1":
+                param.data[:half_size].copy_(loaded_weight)
+            else:
+                assert shard_id == "w3"
+                param.data[half_size:].copy_(loaded_weight)
+
+        self.weight.weight_loader = shard_loader
+        self.quant_method = _LayoutSwapMethod()
+
+
+class _LayoutSwapModel(torch.nn.Module):
+    """Tiny model with a single `_LayoutSwapLayer` for regression testing."""
+
+    def __init__(self):
+        super().__init__()
+        self.layer = _LayoutSwapLayer()
+
+    def load_weights(self, weights):
+        loaded = set()
+        for name, value, shard_id in weights:
+            assert name == "layer.weight"
+            self.layer.weight.weight_loader(
+                self.layer.weight, value, shard_id=shard_id
+            )
+            loaded.add(name)
+        return loaded
+
+
+def test_make_load_weights_safe_for_reload_is_idempotent():
+    """Re-wrapping `model.load_weights` is a no-op.
+
+    Guards against accumulating layers of `initialize_layerwise_reload`
+    indirection if a loader's `load_model` is invoked more than once on
+    the same model instance.
+    """
+    model = _LayoutSwapModel()
+    record_metadata_for_reloading(model)
+
+    make_load_weights_safe_for_reload(model, model_config=None)
+    wrapped_once = model.load_weights
+    assert getattr(wrapped_once, "_vllm_safe_reload_wrapped", False)
+
+    make_load_weights_safe_for_reload(model, model_config=None)
+    assert model.load_weights is wrapped_once
+
+
+def test_load_weights_idempotent_under_destructive_process_step():
+    """Regression test for https://github.com/vllm-project/vllm/issues/42821.
+
+    Calling `model.load_weights` a second time with the same checkpoint must
+    not silently corrupt parameters whose `process_weights_after_loading`
+    rewrites their layout. Without the wrapper, the second invocation writes
+    checkpoint-format bytes into the swapped-layout buffer and the layer
+    drifts away from its post-init state on every reload.
+    """
+    model = _LayoutSwapModel()
+    record_metadata_for_reloading(model)
+
+    # Initial load: checkpoint provides [w1=(1,2), w3=(3,4)] which yields
+    # the checkpoint-format buffer [1, 2, 3, 4]. The layout swap then
+    # produces the kernel-format buffer [3, 4, 1, 2].
+    initial_weights = [
+        ("layer.weight", torch.tensor([1.0, 2.0]), "w1"),
+        ("layer.weight", torch.tensor([3.0, 4.0]), "w3"),
+    ]
+    model.load_weights(iter(initial_weights))
+    model.layer.quant_method.process_weights_after_loading(model.layer)
+
+    post_init_state = model.layer.weight.data.clone()
+    assert torch.equal(post_init_state, torch.tensor([3.0, 4.0, 1.0, 2.0]))
+
+    # Without the wrapper, a second `load_weights` writes raw [1, 2, 3, 4]
+    # into the swapped-layout buffer, leaving it inconsistent with the
+    # kernel's expected [3, 4, 1, 2] layout.
+    make_load_weights_safe_for_reload(model, model_config=None)
+    model.load_weights(iter(initial_weights))
+
+    assert torch.equal(model.layer.weight.data, post_init_state), (
+        f"Reload corrupted parameter layout: got {model.layer.weight.data}, "
+        f"expected {post_init_state}"
+    )
+
+    # Idempotency across many reloads.
+    for _ in range(3):
+        model.load_weights(iter(initial_weights))
+        assert torch.equal(model.layer.weight.data, post_init_state)
+
+
+def test_safe_reload_wrapper_preserves_kernel_storage_address():
+    """The wrapper preserves the parameter's storage `data_ptr` across reload.
+
+    This is critical for captured CUDA graphs in RL weight-update loops.
+    """
+    model = _LayoutSwapModel()
+    record_metadata_for_reloading(model)
+
+    initial_weights = [
+        ("layer.weight", torch.tensor([1.0, 2.0]), "w1"),
+        ("layer.weight", torch.tensor([3.0, 4.0]), "w3"),
+    ]
+    model.load_weights(iter(initial_weights))
+    model.layer.quant_method.process_weights_after_loading(model.layer)
+    storage_before = model.layer.weight.untyped_storage().data_ptr()
+
+    make_load_weights_safe_for_reload(model, model_config=None)
+    model.load_weights(iter(initial_weights))
+    storage_after = model.layer.weight.untyped_storage().data_ptr()
+
+    assert storage_before == storage_after, (
+        "Wrapper must preserve parameter storage address across reload."
+    )
+
+
+def test_safe_reload_wrapper_finalizes_on_loader_exception():
+    """If the inner `load_weights` raises, the wrapper still runs finalize.
+
+    The `finally` branch must call `finalize_layerwise_reload` so that
+    per-layer `info` is reset; otherwise the next `load_weights` call would
+    short-circuit `initialize_layerwise_reload` (which skips layers whose
+    `info.can_load()` is already True), causing wedged reload state.
+    """
+    model = _LayoutSwapModel()
+    record_metadata_for_reloading(model)
+
+    initial_weights = [
+        ("layer.weight", torch.tensor([1.0, 2.0]), "w1"),
+        ("layer.weight", torch.tensor([3.0, 4.0]), "w3"),
+    ]
+    model.load_weights(iter(initial_weights))
+    model.layer.quant_method.process_weights_after_loading(model.layer)
+    post_init_state = model.layer.weight.data.clone()
+
+    make_load_weights_safe_for_reload(model, model_config=None)
+
+    class _ExplodingIter:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise RuntimeError("simulated checkpoint read failure")
+
+    with pytest.raises(RuntimeError, match="simulated checkpoint read failure"):
+        model.load_weights(_ExplodingIter())
+
+    # The next successful reload must produce the same post-init state,
+    # i.e. the wrapper recovers cleanly from the exception (`info` was
+    # reset by the `finally`-clause finalize so the second reload runs
+    # the full pipeline rather than short-circuiting).
+    model.load_weights(iter(initial_weights))
+    assert torch.equal(model.layer.weight.data, post_init_state), (
+        f"Wrapper failed to recover after exception: "
+        f"got {model.layer.weight.data}, expected {post_init_state}"
     )
 
 

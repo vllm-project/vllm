@@ -37,6 +37,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "make_load_weights_safe_for_reload",
 ]
 
 
@@ -399,3 +400,88 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
         layer.register_buffer(name, buffer)
+
+
+# Attribute used to mark a wrapped `model.load_weights` so we can detect and
+# avoid double-wrapping. We also expose the original callable for callers that
+# want to opt out of the layerwise reload (e.g. tests that pre-wrap manually).
+_SAFE_RELOAD_WRAPPED_ATTR = "_vllm_safe_reload_wrapped"
+_SAFE_RELOAD_ORIGINAL_ATTR = "_vllm_original_load_weights"
+
+
+def make_load_weights_safe_for_reload(
+    model: torch.nn.Module, model_config: ModelConfig | None
+) -> None:
+    """Make ``model.load_weights`` safe to invoke on an already-initialized model.
+
+    The first call to ``model.load_weights`` is made by the model loader before
+    ``process_weights_after_loading`` runs and is therefore correct by
+    construction: weight loaders write checkpoint-format bytes into freshly
+    created checkpoint-format buffers, and the kernel-layout transform is
+    applied exactly once afterwards.
+
+    Subsequent direct calls (e.g. from RL frameworks doing in-place weight
+    updates over ``collective_rpc``) are not idempotent on backends that
+    rewrite the parameter layout in ``process_weights_after_loading`` — for
+    example, the FlashInfer CUTLASS and FlashInfer TRT-LLM unquantized MoE
+    backends apply ``swap_w13_to_w31`` (and, for TRT-LLM, an additional block
+    permutation) to ``layer.w13_weight`` once at engine init. The per-expert
+    ``weight_loader`` attribute is preserved across that transform via
+    ``replace_parameter``, so a second ``load_weights`` call routes raw
+    ``[w1; w3]`` checkpoint bytes into a buffer that the kernel reads as
+    ``[w3; w1]`` (or block-permuted). The forward output silently collapses
+    into multilingual subword soup. See
+    https://github.com/vllm-project/vllm/issues/42821.
+
+    This helper installs a wrapper around ``model.load_weights`` that, on
+    every invocation after the initial load, runs the call through the
+    layerwise reload pipeline (``initialize_layerwise_reload`` /
+    ``finalize_layerwise_reload``) — the same pipeline that
+    :meth:`GPUModelRunner.reload_weights` already uses. That pipeline
+    restores parameters to their checkpoint-format storage (via captured
+    meta tensors), replays the weight loaders into a fresh buffer, re-runs
+    each layer's ``process_weights_after_loading`` (re-applying the
+    kernel-layout transform against the freshly loaded weights), and finally
+    copies the result back into the original kernel-layout parameter storage
+    so captured CUDA graphs remain valid.
+
+    The wrapper is a no-op if ``model.load_weights`` is already wrapped (so
+    callers nesting through ``reload_weights`` do not pay extra cost; the
+    inner ``initialize_layerwise_reload`` short-circuits for layers already
+    in the loadable state, and the inner ``finalize_layerwise_reload`` is a
+    no-op once the outer one has already reset per-layer info).
+
+    Args:
+        model: The fully-loaded model whose ``load_weights`` should be wrapped.
+            ``record_metadata_for_reloading`` must already have been called on
+            this model (which is the case after ``initialize_model``).
+        model_config: ``ModelConfig`` to forward to ``finalize_layerwise_reload``.
+            Required so attention layers can re-run their
+            ``process_weights_after_loading(dtype)`` finalize step. Pass
+            ``None`` only when the model has no attention layers (test paths).
+    """
+    original_load_weights = getattr(model, "load_weights", None)
+    if original_load_weights is None:
+        return
+
+    if getattr(original_load_weights, _SAFE_RELOAD_WRAPPED_ATTR, False):
+        return
+
+    @wraps(original_load_weights)
+    def safe_reload_load_weights(*args, **kwargs):
+        # Nesting note: when this wrapper is invoked from within
+        # `GPUModelRunner.reload_weights` (which already calls
+        # `initialize_layerwise_reload` itself), the inner call here is a
+        # no-op because `initialize_layerwise_reload` skips layers whose
+        # `info.can_load()` is already True. Symmetrically, the outer
+        # finalize seen by `reload_weights` becomes a no-op because the
+        # inner finalize below has already reset every layer's info.
+        initialize_layerwise_reload(model)
+        try:
+            return original_load_weights(*args, **kwargs)
+        finally:
+            finalize_layerwise_reload(model, model_config)
+
+    setattr(safe_reload_load_weights, _SAFE_RELOAD_WRAPPED_ATTR, True)
+    setattr(safe_reload_load_weights, _SAFE_RELOAD_ORIGINAL_ATTR, original_load_weights)
+    model.load_weights = safe_reload_load_weights  # type: ignore[assignment]

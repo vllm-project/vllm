@@ -14,6 +14,9 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.reload import (
+    make_load_weights_safe_for_reload,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -450,4 +453,10 @@ class GGUFModelLoader(BaseModelLoader):
             self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+
+            # See `BaseModelLoader.load_model` for rationale.
+            # Required for parity with the default loader so that direct
+            # `model.load_weights` calls after init are safe on GGUF models
+            # too. https://github.com/vllm-project/vllm/issues/42821
+            make_load_weights_safe_for_reload(model, model_config)
         return model
