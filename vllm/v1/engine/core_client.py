@@ -720,14 +720,26 @@ class MPClient(EngineCoreClient):
         )
 
         # Setup KV cache config with initialization state from
-        # engine core process. Sum values from all engines in DP case.
+        # engine core process. Sum num_gpu_blocks from all engines in DP case.
         num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
         num_gpu_blocks += response.num_gpu_blocks
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
         # Sync block_size: may be enlarged by _align_hybrid_block_size in the
         # worker for hybrid Mamba models.
-        vllm_config.cache_config.block_size = response.block_size
+        cache_config = vllm_config.cache_config
+        cache_config.block_size = response.block_size
+        # Keep these as per-engine cache_config_info values; do not sum across DP.
+        cache_config.kv_cache_size_tokens = (
+            getattr(cache_config, "kv_cache_size_tokens", None)
+            if getattr(cache_config, "kv_cache_size_tokens", None) is not None
+            else response.kv_cache_size_tokens
+        )
+        cache_config.kv_cache_max_concurrency = (
+            getattr(cache_config, "kv_cache_max_concurrency", None)
+            if getattr(cache_config, "kv_cache_max_concurrency", None) is not None
+            else response.kv_cache_max_concurrency
+        )
 
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
