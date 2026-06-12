@@ -7,7 +7,10 @@ from typing import Any
 import numpy as np
 import torch
 from PIL import Image
+from transformers import BatchFeature, TensorType
+from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
+from transformers.tokenization_utils_base import TextInput
 
 IMAGENET_MEAN = np.array([0.484375, 0.455078125, 0.40625], dtype=np.float32)
 IMAGENET_STD = np.array([0.228515625, 0.2236328125, 0.224609375], dtype=np.float32)
@@ -92,6 +95,10 @@ class OpenVLAImageProcessor:
 
 
 class OpenVLAProcessor(ProcessorMixin):
+    # Declared explicitly so the sub-processors are routed correctly on
+    # Transformers v4, which keys `ProcessorMixin.__call__` off this list.
+    attributes = ["image_processor", "tokenizer"]
+
     def __init__(
         self,
         *,
@@ -100,3 +107,28 @@ class OpenVLAProcessor(ProcessorMixin):
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer
+
+    def __call__(
+        self,
+        images: ImageInput | None = None,
+        text: TextInput | list[TextInput] | None = None,
+        return_tensors: str | TensorType | None = None,
+        **kwargs: object,
+    ) -> BatchFeature:
+        # Route each modality to its own sub-processor instead of relying on
+        # the inherited `ProcessorMixin.__call__`, whose internals differ
+        # across Transformers versions (v4 drops the image when `attributes`
+        # omits `image_processor`; v5.10 calls `image_processor.fetch_images`,
+        # which this lightweight image processor does not implement). Unknown
+        # kwargs (e.g. `max_pixels`) are accepted and ignored for parity with
+        # the upstream OpenVLA processor.
+        if images is None and text is None:
+            raise ValueError("You must provide at least one of `text` or `images`.")
+
+        data: dict[str, Any] = {}
+        if text is not None:
+            data.update(self.tokenizer(text, return_tensors=return_tensors))
+        if images is not None:
+            data.update(self.image_processor(images))
+
+        return BatchFeature(data=data, tensor_type=return_tensors)

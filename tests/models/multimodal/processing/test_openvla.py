@@ -33,15 +33,23 @@ class _FakeTokenizer:
     bos_token_id = 1
     init_kwargs: dict[str, object] = {}
 
-    def encode(self, prompt: str, **kwargs: object) -> list[int]:
+    def encode(self, prompt: str, *, add_special_tokens: bool = True) -> list[int]:
         assert prompt == "In: test\nOut:"
-        if kwargs == {"add_special_tokens": True}:
+        if add_special_tokens:
             return [self.bos_token_id, 10, 11]
-        assert kwargs == {"add_special_tokens": False}
         return [10, 11]
 
-    def __call__(self, text: str, **kwargs: object) -> dict[str, list[list[int]]]:
-        return {"input_ids": [self.encode(text, **kwargs)]}
+    def __call__(
+        self,
+        text: str,
+        *,
+        add_special_tokens: bool = True,
+        # vLLM's `call_hf_processor` passes `return_tensors` as a flat kwarg
+        # (see vllm/multimodal/processing/context.py); accept and ignore it.
+        return_tensors: object = None,
+        **kwargs: object,
+    ) -> dict[str, list[list[int]]]:
+        return {"input_ids": [self.encode(text, add_special_tokens=add_special_tokens)]}
 
 
 class _FakeProcessingInfo:
@@ -147,10 +155,12 @@ def test_openvla_processor_outputs_pixel_values() -> None:
     )
     image = Image.new("RGB", (8, 8), color=(255, 0, 0))
 
+    # Mirror how vLLM invokes the HF processor: flat kwargs with
+    # `return_tensors`, relying on the tokenizer's default
+    # `add_special_tokens=True` (see vllm/multimodal/processing/context.py).
     batch = processor(
         text="In: test\nOut:",
         images=image,
-        text_kwargs={"add_special_tokens": True},
     )
 
     assert batch["input_ids"] == [[1, 10, 11]]
