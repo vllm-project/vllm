@@ -318,15 +318,7 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekV4MTPModel"]}
             )
-        if hf_config.model_type in ("pangu_ultra_moe"):
-            hf_config.model_type = "pangu_ultra_moe_mtp"
-        if hf_config.model_type == "pangu_ultra_moe_mtp":
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            hf_config.update(
-                {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
-            )
-
-        if hf_config.model_type == "openpangu_v2":
+        if hf_config.model_type in ("pangu_ultra_moe", "openpangu_v2"):
             hf_config.model_type = "openpangu_mtp"
         if hf_config.model_type == "openpangu_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)

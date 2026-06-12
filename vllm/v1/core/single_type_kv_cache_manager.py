@@ -15,16 +15,12 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
-    DSAAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SinkDSAAttentionSpec,
     SinkFullAttentionSpec,
-    SinkMLAAttentionSpec,
-    SinkMLASlidingWindowSpec,
     SlidingWindowMLASpec,
     SlidingWindowMomeSpec,
     SlidingWindowSpec,
@@ -499,10 +495,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec,
-            FullAttentionSpec | ChunkedLocalAttentionSpec | DSAAttentionSpec,
+            FullAttentionSpec | ChunkedLocalAttentionSpec,
         ), (
-            "FullAttentionManager can only be used for full attention, "
-            "chunked local attention, and DSA attention groups"
+            "FullAttentionManager can only be used for full attention "
+            "and chunked local attention groups"
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
@@ -1203,17 +1199,6 @@ class SinkFullAttentionManager(FullAttentionManager):
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
-class SinkSlidingWindowManager(SlidingWindowManager):
-    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
-        self.sliding_window = kv_cache_spec.sliding_window
-
-        sink_len = kv_cache_spec.sink_len  # type: ignore[attr-defined]
-        assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
-        num_sink_block = sink_len // self.block_size
-        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
-
-
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     TQFullAttentionSpec: FullAttentionManager,
@@ -1226,9 +1211,6 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
     SinkFullAttentionSpec: SinkFullAttentionManager,
-    SinkMLAAttentionSpec: SinkFullAttentionManager,
-    SinkMLASlidingWindowSpec: SinkSlidingWindowManager,
-    SinkDSAAttentionSpec: SinkFullAttentionManager,
 }
 
 

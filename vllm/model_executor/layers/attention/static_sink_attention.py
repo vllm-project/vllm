@@ -237,7 +237,8 @@ class StaticSinkAttention(Attention, CustomOp):
         )
 
 
-class StaticSinkMLAAttention(MLAAttention):
+@CustomOp.register("static_sink_mla_attention")
+class StaticSinkMLAAttention(MLAAttention, CustomOp):
     """MLAAttention with static sink tokens."""
 
     def __init__(
@@ -257,9 +258,9 @@ class StaticSinkMLAAttention(MLAAttention):
         indexer: nn.Module | None = None,
         sink_len: int | None = None,
         sliding_window: int | None = None,
-        # is_hybrid_kv: bool = False,
         **extra_impl_args,
     ):
+        CustomOp.__init__(self)
         head_size = kv_lora_rank + qk_rope_head_dim
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
@@ -349,10 +350,6 @@ class StaticSinkMLAAttention(MLAAttention):
                 compress_ratio=1,
                 alignment=576,
             )
-        # TODO(runze): debug only, remove later
-        # assert self.use_sparse and self.indexer is not None, (
-        #     "If sliding window is None, should use DSA"
-        # )
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
