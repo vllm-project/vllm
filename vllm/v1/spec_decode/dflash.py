@@ -68,6 +68,15 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.parallel_drafting_hidden_state_tensor = None
 
         self.dflash_causal = self.dflash_config.get("causal", False)
+        self.draft_sliding_window = 0
+        if self.dflash_config.get("use_swa", False):
+            self.draft_sliding_window = int(
+                self.dflash_config.get(
+                    "swa_window_size",
+                    getattr(self.draft_model_config.hf_config, "sliding_window", 0)
+                    or 0,
+                )
+            )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -152,6 +161,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.block_size,
+            sliding_window=self.draft_sliding_window,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
@@ -192,7 +202,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             slot_mapping=query_slot_mapping,
             causal=self.dflash_causal,
         )
-
         return num_query_total, token_indices_to_sample, new_cad
 
     @override

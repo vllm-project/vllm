@@ -626,7 +626,12 @@ class MiMoV2Mxfp4Config(Mxfp4Config):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, FusedMoE):
+        # NOTE: the fused-MoE refactor replaced the `FusedMoE` class with a
+        # `FusedMoE(...)` factory returning a `MoERunner`; the routed-expert
+        # module that reaches quant-method selection is a `RoutedExperts`
+        # (matching the parent `Mxfp4Config.get_quant_method`). Checking the
+        # old `FusedMoE` symbol (now a function) would raise TypeError.
+        if isinstance(layer, RoutedExperts):
             return MiMoV2Mxfp4MoEMethod(
                 layer.moe_config, swiglu_limit=self.SWIGLU_LIMIT
             )

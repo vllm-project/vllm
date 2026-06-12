@@ -36,6 +36,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.mxfp4 import MiMoV2Mxfp4Config
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_quantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -455,6 +459,77 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         return self.config.hybrid_layer_pattern[self.layer_id] == 1
 
 
+def _shard_fp8_qkv_proj(
+    w_full: torch.Tensor,
+    s_full: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+    block: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shard Pro-format fp8 fused QKV weights for a tensor-parallel rank.
+
+    The checkpoint stores rows as per-KV-head ``[Q | K | V]`` groups and stores
+    FP8 scales per padded group, not as one flat scale table for the whole fused
+    matrix. When a TP rank owns multiple groups, vLLM expects the local rows
+    de-interleaved as ``[all Q | all K | all V]``. Since K/V boundaries can
+    split 128-row FP8 scale blocks, dequantize each checkpoint group first,
+    reorder in floating point, and quantize back to rank-local FP8 blocks.
+    """
+    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
+        "TP size must evenly split the number of KV heads."
+    )
+
+    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
+    k_rows_per_group = head_dim
+    v_rows_per_group = v_head_dim
+    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
+    assert s_full.shape[0] % num_kv_heads == 0, (
+        "Pro-format qkv_proj scales must be grouped by KV head."
+    )
+    scale_rows_per_group = s_full.shape[0] // num_kv_heads
+    min_scale_rows_per_group = (rows_per_group + block - 1) // block
+    assert scale_rows_per_group >= min_scale_rows_per_group, (
+        "Pro-format qkv_proj scale group is too small for the weight group."
+    )
+    kv_heads_per_rank = num_kv_heads // tp_size
+    if kv_heads_per_rank == 1:
+        return w_full.chunk(tp_size, dim=0)[tp_rank], s_full.chunk(tp_size, dim=0)[
+            tp_rank
+        ]
+
+    qs, ks, vs = [], [], []
+    for group_idx in range(
+        tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank
+    ):
+        row_start = group_idx * rows_per_group
+        scale_row_start = group_idx * scale_rows_per_group
+        w_group = w_full[row_start : row_start + rows_per_group].to(torch.float32)
+        s_group = s_full[
+            scale_row_start : scale_row_start + scale_rows_per_group
+        ].to(torch.float32)
+        s_group = s_group.repeat_interleave(block, dim=0).repeat_interleave(
+            block, dim=1
+        )[:rows_per_group]
+        dequant_group = w_group * s_group
+        qs.append(dequant_group[:q_rows_per_group])
+        ks.append(
+            dequant_group[q_rows_per_group : q_rows_per_group + k_rows_per_group]
+        )
+        vs.append(dequant_group[q_rows_per_group + k_rows_per_group :])
+
+    grouped = torch.cat([torch.cat(qs), torch.cat(ks), torch.cat(vs)], dim=0)
+    return scaled_quantize(
+        grouped,
+        GroupShape(block, block),
+        w_full.dtype,
+        compute_dtype=torch.float32,
+    )
+
+
 @support_torch_compile
 class MiMoV2Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -568,6 +643,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -627,11 +703,15 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             if expert_matched:
                 continue
             # Support fused qkv_proj checkpoint (Pro format)
-            if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+            if self._try_load_fp8_qkv_proj(
+                name,
+                loaded_weight,
+                pending_fp8_qkv_proj,
+                params_dict,
+                loaded_params,
+                tp_rank,
+                tp_size,
+            ):
                 continue
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -688,6 +768,56 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 loaded_params.add(name)
 
         return loaded_params
+
+    def _try_load_fp8_qkv_proj(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        fp8_qkv_proj_dict: dict[str, dict[str, torch.Tensor]],
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_params: set[str],
+        tp_rank: int,
+        tp_size: int,
+    ) -> bool:
+        is_weight = (
+            name.endswith("qkv_proj.weight") and tensor.dtype == torch.float8_e4m3fn
+        )
+        is_scale = name.endswith("qkv_proj.weight_scale_inv")
+        if not is_weight and not is_scale:
+            return False
+
+        if is_pp_missing_parameter(name, self):
+            return True
+
+        prefix, qkv_kind = name.rsplit(".", 1)
+        entry = fp8_qkv_proj_dict.setdefault(prefix, {})
+        entry[qkv_kind] = tensor
+        if "weight" not in entry or "weight_scale_inv" not in entry:
+            return True
+        del fp8_qkv_proj_dict[prefix]
+
+        attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+        weight, scale = _shard_fp8_qkv_proj(
+            entry["weight"],
+            entry["weight_scale_inv"],
+            num_heads=attn.total_num_heads,
+            num_kv_heads=attn.total_num_kv_heads,
+            head_dim=attn.head_dim,
+            v_head_dim=attn.v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+        )
+        for kind, loaded_weight in {
+            "weight": weight,
+            "weight_scale_inv": scale,
+        }.items():
+            param_name = f"{prefix}.{kind}"
+            param = params_dict[param_name]
+            if loaded_weight.shape[0] > param.shape[0]:
+                loaded_weight = loaded_weight[: param.shape[0]]
+            default_weight_loader(param, loaded_weight)
+            loaded_params.add(param_name)
+        return True
 
 
 class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, SupportsEagle3, MixtureOfExperts):

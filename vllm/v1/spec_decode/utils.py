@@ -476,6 +476,7 @@ def copy_and_expand_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,  # tl.int32
     block_size,  # tl.int32
+    sliding_window,  # tl.int32
     num_query_per_req,  # tl.int32
     num_speculative_tokens,  # tl.int32
     total_input_tokens,  # tl.int32
@@ -525,6 +526,7 @@ def copy_and_expand_dflash_inputs_kernel(
         valid_ctx_end = ctx_end
     num_valid_ctx = valid_ctx_end - ctx_start
     last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+    visible_context_start = tl.maximum(last_pos + 2 - sliding_window, 0)
     query_pos = last_pos + 1 + query_off
 
     positions = tl.where(is_ctx, ctx_pos, query_pos)
@@ -539,6 +541,8 @@ def copy_and_expand_dflash_inputs_kernel(
     block_num = positions // block_size
     is_valid_ctx = j < num_valid_ctx
     has_context_slot = is_ctx & is_valid_ctx & (block_num < block_table_stride)
+    context_in_window = (sliding_window <= 0) | (ctx_pos >= visible_context_start)
+    has_context_slot = has_context_slot & context_in_window
     has_query_slot = is_query & (block_num < block_table_stride)
     has_slot = has_context_slot | has_query_slot
     block_id = tl.load(
