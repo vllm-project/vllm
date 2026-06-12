@@ -70,6 +70,9 @@ class StatLoggerBase(ABC):
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
+    def record_pause_state(self, paused: bool, mode: str):  # noqa
+        pass
+
 
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
     factories: list[StatLoggerFactory] = []
@@ -520,6 +523,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         # Setting default values
         self.record_sleep_state()
+
+        gauge_engine_pause_state = self._gauge_cls(
+            name="vllm:engine_pause_state",
+            documentation=(
+                "Engine pause state; unpaused = 1 means the engine is "
+                "scheduling requests; paused_new = 1 means new requests are "
+                "blocked while in-flight requests continue; paused_all = 1 "
+                "means all requests are blocked."
+            ),
+            labelnames=labelnames + ["pause_state"],
+            multiprocess_mode="mostrecent",
+        )
+
+        self.gauge_engine_pause_state = {}
+        pause_state = ["unpaused", "paused_new", "paused_all"]
+
+        for s in pause_state:
+            self.gauge_engine_pause_state[s] = {
+                idx: gauge_engine_pause_state.labels(
+                    engine=idx, model_name=model_name, pause_state=s
+                )
+                for idx in engine_indexes
+            }
+
+        # Setting default values
+        self.record_pause_state()
 
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
@@ -1240,6 +1269,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
+    def record_pause_state(self, paused: bool = False, mode: str = ""):
+        unpaused = 0 if paused else 1
+        paused_new = 0
+        paused_all = 0
+
+        if paused:
+            # "keep" freezes all requests; "abort"/"wait" only block new ones.
+            if mode == "keep":
+                paused_all = 1
+            else:
+                paused_new = 1
+
+        for engine_idx in self.engine_indexes:
+            self.gauge_engine_pause_state["unpaused"][engine_idx].set(unpaused)
+            self.gauge_engine_pause_state["paused_new"][engine_idx].set(paused_new)
+            self.gauge_engine_pause_state["paused_all"][engine_idx].set(paused_all)
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -1355,6 +1401,10 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def record_pause_state(self, paused: bool = False, mode: str = ""):
+        for logger in self.stat_loggers:
+            logger.record_pause_state(paused, mode)
 
     def log(self):
         for logger in self.stat_loggers:

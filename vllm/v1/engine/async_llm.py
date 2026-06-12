@@ -784,6 +784,8 @@ class AsyncLLM(EngineClient):
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        if self.logger_manager is not None:
+            self.logger_manager.record_pause_state(True, mode)
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
         # prior to the wait-for-idle completion event, but involve additional async
@@ -795,6 +797,8 @@ class AsyncLLM(EngineClient):
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
         await self.engine_core.resume_scheduler_async()
+        if self.logger_manager is not None:
+            self.logger_manager.record_pause_state(False)
 
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
