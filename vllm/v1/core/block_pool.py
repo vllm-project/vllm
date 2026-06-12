@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from vllm import _apex as apex
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -360,7 +361,34 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+
+        # APEX (ROCm-CPU): hint that these blocks are about to be written and
+        # read by the attention kernel — apexd will pin/prefetch them to DRAM.
+        # No-op unless VLLM_APEX_HINTS=1.
+        if apex.enabled() and ret:
+            apex.prefetch_blocks(
+                (b.block_id for b in ret),
+                sequence_id=0,
+            )
+
         return ret
+
+    def apex_prefetch_request_blocks(
+        self,
+        block_ids: list[int],
+        sequence_id: int = 0,
+    ) -> None:
+        """Emit a KvBlockPrefetch hint for an already-allocated set of blocks.
+
+        Use this to warm cached/prefix blocks back into DRAM when a request
+        is admitted and its prefix already lives in the prefix cache (those
+        blocks may have been demoted by APEX since their last touch).
+
+        No-op unless VLLM_APEX_HINTS=1.
+        """
+        if not apex.enabled() or not block_ids:
+            return
+        apex.prefetch_blocks(block_ids, sequence_id=sequence_id)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
