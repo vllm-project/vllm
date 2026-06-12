@@ -34,7 +34,6 @@ steps:
     torch_nightly: {}
 
 - label: Language Models Tests (Hybrid) %N
-  device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 75
   source_file_dependencies:
@@ -51,7 +50,8 @@ steps:
   mirror:
     torch_nightly: {}
     amd:
-      device: mi300_1
+      device: mi325_1
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
       commands:
@@ -97,7 +97,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 100
       depends_on:
       - image-build-amd

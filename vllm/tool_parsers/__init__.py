@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_tool_parser",
         "MinimaxToolParser",
     ),
+    "minicpm5": (
+        "minicpm5xml_tool_parser",
+        "MiniCPM5XMLToolParser",
+    ),
     "mistral": (
         "mistral_tool_parser",
         "MistralToolParser",
@@ -139,8 +143,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Olmo3PythonicToolParser",
     ),
     "openai": (
-        "openai_tool_parser",
-        "OpenAIToolParser",
+        "gptoss_tool_parser",
+        "GptOssToolParser",
     ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",

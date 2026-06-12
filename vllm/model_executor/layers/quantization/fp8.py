@@ -207,25 +207,18 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """
-        Check whether the param name matches the format for k/v cache scales
-        in compressed-tensors. If this is the case, return its equivalent
-        param name expected by vLLM
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
+        """Map compressed-tensors KV-cache scale names to vLLM names."""
+        from vllm.model_executor.models.utils import WeightsMapper
 
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
-        """
-        if name.endswith(".output_scale") and ".k_proj" in name:
-            return name.replace(".k_proj.output_scale", ".attn.k_scale")
-        if name.endswith(".output_scale") and ".v_proj" in name:
-            return name.replace(".v_proj.output_scale", ".attn.v_scale")
-        if name.endswith(".output_scale") and ".q_proj" in name:
-            return name.replace(".q_proj.output_scale", ".attn.q_scale")
-        if name.endswith("self_attn.prob_output_scale"):
-            return name.replace(".prob_output_scale", ".attn.prob_scale")
-        # If no matches, return None
-        return None
+        return WeightsMapper(
+            orig_to_new_suffix={
+                ".k_proj.output_scale": ".attn.k_scale",
+                ".v_proj.output_scale": ".attn.v_scale",
+                ".q_proj.output_scale": ".attn.q_scale",
+                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+            }
+        )
 
 
 class CopyNumelCounter(TorchDispatchMode):
@@ -391,6 +384,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.use_marlin:
+            if not self.block_quant:
+                # Canonicalize to (K, N) for the kernel.
+                replace_parameter(layer, "weight", layer.weight.t())
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
             if hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -544,19 +540,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
 
-        # Update layer with new values.
-        replace_parameter(layer, "weight", qweight.data)
+        # Update layer with new values. Canonicalize to (K, N) for the kernel.
+        replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin:
+        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
-            self.fp8_linear.process_weights_after_loading(layer)
-        else:
-            weight = qweight.t()
-            replace_parameter(layer, "weight", weight.data)
+            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True

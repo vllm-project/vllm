@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -58,50 +57,49 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        """Force unified attention backend for models with heterogeneous
-        head dimensions.
+        """Configure attention for heterogeneous head dimensions.
 
-        Some Gemma4 variants use different head dimensions for
-        sliding window (head_dim) vs full attention (global_head_dim) layers.
-        When global_head_dim > 256, FlashAttention rejects those layers
-        (head_size <= 256 kernel limit), causing vLLM to select a different
-        backend for each layer type. This mixed-backend execution produces
-        numerical divergence and output corruption.
+        Gemma4 uses different head dimensions for sliding window
+        (head_dim) vs full attention (global_head_dim) layers. The
+        default FA3 on Hopper cannot handle head_dim > 256, which
+        causes mixed backend selection and numerical divergence.
 
-        The fix detects heterogeneous head dimensions from the model config
-        and forces TRITON_ATTN (which has no head_size ceiling) for all
-        layers when the user hasn't explicitly chosen a backend.
-
-        TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
-        require NixlConnector changes to support per-layer KV transfer
-        with different head dimensions for prefill-decode disaggregation.
+        When FA4 is available we force it for ALL layers, giving a
+        uniform kernel path and avoiding the mixed FA3+FA4 penalty.
+        When FA4 is not available we fall back to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
 
-        # Only force Triton when head dimensions actually differ AND the
-        # larger one exceeds FlashAttention's kernel limit (head_size <= 256).
-        # This avoids unnecessary backend forcing on smaller models where
-        # the config carries global_head_dim but all layers can still use
-        # the same FA backend.
-        max_head_dim = max(head_dim or 0, global_head_dim or 0)
-        if (
-            head_dim is not None
-            and global_head_dim is not None
-            and head_dim != global_head_dim
-            and max_head_dim > 256
-            and vllm_config.attention_config.backend is None
-        ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+        if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
+            return
 
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        max_head_dim = max(head_dim, global_head_dim)
+
+        if is_fa_version_supported(4) and max_head_dim <= 512:
+            if (
+                vllm_config.attention_config.flash_attn_version is None
+                and vllm_config.attention_config.backend
+                in (None, AttentionBackendEnum.FLASH_ATTN)
+            ):
+                vllm_config.attention_config.flash_attn_version = 4
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). Using FA4 for "
+                    "all layers to avoid mixed FA3/FA4 penalty.",
+                    head_dim,
+                    global_head_dim,
+                )
+        elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
-                "backend to prevent mixed-backend numerical divergence.",
+                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
+                "forcing TRITON_ATTN backend.",
                 head_dim,
                 global_head_dim,
             )
@@ -473,79 +471,21 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         )
 
         head_dim = config.hidden_size // config.num_attention_heads
-        max_trained_positions = getattr(config, "max_trained_positions", 2048)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
+        max_trained_positions = getattr(
+            config, "max_trained_positions", max_position_embeddings
+        )
+
+        rope_parameters = {
+            "max_trained_positions": max_trained_positions,
+            **(config.rope_parameters or {}),
+        }
 
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "max_position": max_trained_positions,
-            "rope_parameters": config.rope_parameters,
+            "max_position": model_config.max_model_len,
+            "rope_parameters": rope_parameters,
         }
-
-        # we ignore config.rotary_scaling_factor so that for datasets shorter
-        # than max_trained_positions 2048, the results are consistent
-        # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_parameters.
-        # See #17785 #18755
-        if (
-            not model_config.hf_overrides
-            and model_config.original_max_model_len is None
-        ):
-            # Default
-            # Reset max_model_len to max_trained_positions.
-            # nomic-embed-text-v2-moe the length is set to 512
-            # by sentence_bert_config.json.
-            max_model_len_before = model_config.max_model_len
-            max_model_len = min(model_config.max_model_len, max_trained_positions)
-
-            model_config.max_model_len = model_config.get_and_verify_max_len(
-                max_model_len
-            )
-
-            if model_config.max_model_len != max_model_len_before:
-                logger.warning(
-                    "Nomic context extension is disabled. "
-                    "Changing max_model_len from %s to %s. "
-                    "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/features/context_extension/context_extension_offline.py",
-                    max_model_len_before,
-                    model_config.max_model_len,
-                )
-        else:
-            # We need to re-verify max_model_len to avoid lengths
-            # greater than position_embedding.
-            hf_text_config = model_config.hf_text_config
-
-            if isinstance(model_config.hf_overrides, dict):
-                # hf_overrides_kw
-                max_model_len = model_config.hf_overrides.get(
-                    "max_model_len", model_config.max_model_len
-                )
-            else:
-                # hf_overrides_fn
-                # This might be overridden by sentence_bert_config.json.
-                max_model_len = model_config.max_model_len
-
-            # reset hf_text_config for recalculate_max_model_len.
-            if hasattr(hf_text_config, "max_model_len"):
-                delattr(hf_text_config, "max_model_len")
-            hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
-
-            # Update the cached derived_max_model_len to enforce the limit
-            model_config.model_arch_config.derived_max_model_len_and_key = (
-                float(max_trained_positions),
-                "max_position_embeddings",
-            )
-
-            # The priority of sentence_bert_config.json is higher
-            # than max_position_embeddings
-            encoder_config = deepcopy(model_config.encoder_config)
-            encoder_config.pop("max_seq_length", None)
-            model_config.encoder_config = encoder_config
-
-            model_config.max_model_len = model_config.get_and_verify_max_len(
-                max_model_len
-            )
 
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
@@ -656,6 +596,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
+    "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
