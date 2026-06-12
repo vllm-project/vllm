@@ -280,13 +280,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             reg_data["remote_host"],
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
+            # Push mode does not support pipeline-parallel peers.
+            pp_size=1,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)
             return
 
         def _on_handshake(
-            f: Future[dict[int, str]],
+            f: Future[dict[tuple[int, int], str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -452,6 +454,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 decode_host,
                 decode_port,
                 decode_tp_size,
+                # Push mode does not support pipeline-parallel peers.
+                1,
                 decode_engine_id,
             )
         except Exception:
@@ -463,6 +467,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return False
         with self._handshake_lock:
             self._remote_agents[decode_engine_id] = remote_agents
+            self._remote_pp_size[decode_engine_id] = 1
         logger.info(
             "Push handshake to D %s done (%d agents)",
             decode_engine_id,
@@ -486,7 +491,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Issue WRITE transfers to one or more remote TP ranks."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        plan = self.tp_mappings[engine_id]
+        plan = self.tp_mappings[(engine_id, 0)]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
@@ -534,14 +539,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             if tp_ratio < 0 and not self.use_mla:
                 assert remote_block_size == self.block_size
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+                local_xfer_side_handle = self.src_xfer_handles_by_shard_tp_ratio[
+                    (engine_id, 0, tp_ratio)
+                ][i]
             else:
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
+                local_xfer_side_handle = self.src_xfer_handles_by_remote[
+                    (engine_id, 0, remote_block_size)
                 ]
 
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+                (0, spec.remote_rank)
             ]
 
             self._xfer_blocks(
@@ -556,7 +563,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if self.use_mla and tp_ratio < 0 and read_specs:
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify, agent in remote_agents.items():
+            for (_, rank_to_notify), agent in remote_agents.items():
                 if rank_to_notify != read_specs[0].remote_rank:
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
