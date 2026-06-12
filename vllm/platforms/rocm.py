@@ -191,9 +191,7 @@ def _get_gcn_arch() -> str:
         # current_platform is bound. This path is taken on the FFM simulator,
         # where amdsmi is unavailable (and would report the host's real gfx950
         # cards rather than the simulated gfx1250) — torch.cuda below is correct.
-        logger.debug(
-            "Failed to get GCN arch via amdsmi, falling back to torch.cuda."
-        )
+        logger.debug("Failed to get GCN arch via amdsmi, falling back to torch.cuda.")
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
@@ -206,10 +204,14 @@ _GCN_ARCH = _get_gcn_arch()
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950", "gfx1250"])
-_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950", "gfx1250"])
+_ON_GFX9 = any(
+    arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950", "gfx1250"]
+)  # TODO(JPVILLAM): Bubblegum patch to unlock gptoss
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
-_ON_GFX950 = "gfx950" in _GCN_ARCH
+_ON_GFX950 = any(
+    arch in _GCN_ARCH for arch in ["gfx950", "gfx1250"]
+)  # TODO(JPVILLAM): Bubblegum patch to unlock DSR1
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
 
