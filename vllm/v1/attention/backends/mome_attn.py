@@ -50,6 +50,7 @@ class MomeAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    max_decode_query_len: int | None = None
 
 
 class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadata]):
@@ -113,6 +114,27 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             self.supports_update_block_table = False
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        self._draft_num_accepted_tokens: torch.Tensor | None = None
+
+    def set_draft_num_accepted_tokens(
+        self, num_accepted_tokens: torch.Tensor | None
+    ) -> None:
+        self._draft_num_accepted_tokens = num_accepted_tokens
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> MomeAttentionMetadata:
+        del draft_index
+        common_attn_metadata = self._treat_single_token_prefills_as_decodes(
+            common_attn_metadata
+        )
+        num_accepted_tokens = self._draft_num_accepted_tokens
+        return self._compute_metadata(
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -125,12 +147,18 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             "MoME only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
+        assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
 
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
-        return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
+        common_attn_metadata = self._treat_single_token_prefills_as_decodes(m)
+        return self._compute_metadata(
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            require_uniform=True,
+        )
 
     def build(
         self,
@@ -139,6 +167,7 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         fast_build: bool = False,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        num_prompt_tokens: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> MomeAttentionMetadata:
         del common_prefix_len, fast_build, kwargs
@@ -146,7 +175,9 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             common_attn_metadata
         )
         return self._compute_metadata(
-            common_attn_metadata, num_accepted_tokens=num_accepted_tokens
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            num_prompt_tokens=num_prompt_tokens,
         )
 
     def _treat_single_token_prefills_as_decodes(
@@ -199,6 +230,8 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        num_prompt_tokens: torch.Tensor | None = None,
+        require_uniform: bool = False,
     ) -> MomeAttentionMetadata:
         if num_accepted_tokens is not None:
             assert self.reorder_batch_threshold is not None
@@ -209,12 +242,13 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=decode_threshold,
+                require_uniform=require_uniform,
                 treat_short_extends_as_decodes=False,
             )
         )
-        num_reqs = common_attn_metadata.num_reqs
 
-        state_indices_tensor = common_attn_metadata.block_table_tensor
+        num_reqs = common_attn_metadata.num_reqs
+        state_indices_tensor = common_attn_metadata.block_table_tensor[:num_reqs]
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
         state_indices_tensor = state_indices_tensor.contiguous()
@@ -233,6 +267,39 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             [num_decodes, num_prefills],
             dim=0,
         )
+        if (
+            num_decodes > 0
+            and self.use_spec_decode
+            and num_accepted_tokens is not None
+            and num_prompt_tokens is not None
+        ):
+            block_size = self.kv_cache_spec.block_size
+            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+            num_computed_tokens_d = num_computed_tokens[:num_decodes]
+            num_prompt_tokens = num_prompt_tokens.to(
+                device=num_computed_tokens.device, non_blocking=True
+            )
+            num_prompt_tokens_d = num_prompt_tokens[:num_decodes]
+            num_accepted_tokens_d = num_accepted_tokens[:num_decodes]
+            prev_num_computed_tokens_d = num_computed_tokens_d - num_accepted_tokens_d
+            prev_scheduled_len_d = torch.clamp(
+                self.vllm_config.model_config.max_model_len
+                - 1
+                - prev_num_computed_tokens_d,
+                min=1,
+                max=self.num_spec_tokens + 1,
+            )
+            spec_block_idx_last_computed_token_d = (
+                cdiv(prev_num_computed_tokens_d + prev_scheduled_len_d, block_size) - 1
+            )
+            block_idx_last_computed_token_d = torch.where(
+                num_computed_tokens_d > num_prompt_tokens_d,
+                spec_block_idx_last_computed_token_d,
+                block_idx_last_computed_token_d,
+            )
+            block_idx_last_computed_token_d = torch.clamp(
+                block_idx_last_computed_token_d, min=0
+            )
         _, block_idx_first_scheduled_token_p = torch.split(
             block_idx_first_scheduled_token, [num_decodes, num_prefills], dim=0
         )
@@ -245,9 +312,14 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         )
 
         query_start_loc_d = None
+        max_decode_query_len = None
         if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
             num_accepted_tokens = num_accepted_tokens[:num_decodes]
+            query_lens_cpu = torch.diff(
+                common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
+            )
+            max_decode_query_len = int(query_lens_cpu.max().item())
 
         has_initial_states_p = None
         query_start_loc_p = None
@@ -287,6 +359,7 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
+            max_decode_query_len=max_decode_query_len,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
             block_idx_last_computed_token_p=block_idx_last_computed_token_p,
@@ -348,7 +421,10 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         padded_block_idx_last_computed_token_d[metadata.num_decodes :] = 0
 
         num_accepted_tokens = metadata.num_accepted_tokens
+        query_start_loc_d = metadata.query_start_loc_d
         if self.use_spec_decode and num_accepted_tokens is not None:
+            assert query_start_loc_d is not None
+            query_start_loc_d = query_start_loc_d[: padded_bs + 1]
             self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                 num_accepted_tokens, non_blocking=True
             )
@@ -361,6 +437,7 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             block_idx_last_scheduled_token_d=(padded_block_idx_last_scheduled_token_d),
             block_idx_last_computed_token_d=padded_block_idx_last_computed_token_d,
             num_accepted_tokens=num_accepted_tokens,
+            query_start_loc_d=query_start_loc_d,
         )
 
     def update_block_table(
