@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Replay tests for DelegatingParser with engine adapters and old parsers.
+"""Replay tests for DelegatingParser with engine adapters.
 
-Exercises DelegatingParser in both old-parser and engine-adapter modes
-to verify that delegated routing produces correct output across chunk sizes.
+Exercises DelegatingParser in engine-adapter mode to verify that delegated
+routing produces correct output across chunk sizes.
 See test_replay.py for tests that target engine parsers directly.
 """
 
@@ -30,19 +30,10 @@ from vllm.parser.parser_manager import ParserManager
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
 
 _PAIRINGS: dict[str, tuple[str, str]] = {
-    "old_xml": ("qwen3_xml", "qwen3"),
     "engine": ("qwen3_coder", "qwen3"),
 }
 
 CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
-
-_OLD_XML_XFAIL_SAMPLES: frozenset[str] = frozenset(
-    {
-        "qwen3-think-then-parallel-tools",
-        "qwen3-think-whitespace-tool",
-        "qwen3-whitespace-before-tool",
-    }
-)
 
 
 @lru_cache
@@ -62,15 +53,12 @@ _all_samples = build_samples("qwen3")
 
 @pytest.mark.parametrize(
     "pairings",
-    ["old_xml", "engine"],
+    list(_PAIRINGS),
     ids=lambda p: f"mode={p}",
 )
 @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk={c}")
 @pytest.mark.parametrize("sample", _all_samples, ids=lambda s: s.id)
 def test_delegating_replay(sample, chunk_size, pairings):
-    if pairings == "old_xml" and sample.id in _OLD_XML_XFAIL_SAMPLES:
-        pytest.xfail("old xml tool parser has streaming differences")
-
     parser_cls = _get_delegating_parser_cls(pairings=pairings)
 
     tokenizer = make_mock_tokenizer(sample)
