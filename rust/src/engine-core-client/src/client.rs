@@ -442,9 +442,10 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
+        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
         let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), data_parallel_rank)?;
+            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
 
         let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
@@ -582,7 +583,8 @@ impl EngineCoreClient {
         let results: Vec<T> = self.call_utility(method, args).await?;
 
         if results.iter().all_equal() {
-            // `engine_count >= 1` is enforced during startup handshake so `results` must be non-empty.
+            // `engine_count >= 1` is enforced during startup handshake so `results` must be
+            // non-empty.
             Ok(results.into_iter().next().unwrap())
         } else {
             Err(Error::InconsistentUtilityResults {
