@@ -304,6 +304,64 @@ class TestContentWhitespaceHandling:
         assert d.content == "  \n"
 
 
+# ── TestPostToolContentDeferral ──────────────────────────────────────
+
+
+class TestPostToolContentDeferral:
+    """Regression: content after TOOL_CALL_END in the same batch must not
+    produce a mixed DeltaMessage(content=..., tool_calls=...) — that causes
+    split_delta to reorder content before tool_calls, breaking the Responses
+    API state machine."""
+
+    def test_text_after_tool_end_deferred(self):
+        engine = _make_engine()
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "get_weather", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, '{"city":"NYC"}', tool_index=0),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+            SemanticEvent(EventType.TEXT_CHUNK, "\nHere is the result"),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert delta.tool_calls
+        assert delta.content is None
+
+        deferred = engine._events_to_delta([])
+        assert deferred is not None
+        assert deferred.content == "\nHere is the result"
+        assert not deferred.tool_calls
+
+    def test_text_after_tool_deferred_even_when_finished(self):
+        engine = _make_engine()
+        events = [
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "f", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, "{}", tool_index=0),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+            SemanticEvent(EventType.TEXT_CHUNK, "done"),
+        ]
+        delta = engine._events_to_delta(events, finished=True)
+        assert delta is not None
+        assert delta.tool_calls
+        assert delta.content is None
+
+    def test_text_before_tool_not_deferred(self):
+        engine = _make_engine()
+        engine._content_has_nonws = True
+        events = [
+            SemanticEvent(EventType.TEXT_CHUNK, "hello"),
+            SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
+            SemanticEvent(EventType.TOOL_NAME, "f", tool_index=0),
+            SemanticEvent(EventType.ARG_VALUE_CHUNK, "{}", tool_index=0),
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=0),
+        ]
+        delta = engine._events_to_delta(events)
+        assert delta is not None
+        assert delta.content == "hello"
+        assert delta.tool_calls
+
+
 # ── TestFixArgTypes ──────────────────────────────────────────────────
 
 

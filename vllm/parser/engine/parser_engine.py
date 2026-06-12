@@ -692,21 +692,29 @@ class ParserEngine(Parser):
             content_parts.append(self._deferred_content)
             self._deferred_content = ""
 
+        seen_tool_event = False
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
-                    content_parts.append(event.value)
+                    if seen_tool_event:
+                        self._deferred_content += event.value
+                    else:
+                        content_parts.append(event.value)
                 case EventType.REASONING_CHUNK:
                     reasoning_parts.append(event.value)
                 case EventType.REASONING_END:
                     self._reasoning_ended = True
                 case EventType.TOOL_CALL_START:
+                    seen_tool_event = True
                     self._ensure_slot(event.tool_index)
                 case EventType.TOOL_NAME:
+                    seen_tool_event = True
                     self._handle_tool_name(event)
                 case EventType.ARG_VALUE_CHUNK:
+                    seen_tool_event = True
                     self._handle_arg_chunk(event, tool_call_deltas)
                 case EventType.TOOL_CALL_END:
+                    seen_tool_event = True
                     self._handle_tool_end(event, tool_call_deltas)
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
