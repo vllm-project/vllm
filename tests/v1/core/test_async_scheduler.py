@@ -64,6 +64,48 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
+def test_max_num_seqs_excludes_async_finished_reqs():
+    """Requests that reached max_tokens in the prior step but are still in the
+    running queue (async scheduling) must not count against max_num_seqs when
+    admitting new waiting requests.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/45257.
+    """
+    max_num_seqs = 2
+    scheduler = create_scheduler(async_scheduling=True, max_num_seqs=max_num_seqs)
+    # max_tokens=1 mimics a P/D prefill node: each request finishes after a
+    # single forward pass but stays in the running queue until its output is
+    # processed. Under async scheduling the output is only processed after the
+    # next schedule() call, so a full step happens with finished requests still
+    # occupying the running queue.
+    requests = create_requests(num_requests=2 * max_num_seqs, max_tokens=1)
+    for req in requests:
+        scheduler.add_request(req)
+
+    # First step: only max_num_seqs requests can be scheduled.
+    sched_output0 = scheduler.schedule()
+    assert set(sched_output0.num_scheduled_tokens) == {
+        requests[0].request_id,
+        requests[1].request_id,
+    }
+    # Both scheduled requests reach max_tokens but remain in the running queue
+    # until their (not-yet-processed) output is consumed.
+    assert len(scheduler.running) == max_num_seqs
+
+    # Second step, BEFORE the first step's output is processed: the two running
+    # requests have already reached max_tokens, so they occupy the running queue
+    # without being rescheduled. They must not block admission of the remaining
+    # waiting requests.
+    sched_output1 = scheduler.schedule()
+    assert set(sched_output1.num_scheduled_tokens) == {
+        requests[2].request_id,
+        requests[3].request_id,
+    }
+    # The finished requests are still in the running queue (now alongside the
+    # newly admitted ones) but were not rescheduled.
+    assert len(scheduler.running) == 2 * max_num_seqs
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)
