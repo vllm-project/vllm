@@ -293,6 +293,21 @@ class OffloadingConnectorWorker:
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
 
+    def sleep(self) -> None:
+        """Quiesce all transfers before GPU memory is unmapped by allocator.sleep().
+
+        Without this, CuMemAllocator.sleep() → unmap_and_release() races with
+        active GPU↔CPU DMA on the connector's transfer streams, causing
+        CUDA_ERROR_ILLEGAL_ADDRESS and an EngineDeadError on the next request.
+
+        Called from Worker.sleep() before allocator.sleep().
+        """
+        # Deferred store jobs have not yet been submitted to CUDA; discard them
+        # because the GPU source VA will be unmapped before they could run.
+        self._unsubmitted_store_jobs.clear()
+        # Drain all in-flight transfers so cuMemUnmap doesn't race with DMA.
+        self.worker.wait_all()
+
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()

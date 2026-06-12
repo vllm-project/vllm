@@ -459,6 +459,11 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 event.synchronize()
 
     @override
+    def wait_all(self) -> None:
+        for transfer in self._transfers:
+            transfer.end_event.synchronize()
+
+    @override
     def shutdown(self) -> None:
         while self._transfers:
             transfer = self._transfers.popleft()
