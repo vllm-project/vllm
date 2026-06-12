@@ -293,6 +293,13 @@ class Qwen3CoderToolParser(ToolParser):
                 if self.current_tool_index >= tool_starts:
                     # No more tool calls
                     self.is_tool_call_started = False
+                    if self.tool_call_end_token in delta_text:
+                        trailing_content = delta_text.split(
+                            self.tool_call_end_token, 1
+                        )[1]
+                        if not trailing_content.strip():
+                            return None
+                        return DeltaMessage(content=trailing_content)
                 # Continue processing the current delta. It may contain the
                 # next tool call or trailing content after the closed call.
 
@@ -410,7 +417,13 @@ class Qwen3CoderToolParser(ToolParser):
             # decoding, a single delta may contain both the opening brace
             # and parameter data; skipping "{" here would desync
             # json_started from what was actually streamed.
-            if not self.json_started:
+            if (
+                not self.json_started
+                and (
+                    self.parameter_prefix in tool_text
+                    or self.function_end_token in tool_text
+                )
+            ):
                 self.json_started = True
                 self.streamed_args_for_tool[self.current_tool_index] += "{"
                 pending_args += "{"
