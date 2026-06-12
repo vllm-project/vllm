@@ -415,6 +415,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             ps["reduce_final_map"],
             ps["reduce_partial_map"],
             tile_q,
+            0,
             out,
             final_lse,
         )
@@ -577,6 +578,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             ps["reduce_final_map"],
             ps["reduce_partial_map"],
             tile_q,
+            0,
             out,
             final_lse,
         )
