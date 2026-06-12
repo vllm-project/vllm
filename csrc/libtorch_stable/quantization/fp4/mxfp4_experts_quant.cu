@@ -43,9 +43,9 @@ static_assert(CVT_FP4_ELTS_PER_THREAD == 16,
 
 #include "libtorch_stable/launch_bounds_utils.h"
 
-namespace vllm {
-
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
+
+namespace vllm {
 
 // MXFP4 block size constants
 static constexpr int MXFP4_SF_VEC_SIZE = 32;
@@ -317,10 +317,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
 }
 
 }  // namespace vllm
-
-#endif  // VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
-
-#if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
 
   /*Quantization entry for mxfp4 experts quantization*/
   #define CHECK_TH_CUDA(x, m) \
