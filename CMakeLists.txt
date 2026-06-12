@@ -953,16 +953,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_SM120_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${NVFP4_KV_SRC}"
-      CUDA_ARCHS "${FP4_SM120_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
@@ -986,7 +982,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
-      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     if(NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       message(STATUS
         "Building mxfp4_experts_quant unsupported stubs because CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
@@ -995,11 +992,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_SM100_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${NVFP4_KV_SRC}"
-      CUDA_ARCHS "${FP4_SM100_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
