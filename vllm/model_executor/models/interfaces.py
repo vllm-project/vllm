@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
     )
 else:
     VllmConfig = object
@@ -1281,6 +1282,41 @@ def supports_any_eagle(
     return supports_eagle(model) or supports_eagle3(model)
 
 
+class LocalArgmaxMixin:
+    """Mixin for draft model heads in speculative decoding.
+
+    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    local-argmax communication reduction even when the draft vocabulary
+    is smaller than the target vocabulary.
+
+    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    containing per-token offset to target vocab id), the draft argmax index
+    ``k`` is mapped to the target vocab id via::
+
+        target_id = k + draft_id_to_target_id[k]
+
+    This is mathematically equivalent to computing the full-vocab scatter
+    logits and taking the global argmax, but requires only
+    O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
+
+    Requires the subclass to expose:
+        ``self.logits_processor``: LogitsProcessor
+        ``self.lm_head``: ParallelLMHead
+        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+    """
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Vocab-parallel argmax with optional D2T remapping."""
+        top = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
+        )
+        d2t = getattr(self, "draft_id_to_target_id", None)
+        if d2t is not None:
+            top = top + d2t[top]
+        return top
+
+
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
@@ -1523,8 +1559,8 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
     ) -> str:
-        """Return the modality of the inputs."""
-        ...
+        """Return the modality of the inputs (default: image-only)."""
+        return "image"
 
     def get_max_frames_per_video(
         self,
@@ -1549,30 +1585,15 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        """Return the number of items (e.g. images) in the batch."""
-        ...
+    ) -> list["EncoderItemSpec"]:
+        """Return specs describing each item in the batch.
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return output token count for each item.
-
-        Used for greedy packing and DP load balancing.
-        """
-        ...
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return input size (e.g. patch count) for each item.
-
-        Used for input tensor slicing offsets.
+        Replaces the former separate methods for num_items,
+        per_item_output_tokens, and per_item_input_sizes.
+        The manager derives all three from this single return value.
         """
         ...
 
@@ -1637,8 +1658,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 

@@ -440,6 +440,7 @@ def test_fp8_reloading(
                 hidden_size=1,
                 intermediate_size=1,
             )
+            layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
@@ -465,11 +466,9 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
     # test reloading works after loading
-    # assuming that no reshaping occurred
-    for name, shape, original_weight_loader in original_metadata:
+    for name, shape, _ in original_metadata:
         param = getattr(layer, name)
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        assert weight_loader is original_weight_loader
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)

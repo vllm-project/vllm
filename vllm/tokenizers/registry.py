@@ -38,17 +38,15 @@ logger = init_logger(__name__)
 # temporary workaround and better long term solutions are:
 # - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
-_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl", "step3p7"}
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
-    "fastokens": ("fastokens", "FastokensTokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
-    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
 }
 
 
@@ -204,6 +202,13 @@ def get_tokenizer(
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
+    if envs.VLLM_USE_FASTOKENS:
+        # Process-global, idempotent patch that swaps the Rust BPE backend
+        # of any HF fast tokenizer loaded afterwards. No-op for non-HF modes.
+        from .fastokens import apply_fastokens_patch
+
+        apply_fastokens_patch()
+
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -243,6 +248,10 @@ def get_tokenizer(
         tokenizer_cls_ = tokenizer_cls
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from vllm.tokenizers.hf import get_cached_tokenizer
+
+        tokenizer = get_cached_tokenizer(tokenizer)
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "

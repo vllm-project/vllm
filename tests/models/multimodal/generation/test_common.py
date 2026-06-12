@@ -383,6 +383,26 @@ VLM_TEST_SETTINGS = {
         max_tokens=8,
         dtype="bfloat16",
     ),
+    "cosmos3": VLMTestInfo(
+        models=["nvidia/Cosmos3-Nano"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        enforce_eager=False,
+        needs_video_metadata=True,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",  # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+    ),
     "deepseek_vl_v2": VLMTestInfo(
         models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -765,8 +785,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_25_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmo_26": VLMTestInfo(
         models=["openbmb/MiniCPM-o-2_6"],
@@ -780,8 +798,6 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-o-2_6/discussions/49
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
@@ -959,16 +975,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
         hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
-    ),
-    "qwen_vl": VLMTestInfo(
-        models=["Qwen/Qwen-VL"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
-        max_model_len=1024,
-        max_num_seqs=2,
-        vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
-        prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

@@ -408,6 +408,12 @@ class NixlConnectorWorker:
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
+        # TTL-based eviction of stale remote engine state.
+        self._engine_last_active: dict[EngineId, float] = {}
+        self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
+            "engine_ttl", 3600.0
+        )
+
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
 
@@ -711,6 +717,7 @@ class NixlConnectorWorker:
         returned future.
         Failures to handshake are logged and the request is marked as failed.
         """
+        self._evict_stale_engines()
         with self._handshake_lock:
             if engine_id in self._remote_agents:
                 return None
@@ -731,6 +738,7 @@ class NixlConnectorWorker:
                     del self._handshake_futures[eid]
                     try:
                         self._remote_agents[eid] = f.result()
+                        self._engine_last_active[eid] = time.perf_counter()
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -850,7 +858,14 @@ class NixlConnectorWorker:
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
-            layer_spec = self._layer_specs[layer_name]
+            layer_spec = self._layer_specs.get(layer_name)
+            if layer_spec is None:
+                logger.debug(
+                    "Skipping layer %s as no KVCache spec is present. "
+                    "This is likely because the layer is sharing its KV cache",
+                    layer_name,
+                )
+                continue
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
@@ -943,7 +958,7 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -1118,7 +1133,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset
                 result.append((addr, kv_block_len, self.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1167,7 +1182,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
@@ -2021,6 +2036,9 @@ class NixlConnectorWorker:
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        # Update last activity from this remote. Mind that cleanup is done on main
+        # thread (this one), so we don't race on this structure.
+        self._engine_last_active[engine_id] = time.perf_counter()
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
@@ -2333,9 +2351,25 @@ class NixlConnectorWorker:
             for i, remote_group in enumerate(remote_block_ids):
                 num_local_blocks = len(local_block_ids[i])
                 num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
-                    assert num_local_blocks == num_remote_blocks
+                if (
+                    _is_ssm_spec(self._group_spec_types[i])
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
+                    # prior to the last one are placeholders (null blocks). Mind that
+                    # this doesn't really impact transfer, as we only still care about
+                    # the last "block", the full in-place state.
+                    assert num_local_blocks == 1, "SSM can only have one local block"
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif (
+                    self._physical_blocks_per_logical_kv_block
+                    == remote_physical_per_logical
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
+                    # TODO Handle prefix caching with different block_sizes
                     max_padding = max(
                         self._physical_blocks_per_logical_kv_block,
                         remote_physical_per_logical,
@@ -2416,7 +2450,7 @@ class NixlConnectorWorker:
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
         assert self.transfer_topo is not None
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             if mamba_view:
                 block_len = self._mamba_ssm_size[not first_split]
             else:
@@ -2450,6 +2484,61 @@ class NixlConnectorWorker:
                 break
         return result
 
+    def _evict_stale_engines(self) -> None:
+        """Scan for and evict remote engines that have exceeded their TTL.
+
+        Called from the main thread in when a new remote engine appears.
+        We can only go OOM as we discover and register a new remote, therefore we make
+        sure we clean up stale engine data structures before then. This invariant
+        prevents us from using background threads, though memory usage is not guaranteed
+        to be "optimal" until a new handshake is performed.
+
+        Engines with active transfers or pending handshakes cannot be stale:
+        - Active transfers touch _engine_last_active in start_load_kv.
+        - Pending handshakes don't have an _engine_last_active entry yet
+        """
+        # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
+        # of remote engines is registered all at once (adding a background cleanup
+        # thread wouldnt help either).
+        # If that scenario is plausible, we can follow up with an LRU eviction policy.
+        if self._engine_ttl <= 0:
+            return
+
+        now = time.perf_counter()
+        for eid, last_active in list(self._engine_last_active.items()):
+            if now - last_active > self._engine_ttl:
+                self._cleanup_remote_engine(eid)
+
+    def _cleanup_remote_engine(
+        self, engine_id: EngineId, *, log_eviction: bool = True
+    ) -> None:
+        """Remove all state for a single remote engine.
+
+        Releases NIXL resources (dlist handles, remote agents) and clears
+        all per-engine data structures. Used by both TTL eviction and
+        shutdown.
+        """
+        assert engine_id in self._remote_agents
+
+        for handle in self.dst_xfer_side_handles.pop(engine_id).values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        for agent_name in self._remote_agents.pop(engine_id).values():
+            self.nixl_wrapper.remove_remote_agent(agent_name)
+
+        del self.kv_caches_base_addr[engine_id]
+        del self.dst_num_blocks[engine_id]
+        del self.tp_mappings[engine_id]
+        if self.transfer_topo is not None:
+            self.transfer_topo.unregister_remote_engine(engine_id)
+
+        last_active = self._engine_last_active.pop(engine_id)
+        if log_eviction:
+            logger.info(
+                "Evicted stale remote engine %s (inactive for %.1fs).",
+                engine_id,
+                time.perf_counter() - last_active,
+            )
+
     def __del__(self):
         self.shutdown()
 
@@ -2470,14 +2559,8 @@ class NixlConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
-        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
-            for dst_xfer_side_handle in dst_xfer_side_handles.values():
-                self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
-        self.dst_xfer_side_handles.clear()
-        for remote_agents in self._remote_agents.values():
-            for agent_name in remote_agents.values():
-                self.nixl_wrapper.remove_remote_agent(agent_name)
-        self._remote_agents.clear()
+        for engine_id in list(self._remote_agents):
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
