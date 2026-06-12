@@ -246,6 +246,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
+    VLLM_MANUAL_GC_CONTROL: bool = False
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
@@ -1747,6 +1748,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Manual GC control - disable automatic GC and trigger it manually
+    # at controlled points (e.g., during CUDA stream sync) to avoid
+    # stop-the-world pauses during GPU kernel execution.
+    # Off by default for safety.
+    "VLLM_MANUAL_GC_CONTROL": lambda: bool(
+        int(os.getenv("VLLM_MANUAL_GC_CONTROL", "0"))
+    ),
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
