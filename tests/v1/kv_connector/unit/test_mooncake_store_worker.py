@@ -1558,3 +1558,34 @@ def test_lookup_records_mooncake_metrics():
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
+
+
+def test_store_worker_close_releases_store():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+
+    store.close.assert_called_once_with()
+    assert worker.store is None
+
+
+def test_store_worker_close_is_idempotent():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+    worker.close()
+
+    # Second call short-circuits because store was already released.
+    store.close.assert_called_once_with()
+
+
+def test_store_worker_close_swallows_store_errors():
+    worker = _make_bare_worker()
+    worker.store.close.side_effect = RuntimeError("boom")
+
+    # A failure tearing down the store must not propagate out of close().
+    worker.close()
+
+    assert worker.store is None

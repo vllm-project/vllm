@@ -1381,3 +1381,54 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
         expected_stored=(2, 3),
         expected_flushed=(2, 3) if not async_scheduling else (),
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
+    """When skip_reading_prefix_cache=True, the offloading connector must not
+    load any blocks from CPU even if a matching prefix is cached there."""
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    # Populate the CPU offload cache with one block.
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
+
+    # Reset GPU prefix cache so the next request cannot hit locally.
+    runner.scheduler.reset_prefix_cache()
+
+    # New request with identical tokens but skip_reading_prefix_cache=True.
+    # The offloading connector must not load anything from CPU, but must
+    # still offload the freshly computed blocks (state management intact).
+    runner.new_request(
+        token_ids=[0] * offloaded_block_size,
+        skip_reading_prefix_cache=True,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(),  # no CPU loads must happen
+        expected_stored=(0, 1, 2),  # tokens still offloaded to CPU
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
+
+    # The external lookup must have been completely skipped.
+    runner.manager.lookup.assert_not_called()
