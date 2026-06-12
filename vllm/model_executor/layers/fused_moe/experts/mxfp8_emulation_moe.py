@@ -90,7 +90,13 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
     def _supports_current_device() -> bool:
         return True
 
-    def activation(self, activation, output: torch.Tensor, input: torch.Tensor):
+    def activation(
+        self,
+        activation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        **kwargs,
+    ):
         """Apply GEMM1 activation with quant-config alpha/beta/clamp."""
         from vllm.model_executor.layers.fused_moe.activation import (
             MoEActivation,

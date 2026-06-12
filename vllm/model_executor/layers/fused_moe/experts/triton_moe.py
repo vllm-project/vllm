@@ -139,7 +139,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return TopKWeightAndReduceNoOP()
 
     def activation(
-        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        **kwargs,
     ) -> None:
         gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
         if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
