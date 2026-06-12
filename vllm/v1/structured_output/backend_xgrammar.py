@@ -285,8 +285,6 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_regex,
                 so_params.regex,
             )
-        except ValueError:
-            raise
         except Exception as err:
             raise ValueError(
                 f"Failed to transform regex into a grammar: {err}"
