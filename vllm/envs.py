@@ -154,7 +154,7 @@ if TYPE_CHECKING:
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
-    VLLM_HW_AGNOSTIC_TRITON: bool = True
+    VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -692,17 +692,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
         os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
     ),
-    # Toggle for the DeepseekV4 hw-agnostic attention path:
-    #   "1" (default) = the Triton-only swap (XPU/AMD-style kernels, the
-    #                   `xpu_qnorm_rope_kv_fp8_insert` + `xpu_sparse_decode_fp8`
-    #                   + `triton_bf16_mla_sparse_interface` + `rocm_inv_rope_einsum`
-    #                   integration in study doc §50)
-    #   "0"           = the original FlashMLA + NVCC custom-op +
-    #                   DeepGEMM FP8 einsum path
-    # Used to A/B the two implementations during bring-up; once parity is
-    # demonstrated this flag should disappear.
-    "VLLM_HW_AGNOSTIC_TRITON": lambda: (
-        os.environ.get("VLLM_HW_AGNOSTIC_TRITON", "1") == "1"
+    # Force the DeepSeek V4 hardware-agnostic attention path on any
+    # platform (default is to follow the platform: nvidia/, amd/, or xpu/).
+    # Used for testing the agnostic path on platforms that have a vendor
+    # branch.
+    "VLLM_USE_HW_AGNOSTIC": lambda: (
+        os.environ.get("VLLM_USE_HW_AGNOSTIC", "0") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').

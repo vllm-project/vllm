@@ -18,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.models.deepseek_v4.hw_agnostic.attention import (
+from vllm.models.deepseek_v4.hw_agnostic.ops.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
@@ -350,7 +350,6 @@ class DeepseekV4Attention(nn.Module):
         vllm_config: VllmConfig,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -482,7 +481,6 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             indexer_rotary_emb=self.rotary_emb,
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream_list=aux_stream_list,
         )
         self.mla_attn = DeepseekV4MultiHeadLatentAttentionWrapper(
             hidden_size=self.hidden_size,
@@ -518,7 +516,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         vllm_config,
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
 
@@ -538,7 +535,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream_list=aux_stream_list,
         )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
@@ -695,18 +691,6 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        # TODO: In an HW agnostic implementation we cannot use CUDA streams
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
-
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -732,7 +716,6 @@ class DeepseekV4Model(nn.Module):
                 vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
-                aux_stream_list=aux_stream_list,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -845,9 +828,6 @@ class DeepseekV4Model(nn.Module):
         num_tokens = hidden_states.shape[0]
         self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        # HCHeadOp dispatches to forward_cuda/forward_hip (tilelang/Triton on
-        # CUDA/ROCm); both reshape the (..., hc_mult, hidden_size) input and
-        # return a (..., hidden_size) tensor. No native fallback yet.
         hidden_states = self.hc_head_op(
             hidden_states,
             self.hc_head_fn,

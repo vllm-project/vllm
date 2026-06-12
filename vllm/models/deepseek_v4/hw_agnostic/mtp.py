@@ -63,7 +63,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         vllm_config: VllmConfig,
         topk_indices_buffer: torch.Tensor,
         prefix: str,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ) -> None:
         super().__init__()
 
@@ -121,7 +120,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             vllm_config,
             prefix,
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream_list=aux_stream_list,
         )
 
     def forward(
@@ -174,14 +172,6 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             device=self.device,
         )
 
-        # Three aux streams shared across all MTP layers, mirroring
-        # DeepseekV4Model. ROCm runs the same work serially for now.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
-
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
@@ -189,7 +179,6 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
                     vllm_config,
                     self.topk_indices_buffer,
                     f"{prefix}.layers.{idx}",
-                    aux_stream_list=aux_stream_list,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -461,13 +450,8 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.model.layers.values():
-            layer.mtp_block.ffn.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
