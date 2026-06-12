@@ -211,6 +211,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         # General request states.
+        use_dense_all_token_ids = (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        )
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -218,6 +222,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            use_dense_all_token_ids=use_dense_all_token_ids,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -231,6 +236,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
             )
+
+        # Inject RequestState into speculators that consume the persistent
+        # token store directly (e.g. NgramGPUSpeculator).
+        if self.speculator is not None and hasattr(self.speculator, "req_states"):
+            self.speculator.req_states = self.req_states
 
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
@@ -328,7 +338,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
-            if self.speculator is not None:
+            if self.speculator is not None and hasattr(self.speculator, "model"):
                 prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
@@ -1433,7 +1443,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            draft_tokens = self.speculator.propose(
+            draft_tokens, num_valid_draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings_by_layer,
@@ -1448,7 +1458,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch, draft_tokens, num_valid_draft_tokens
+            )
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
