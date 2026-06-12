@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 
 logger = init_logger(__name__)
 
@@ -118,6 +117,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         return rocm_moe_rdna.make_method(
                             weight_quant, input_quant, layer.moe_config
                         )
+                    from vllm.platforms.rocm import on_gfx950
 
                     vllm_config = get_current_vllm_config()
                     is_lora_disabled = vllm_config.lora_config is None
