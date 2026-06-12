@@ -75,16 +75,6 @@ def cpu_gdn_attention_core(
             layer,
         )
 
-    if torch.cpu._is_amx_tile_supported():
-        return cpu_gdn_attention_core_amx(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            attn_metadata_i,
-            layer,
-        )
-
     state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
     query_start_loc = attn_metadata_i.non_spec_query_start_loc
     assert state_indices_tensor is not None
