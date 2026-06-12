@@ -6,12 +6,17 @@ from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from huggingface_hub.utils import HfHubHTTPError
 from torch import nn
 
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_adapter_absolute_path,
+    is_trainable_tokens_delta,
     parse_fine_tuned_lora_name,
+    parse_trainable_tokens_delta_name,
     replace_submodule,
 )
 from vllm.model_executor.models.utils import WeightsMapper
@@ -199,3 +204,135 @@ def test_get_adapter_absolute_path_huggingface_error(
         response=MagicMock(),
     )
     assert get_adapter_absolute_path(path) == path
+
+
+# ---- Tests for trainable_tokens_delta helpers ----
+
+
+def test_is_trainable_tokens_delta():
+    assert is_trainable_tokens_delta(
+        "base_model.model.language_model.model.embed_tokens"
+        ".token_adapter.trainable_tokens_delta"
+    )
+    assert is_trainable_tokens_delta(
+        "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta"
+    )
+    # Should not match standard LoRA weights
+    assert not is_trainable_tokens_delta(
+        "base_model.model.model.embed_tokens.lora_embedding_A"
+    )
+    assert not is_trainable_tokens_delta(
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+    )
+
+
+def test_parse_trainable_tokens_delta_name():
+    # With base_model.model. prefix
+    assert (
+        parse_trainable_tokens_delta_name(
+            "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta"
+        )
+        == "model.embed_tokens"
+    )
+
+    # VLM-style with language_model prefix
+    assert (
+        parse_trainable_tokens_delta_name(
+            "base_model.model.language_model.model.embed_tokens"
+            ".token_adapter.trainable_tokens_delta"
+        )
+        == "language_model.model.embed_tokens"
+    )
+
+    # Without base_model.model. prefix
+    assert (
+        parse_trainable_tokens_delta_name(
+            "model.embed_tokens.token_adapter.trainable_tokens_delta"
+        )
+        == "model.embed_tokens"
+    )
+
+
+def test_parse_trainable_tokens_delta_name_with_weights_mapper():
+    mapper = WeightsMapper(orig_to_new_prefix={"model.": "language_model.model."})
+    assert (
+        parse_trainable_tokens_delta_name(
+            "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta",
+            weights_mapper=mapper,
+        )
+        == "language_model.model.embed_tokens"
+    )
+
+
+def test_from_lora_tensors_trainable_tokens_delta():
+    """Test that trainable_tokens_delta is correctly converted to
+    equivalent LoRA embedding weights."""
+    vocab_size = 1000
+    embedding_dim = 64
+    token_indices = [500, 501, 502]
+    num_tokens = len(token_indices)
+
+    # Simulate the delta tensor from a PEFT checkpoint
+    delta = torch.randn(num_tokens, embedding_dim)
+
+    tensors = {
+        "base_model.model.model.embed_tokens"
+        ".token_adapter.trainable_tokens_delta": delta,
+    }
+
+    peft_helper = PEFTHelper(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "v_proj"],
+        trainable_token_indices={"embed_tokens": token_indices},
+    )
+
+    lora_model = LoRAModel.from_lora_tensors(
+        lora_model_id=1,
+        tensors=tensors,
+        peft_helper=peft_helper,
+        device="cpu",
+        dtype=torch.float32,
+        model_vocab_size=vocab_size,
+    )
+
+    lora = lora_model.get_lora("model.embed_tokens")
+    assert lora is not None
+    assert lora.rank == num_tokens
+    assert lora.scaling == 1.0
+
+    # lora_a should be sparse one-hot: [N, vocab_size]
+    assert lora.lora_a.shape == (num_tokens, vocab_size)
+    for i, idx in enumerate(token_indices):
+        assert lora.lora_a[i, idx].item() == 1.0
+    # All other entries should be zero
+    mask = torch.ones(num_tokens, vocab_size, dtype=torch.bool)
+    for i, idx in enumerate(token_indices):
+        mask[i, idx] = False
+    assert (lora.lora_a[mask] == 0).all()
+
+    # lora_b should be delta transposed: [embedding_dim, N]
+    assert lora.lora_b.shape == (embedding_dim, num_tokens)
+    torch.testing.assert_close(lora.lora_b, delta.T)
+
+
+def test_from_lora_tensors_trainable_tokens_delta_missing_config():
+    """Test error when trainable_token_indices is missing from config."""
+    tensors = {
+        "base_model.model.model.embed_tokens"
+        ".token_adapter.trainable_tokens_delta": torch.randn(3, 64),
+    }
+    peft_helper = PEFTHelper(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj"],
+    )
+
+    with pytest.raises(ValueError, match="trainable_token_indices not set"):
+        LoRAModel.from_lora_tensors(
+            lora_model_id=1,
+            tensors=tensors,
+            peft_helper=peft_helper,
+            device="cpu",
+            model_vocab_size=1000,
+        )
