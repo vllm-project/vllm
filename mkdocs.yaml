@@ -114,6 +114,7 @@ plugins:
         features/quantization/int4.md: features/quantization/llm_compressor/int4.md
         features/quantization/int8.md: features/quantization/llm_compressor/int8_w8a8.md
         serving/openai_compatible_server.md: serving/online_serving/README.md
+        examples/others/lmcache.md: examples/disaggregated/lmcache.md
 
 markdown_extensions:
   - attr_list
