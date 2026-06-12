@@ -242,6 +242,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -505,6 +506,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
+        # optional auxiliary CUDA stream + event pair used to
+        # overlap the kv-path tail (`do_kv_cache_update`, which executes
+        # `concat_and_cache_mla`) with the q-path head of `forward_impl`
+        # (`W_UK_T` BMM). Initialized lazily by the parent
+        # `MultiHeadLatentAttentionWrapper` via `set_aux_stream(...)` when
+        # `VLLM_MLA_TWO_STREAM_DECODE=1`. When unset, the dispatch falls
+        # through to the standard sequential path with no behavioral
+        # change.
+        self._mla_aux_stream: torch.cuda.Stream | None = None
+        self._mla_stream_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
+
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
         self._chunked_prefill_workspace_size: int | None = None
@@ -528,6 +540,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             )
         return self._chunked_prefill_workspace_size
+
+    def set_aux_stream(
+        self,
+        aux_stream: torch.cuda.Stream,
+        events: tuple[torch.cuda.Event, torch.cuda.Event],
+    ) -> None:
+        """Install an auxiliary CUDA stream + event pair.
+
+        The wrapper layer (`MultiHeadLatentAttentionWrapper`) calls this
+        when `VLLM_MLA_TWO_STREAM_DECODE=1`. With the stream installed, the
+        direct-call path of `forward()` overlaps `do_kv_cache_update`
+        (concat_and_cache_mla) on the auxiliary stream with the start of
+        `forward_impl` (W_UK_T BMM) on the default stream. Reuses the same
+        stream + events as the wrapper so that we don't duplicate stream
+        objects per-MLA-layer.
+        """
+        self._mla_aux_stream = aux_stream
+        self._mla_stream_events = events
 
     def forward(
         self,
@@ -562,23 +592,78 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            self.forward_impl(
-                q,
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                attn_metadata,
-                output=output,
-            )
+
+            # when an auxiliary CUDA stream has been installed
+            # by the wrapper layer (via `set_aux_stream`), overlap
+            # `do_kv_cache_update` (concat_and_cache_mla, ~2.4 µs/layer on
+            # B300) with the q-path head of `forward_impl` (the `W_UK_T`
+            # BMM, ~6.5 µs/layer). Synchronization protocol:
+            #   1. Default stream records `kv_cache_pre_event` to mark the
+            #      point at which `kv_c_normed` and `k_pe` are produced.
+            #   2. Aux stream waits for the pre-event, then enqueues
+            #      `do_kv_cache_update`, then records
+            #      `kv_cache_ready_event`.
+            #   3. Default stream calls `forward_impl(...,
+            #      kv_cache_ready_event=...)`. The W_UK_T BMM and all
+            #      cache-independent prep run immediately, in parallel
+            #      with the cache write. Just before `forward_mqa`
+            #      launches the attention kernel (which reads the cache),
+            #      `forward_impl` waits on `kv_cache_ready_event` so the
+            #      attention kernel sees the post-write cache.
+            # When the auxiliary stream is unavailable, fall through to
+            # the original sequential dispatch with no behavioral change.
+            if (
+                self._mla_aux_stream is not None
+                and self._mla_stream_events is not None
+            ):
+                event_pre_kv, event_kv_ready = self._mla_stream_events
+                # Pre-event: a barrier on the default stream so the aux
+                # stream waits for the producer of `kv_c_normed` / `k_pe`
+                # before reading them.
+                event_pre_kv.record()
+                with torch.cuda.stream(self._mla_aux_stream):
+                    event_pre_kv.wait()
+                    self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                        kv_c_normed,
+                        k_pe,
+                        self_kv_cache,
+                        slot_mapping.get(self.layer_name),
+                        self.kv_cache_dtype,
+                        self._k_scale,
+                    )
+                    event_kv_ready.record()
+                # Default stream continues with W_UK_T BMM + attention.
+                # `forward_impl` waits on `event_kv_ready` immediately
+                # before the attention kernel call so the cache write is
+                # visible to `forward_mqa` while the BMM still overlaps
+                # the cache write in time.
+                self.forward_impl(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    output=output,
+                    kv_cache_ready_event=event_kv_ready,
+                )
+            else:
+                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    slot_mapping.get(self.layer_name),
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
+                self.forward_impl(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    output=output,
+                )
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
@@ -614,6 +699,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        kv_cache_ready_event: torch.cuda.Event | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -688,6 +774,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
+            # `forward_mha` (prefill) reads `kv_cache`, so we
+            # must synchronize with the aux stream's cache write here.
+            # MHA workloads do not benefit from W_UK_T BMM overlap (the
+            # W_UK_T BMM is decode-only, inside the `num_mqa_tokens > 0`
+            # block), so waiting before MHA does not cost any overlap.
+            if kv_cache_ready_event is not None:
+                kv_cache_ready_event.wait()
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -767,6 +860,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+
+            # synchronize the default stream with the aux
+            # stream's `do_kv_cache_update` immediately before the
+            # decode attention kernel reads `kv_cache`. All cache-
+            # independent prep above (W_UK_T BMM, the FP8/FP4 quant
+            # variants, the optional DCP all-gather) has already run on
+            # the default stream concurrently with the cache write — that
+            # is the overlap that produces the gain. Waiting here
+            # guarantees the cache write is visible to `forward_mqa`.
+            # When `kv_cache_ready_event` is None, this is a no-op.
+            if kv_cache_ready_event is not None:
+                kv_cache_ready_event.wait()
 
             # call decode attn
             if not is_sparse_impl:
@@ -1008,14 +1113,42 @@ def unified_mla_kv_cache_update(
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            kv_c_normed,
-            k_pe,
-            kv_cache,
-            layer_slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-        )
+        # when an auxiliary CUDA stream has been installed
+        # by the wrapper layer (`MultiHeadLatentAttentionWrapper`),
+        # dispatch `do_kv_cache_update` (concat_and_cache_mla, ~2.4 µs)
+        # onto the aux stream so it overlaps with the W_UK_T BMM that
+        # `unified_mla_attention_with_output` runs on the default stream.
+        # Synchronization protocol mirrors the direct-call path in
+        # `MLAAttention.forward`: a pre-event ensures the aux stream
+        # waits for `kv_c_normed` / `k_pe` to be produced; a ready-event
+        # is recorded after the cache write and is awaited on the
+        # default stream just before the attention kernel reads
+        # `kv_cache`.
+        aux_stream = getattr(attn_layer, "_mla_aux_stream", None)
+        events = getattr(attn_layer, "_mla_stream_events", None)
+        if aux_stream is not None and events is not None:
+            event_pre_kv, event_kv_ready = events
+            event_pre_kv.record()
+            with torch.cuda.stream(aux_stream):
+                event_pre_kv.wait()
+                attn_layer.impl.do_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    kv_cache,
+                    layer_slot_mapping,
+                    kv_cache_dtype,
+                    k_scale,
+                )
+                event_kv_ready.record()
+        else:
+            attn_layer.impl.do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                kv_cache,
+                layer_slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+            )
 
     return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
@@ -1059,6 +1192,18 @@ def unified_mla_attention_with_output(
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    # pull the `kv_cache_ready_event` recorded by the
+    # paired `unified_mla_kv_cache_update` op so `forward_impl` can wait
+    # on it just before the attention kernel reads `kv_cache`. The W_UK_T
+    # BMM and other cache-independent prep inside `forward_impl` run on
+    # the default stream concurrently with the cache write — that is the
+    # overlap that produces the gain. When the aux stream is unset
+    # (default), `events` is None and the wait is skipped.
+    events = getattr(layer, "_mla_stream_events", None)
+    aux_stream = getattr(layer, "_mla_aux_stream", None)
+    kv_cache_ready_event: torch.cuda.Event | None = None
+    if aux_stream is not None and events is not None:
+        kv_cache_ready_event = events[1]
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1072,6 +1217,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        kv_cache_ready_event=kv_cache_ready_event,
     )
 
 

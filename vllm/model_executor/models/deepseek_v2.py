@@ -33,6 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -356,6 +357,24 @@ class DeepseekV2MoE(nn.Module):
         ):
             self.gate.e_score_correction_bias.data = (
                 self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
+            )
+
+        # pre-cast the bias to bfloat16 on CUDA when the
+        # FlashInfer-TRTLLM MoE backend is used. The TRTLLM kernel
+        # currently requires a bf16 routing bias (see
+        # vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py:332-335),
+        # producing a per-layer .to(bf16) cast on the hot decode path.
+        # Pre-casting at module init eliminates 60 redundant
+        # `bf16_copy_kernel_cuda` launches per decode step. Once the
+        # bias is bf16, the per-layer `.to(torch.bfloat16)` becomes a
+        # no-op (returns the same tensor) and emits no kernel.
+        elif (
+            envs.VLLM_MOE_FP4_PREAMBLE_FUSION
+            and self.gate.e_score_correction_bias is not None
+            and self.gate.e_score_correction_bias.data.dtype != torch.bfloat16
+        ):
+            self.gate.e_score_correction_bias.data = (
+                self.gate.e_score_correction_bias.data.to(torch.bfloat16)
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

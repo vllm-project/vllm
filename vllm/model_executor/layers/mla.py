@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
@@ -114,6 +115,28 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer=self.indexer,
         )
 
+        # Two-stream MLA decode pipelining.
+        # When VLLM_MLA_TWO_STREAM_DECODE=1, allocate an auxiliary CUDA stream
+        # and a pair of CUDA events on which the q-path and kv-path
+        # preprocessing within `forward()` can be dispatched in parallel.
+        # Mirrors the production-proven pattern used in
+        # vllm/model_executor/layers/deepseek_v4_attention.py (see
+        # `aux_stream` / `ln_events` setup at lines 220-221 there).
+        # When the env var is unset (default), `self.aux_stream` is None and
+        # `maybe_execute_in_parallel` silently degrades to sequential
+        # execution on the current stream — preserving existing behavior
+        # bit-for-bit.
+        self.aux_stream: torch.cuda.Stream | None = None
+        self._mla_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
+        if envs.VLLM_MLA_TWO_STREAM_DECODE and torch.cuda.is_available():
+            self.aux_stream = torch.cuda.Stream()
+            self._mla_events = (torch.cuda.Event(), torch.cuda.Event())
+            # Make the auxiliary stream available to the underlying
+            # MLAAttention so it can also overlap `do_kv_cache_update`
+            # (concat_and_cache_mla) with the W_UK_T BMM inside
+            # `forward_impl`.
+            self.mla_attn.set_aux_stream(self.aux_stream, self._mla_events)
+
         self.prefix = prefix
 
     def forward(
@@ -122,6 +145,23 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # NOTE: The wrapper-level q-path / kv-path overlap was
+        # initially attempted here via `maybe_execute_in_parallel`, but
+        # `MultiHeadLatentAttentionWrapper.forward()` runs INSIDE the
+        # Inductor-compiled region produced by `@support_torch_compile`
+        # on `DeepseekV2Model`. Dynamo traces `torch.cuda.Event` objects
+        # into integer stream indices, and the resulting Inductor code
+        # passes integers to `record_event`, which fails at runtime with
+        # "expected event to be a torch.Event object". The opaque-op
+        # boundary needed to safely call multi-stream primitives from
+        # inside the compiled graph already exists at the
+        # `MLAAttention` level (`unified_mla_kv_cache_update` /
+        # `unified_mla_attention_with_output`), so all of the MLA path's
+        # cross-stream dispatch is concentrated there. The wrapper now
+        # only allocates the aux stream + events and hands them to
+        # `MLAAttention` via `set_aux_stream`. This file therefore
+        # contains no per-forward stream/event ops — keeping it
+        # safe under torch.compile.
         q_c = None
         kv_lora = None
 

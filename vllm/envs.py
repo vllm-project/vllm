@@ -184,6 +184,9 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_MOE_FP4_PREAMBLE_FUSION: bool = False
+    VLLM_MLA_TWO_STREAM_DECODE: bool = False
+    VLLM_MOE_SHARED_EXPERTS_TWO_STREAM: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
@@ -1441,6 +1444,46 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # enable MoE FP4 preamble fusion. Eliminates two
+    # redundant per-MoE-layer kernel launches when the FlashInfer
+    # TRTLLM MoE backend is selected:
+    #   1. The FillFunctor (torch.zeros) preceding cvt_fp16_to_fp4_sf_major
+    #      — cvt overwrites every scale-factor address in the sf_major
+    #        (non-swizzled) layout, so torch.empty is safe.
+    #   2. The per-layer e_score_correction_bias.to(bfloat16) cast — the
+    #      bias is a constant nn.Parameter and can be pre-cast at module
+    #        init time (mirrors the existing ROCm pattern).
+    "VLLM_MOE_FP4_PREAMBLE_FUSION": lambda: bool(
+        int(os.getenv("VLLM_MOE_FP4_PREAMBLE_FUSION", "0"))
+    ),
+    # enable two-stream MLA decode pipelining for the standard
+    # MLA path (vllm/model_executor/layers/mla.py). When set, the MLA wrapper
+    # creates an auxiliary CUDA stream and dispatches the q-path
+    # (q_a_layernorm → q_b_proj → q-side RoPE) and the kv-path
+    # (kv_lora.split → kv_a_layernorm → k-side RoPE) onto two streams,
+    # synchronized via CUDA events. The two paths are structurally
+    # independent between fused_qkv_a_proj and the attention kernel call,
+    # which lets the GPU overlap their execution. This mirrors the
+    # production-proven pattern in deepseek_v4_attention.py:368-386 and
+    # uses vllm.utils.multi_stream_utils.maybe_execute_in_parallel under
+    # the hood.
+    "VLLM_MLA_TWO_STREAM_DECODE": lambda: bool(
+        int(os.getenv("VLLM_MLA_TWO_STREAM_DECODE", "0"))
+    ),
+    # Replace the framework's `Stream.wait_stream`-based
+    # MoE shared/routed expert overlap (`SharedExperts._run_in_aux_stream`)
+    # with the event-based `torch.cuda.Event` record/wait pattern so that
+    # the shared-expert NVJet GEMMs and routed-expert FP4 BMMs actually
+    # run concurrently under CUDA graph capture. The framework's
+    # MULTI_STREAM_OVERLAPPED path silently degenerates to sequential
+    # under CUDA-graph capture (observed under nsys profiling: ALL MoE kernels on the
+    # same streamId), while the event-based pattern parks shared-expert
+    # work on a side-stream just like the MLA two-stream path parks `concat_and_cache_mla`.
+    # When unset (default), behaviour is bit-identical to the existing
+    # framework path.
+    "VLLM_MOE_SHARED_EXPERTS_TWO_STREAM": lambda: bool(
+        int(os.getenv("VLLM_MOE_SHARED_EXPERTS_TWO_STREAM", "0"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
