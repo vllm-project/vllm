@@ -5,26 +5,32 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
 )
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
+
+
+class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
 
 class TritonMLABackend(MLACommonBackend):
@@ -55,9 +61,17 @@ class TritonMLABackend(MLACommonBackend):
     def get_name() -> str:
         return "TRITON_MLA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["TritonMLAMetadataBuilder"]:
+        return TritonMLAMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -117,17 +131,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
-    def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
-    ):
-        return super()._flash_attn_varlen_diff_headdims(
-            q,
-            k,
-            v,
-            return_softmax_lse=return_softmax_lse,
-            softmax_scale=softmax_scale,
-            **kwargs,
-        )
+        self._sm_count = current_platform.num_compute_units()
 
     def forward_mqa(
         self,
@@ -151,7 +155,24 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
         # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        if envs.VLLM_BATCH_INVARIANT:
+            num_kv_splits = 1
+        else:
+            # Minimum work per split
+            # hardware dependent
+            min_work_per_split = 512
+
+            ideal_splits = max(1, attn_metadata.max_seq_len // min_work_per_split)
+
+            # use power of 2 to avoid excessive kernel instantiations
+            ideal_splits = triton.next_power_of_2(ideal_splits)
+
+            # Calculate SM-based maximum splits with occupancy multiplier
+            # 2-4x allows multiple blocks per SM for latency hiding
+            # hardware dependent
+            occupancy_multiplier = 2
+            max_splits = self._sm_count * occupancy_multiplier
+            num_kv_splits = min(ideal_splits, max_splits)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
@@ -188,6 +209,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             PAGE_SIZE,
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
+            is_mla=True,
         )
 
         return o, lse

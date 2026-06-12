@@ -220,7 +220,6 @@ class Qwen3NextConfig(PretrainedConfig):
     ):
         if mlp_only_layers is None:
             mlp_only_layers = []
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -253,14 +252,7 @@ class Qwen3NextConfig(PretrainedConfig):
                 "linear_attention" if bool((i + 1) % 4) else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        if hasattr(self, "validate_layer_type"):
-            # Transformers v5
-            self.validate_layer_type()
-        else:
-            # Transformers v4
-            from transformers.configuration_utils import layer_type_validation
-
-            layer_type_validation(self.layer_types)
+        self.validate_layer_type()
 
         # linear attention part
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
@@ -279,6 +271,7 @@ class Qwen3NextConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.mlp_only_layers = mlp_only_layers
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
 
 __all__ = ["Qwen3NextConfig"]

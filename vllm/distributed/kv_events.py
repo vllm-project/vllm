@@ -35,7 +35,6 @@ class EventBatch(
 
 class KVCacheEvent(
     msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,  # type: ignore[call-arg]
     tag=True,
@@ -67,6 +66,12 @@ class BlockStored(KVCacheEvent):
     KV cache consumers to reconstruct block hashes.
     """
 
+    group_idx: int | None = None
+    # Store events carry cache-spec metadata so consumers can classify and
+    # filter groups as they are learned. Remove events only need group_idx+hash.
+    kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
+
     def __hash__(self) -> int:
         return hash(
             (
@@ -77,6 +82,9 @@ class BlockStored(KVCacheEvent):
                 self.lora_id,
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,
+                self.group_idx,
+                self.kv_cache_spec_kind,
+                self.kv_cache_spec_sliding_window,
             )
         )
 
@@ -84,9 +92,16 @@ class BlockStored(KVCacheEvent):
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
+    group_idx: int | None = None
 
     def __hash__(self) -> int:
-        return hash((tuple(self.block_hashes), self.medium))
+        return hash(
+            (
+                tuple(self.block_hashes),
+                self.medium,
+                self.group_idx,
+            )
+        )
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -116,7 +131,8 @@ class KVEventAggregator:
         """
         Add events from a worker batch.
 
-        :param events: List of KVCacheEvent objects.
+        Args:
+            events: List of KVCacheEvent objects.
         """
         if not isinstance(events, list):
             raise TypeError("events must be a list of KVCacheEvent.")
@@ -126,7 +142,8 @@ class KVEventAggregator:
         """
         Return events that appeared in all workers.
 
-        :return: List of events present in all workers.
+        Returns:
+            List of events present in all workers.
         """
         return [
             event
@@ -138,7 +155,8 @@ class KVEventAggregator:
         """
         Return all events for all workers.
 
-        :return: List of events for all workers.
+        Returns:
+            List of events for all workers.
         """
         return list(self._event_counter.elements())
 
@@ -152,7 +170,8 @@ class KVEventAggregator:
         """
         Increment the number of workers contributing events.
 
-        :param count: Number to increment the workers by.
+        Args:
+            count: Number to increment the workers by.
         """
         if count <= 0:
             raise ValueError("count must be positive.")
@@ -168,7 +187,8 @@ class KVEventAggregator:
         """
         Return the number of workers.
 
-        :return: int number of workers.
+        Returns:
+            int number of workers.
         """
         return self._num_workers
 

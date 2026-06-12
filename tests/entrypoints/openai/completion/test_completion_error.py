@@ -3,9 +3,10 @@
 
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -16,7 +17,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -54,6 +55,7 @@ class MockModelConfig:
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -78,7 +80,6 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
         model_registry=models.registry,
         request_logger=None,
         chat_template=None,
@@ -93,11 +94,9 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
 
 
 def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
@@ -108,7 +107,6 @@ async def test_completion_error_non_stream():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
@@ -152,13 +150,72 @@ async def test_completion_error_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_openai_completion_keeps_mm_cache_for_engine_execution():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+    serving_completion.openai_serving_render.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    )
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+    )
+
+    result = await serving_completion.render_completion_request(request)
+
+    assert isinstance(result, list)
+    assert (
+        serving_completion.openai_serving_render.preprocess_completion.call_args.kwargs[
+            "skip_mm_cache"
+        ]
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_renderer_only_completion_request_skips_mm_cache():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+    serving_completion.openai_serving_render.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1, 2, 3]}]
+    )
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+    )
+
+    result = await serving_completion.openai_serving_render.render_completion_request(
+        request
+    )
+
+    assert isinstance(result, list)
+    assert (
+        serving_completion.openai_serving_render.preprocess_completion.call_args.kwargs[
+            "skip_mm_cache"
+        ]
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_completion_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
@@ -243,6 +300,36 @@ def test_json_schema_response_format_missing_schema():
             prompt="Test prompt",
             max_tokens=10,
             response_format={"type": "json_schema"},
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_structural_tag_response_format_invalid(format_value):
+    """Malformed structural tags should be rejected during request validation."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("structural_tag", ["not json", ""])
+def test_structured_outputs_structural_tag_invalid(structural_tag):
+    """Malformed direct structured_outputs structural tags should be rejected."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid structured_outputs structural_tag",
+    ):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            structured_outputs={"structural_tag": structural_tag},
         )
 
 

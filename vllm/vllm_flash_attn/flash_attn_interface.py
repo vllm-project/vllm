@@ -206,6 +206,9 @@ def flash_attn_varlen_func(
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
+    # FA4 only
+    mask_mod=None,
+    aux_tensors=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -297,6 +300,10 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support s_aux")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if mask_mod is not None:
+            raise NotImplementedError("FA2 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA2 does not support aux_tensors")
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -325,6 +332,10 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
+        if mask_mod is not None:
+            raise NotImplementedError("FA3 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA3 does not support aux_tensors")
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
             k,
@@ -366,14 +377,7 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
-        # FA4 on SM90 doesn't support paged KV; SM100+ does
-        from vllm.platforms import current_platform
 
-        if block_table is not None and current_platform.is_device_capability_family(90):
-            raise NotImplementedError(
-                "FA4 with paged KV is not supported on SM90 (Hopper). "
-                "Use FA3 or upgrade to Blackwell (SM100+)."
-            )
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
         out, softmax_lse = _flash_attn_fwd(
@@ -394,6 +398,9 @@ def flash_attn_varlen_func(
             num_splits=num_splits,
             return_lse=return_softmax_lse,
             out=out,
+            learnable_sink=s_aux,
+            mask_mod=mask_mod,
+            aux_tensors=aux_tensors,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

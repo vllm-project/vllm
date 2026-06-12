@@ -11,12 +11,16 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    BatchFeature,
     processing_utils,
 )
+from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
+from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
+from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
@@ -55,10 +59,6 @@ def _transformers_v4_compatibility_init() -> Any:
 
     This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
     Transformers."""
-    # Transformers v4
-    if hasattr(ProcessorMixin, "optional_attributes"):
-        return
-    # Transformers v5
     if hasattr(ProcessorMixin.__init__, "_vllm_patched"):
         return
 
@@ -155,6 +155,44 @@ def get_processor_cls_name_from_config(
         if config and "processor_class" in config:
             return config["processor_class"]
     return None
+
+
+def get_video_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
+    processor_name = convert_model_repo_to_path(processor_name)
+    config_file = [
+        "video_preprocessor_config.json",
+        "preprocessor_config.json",
+    ]
+    for file in config_file:
+        config = get_hf_file_to_dict(file, processor_name, revision=revision)
+        if config and "video_processor_type" in config:
+            return config["video_processor_type"]
+    return None
+
+
+_cached_get_video_processor_cls_name = lru_cache(
+    get_video_processor_cls_name_from_config
+)
+
+
+def get_video_processor_cls_name(
+    model_config: "ModelConfig",
+) -> str | None:
+    if is_gguf(model_config.model):
+        assert not is_gguf(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load video processor metadata."
+        )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
+    else:
+        model = model_config.model
+        revision = model_config.revision
+
+    return _cached_get_video_processor_cls_name(model, revision=revision)
 
 
 def get_processor(
@@ -272,7 +310,6 @@ def get_processor_kwargs_keys(
         "images_kwargs",
         "videos_kwargs",
         "audio_kwargs",
-        "common_kwargs",
     }
 
     try:
@@ -522,4 +559,44 @@ def cached_video_processor_from_config(
         trust_remote_code=model_config.trust_remote_code,
         processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
+    )
+
+
+def call_hf_processor_mm_only(
+    processor: ProcessorMixin,
+    images: ImageInput | None = None,
+    videos: VideoInput | None = None,
+    audio: AudioInput | None = None,
+    **kwargs,
+) -> BatchFeature:
+    output_kwargs = processor._merge_kwargs(
+        get_processor_kwargs_type(processor),
+        **kwargs,
+    )
+
+    if audio is not None and (
+        feature_extractor := getattr(processor, "feature_extractor", None)
+    ):
+        audio_inputs = feature_extractor(audio, **output_kwargs["audio_kwargs"])
+        audio_inputs["feature_attention_mask"] = audio_inputs.pop("attention_mask")
+    else:
+        audio_inputs = {}
+
+    if images is not None and (
+        image_processor := getattr(processor, "image_processor", None)
+    ):
+        images_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
+    else:
+        images_inputs = {}
+
+    if videos is not None and (
+        video_processor := getattr(processor, "video_processor", None)
+    ):
+        videos_inputs = video_processor(videos=videos, **output_kwargs["videos_kwargs"])
+    else:
+        videos_inputs = {}
+
+    return BatchFeature(
+        data={**audio_inputs, **images_inputs, **videos_inputs},
+        tensor_type=kwargs.get("return_tensors"),
     )

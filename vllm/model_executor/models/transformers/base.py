@@ -27,8 +27,13 @@ import transformers
 from packaging.version import Version
 from torch import nn
 from transformers import AutoModel
+from transformers.conversion_mapping import (
+    WeightRenaming,
+    get_model_conversion_mapping,
+)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -47,6 +52,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.utils import (
+    can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -117,6 +123,7 @@ class Base(
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.device_config = vllm_config.device_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -146,7 +153,7 @@ class Base(
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
-            if quant_method_name == "mxfp4":
+            if quant_method_name in ("mxfp4", "gpt_oss_mxfp4"):
                 raise NotImplementedError(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
@@ -155,14 +162,16 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Patch config and init on "meta" to delay allocating GPU tensors
         self._patch_config()
+        from_config_kwargs = dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+        self._decorate_for_torch_compile(**from_config_kwargs)
+        # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
-            self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
+            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -207,16 +216,80 @@ class Base(
         `create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
-        - Propagates this dtype to any sub-configs because Transformers model
-        implementations do not support/use different dtypes in sub-models
         """
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
-        # TODO(hmellor): Remove this when Transformers v4 support is dropped
-        for sub_config_name in getattr(self.config, "sub_configs", {}):
-            sub_config = getattr(self.config, sub_config_name)
-            if sub_config.dtype != (dtype := self.config.dtype):
-                sub_config.dtype = dtype
+
+    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
+        """
+        Get the decoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The decoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        decoder_cls = type(model.get_decoder())
+        logger.debug("Identified decoder class as: %s", decoder_cls)
+        del model
+        return decoder_cls
+
+    def _decorate_cls_for_torch_compile(
+        self,
+        cls: type[PreTrainedModel],
+        dynamic_arg_dims: dict[str, int] | None,
+        enable_if: Callable[["VllmConfig"], bool],
+        is_encoder: bool,
+    ):
+        """
+        Decorate `cls` to indicate to vLLM that it supports torch compile.
+
+        Args:
+            cls: The PreTrainedModel class to decorate.
+            dynamic_arg_dims: A mapping from argument name to the dynamic dimensions
+                of the argument. If None, default dynamic arg dims will be used. See
+                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                for more details.
+            enable_if: A function which takes in the vLLM config and returns whether
+                torch compile should be enabled for this class.
+            is_encoder: Whether the class being decorated is an encoder.
+        """
+        logger.debug(
+            "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
+            cls.__name__,
+            "encoder" if is_encoder else "decoder",
+            dynamic_arg_dims,
+        )
+
+        support_torch_compile(
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=enable_if,
+            is_encoder=is_encoder,
+        )(cls)
+
+    def _decorate_for_torch_compile(self, **kwargs: dict):
+        """
+        Decorate the model's decoder class to indicate to vLLM that it supports torch
+        compile if `can_enable_torch_compile` is True.
+
+        Args:
+            kwargs: The kwargs to create the model, which are needed to get the decoder
+                class.
+        """
+        self._decorate_cls_for_torch_compile(
+            cls=self._get_decoder_cls(**kwargs),
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims=dict[str, int](
+                input_ids=1,  # shape: [1, seq_len]
+                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+            ),
+            enable_if=can_enable_torch_compile,
+            is_encoder=False,
+        )
 
     def _create_hf_to_vllm_mapper(self):
         """
@@ -224,9 +297,7 @@ class Base(
 
         This handles:
 
-        - Transformers weight renaming:
-            - from `WeightRenaming` in Transformers v5
-            - from `_checkpoint_conversion_mapping` in Transformers v4
+        - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
@@ -234,37 +305,16 @@ class Base(
         self.hf_to_vllm_mapper = WeightsMapper()
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
 
-        if Version(transformers.__version__) >= Version("5.0.0"):
-            from transformers.conversion_mapping import (
-                WeightRenaming,
-                get_model_conversion_mapping,
-            )
-
-            for mapping in get_model_conversion_mapping(self.model):
-                # Handle weights which have been renamed in Transformers
-                if isinstance(mapping, WeightRenaming):
-                    # Recompile using regex (Transformers used re)
-                    compiled_sources = re.compile(
-                        mapping.compiled_sources.pattern, mapping.compiled_sources.flags
-                    )
-                    target_pattern = mapping.target_patterns[0]
-                    orig_to_new_regex[compiled_sources] = target_pattern
-                # TODO: Handle WeightConverter to enable layer merging
-        else:
-            # Replace legacy suffixes used for norms
-            # TODO(hmellor): Remove this when Transformers v4 support is dropped
-            orig_to_new_regex.update(
-                {
-                    re.compile(r"\.gamma$"): ".weight",
-                    re.compile(r"\.beta$"): ".bias",
-                }
-            )
-
-        # Handle weights which have been renamed in Transformers
-        # TODO(hmellor): Remove this when Transformers v4 support is dropped
-        ccm = getattr(self.model, "_checkpoint_conversion_mapping", {})
-        for source, target in ccm.items():
-            orig_to_new_regex[re.compile(source)] = target
+        for mapping in get_model_conversion_mapping(self.model):
+            # Handle weights which have been renamed in Transformers
+            if isinstance(mapping, WeightRenaming):
+                # Recompile using regex (Transformers used re)
+                compiled_sources = re.compile(
+                    mapping.compiled_sources.pattern, mapping.compiled_sources.flags
+                )
+                target_pattern = mapping.target_patterns[0]
+                orig_to_new_regex[compiled_sources] = target_pattern
+            # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -301,7 +351,7 @@ class Base(
         """
         Check if the model has tied word embeddings.
         """
-        # Transformers v4 and v5 will store this in different places
+        # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
@@ -553,11 +603,6 @@ class Base(
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        if input_ids is not None:
-            input_ids = input_ids[None, ...]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[None, ...]
-
         # If the model scales embeddings inside the input embedding layer we must
         # ensure they are scaled here since VocabParallelEmbedding will not do it
         if (
@@ -568,22 +613,29 @@ class Base(
             inputs_embeds = self.embed_input_ids(input_ids)
             input_ids = None
 
-        if self.model_config.uses_mrope:
-            position_ids = positions[:, None]
-        else:
-            position_ids = positions[None, ...]
+        # Add batch dimension before entering Transformers model
+        if input_ids is not None and input_ids.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            input_ids = input_ids[None, ...]
+        if inputs_embeds is not None and inputs_embeds.ndim == 2:
+            # [seq_len, hidden_size] -> [1, seq_len, hidden_size]
+            inputs_embeds = inputs_embeds[None, ...]
+        if positions.ndim == 1:
+            # [seq_len] -> [1, seq_len]
+            positions = positions[None, ...]
 
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
-            position_ids=position_ids,
+            position_ids=positions,
             attention_instances=self.attention_instances,
             return_dict=False,
             **self._output_aux_hidden_states_kwargs,
             **kwargs,
         )
-        # We must remove the batch dimension from these outputs
+
+        # Remove batch dimension after exiting Transformers model
         hidden_states = outputs[0][0, ...]
         if self._output_aux_hidden_states_kwargs:
             aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]

@@ -30,7 +30,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import Olmo2Config
+from transformers import Olmo2Config, Olmo3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -63,7 +63,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Olmo3Config
 
 
 class Olmo2Attention(nn.Module):
@@ -315,7 +314,8 @@ class Olmo2Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         """
-        :param input_ids: A tensor of shape `(batch_size, seq_len)`.
+        Args:
+            input_ids: A tensor of shape `(batch_size, seq_len)`.
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
