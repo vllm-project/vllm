@@ -207,12 +207,10 @@ def make_wna16_moe_kernel(
     w2_g_idx_sort_indices: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
+    from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts
     # and BatchedMarlinExperts
@@ -223,22 +221,9 @@ def make_wna16_moe_kernel(
         XPUExpertsWNA16,
     )
 
-    is_monolithic = experts_cls.is_monolithic()
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-
-    extra_args: dict[str, Any] = {}
+    extra_kwargs: dict[str, Any] = {}
     if issubclass(experts_cls, MarlinExpertsBase):
-        extra_args = {
+        extra_kwargs = {
             "w13_g_idx": w13_g_idx,
             "w2_g_idx": w2_g_idx,
             "w13_g_idx_sort_indices": w13_g_idx_sort_indices,
@@ -246,39 +231,12 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if experts_cls is XPUExpertsWNA16:
-        assert (
-            prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard
-        ), (
-            "XPUExpertsWNA16 only supports the Standard activation format; "
-            "xpu_fused_moe(is_int4=True) does not implement BatchedExperts."
-        )
-        experts: mk.FusedMoEExperts = XPUExpertsWNA16(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    elif (
-        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return MoEKernelOracle.make_moe_kernel(
+        quant_config=moe_quant_config,
+        moe_config=moe_config,
+        experts_cls=experts_cls,
+        routing_tables=routing_tables,
+        experts_extra_kwargs=extra_kwargs,
     )
 
 

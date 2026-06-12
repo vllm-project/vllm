@@ -171,25 +171,16 @@ def make_w4a8_moe_kernel(
     group_size: int,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
+    from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
+
+    return MoEKernelOracle.make_moe_kernel(
         quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    experts = experts_cls(
         moe_config=moe_config,
-        quant_config=moe_quant_config,
-        b_strides1=b_strides1,
-        b_strides2=b_strides2,
-        group_size=group_size,
-    )
-
-    return mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+        experts_cls=experts_cls,
+        routing_tables=routing_tables,
+        experts_extra_kwargs={
+            "b_strides1": b_strides1,
+            "b_strides2": b_strides2,
+            "group_size": group_size,
+        },
     )

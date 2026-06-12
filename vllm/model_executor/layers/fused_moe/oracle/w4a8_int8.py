@@ -327,19 +327,8 @@ def make_w4a8_int8_moe_kernel(
     Returns:
         Configured FusedMoEKernel instance
     """
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-    )
-    assert prepare_finalize is not None
+    from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts.
     # W4A8 Int8 currently only supports monolithic interface
     if not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic):
         raise ValueError(
@@ -347,14 +336,9 @@ def make_w4a8_int8_moe_kernel(
             f"but got {experts_cls.__name__}"
         )
 
-    experts = experts_cls(
-        moe_config=moe_config,
+    return MoEKernelOracle.make_moe_kernel(
         quant_config=moe_quant_config,
+        moe_config=moe_config,
+        experts_cls=experts_cls,
+        routing_tables=routing_tables,
     )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
