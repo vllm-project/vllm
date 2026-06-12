@@ -18,8 +18,6 @@ else()
     fmha_sm100
     GIT_REPOSITORY https://github.com/vllm-project/MSA.git
     GIT_TAG e32b23be48ccdbab952ff68db9fa31dc12733084
-    GIT_SUBMODULES python/fmha_sm100/cutlass
-    GIT_SUBMODULES_RECURSE TRUE
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
@@ -32,19 +30,13 @@ if(NOT fmha_sm100_POPULATED)
 endif()
 message(STATUS "fmha_sm100 is available at ${fmha_sm100_SOURCE_DIR}")
 
-if(NOT EXISTS "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/cutlass/include")
-  message(FATAL_ERROR
-    "fmha_sm100 CUTLASS submodule is missing. "
-    "If using FMHA_SM100_SRC_DIR, run "
-    "`git submodule update --init --recursive` in that MSA checkout.")
-endif()
-
 add_custom_target(fmha_sm100)
 
 install(DIRECTORY "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100/"
   DESTINATION vllm/third_party/fmha_sm100
   COMPONENT fmha_sm100
   FILES_MATCHING
+    PATTERN "cutlass" EXCLUDE
     PATTERN "*.py"
     PATTERN "*.cu"
     PATTERN "*.cuh"
