@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
+use super::utils::{parse_buffered_event, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
@@ -251,7 +251,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
         is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
-        value: take_until(0.., PARAMETER_END).map(xml_unescape).map(|value| value.into_owned()),
+        value: take_until(0.., PARAMETER_END).map(str::to_string),
         _: literal(PARAMETER_END),
     }}
     .parse_next(input)

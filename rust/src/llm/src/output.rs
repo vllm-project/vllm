@@ -14,6 +14,17 @@ use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 use crate::error::Result;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
+/// Token usage metadata for one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Number of prompt tokens sent to the engine.
+    pub prompt_token_count: usize,
+    /// Number of output tokens generated.
+    pub output_token_count: usize,
+    /// Number of prompt tokens served from cache.
+    pub cached_token_count: usize,
+}
+
 /// Final raw token output plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectedGenerateOutput {
@@ -23,6 +34,7 @@ pub struct CollectedGenerateOutput {
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
+    pub usage: TokenUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -127,6 +139,8 @@ pub struct GenerateOutput {
     pub logprobs: Option<Logprobs>,
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
+    /// Number of prompt tokens served from cache, when reported by prefill stats.
+    pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
 }
@@ -173,6 +187,7 @@ impl GenerateOutput {
             token_ids,
             logprobs: None,
             finish_reason,
+            cached_token_count: 0,
             kv_transfer_params: None,
         }
     }
@@ -241,6 +256,11 @@ impl Stream for GenerateOutputStream {
         }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
+        let cached_token_count = raw
+            .prefill_stats
+            .as_ref()
+            .map(|stats| stats.num_cached_tokens as usize)
+            .unwrap_or(0);
 
         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
         if let Some(finish_reason) = finish_reason.as_ref() {
@@ -253,6 +273,7 @@ impl Stream for GenerateOutputStream {
             token_ids: raw.new_token_ids,
             logprobs,
             finish_reason,
+            cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
         };
 
@@ -299,9 +320,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             pin_mut!(stream);
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
+            let mut cached_token_count = 0;
             let mut collected: Option<CollectedGenerateOutput> = None;
 
             while let Some(output) = stream.next().await.transpose()? {
+                cached_token_count = cached_token_count.max(output.cached_token_count);
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
@@ -328,6 +351,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,
+                        usage: TokenUsage {
+                            prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
+                            output_token_count: 0,
+                            cached_token_count,
+                        },
                         kv_transfer_params: None,
                     });
                 }
@@ -335,6 +363,11 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                 if let Some(finish_reason) = output.finish_reason {
                     let mut collected = collected.expect("terminal output must exist");
                     collected.finish_reason = finish_reason;
+                    collected.usage = TokenUsage {
+                        prompt_token_count: collected.prompt_token_ids.len(),
+                        output_token_count: collected.token_ids.len(),
+                        cached_token_count,
+                    };
                     collected.kv_transfer_params = output.kv_transfer_params;
                     return Ok(collected);
                 }

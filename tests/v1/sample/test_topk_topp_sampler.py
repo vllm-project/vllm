@@ -64,6 +64,51 @@ def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
     assert sampler.topk_topp_sampler.use_fp64_gumbel
 
 
+def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    class MockPlatform:
+        @staticmethod
+        def is_cuda():
+            return False
+
+        @staticmethod
+        def is_cpu():
+            return False
+
+        @staticmethod
+        def is_xpu():
+            return False
+
+    class MockRocmAiterOps:
+        @staticmethod
+        def is_enabled():
+            return True
+
+    real_import = __import__
+
+    def guard_aiter_sampling_import(name, *args, **kwargs):
+        if name == "aiter.ops.sampling":
+            raise AssertionError("aiter sampling import should be deferred")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(topk_topp_sampler, "current_platform", MockPlatform())
+    monkeypatch.setattr(topk_topp_sampler, "rocm_aiter_ops", MockRocmAiterOps())
+    monkeypatch.setattr("builtins.__import__", guard_aiter_sampling_import)
+
+    sampler = topk_topp_sampler.TopKTopPSampler()
+    logits = torch.randn(2, 8)
+    k = torch.full((2,), 2, dtype=torch.int32)
+    generators = {0: torch.Generator(device=logits.device).manual_seed(0)}
+
+    token_ids, logits_to_return = sampler(logits, generators, k, None)
+
+    assert token_ids.shape == (2,)
+    assert logits_to_return is None
+
+
 def test_random_sample_uses_fp64_exponential_race_when_requested():
     torch.set_default_device(DEVICE_TYPE)
     probs = torch.tensor(

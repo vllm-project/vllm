@@ -111,11 +111,6 @@ class MistralCommonVoxtralProcessor(ProcessorMixin):
         feature_extractor: MistralCommonFeatureExtractor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
-
-        # Back-compatibility for Transformers v4
-        if not hasattr(self.tokenizer, "init_kwargs"):
-            self.tokenizer.init_kwargs = {}
-
         self.feature_extractor = feature_extractor
 
         audio_special_ids = self.feature_extractor.audio_encoder.special_ids

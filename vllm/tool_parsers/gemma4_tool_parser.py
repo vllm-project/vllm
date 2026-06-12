@@ -20,9 +20,11 @@ import json
 from collections.abc import Sequence
 
 import regex as re
+from openai.types.responses import ToolChoiceFunction
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -343,6 +345,9 @@ class Gemma4ToolParser(ToolParser):
     tool parsers.
     """
 
+    # Gemma4 emits native special-token tool calls, not generic JSON calls.
+    supports_required_and_named = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -390,6 +395,23 @@ class Gemma4ToolParser(ToolParser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
+        if request.tools:
+            tc = request.tool_choice
+            if tc == "required" or isinstance(
+                tc,
+                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+            ):
+                # Do NOT call super().adjust_request() for required/named tool
+                # choice. The base implementation injects a JSON-array
+                # `structured_outputs` schema and forces xgrammar guided
+                # decoding, which conflicts with Gemma4's native
+                # `<|tool_call>call:...` (non-JSON) tool syntax and crashes
+                # EngineCore under MTP spec decode. The streaming/extraction
+                # parser already handles the native output, so guided decoding
+                # is skipped here (mirrors the GLM4 precedent).
+                if request.tool_choice != "none":
+                    request.skip_special_tokens = False
+                return request
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Don't skip special tokens — <|tool_call> etc. are needed for
@@ -549,22 +571,40 @@ class Gemma4ToolParser(ToolParser):
                 return DeltaMessage(content=delta_text)
             return None
 
-        # Case 2: Starting a new tool call
-        if start_count > prev_start_count and start_count > end_count:
-            self.current_tool_id += 1
+        # Case 2: One or more new tool calls started in this delta.
+        # A single delta can batch several complete calls, so advance the
+        # tool id once per newly-seen start token and allocate a tracking
+        # slot for each.
+        if start_count > prev_start_count:
+            num_new = start_count - prev_start_count
+            for _ in range(num_new):
+                self.current_tool_id += 1
+                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
             self.current_tool_name_sent = False
-            self.streamed_args_for_tool.append("")
-            self.prev_tool_call_arr.append({})
-            logger.debug("Starting new tool call %d", self.current_tool_id)
-            # Don't return yet — fall through to try parsing if there's
-            # content after <|tool_call> in this same delta
-            # (but usually it's just the token itself, so return None)
-            if len(delta_text) <= len(self.tool_call_start_token):
+            logger.debug(
+                "Started %d new tool call(s); current_tool_id=%d",
+                num_new,
+                self.current_tool_id,
+            )
+            # Don't return yet if this delta also contains call payload or
+            # the end marker; backends can batch one or more complete tool
+            # calls into a single streaming chunk. Only wait for more text
+            # when the delta is just the start token itself.
+            if start_count > end_count and len(delta_text) <= len(
+                self.tool_call_start_token
+            ):
                 return None
 
-        # Case 3: Tool call just ended
+        # Case 3: One or more tool calls just ended (possibly several in a
+        # single batched delta) — drain every newly-completed call.
         if end_count > prev_end_count:
-            return self._handle_tool_call_end(current_text)
+            return self._handle_tool_call_end(
+                current_text,
+                prev_end_count=prev_end_count,
+                end_count=end_count,
+                start_count=start_count,
+            )
 
         # Case 4: In the middle of a tool call — parse partial content
         if start_count > end_count:
@@ -652,45 +692,111 @@ class Gemma4ToolParser(ToolParser):
 
         return None
 
-    def _handle_tool_call_end(self, current_text: str) -> DeltaMessage | None:
-        """Handle streaming when a tool call has just completed.
+    def _handle_tool_call_end(
+        self,
+        current_text: str,
+        prev_end_count: int,
+        end_count: int,
+        start_count: int,
+    ) -> DeltaMessage | None:
+        """Handle streaming when one or more tool calls have just completed.
 
-        Performs a final parse of the complete tool call and flushes
-        any remaining un-streamed argument fragments.
+        A single streaming delta can batch several complete tool calls
+        (``<|tool_call>...<tool_call|><|tool_call>...<tool_call|>``). Every
+        call whose ``<tool_call|>`` end marker arrived in this delta — i.e.
+        those with index in ``[prev_end_count, end_count)`` — is drained and
+        emitted, with one ``DeltaToolCall`` per call in a single
+        ``DeltaMessage`` (this matches the OpenAI streaming wire format, and
+        the serving layer iterates over ``delta.tool_calls``).
+
+        Per call:
+
+        * If the function name was already streamed incrementally (the
+          token-by-token path), only the remaining argument fragment is
+          flushed as a diff.
+        * If the call is seen complete for the first time in this delta (the
+          batched-complete path), the id + name + full arguments JSON are
+          emitted exactly once.
         """
-        if self.current_tool_id < 0 or self.current_tool_id >= len(
-            self.prev_tool_call_arr
-        ):
-            logger.debug(
-                "Tool call end detected but no active tool call (current_tool_id=%d)",
-                self.current_tool_id,
-            )
+        # Parse the complete tool calls using regex for accuracy.
+        all_matches = self.tool_call_regex.findall(current_text)
+        if not all_matches:
+            logger.debug("Tool call end detected but no complete tool call parsed yet.")
             return None
 
-        # Parse the complete tool call using regex for accuracy
-        all_matches = self.tool_call_regex.findall(current_text)
-        if self.current_tool_id < len(all_matches):
-            _, args_str = all_matches[self.current_tool_id]
+        deltas: list[DeltaToolCall] = []
+        for idx in range(prev_end_count, end_count):
+            if idx >= len(all_matches):
+                break
+            # Ensure the tracking arrays have a slot for this index (defensive;
+            # Case 2 normally allocates these when the start token arrives).
+            while len(self.prev_tool_call_arr) <= idx:
+                self.prev_tool_call_arr.append({})
+                self.streamed_args_for_tool.append("")
+
+            func_name, args_str = all_matches[idx]
             final_args = _parse_gemma4_args(args_str)
             final_args_json = json.dumps(final_args, ensure_ascii=False)
 
-            prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
-            if len(final_args_json) > len(prev_streamed):
-                diff = final_args_json[len(prev_streamed) :]
-                self.streamed_args_for_tool[self.current_tool_id] = final_args_json
-                self.prev_tool_call_arr[self.current_tool_id]["arguments"] = final_args
+            # The name is sent exactly once per call. We track that via the
+            # per-call entry in prev_tool_call_arr (set either by the middle
+            # path or by the batched-complete branch below), which is robust
+            # even when several calls are drained in one delta.
+            name_already_sent = bool(self.prev_tool_call_arr[idx].get("name"))
 
-                return DeltaMessage(
-                    tool_calls=[
+            if not name_already_sent:
+                # Batched-complete call: emit id + name + full arguments once.
+                self.streamed_args_for_tool[idx] = final_args_json
+                self.prev_tool_call_arr[idx] = {
+                    "name": func_name,
+                    "arguments": final_args,
+                }
+                deltas.append(
+                    DeltaToolCall(
+                        index=idx,
+                        type="function",
+                        id=make_tool_call_id(),
+                        function=DeltaFunctionCall(
+                            name=func_name, arguments=final_args_json
+                        ).model_dump(exclude_none=True),
+                    )
+                )
+            else:
+                # Incrementally-streamed call: flush the remaining argument
+                # tail that was withheld during the middle phase.
+                prev_streamed = self.streamed_args_for_tool[idx]
+                if len(final_args_json) > len(prev_streamed):
+                    diff = final_args_json[len(prev_streamed) :]
+                    self.streamed_args_for_tool[idx] = final_args_json
+                    self.prev_tool_call_arr[idx]["arguments"] = final_args
+                    deltas.append(
                         DeltaToolCall(
-                            index=self.current_tool_id,
+                            index=idx,
                             function=DeltaFunctionCall(arguments=diff).model_dump(
                                 exclude_none=True
                             ),
                         )
-                    ]
-                )
+                    )
 
+        # Advance streaming state past the calls completed in this delta. If a
+        # further tool call is still being accumulated (start without a
+        # matching end), point current_tool_id at it so the middle path can
+        # stream its arguments next; otherwise settle on the last completed
+        # call.
+        if start_count > end_count:
+            self.current_tool_id = end_count
+            while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                self.prev_tool_call_arr.append({})
+                self.streamed_args_for_tool.append("")
+            self.current_tool_name_sent = bool(
+                self.prev_tool_call_arr[self.current_tool_id].get("name")
+            )
+        else:
+            self.current_tool_id = end_count - 1
+            self.current_tool_name_sent = True
+
+        if deltas:
+            return DeltaMessage(tool_calls=deltas)
         return None
 
     def _emit_argument_diff(self, raw_args_str: str) -> DeltaMessage | None:
