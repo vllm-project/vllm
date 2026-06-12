@@ -2041,10 +2041,6 @@ class FlashInferImpl(AttentionImpl):
                 if self.use_xqa_nvfp4 and self.is_kvcache_nvfp4:
                     assert nvfp4_kv_data is not None
                     assert nvfp4_kv_block_scales is not None
-                    decode_kv_cache = tuple(t.contiguous() for t in nvfp4_kv_data)
-                    decode_kv_cache_sf = tuple(
-                        t.contiguous() for t in nvfp4_kv_block_scales
-                    )
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
