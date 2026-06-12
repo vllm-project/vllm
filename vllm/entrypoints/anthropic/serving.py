@@ -377,6 +377,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
+            ec_transfer_params=anthropic_request.ec_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 
@@ -511,6 +512,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 output_tokens=generator.usage.completion_tokens,
             ),
             kv_transfer_params=generator.kv_transfer_params,
+            ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":

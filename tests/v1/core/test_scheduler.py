@@ -2576,7 +2576,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     def free_request(req: Request, delay_free_blocks: bool = False):
         scheduler.finished_req_ids.add(req.request_id)
         scheduler.requests.pop(req.request_id, None)
-        return None
+        return None, None
 
     scheduler._free_request = Mock(side_effect=free_request)
 
