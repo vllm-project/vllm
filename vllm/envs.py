@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
+    VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -199,6 +200,7 @@ if TYPE_CHECKING:
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -226,7 +228,6 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
-    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
@@ -928,6 +929,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
     ),
+    # Maximum number of worker threads used for STT preprocessing. The default
+    # intentionally caps at 2 because that performed best in profiling.
+    # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
+    "VLLM_MAX_AUDIO_PREPROCESS_WORKERS": lambda: int(
+        os.getenv(
+            "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+            str(max(1, min(os.cpu_count() or 1, 2))),
+        )
+    ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1526,6 +1536,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
+    # Enforce function parameter schemas in structural-tag based tool calling.
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: os.getenv(
+        "VLLM_ENFORCE_STRICT_TOOL_CALLING", "True"
+    ).lower()
+    in ("true", "1"),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1648,12 +1663,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If disabled (default), raises an exception and fails the request
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
-    ),
-    # When 1,the model structural tags will be used to enforce the model
-    # output conforming to the model's tool-calling format and schema.
-    # Default 0 (off).
-    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: bool(
-        int(os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"))
     ),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
@@ -1997,6 +2006,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
+        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

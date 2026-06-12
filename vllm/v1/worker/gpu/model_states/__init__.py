@@ -13,6 +13,11 @@ def init_model_state(
     encoder_cache: EncoderCache | None,
     device: torch.device,
 ):
+    # Let the model provide its own ModelState if it defines one.
+    if hasattr(model, "get_model_state_cls"):
+        cls = model.get_model_state_cls()
+        return cls(vllm_config, model, encoder_cache, device)
+
     if (
         "WhisperForConditionalGeneration" in vllm_config.model_config.architectures
         or "CohereAsrForConditionalGeneration" in vllm_config.model_config.architectures
