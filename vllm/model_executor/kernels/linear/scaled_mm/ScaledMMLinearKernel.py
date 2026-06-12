@@ -9,6 +9,9 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -120,30 +123,27 @@ class FP8ScaledMMLinearKernel(
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
 
-        #   ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_s computed from x.
-        #   If static, layer.input_scale is scalar and x_s is input_scale.
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], w.shape[1]]
-        out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
+        if isinstance(x, QuantizedActivation):
+            x_data, x_s = x.data, x.scale
+            orig_shape, orig_dtype = x.orig_shape, x.orig_dtype
+        else:
+            x_data = x
+            orig_shape, orig_dtype = x.shape, x.dtype
 
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
+        x_2d = x_data.view(-1, x_data.shape[-1])
+        output_shape = [*orig_shape[:-1], w.shape[1]]
+        out_dtype = orig_dtype if maybe_out_dtype is None else maybe_out_dtype
+
         x_2d_q = x_2d
-        if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-                x_s_ub,
-            )
+        if x_data.dtype != fp8_dtype:
+            x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
