@@ -30,26 +30,6 @@ _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
 
 
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
-    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
-    if workspace is None:
-        workspace = torch.zeros(
-            _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=device,
-        )
-        _flashinfer_dsv4_workspace_by_device[device] = workspace
-    return workspace
-
-
-def _as_sparse_sm120_cache(kv_cache: torch.Tensor) -> torch.Tensor:
-    if kv_cache.dtype == torch.float8_e4m3fn:
-        kv_cache = kv_cache.view(torch.uint8)
-    if kv_cache.dim() == 4:
-        return kv_cache
-    return kv_cache.unsqueeze(-2)
-
-
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout."""
 
@@ -95,11 +75,46 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
         return None
 
 
-class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
-    """Shared DeepSeek V4 FlashInfer sparse MLA attention helpers."""
+class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
+    """DeepSeek V4 sparse MLA attention through FlashInfer's SM120 kernels."""
 
     backend_cls = DeepseekV4FlashInferMLASparseBackend
-    use_fp8_ds_mla_layout: ClassVar[bool] = False
+    use_fp8_ds_mla_layout: ClassVar[bool] = True
+
+    @staticmethod
+    def _get_workspace(device: torch.device) -> torch.Tensor:
+        workspace = _flashinfer_dsv4_workspace_by_device.get(device)
+        if workspace is None:
+            workspace = torch.zeros(
+                _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
+            )
+            _flashinfer_dsv4_workspace_by_device[device] = workspace
+        return workspace
+
+    @staticmethod
+    def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
+        if kv_cache.dtype == torch.float8_e4m3fn:
+            kv_cache = kv_cache.view(torch.uint8)
+        if kv_cache.dim() == 4:
+            return kv_cache
+        return kv_cache.unsqueeze(-2)
+
+    @classmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        if num_heads <= 16:
+            return 16
+        if num_heads <= 32:
+            return 32
+        if num_heads <= 64:
+            return 64
+        if num_heads <= 128:
+            return 128
+        raise ValueError(
+            f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
+            "(SM120 kernel requires h_q in {16, 32, 64, 128})."
+        )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -119,6 +134,13 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+
+        if not has_flashinfer_sparse_mla_sm120():
+            raise RuntimeError(
+                "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires FlashInfer's "
+                "sparse MLA decode API."
+            )
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
         # Per-tensor FP8 cache path scales.
         if self.kv_cache_torch_dtype != torch.float8_e4m3fn:
@@ -145,7 +167,9 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         self._flashinfer_fp8_bmm2_scale = fp8_kv_scale
 
     def _reserve_empty_forward_workspace(self) -> None:
-        pass
+        self._get_workspace(
+            torch.device("cuda", torch.accelerator.current_device_index())
+        )
 
     def _forward_sparse_impl(
         self,
@@ -157,7 +181,25 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         swa_kv_cache: torch.Tensor,
         swa_only: bool,
     ) -> None:
-        raise NotImplementedError
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        if swa_metadata.num_prefills > 0:
+            self._forward_prefill(
+                q=q[num_decode_tokens:],
+                compressed_k_cache=self_kv_cache,
+                swa_k_cache=swa_kv_cache,
+                output=output[num_decode_tokens:],
+                attn_metadata=flashmla_metadata,
+                swa_metadata=swa_metadata,
+            )
+        if swa_metadata.num_decodes > 0:
+            self._forward_decode(
+                q=q[:num_decode_tokens],
+                kv_cache=self_kv_cache,
+                swa_metadata=swa_metadata,
+                attn_metadata=flashmla_metadata,
+                swa_only=swa_only,
+                output=output[:num_decode_tokens],
+            )
 
     def forward_mqa(
         self,
@@ -214,14 +256,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
             swa_only=swa_only,
         )
 
-    def _reserve_sm120_decode_workspace(self) -> None:
-        _get_flashinfer_dsv4_workspace(
-            torch.device("cuda", torch.accelerator.current_device_index())
-        )
-
-    def _prepare_sm120_query(
-        self, q: torch.Tensor, output: torch.Tensor
-    ) -> torch.Tensor:
+    def _prepare_query(self, q: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
             assert q.dtype == torch.float8_e4m3fn
             q = q.to(torch.bfloat16)
@@ -234,7 +269,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
             q = padded_query
         return q.contiguous()
 
-    def _forward_sm120_decode(
+    def _forward_decode(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,
@@ -282,9 +317,9 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         swa_lens = swa_metadata.decode_swa_lens
         assert swa_indices is not None
         assert swa_lens is not None
-        q = self._prepare_sm120_query(q, output)
-        swa_cache = _as_sparse_sm120_cache(self.swa_cache_layer.kv_cache)
-        extra_cache = _as_sparse_sm120_cache(kv_cache) if kv_cache is not None else None
+        q = self._prepare_query(q, output)
+        swa_cache = self._as_sparse_cache(self.swa_cache_layer.kv_cache)
+        extra_cache = self._as_sparse_cache(kv_cache) if kv_cache is not None else None
         if extra_cache is not None and extra_sparse_indices is None:
             raise RuntimeError(
                 "Compressed sparse MLA decode requires compressed sparse indices."
@@ -292,7 +327,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
             query=q,
             swa_kv_cache=swa_cache,
-            workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
+            workspace_buffer=self._get_workspace(q.device),
             sparse_indices=swa_indices,
             compressed_kv_cache=extra_cache,
             out=output,
@@ -304,7 +339,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
             extra_sparse_topk_lens=extra_sparse_lengths,
         )
 
-    def _forward_sm120_prefill(
+    def _forward_prefill(
         self,
         q: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,
@@ -366,8 +401,8 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
         assert swa_metadata.prefill_swa_indices is not None
         assert swa_metadata.prefill_swa_lens is not None
 
-        q = self._prepare_sm120_query(q, output)
-        swa_kv_paged = _as_sparse_sm120_cache(swa_k_cache)
+        q = self._prepare_query(q, output)
+        swa_kv_paged = self._as_sparse_cache(swa_k_cache)
         if swa_only:
             extra_kv_paged = None
         else:
@@ -375,7 +410,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
                 raise RuntimeError(
                     "Compressed sparse MLA layers require their compressed KV cache."
                 )
-            extra_kv_paged = _as_sparse_sm120_cache(compressed_k_cache)
+            extra_kv_paged = self._as_sparse_cache(compressed_k_cache)
 
         num_chunks = (
             num_prefills + self.PREFILL_CHUNK_SIZE - 1
@@ -411,7 +446,7 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=q_chunk,
                 swa_kv_cache=swa_kv_paged,
-                workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
+                workspace_buffer=self._get_workspace(q.device),
                 sparse_indices=swa_indices_chunk,
                 compressed_kv_cache=extra_kv_paged,
                 out=output[query_start:query_end],
@@ -421,68 +456,4 @@ class _DeepseekV4FlashInferMLAAttentionBase(DeepseekV4Attention):
                 swa_topk_lens=swa_lens_chunk,
                 extra_sparse_indices=extra_sparse_indices_chunk,
                 extra_sparse_topk_lens=extra_sparse_lengths_chunk,
-            )
-
-
-class DeepseekV4FlashInferSM120Attention(_DeepseekV4FlashInferMLAAttentionBase):
-    """DeepSeek V4 sparse MLA attention through FlashInfer."""
-
-    use_fp8_ds_mla_layout: ClassVar[bool] = True
-
-    @classmethod
-    def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        if num_heads <= 16:
-            return 16
-        if num_heads <= 32:
-            return 32
-        if num_heads <= 64:
-            return 64
-        if num_heads <= 128:
-            return 128
-        raise ValueError(
-            f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-            "(SM120 kernel requires h_q in {16, 32, 64, 128})."
-        )
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
-
-        if not has_flashinfer_sparse_mla_sm120():
-            raise RuntimeError(
-                "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires FlashInfer's "
-                "sparse MLA decode API."
-            )
-
-    def _reserve_empty_forward_workspace(self) -> None:
-        self._reserve_sm120_decode_workspace()
-
-    def _forward_sparse_impl(
-        self,
-        q: torch.Tensor,
-        output: torch.Tensor,
-        flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
-        swa_metadata: "DeepseekSparseSWAMetadata",
-        self_kv_cache: torch.Tensor | None,
-        swa_kv_cache: torch.Tensor,
-        swa_only: bool,
-    ) -> None:
-        num_decode_tokens = swa_metadata.num_decode_tokens
-        if swa_metadata.num_prefills > 0:
-            self._forward_sm120_prefill(
-                q=q[num_decode_tokens:],
-                compressed_k_cache=self_kv_cache,
-                swa_k_cache=swa_kv_cache,
-                output=output[num_decode_tokens:],
-                attn_metadata=flashmla_metadata,
-                swa_metadata=swa_metadata,
-            )
-        if swa_metadata.num_decodes > 0:
-            self._forward_sm120_decode(
-                q=q[:num_decode_tokens],
-                kv_cache=self_kv_cache,
-                swa_metadata=swa_metadata,
-                attn_metadata=flashmla_metadata,
-                swa_only=swa_only,
-                output=output[:num_decode_tokens],
             )

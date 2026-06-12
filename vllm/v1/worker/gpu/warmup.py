@@ -10,7 +10,6 @@ import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -22,39 +21,6 @@ from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
-
-_DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
-    {
-        "FLASHMLA_SPARSE_DSV4",
-        "FLASHINFER_MLA_SPARSE_DSV4",
-        "ROCM_FLASHMLA_SPARSE_DSV4",
-        "DEEPSEEK_SPARSE_SWA",
-    }
-)
-_DEEPSEEK_V4_METADATA_WARMUP_TOKENS = 16
-
-
-def _attention_backend_name(backend: object) -> str | None:
-    get_name = getattr(backend, "get_name", None)
-    if get_name is None:
-        return None
-    try:
-        return get_name()
-    except NotImplementedError:
-        return None
-
-
-def _has_deepseek_v4_sparse_mla_backend(model_runner: GPUModelRunner) -> bool:
-    for groups in getattr(model_runner, "attn_groups", []) or ():
-        for group in groups:
-            name = _attention_backend_name(getattr(group, "backend", None))
-            if name in _DEEPSEEK_V4_SPARSE_MLA_BACKENDS:
-                return True
-    return False
-
-
-def _clamp_warmup_tokens(num_tokens: int, max_tokens: int) -> int:
-    return max(0, min(num_tokens, max_tokens))
 
 
 def run_mixed_prefill_decode_warmup(
@@ -181,36 +147,6 @@ def run_mixed_prefill_decode_warmup(
     finally:
         model_runner.kv_connector.set_disabled(False)
     return True
-
-
-def warmup_deepseek_v4_sparse_mla_metadata_kernels(
-    model_runner: GPUModelRunner,
-    worker_execute_model: Callable[[SchedulerOutput], Any],
-    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
-) -> None:
-    if (
-        model_runner.is_pooling_model
-        or not current_platform.is_cuda_alike()
-        or not _has_deepseek_v4_sparse_mla_backend(model_runner)
-    ):
-        return
-
-    max_tokens = model_runner.scheduler_config.max_num_batched_tokens
-    mixed_tokens = _clamp_warmup_tokens(_DEEPSEEK_V4_METADATA_WARMUP_TOKENS, max_tokens)
-    if mixed_tokens <= 0:
-        return
-
-    logger.info(
-        "Warming up DeepSeek V4 sparse MLA metadata for mixed tokens=%s.",
-        mixed_tokens,
-    )
-    run_mixed_prefill_decode_warmup(
-        model_runner,
-        worker_execute_model,
-        worker_sample_tokens,
-        mixed_tokens,
-        req_id_prefix="_deepseek_v4_metadata_warmup",
-    )
 
 
 @torch.inference_mode()
@@ -344,7 +280,4 @@ def warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
-    warmup_deepseek_v4_sparse_mla_metadata_kernels(
-        model_runner, worker_execute_model, worker_sample_tokens
-    )
     torch.accelerator.synchronize()
