@@ -509,6 +509,68 @@ class TestExtractResponseOutputs:
         assert "function_call" in types
 
 
+# ── TestParseTokenIdPassthrough ────────────────────────────────────
+
+
+class TestParseTokenIdPassthrough:
+    """parse() must forward model_output_token_ids to _single_pass_parse
+    so that token-ID-based strict terminal matching is active."""
+
+    def test_literal_tool_tag_in_content_preserved_with_token_ids(self, mock_request):
+        engine = _make_engine(_hermes_config())
+        text = (
+            "Use <tool_call> to call tools."
+            '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+        )
+        token_ids = [
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,  # "Use <tool_call> to call tools."
+            202,  # real <tool_call>
+            72,
+            73,
+            74,  # '{"name": "f", ...}'
+            203,  # real </tool_call>
+        ]
+
+        _, content, tool_calls = engine.parse(
+            text, mock_request, model_output_token_ids=token_ids
+        )
+
+        assert content is not None
+        assert "<tool_call>" in content
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "f"
+
+    def test_parse_with_token_ids_basic(self, mock_request):
+        engine = _make_engine(_hermes_config())
+        text = '<tool_call>{"name": "h", "arguments": {"x": 1}}</tool_call>'
+        token_ids = [202, 65, 66, 67, 203]
+
+        _, content, tool_calls = engine.parse(
+            text, mock_request, model_output_token_ids=token_ids
+        )
+
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "h"
+
+    def test_parse_without_token_ids_backward_compat(self, mock_request):
+        engine = _make_engine(_hermes_config())
+        text = '<tool_call>{"name": "g", "arguments": {}}</tool_call>'
+
+        _, content, tool_calls = engine.parse(text, mock_request)
+
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "g"
+
+
 # ── TestAdapterFinishOnStreamEnd ────────────────────────────────────
 
 

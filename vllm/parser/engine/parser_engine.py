@@ -565,10 +565,11 @@ class ParserEngine(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         reasoning, content, tool_call_info = self._single_pass_parse(
             model_output,
-            [],
+            model_output_token_ids,
         )
 
         tool_calls: list[FunctionCall] | None = None
