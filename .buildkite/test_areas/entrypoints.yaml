@@ -123,6 +123,11 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Speech to Text)
   device: h200_35gb
@@ -163,21 +168,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
-
-- label: Entrypoints Integration (Responses API)
-  key: entrypoints-integration-responses-api
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/entrypoints/openai/responses
-  commands:
-  - pytest -v -s entrypoints/openai/responses
-  mirror:
-    amd:
-      device: mi300_1
-      depends_on:
-      - image-build-amd
 
 - label: OpenAI API Correctness
   key: openai-api-correctness
