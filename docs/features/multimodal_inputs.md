@@ -860,9 +860,13 @@ This targets prefill-heavy workloads that generate few tokens, where CPU-side vi
 - Returned frames sit on GOP boundaries rather than a uniform stride, so temporal coverage follows the source encoding (typically one frame per 2–10 seconds of video).
 - If a clip has fewer keyframes than `num_frames`, keyframes are duplicated (balanced) to fill the request; `frames_indices` always reports true source indices.
 - It is never selected automatically for any model; the `opencv` codec and `frame_recovery` are rejected.
+- Models with their own model-specific video loader (e.g. GLM-4V/4.6V, Molmo2) ignore `VLLM_VIDEO_LOADER_BACKEND`: the processor-mapped backend takes precedence, so `pyav_keyframes` only ever replaces the default `opencv` loader. It can still be forced per request via `media_io_kwargs` `{"video": {"video_backend": "pyav_keyframes"}}`, which is unvalidated for those models.
 
 !!! warning
     This is a lossy trade-off. In a Qwen2.5-VL-7B evaluation (NExTQA + MVBench, 16 frames), NExTQA accuracy was unchanged (79.6% → 79.5%) while MVBench dropped 11.3 points overall, concentrated in motion- and temporal-order subtasks (`action_antonym`: −52.7 points). Avoid it for motion counting, temporal ordering, or action recognition; the accuracy impact varies with model, task, and source GOP structure.
+
+!!! tip
+    Because the cost is data-dependent, gate adoption with a label-free A/B on a sample of your own data: run `pyav_keyframes` vs. the default loader at identical settings and compare exact-match agreement on predicted labels (optionally KL divergence of the output distributions). Enable it only where the agreement justifies the speedup.
 
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
