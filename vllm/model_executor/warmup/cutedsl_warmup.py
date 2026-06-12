@@ -397,6 +397,14 @@ def _barrier_after_cutedsl_warmup() -> None:
     world.barrier()
 
 
+def _should_lock_cutedsl_persistent_cache() -> bool:
+    if os.environ.get(_CUTE_DSL_CACHE_ENABLED_ENV) != "1":
+        return False
+
+    world = _get_world_group_or_none()
+    return world is None or getattr(world, "world_size", 1) <= 1
+
+
 @contextmanager
 def _cutedsl_persistent_cache_lock() -> Generator[None, None, None]:
     if os.environ.get(_CUTE_DSL_CACHE_ENABLED_ENV) != "1":
@@ -510,7 +518,7 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     start_time = time.perf_counter()
     lock_context = (
         _cutedsl_persistent_cache_lock()
-        if os.environ.get(_CUTE_DSL_CACHE_ENABLED_ENV) == "1"
+        if _should_lock_cutedsl_persistent_cache()
         else nullcontext()
     )
     with lock_context:
