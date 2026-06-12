@@ -31,6 +31,7 @@ from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .diffusion import DiffusionConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -323,6 +324,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    diffusion_config: DiffusionConfig | None = None
+    """Diffusion LLM (dLLM) configuration."""
+
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
@@ -511,6 +515,11 @@ class VllmConfig:
             and self.speculative_config.num_speculative_tokens is not None
         ):
             return self.speculative_config.num_speculative_tokens
+        if (
+            self.diffusion_config is not None
+            and self.diffusion_config.canvas_length is not None
+        ):
+            return self.diffusion_config.canvas_length
         return 0
 
     @property
@@ -518,6 +527,9 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
+
+        if self.model_config is not None and self.model_config.is_diffusion:
+            return True
 
         if not self._is_default_v2_model_runner_model():
             return False
@@ -1654,12 +1666,7 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1
-                if (
-                    self.speculative_config
-                    and self.speculative_config.num_speculative_tokens
-                ):
-                    decode_query_len += self.speculative_config.num_speculative_tokens
+                decode_query_len = 1 + self.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )

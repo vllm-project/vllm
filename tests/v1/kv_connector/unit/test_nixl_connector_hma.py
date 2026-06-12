@@ -34,7 +34,9 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
@@ -782,7 +784,9 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,
