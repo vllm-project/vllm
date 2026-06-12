@@ -44,14 +44,14 @@ class ParserState(Enum):
     TOOL_BETWEEN = auto()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Transition:
     next_state: ParserState
-    events: list[EventType] = field(default_factory=list)
+    events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParserEngineConfig:
     """Declarative description of a model's tool-call / reasoning format.
 

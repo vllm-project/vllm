@@ -102,62 +102,62 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             # -- Reasoning transitions --
             (ParserState.REASONING, "THINK_START"): Transition(
                 ParserState.REASONING,
-                [],
+                (),
             ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.REASONING_END],
+                (EventType.REASONING_END,),
             ),
             # Absorb duplicate </think> — model may emit it after
             # already transitioning to CONTENT; drop it silently.
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
-                [],
+                (),
             ),
             # Tool call directly from reasoning (implicit end)
             (ParserState.REASONING, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                [EventType.REASONING_END, EventType.TOOL_CALL_START],
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             # Fallback: <function= without a preceding <tool_call>
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [],
+                (),
             ),
             (ParserState.TOOL_NAME, "CLOSE_ANGLE"): Transition(
                 ParserState.TOOL_ARGS,
-                [],
+                (),
             ),
             # Malformed: </function> while still in TOOL_NAME (no closing >)
             (ParserState.TOOL_NAME, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [],
+                (),
             ),
             # Consecutive tool call without closing </tool_call>
             (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_BETWEEN, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
         },
         arg_converter=_qwen3_arg_converter,

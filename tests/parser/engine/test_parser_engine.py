@@ -59,19 +59,19 @@ def _combined_config() -> ParserEngineConfig:
         transitions={
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.REASONING_END],
+                (EventType.REASONING_END,),
             ),
             (ParserState.CONTENT, "THINK_START"): Transition(
                 ParserState.REASONING,
-                [EventType.REASONING_START],
+                (EventType.REASONING_START,),
             ),
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
         },
         initial_state=ParserState.REASONING,
@@ -98,11 +98,11 @@ def _hermes_config() -> ParserEngineConfig:
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
         },
         content_events={
@@ -657,11 +657,11 @@ def _converter_config(
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
         },
         content_events={

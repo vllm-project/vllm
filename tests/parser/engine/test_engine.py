@@ -36,11 +36,11 @@ def _hermes_config() -> ParserEngineConfig:
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
         },
         content_events={
@@ -61,11 +61,11 @@ def _think_config() -> ParserEngineConfig:
         transitions={
             (ParserState.CONTENT, "THINK_START"): Transition(
                 ParserState.REASONING,
-                [EventType.REASONING_START],
+                (EventType.REASONING_START,),
             ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
-                [EventType.REASONING_END],
+                (EventType.REASONING_END,),
             ),
         },
     )
@@ -460,36 +460,36 @@ def _func_prefix_config() -> ParserEngineConfig:
         transitions={
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
                 skip_in_token_id_mode=True,
             ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [],
+                (),
             ),
             (ParserState.TOOL_NAME, "CLOSE_ANGLE"): Transition(
                 ParserState.TOOL_ARGS,
-                [],
+                (),
             ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                [EventType.TOOL_CALL_END],
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
                 ParserState.CONTENT,
-                [],
+                (),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_BETWEEN, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
-                [EventType.TOOL_CALL_START],
+                (EventType.TOOL_CALL_START,),
                 skip_in_token_id_mode=True,
             ),
         },
@@ -611,15 +611,15 @@ class TestArgsResetOnReentry:
             transitions={
                 (ParserState.CONTENT, "TOOL_START"): Transition(
                     ParserState.TOOL_ARGS,
-                    [EventType.TOOL_CALL_START],
+                    (EventType.TOOL_CALL_START,),
                 ),
                 (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                     ParserState.TOOL_BETWEEN,
-                    [EventType.TOOL_CALL_END],
+                    (EventType.TOOL_CALL_END,),
                 ),
                 (ParserState.TOOL_BETWEEN, "TOOL_SEP"): Transition(
                     ParserState.TOOL_ARGS,
-                    [EventType.TOOL_CALL_START],
+                    (EventType.TOOL_CALL_START,),
                 ),
             },
             content_events={
@@ -682,7 +682,7 @@ class TestToolPreambleFinish:
             transitions={
                 (ParserState.CONTENT, "TOOL_START"): Transition(
                     ParserState.TOOL_PREAMBLE,
-                    [EventType.TOOL_CALL_START],
+                    (EventType.TOOL_CALL_START,),
                 ),
             },
             content_events={ParserState.CONTENT: EventType.TEXT_CHUNK},
@@ -696,7 +696,7 @@ class TestToolPreambleFinish:
             transitions={
                 (ParserState.CONTENT, "TOOL_CALLS_START"): Transition(
                     ParserState.TOOL_PREAMBLE,
-                    [],
+                    (),
                 ),
             },
             content_events={ParserState.CONTENT: EventType.TEXT_CHUNK},
@@ -770,11 +770,11 @@ class TestMultiCharTerminalInArgs:
             transitions={
                 (ParserState.CONTENT, "TOOL_START"): Transition(
                     ParserState.TOOL_ARGS,
-                    [EventType.TOOL_CALL_START],
+                    (EventType.TOOL_CALL_START,),
                 ),
                 (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
                     ParserState.CONTENT,
-                    [EventType.TOOL_CALL_END],
+                    (EventType.TOOL_CALL_END,),
                 ),
             },
             content_events={

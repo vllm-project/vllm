@@ -347,11 +347,11 @@ class TestEndToEndReasoningHoldback:
             transitions={
                 (ParserState.CONTENT, "THINK_START"): Transition(
                     ParserState.REASONING,
-                    [EventType.REASONING_START],
+                    (EventType.REASONING_START,),
                 ),
                 (ParserState.REASONING, "THINK_END"): Transition(
                     ParserState.CONTENT,
-                    [EventType.REASONING_END],
+                    (EventType.REASONING_END,),
                 ),
             },
         )
@@ -435,11 +435,11 @@ class TestEndToEndReasoningHoldback:
             transitions={
                 (ParserState.CONTENT, "THINK_START"): Transition(
                     ParserState.REASONING,
-                    [EventType.REASONING_START],
+                    (EventType.REASONING_START,),
                 ),
                 (ParserState.REASONING, "THINK_END"): Transition(
                     ParserState.CONTENT,
-                    [EventType.REASONING_END],
+                    (EventType.REASONING_END,),
                 ),
             },
         )
