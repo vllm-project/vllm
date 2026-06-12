@@ -8,7 +8,7 @@ happen during model execution.
 
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -25,6 +25,160 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+
+def _is_attention_backend(backend, name: str) -> bool:
+    try:
+        return backend.get_name() == name
+    except NotImplementedError:
+        return False
+
+
+def _uses_triton_attention(runner: "GPUModelRunner") -> bool:
+    return any(
+        _is_attention_backend(group.backend, "TRITON_ATTN")
+        for groups in runner.attn_groups
+        for group in groups
+    )
+
+
+def _warmup_triton_nvfp4_prefill_kernels(runner: "GPUModelRunner") -> None:
+    """Warm NVFP4 pure-prefill Triton kernels missed by dummy runs.
+
+    The NVFP4 Triton path can bypass the paged cache for pure prefill and call
+    `context_attention_fwd` directly. Hybrid models may have several Triton
+    prefill specializations, for example full and sliding-window attention with
+    different head sizes. Use tiny synthetic tensors with the real layer shapes
+    so those variants compile before the JIT monitor is enabled.
+    """
+    from vllm.config import get_layers_from_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+    warmup_tokens = min(runner.max_num_tokens, runner.max_model_len, 64)
+    if warmup_tokens <= 0:
+        return
+
+    b_start_loc = torch.zeros((1,), dtype=torch.int32, device=runner.device)
+    b_seq_len = torch.full((1,), warmup_tokens, dtype=torch.int32, device=runner.device)
+
+    seen: set[tuple] = set()
+    for groups in runner.attn_groups:
+        for group in groups:
+            if not _is_attention_backend(group.backend, "TRITON_ATTN"):
+                continue
+
+            layer_names = getattr(group, "layer_names", ())
+            if not layer_names:
+                continue
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            layers = get_layers_from_vllm_config(
+                runner.vllm_config,
+                layer_type,
+                layer_names,
+            )
+            for layer_name in layer_names:
+                layer = layers.get(layer_name)
+                if layer is None:
+                    continue
+
+                impl = cast(Any, layer.impl)
+                if (
+                    getattr(impl, "kv_cache_dtype", None) != "nvfp4"
+                    or getattr(impl, "kv_sharing_target_layer_name", None) is not None
+                    or getattr(impl, "alibi_slopes", None) is not None
+                    or getattr(impl, "use_alibi_sqrt", False)
+                    or getattr(impl, "sinks", None) is not None
+                    or getattr(impl, "chunk_lookback", -1) != -1
+                ):
+                    continue
+
+                sliding_window = getattr(impl, "sliding_window", (-1, -1))
+                key = (
+                    impl.num_heads,
+                    impl.num_kv_heads,
+                    impl.head_size,
+                    impl.scale,
+                    impl.logits_soft_cap,
+                    sliding_window,
+                    runner.dtype,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                q = torch.zeros(
+                    (warmup_tokens, impl.num_heads, impl.head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                k = torch.zeros(
+                    (warmup_tokens, impl.num_kv_heads, impl.head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                v = torch.zeros_like(k)
+                out = torch.empty_like(q)
+
+                context_attention_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    o=out,
+                    b_start_loc=b_start_loc,
+                    b_seq_len=b_seq_len,
+                    max_input_len=warmup_tokens,
+                    is_causal=True,
+                    softmax_scale=impl.scale,
+                    softcap=impl.logits_soft_cap,
+                    sliding_window_q=sliding_window[0],
+                    sliding_window_k=sliding_window[1],
+                )
+
+
+def _warmup_triton_nvfp4_attention(runner: "GPUModelRunner") -> None:
+    if (
+        runner.is_pooling_model
+        or runner.cache_config.cache_dtype != "nvfp4"
+        or not runner.attn_groups
+        or not _uses_triton_attention(runner)
+    ):
+        return
+
+    num_tokens = runner.uniform_decode_query_len
+    if num_tokens <= 0 or num_tokens > runner.max_num_tokens:
+        return
+
+    # Warm up a decode-shaped NVFP4 Triton attention variant before the JIT
+    # monitor is activated.  A small batch is enough for Triton specialization:
+    # the long context length is a runtime value, but keeping seq_lens > 1
+    # exercises the decode cache-read path rather than pure self-attention.
+    profile_seq_lens = min(runner.max_model_len, max(num_tokens + 1, 8192))
+    logger.info("Warming up Triton NVFP4 attention.")
+    runner._dummy_run(
+        num_tokens=num_tokens,
+        skip_eplb=True,
+        is_profile=True,
+        force_attention=True,
+        uniform_decode=True,
+        profile_seq_lens=profile_seq_lens,
+    )
+
+    # NVFP4 prefill can bypass the paged cache and use the Triton context
+    # attention kernel directly. Warm a representative chunk-sized pure-prefill
+    # shape as well so this kernel does not JIT on the first long prompt.
+    prefill_tokens = min(runner.max_num_tokens, runner.max_model_len, 8192)
+    if prefill_tokens > 1:
+        runner._dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=False,
+        )
+
+    _warmup_triton_nvfp4_prefill_kernels(runner)
 
 
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
@@ -73,15 +227,11 @@ def kernel_warmup(worker: "Worker"):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
+    _warmup_triton_nvfp4_attention(worker.model_runner)
+
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model
-    def _is_flashinfer_backend(backend):
-        try:
-            return backend.get_name() == "FLASHINFER"
-        except NotImplementedError:
-            return False
-
     if (
         not worker.model_runner.is_pooling_model
         and worker.model_runner.attn_groups
@@ -89,7 +239,7 @@ def kernel_warmup(worker: "Worker"):
         # backends don't support this dummy run. Once we remove
         # `build_for_cudagraph_capture`, we can change it to `any`.
         and all(
-            _is_flashinfer_backend(group.backend)
+            _is_attention_backend(group.backend, "FLASHINFER")
             for groups in worker.model_runner.attn_groups
             for group in groups
         )

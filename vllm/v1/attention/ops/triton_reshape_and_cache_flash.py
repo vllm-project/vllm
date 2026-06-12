@@ -3,22 +3,321 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FP8_DTYPE,
-    get_fp8_min_max,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache, nvfp4_kv_cache_split_views
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
+_NVFP4_GROUP_SIZE = 16
 
 
 def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES or is_quantized_kv_cache(
         kv_cache_dtype
+    )
+
+
+@triton.jit
+def _round_to_e2m1_bits(x):
+    sign = tl.where(x < 0.0, 8, 0)
+    abs_x = tl.abs(x)
+    mag = tl.full(x.shape, 0, dtype=tl.int32)
+    mag = tl.where((abs_x > 0.25) & (abs_x < 0.75), 1, mag)
+    mag = tl.where((abs_x >= 0.75) & (abs_x <= 1.25), 2, mag)
+    mag = tl.where((abs_x > 1.25) & (abs_x < 1.75), 3, mag)
+    mag = tl.where((abs_x >= 1.75) & (abs_x <= 2.5), 4, mag)
+    mag = tl.where((abs_x > 2.5) & (abs_x < 3.5), 5, mag)
+    mag = tl.where((abs_x >= 3.5) & (abs_x <= 5.0), 6, mag)
+    mag = tl.where(abs_x > 5.0, 7, mag)
+    return sign | mag
+
+
+@triton.jit
+def _float_to_e4m3fn_bits(x):
+    x = tl.clamp(x, 0.0, 448.0)
+    x_safe = tl.maximum(x, 0.0000000001)
+
+    subnormal_mant = tl.floor(x * 512.0 + 0.5).to(tl.int32)
+    subnormal_mant = tl.minimum(subnormal_mant, 7)
+
+    x_bits = x_safe.to(tl.uint32, bitcast=True)
+    exp_unbiased = ((x_bits >> 23) & 0xFF).to(tl.int32) - 127
+    exp_bits = exp_unbiased + 7
+    mant = (((x_bits & 0x7FFFFF) + 0x80000) >> 20).to(tl.int32)
+    exp_bits += mant >> 3
+    mant = mant & 7
+
+    normal_bits = (exp_bits << 3) | mant
+    bits = tl.where(x < 0.015625, subnormal_mant, normal_bits)
+    bits = tl.where(x == 0.0, 0, bits)
+    return bits.to(tl.uint8)
+
+
+@triton.jit
+def _nvfp4_scale_bits_to_float(bits):
+    # NVFP4 block scales are generated from absmax values, so they are
+    # non-negative.  Keep this scale-specific helper positive-only instead of
+    # exposing it as a general signed E4M3 decoder.
+    payload = bits.to(tl.int32) & 0x7F
+    exp_bits = (payload >> 3) & 0x0F
+    mant = payload & 0x07
+
+    normal_bits = ((exp_bits + 120) << 23) | (mant << 20)
+    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
+    subnormal = mant.to(tl.float32) / 512.0
+    value = tl.where(exp_bits == 0, subnormal, normal)
+    return tl.where(payload == 0, 0.0, value)
+
+
+@triton.jit
+def _nvfp4_swizzled_scale_coord(
+    slot_in_block,
+    scale_group_idx,
+    SCALE_DIM: tl.constexpr,
+):
+    SWIZZLE_GROUP: tl.constexpr = SCALE_DIM // 4
+    swizzled_slot = (slot_in_block // 4) * 4 + (scale_group_idx // SWIZZLE_GROUP)
+    swizzled_scale = (scale_group_idx % SWIZZLE_GROUP) * 4 + (slot_in_block % 4)
+    return swizzled_slot, swizzled_scale
+
+
+@triton.jit
+def _nvfp4_linear_scale_coord(slot_in_block, scale_group_idx):
+    return slot_in_block + scale_group_idx * 0, scale_group_idx + slot_in_block * 0
+
+
+@triton.jit
+def _reshape_cache_nvfp4_kernel(
+    key_ptr,  # [num_tokens, num_heads, head_size]
+    value_ptr,  # [num_tokens, num_heads, head_size]
+    key_data_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 2]
+    value_data_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 2]
+    key_scale_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 16]
+    value_scale_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 16]
+    slot_mapping_ptr,  # [num_tokens]
+    k_scale,  # float32 global dequant scale
+    v_scale,  # float32 global dequant scale
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_value_tok: tl.int64,
+    stride_value_head: tl.int64,
+    stride_k_data_blk: tl.int64,
+    stride_k_data_slot: tl.int64,
+    stride_k_data_head: tl.int64,
+    stride_v_data_blk: tl.int64,
+    stride_v_data_slot: tl.int64,
+    stride_v_data_head: tl.int64,
+    stride_k_scale_blk: tl.int64,
+    stride_k_scale_slot: tl.int64,
+    stride_k_scale_head: tl.int64,
+    stride_k_scale_dim: tl.int64,
+    stride_v_scale_blk: tl.int64,
+    stride_v_scale_slot: tl.int64,
+    stride_v_scale_head: tl.int64,
+    stride_v_scale_dim: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+):
+    tl.static_assert(head_size % 16 == 0)
+    SCALE_DIM: tl.constexpr = head_size // 16
+    tl.static_assert(SCALE_DIM % 4 == 0)
+    tl.static_assert(block_size % 4 == 0)
+
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    scale_group_idx = tl.program_id(2)
+
+    slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
+    if slot_idx < 0:
+        return
+
+    block_idx = slot_idx // block_size
+    slot_in_block = slot_idx % block_size
+
+    byte_offsets = tl.arange(0, 8)
+    even_offsets = byte_offsets * 2
+    odd_offsets = even_offsets + 1
+    dim_base = scale_group_idx * 16
+
+    key_vals_even = tl.load(
+        key_ptr
+        + token_idx * stride_key_tok
+        + head_idx * stride_key_head
+        + dim_base
+        + even_offsets,
+    ).to(tl.float32)
+    key_vals_odd = tl.load(
+        key_ptr
+        + token_idx * stride_key_tok
+        + head_idx * stride_key_head
+        + dim_base
+        + odd_offsets,
+    ).to(tl.float32)
+    value_vals_even = tl.load(
+        value_ptr
+        + token_idx * stride_value_tok
+        + head_idx * stride_value_head
+        + dim_base
+        + even_offsets,
+    ).to(tl.float32)
+    value_vals_odd = tl.load(
+        value_ptr
+        + token_idx * stride_value_tok
+        + head_idx * stride_value_head
+        + dim_base
+        + odd_offsets,
+    ).to(tl.float32)
+
+    k_global_scale = tl.load(k_scale).to(tl.float32)
+    v_global_scale = tl.load(v_scale).to(tl.float32)
+    k_quant_scale = tl.where(k_global_scale == 0.0, 1.0, 1.0 / k_global_scale)
+    v_quant_scale = tl.where(v_global_scale == 0.0, 1.0, 1.0 / v_global_scale)
+
+    k_vec_max = tl.maximum(
+        tl.max(tl.abs(key_vals_even), axis=0),
+        tl.max(tl.abs(key_vals_odd), axis=0),
+    )
+    v_vec_max = tl.maximum(
+        tl.max(tl.abs(value_vals_even), axis=0),
+        tl.max(tl.abs(value_vals_odd), axis=0),
+    )
+
+    k_block_scale_bits = _float_to_e4m3fn_bits((k_quant_scale * k_vec_max) / 6.0)
+    v_block_scale_bits = _float_to_e4m3fn_bits((v_quant_scale * v_vec_max) / 6.0)
+
+    k_block_scale_f32 = _nvfp4_scale_bits_to_float(k_block_scale_bits)
+    v_block_scale_f32 = _nvfp4_scale_bits_to_float(v_block_scale_bits)
+    k_output_scale = tl.where(
+        k_block_scale_f32 == 0.0, 0.0, k_quant_scale / k_block_scale_f32
+    )
+    v_output_scale = tl.where(
+        v_block_scale_f32 == 0.0, 0.0, v_quant_scale / v_block_scale_f32
+    )
+
+    key_low = _round_to_e2m1_bits(tl.clamp(key_vals_even * k_output_scale, -6.0, 6.0))
+    key_high = _round_to_e2m1_bits(tl.clamp(key_vals_odd * k_output_scale, -6.0, 6.0))
+    value_low = _round_to_e2m1_bits(
+        tl.clamp(value_vals_even * v_output_scale, -6.0, 6.0)
+    )
+    value_high = _round_to_e2m1_bits(
+        tl.clamp(value_vals_odd * v_output_scale, -6.0, 6.0)
+    )
+    key_packed = key_low | (key_high << 4)
+    value_packed = value_low | (value_high << 4)
+
+    key_data_base = (
+        block_idx * stride_k_data_blk
+        + slot_in_block * stride_k_data_slot
+        + head_idx * stride_k_data_head
+        + scale_group_idx * 8
+    )
+    value_data_base = (
+        block_idx * stride_v_data_blk
+        + slot_in_block * stride_v_data_slot
+        + head_idx * stride_v_data_head
+        + scale_group_idx * 8
+    )
+    tl.store(key_data_cache_ptr + key_data_base + byte_offsets, key_packed)
+    tl.store(value_data_cache_ptr + value_data_base + byte_offsets, value_packed)
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block, scale_group_idx
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block, scale_group_idx, SCALE_DIM
+        )
+    tl.store(
+        key_scale_cache_ptr
+        + block_idx * stride_k_scale_blk
+        + swizzled_slot * stride_k_scale_slot
+        + head_idx * stride_k_scale_head
+        + swizzled_scale * stride_k_scale_dim,
+        k_block_scale_bits,
+    )
+    tl.store(
+        value_scale_cache_ptr
+        + block_idx * stride_v_scale_blk
+        + swizzled_slot * stride_v_scale_slot
+        + head_idx * stride_v_scale_head
+        + swizzled_scale * stride_v_scale_dim,
+        v_block_scale_bits,
+    )
+
+
+def triton_reshape_and_cache_flash_nvfp4(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_data_cache: torch.Tensor,
+    value_data_cache: torch.Tensor,
+    key_scale_cache: torch.Tensor,
+    value_scale_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> None:
+    num_tokens, num_heads, head_size = key.shape
+    if key_scale_cache.dtype != torch.uint8:
+        key_scale_cache = key_scale_cache.view(torch.uint8)
+    if value_scale_cache.dtype != torch.uint8:
+        value_scale_cache = value_scale_cache.view(torch.uint8)
+
+    if value.shape != key.shape:
+        raise NotImplementedError("Triton NVFP4 KV cache requires K/V same shape.")
+    if key_data_cache.ndim != 4 or value_data_cache.ndim != 4:
+        raise NotImplementedError("Triton NVFP4 KV cache only supports NHD layout.")
+    if key_data_cache.shape[1] % 4 != 0:
+        raise ValueError("NVFP4 requires block_size divisible by 4.")
+    if head_size % _NVFP4_GROUP_SIZE != 0:
+        raise ValueError("NVFP4 requires head_size divisible by 16.")
+    if (head_size // _NVFP4_GROUP_SIZE) % 4 != 0:
+        raise ValueError(
+            "NVFP4 requires (head_size // 16) divisible by 4 "
+            "for 4x4 block scale swizzle."
+        )
+    if key.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("NVFP4 KV cache only supports fp16/bf16 K/V inputs.")
+
+    block_size = key_data_cache.shape[1]
+    num_scale_groups = head_size // _NVFP4_GROUP_SIZE
+    grid = (num_tokens, num_heads, num_scale_groups)
+
+    _reshape_cache_nvfp4_kernel[grid](
+        key_ptr=key,
+        value_ptr=value,
+        key_data_cache_ptr=key_data_cache,
+        value_data_cache_ptr=value_data_cache,
+        key_scale_cache_ptr=key_scale_cache,
+        value_scale_cache_ptr=value_scale_cache,
+        slot_mapping_ptr=slot_mapping,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        stride_key_tok=key.stride(0),
+        stride_key_head=key.stride(1),
+        stride_value_tok=value.stride(0),
+        stride_value_head=value.stride(1),
+        stride_k_data_blk=key_data_cache.stride(0),
+        stride_k_data_slot=key_data_cache.stride(1),
+        stride_k_data_head=key_data_cache.stride(2),
+        stride_v_data_blk=value_data_cache.stride(0),
+        stride_v_data_slot=value_data_cache.stride(1),
+        stride_v_data_head=value_data_cache.stride(2),
+        stride_k_scale_blk=key_scale_cache.stride(0),
+        stride_k_scale_slot=key_scale_cache.stride(1),
+        stride_k_scale_head=key_scale_cache.stride(2),
+        stride_k_scale_dim=key_scale_cache.stride(3),
+        stride_v_scale_blk=value_scale_cache.stride(0),
+        stride_v_scale_slot=value_scale_cache.stride(1),
+        stride_v_scale_head=value_scale_cache.stride(2),
+        stride_v_scale_dim=value_scale_cache.stride(3),
+        block_size=block_size,
+        head_size=head_size,
+        num_warps=1,
+        num_stages=4,
     )
 
 
@@ -244,14 +543,6 @@ def _reshape_cache_per_token_head(
     )
 
 
-# Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
-# per-token-head quantization kernel.
-_PER_TOKEN_HEAD_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
-    torch.int8: (127.0, -128.0),
-    FP8_DTYPE: (FP8_MAX, FP8_MIN),
-}
-
-
 def triton_reshape_and_cache_flash_per_token_head_quant(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
@@ -271,13 +562,16 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     cache tensor dtype so the same code path works for int8 and fp8.
     """
     cache_dtype = key_cache.dtype
-    quant_params = _PER_TOKEN_HEAD_QUANT_PARAMS.get(cache_dtype)
-    if quant_params is None:
+    if cache_dtype == torch.int8:
+        quant_max, quant_min = 127.0, -128.0
+    elif cache_dtype == current_platform.fp8_dtype():
+        quant_max, quant_min = FP8_MAX, FP8_MIN
+    else:
         raise ValueError(
             f"Per-token-head quantization not supported for cache dtype "
-            f"{cache_dtype}.  Supported: {list(_PER_TOKEN_HEAD_QUANT_PARAMS)}"
+            f"{cache_dtype}.  Supported: "
+            f"{[torch.int8, current_platform.fp8_dtype()]}"
         )
-    quant_max, quant_min = quant_params
 
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
@@ -338,6 +632,28 @@ def triton_reshape_and_cache_flash(
 ):
     num_heads = key.shape[1]
     head_size = key.shape[2]
+
+    if kv_cache_dtype == "nvfp4":
+        if key_cache.ndim != 4 or value_cache.ndim != 4:
+            raise NotImplementedError("Triton NVFP4 KV cache only supports NHD layout.")
+        if key_cache.shape[2] != num_heads:
+            raise NotImplementedError("Triton NVFP4 KV cache only supports NHD layout.")
+        (key_data_cache,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+        (value_data_cache,), (value_scale_cache,) = nvfp4_kv_cache_split_views(
+            value_cache
+        )
+        triton_reshape_and_cache_flash_nvfp4(
+            key,
+            value,
+            key_data_cache,
+            value_data_cache,
+            key_scale_cache.view(torch.uint8),
+            value_scale_cache.view(torch.uint8),
+            slot_mapping,
+            k_scale,
+            v_scale,
+        )
+        return
 
     use_head_major_layout = key_cache.ndim == 5
     if use_head_major_layout:

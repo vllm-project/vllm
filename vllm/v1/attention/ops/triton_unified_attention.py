@@ -55,6 +55,447 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     return data.to(Q.dtype)
 
 
+@triton.jit
+def _e2m1_inline(magnitude):
+    exp_bits = (magnitude >> 1) & 0x03
+    mant = magnitude & 0x01
+
+    normal_bits = ((exp_bits.to(tl.int32) + 126) << 23) | (mant.to(tl.int32) << 22)
+    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
+    subnormal = mant.to(tl.float32) * 0.5
+    return tl.where(exp_bits == 0, subnormal, normal)
+
+
+@triton.jit
+def _decode_e2m1_nibble(nibble):
+    magnitude = nibble & 0x07
+    sign = (nibble >> 3) & 1
+    value = _e2m1_inline(magnitude)
+    return tl.where(sign == 1, -value, value)
+
+
+@triton.jit
+def _nvfp4_scale_bits_to_float(bits):
+    # NVFP4 block scales are produced from absmax values, so the sign bit
+    # is not used on the Triton KV cache path.
+    payload = bits.to(tl.int32) & 0x7F
+    exp_bits = (payload >> 3) & 0x0F
+    mant = payload & 0x07
+
+    normal_bits = ((exp_bits + 120) << 23) | (mant << 20)
+    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
+    subnormal = mant.to(tl.float32) / 512.0
+    value = tl.where(exp_bits == 0, subnormal, normal)
+    return tl.where(payload == 0, 0.0, value)
+
+
+@triton.jit
+def _nvfp4_swizzled_scale_coord(
+    slot_in_block,
+    scale_group_idx,
+    SCALE_DIM: tl.constexpr,
+):
+    SWIZZLE_GROUP: tl.constexpr = SCALE_DIM // 4
+    swizzled_slot = (slot_in_block // 4) * 4 + (scale_group_idx // SWIZZLE_GROUP)
+    swizzled_scale = (scale_group_idx % SWIZZLE_GROUP) * 4 + (slot_in_block % 4)
+    return swizzled_slot, swizzled_scale
+
+
+@triton.jit
+def _nvfp4_linear_scale_coord(slot_in_block, scale_group_idx):
+    return slot_in_block + scale_group_idx * 0, scale_group_idx + slot_in_block * 0
+
+
+@triton.jit
+def _load_k_tile_nvfp4(
+    key_data_ptr,
+    key_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_d,
+    dim_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    byte_dim = offs_d // 2
+    scale_group_idx = offs_d // 16
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[None, :] * stride_data_0
+        + slot_in_block[None, :] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + byte_dim[:, None] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        key_data_ptr + data_offset,
+        mask=dim_mask[:, None] & tile_mask[None, :],
+        other=0,
+    )
+    low = raw_bytes & 0x0F
+    high = (raw_bytes >> 4) & 0x0F
+    nibble = tl.where((offs_d[:, None] & 1) == 0, low, high)
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
+        )
+    scale_offset = (
+        physical_block_idx[None, :] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        key_scale_cache_ptr + scale_offset,
+        mask=dim_mask[:, None] & tile_mask[None, :],
+        other=0,
+    )
+    block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
+    return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
+        Q.dtype
+    )
+
+
+@triton.jit
+def _load_v_tile_nvfp4(
+    value_data_ptr,
+    value_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_d,
+    dim_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    byte_dim = offs_d // 2
+    scale_group_idx = offs_d // 16
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[:, None] * stride_data_0
+        + slot_in_block[:, None] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + byte_dim[None, :] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        value_data_ptr + data_offset,
+        mask=tile_mask[:, None] & dim_mask[None, :],
+        other=0,
+    )
+    low = raw_bytes & 0x0F
+    high = (raw_bytes >> 4) & 0x0F
+    nibble = tl.where((offs_d[None, :] & 1) == 0, low, high)
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
+    scale_offset = (
+        physical_block_idx[:, None] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        value_scale_cache_ptr + scale_offset,
+        mask=tile_mask[:, None] & dim_mask[None, :],
+        other=0,
+    )
+    block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
+    return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
+        Q.dtype
+    )
+
+
+@triton.jit
+def _load_k_tile_nvfp4_bytewise(
+    key_data_ptr,
+    key_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_b,
+    byte_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    scale_group_idx = offs_b // 8
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[None, :] * stride_data_0
+        + slot_in_block[None, :] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + offs_b[:, None] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        key_data_ptr + data_offset,
+        mask=byte_mask[:, None] & tile_mask[None, :],
+        other=0,
+    )
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
+        )
+    scale_offset = (
+        physical_block_idx[None, :] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        key_scale_cache_ptr + scale_offset,
+        mask=byte_mask[:, None] & tile_mask[None, :],
+        other=0,
+    )
+    scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
+    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
+    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    return low.to(Q.dtype), high.to(Q.dtype)
+
+
+@triton.jit
+def _load_k_tile_nvfp4_bytewise_transposed(
+    key_data_ptr,
+    key_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_b,
+    byte_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    scale_group_idx = offs_b // 8
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[:, None] * stride_data_0
+        + slot_in_block[:, None] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + offs_b[None, :] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        key_data_ptr + data_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
+    scale_offset = (
+        physical_block_idx[:, None] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        key_scale_cache_ptr + scale_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+    scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
+    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
+    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    return tl.trans(low.to(Q.dtype)), tl.trans(high.to(Q.dtype))
+
+
+@triton.jit
+def _load_v_tile_nvfp4_bytewise(
+    value_data_ptr,
+    value_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_b,
+    byte_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    scale_group_idx = offs_b // 8
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[:, None] * stride_data_0
+        + slot_in_block[:, None] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + offs_b[None, :] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        value_data_ptr + data_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
+    scale_offset = (
+        physical_block_idx[:, None] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        value_scale_cache_ptr + scale_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+    scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
+    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
+    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    return low.to(Q.dtype), high.to(Q.dtype)
+
+
+@triton.jit
+def _load_k_tile_raw_current(
+    raw_key_ptr,
+    context_len,
+    cur_batch_in_all_start_index,
+    seq_offset,
+    kv_head_idx,
+    offs_d,
+    dim_mask,
+    tile_mask,
+    stride_raw_tok: tl.int64,
+    stride_raw_head: tl.int64,
+    stride_raw_dim: tl.int64,
+    Q,
+):
+    current_token_idx = tl.maximum(seq_offset - context_len, 0)
+    raw_token_idx = cur_batch_in_all_start_index + current_token_idx
+    raw_offset = (
+        raw_token_idx[None, :] * stride_raw_tok
+        + kv_head_idx * stride_raw_head
+        + offs_d[:, None] * stride_raw_dim
+    )
+    raw_mask = tile_mask & (seq_offset >= context_len)
+    return tl.load(
+        raw_key_ptr + raw_offset,
+        mask=dim_mask[:, None] & raw_mask[None, :],
+        other=0.0,
+    ).to(Q.dtype)
+
+
+@triton.jit
+def _load_v_tile_raw_current(
+    raw_value_ptr,
+    context_len,
+    cur_batch_in_all_start_index,
+    seq_offset,
+    kv_head_idx,
+    offs_d,
+    dim_mask,
+    tile_mask,
+    stride_raw_tok: tl.int64,
+    stride_raw_head: tl.int64,
+    stride_raw_dim: tl.int64,
+    Q,
+):
+    current_token_idx = tl.maximum(seq_offset - context_len, 0)
+    raw_token_idx = cur_batch_in_all_start_index + current_token_idx
+    raw_offset = (
+        raw_token_idx[:, None] * stride_raw_tok
+        + kv_head_idx * stride_raw_head
+        + offs_d[None, :] * stride_raw_dim
+    )
+    raw_mask = tile_mask & (seq_offset >= context_len)
+    return tl.load(
+        raw_value_ptr + raw_offset,
+        mask=raw_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    ).to(Q.dtype)
+
+
 # ---------------------------------------------------------------------------
 # Tensor-descriptor (TD) helpers
 #
@@ -185,6 +626,8 @@ def kernel_unified_attention(
     query_ptr,
     key_cache_ptr,
     value_cache_ptr,
+    raw_key_ptr,
+    raw_value_ptr,
     sink_ptr,
     block_tables_ptr,
     seq_lens_ptr,
@@ -226,6 +669,12 @@ def kernel_unified_attention(
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
+    stride_raw_k_0: tl.int64,
+    stride_raw_k_1: tl.int64,
+    stride_raw_k_2: tl.int64,
+    stride_raw_v_0: tl.int64,
+    stride_raw_v_1: tl.int64,
+    stride_raw_v_2: tl.int64,
     query_start_len_ptr,
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
@@ -251,12 +700,14 @@ def kernel_unified_attention(
     stride_ks_blk: tl.int64 = None,
     stride_ks_slot: tl.int64 = None,
     stride_ks_head: tl.int64 = None,
+    stride_ks_dim: tl.int64 = None,
     stride_vs_blk: tl.int64 = None,
     stride_vs_slot: tl.int64 = None,
     stride_vs_head: tl.int64 = None,
+    stride_vs_dim: tl.int64 = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3).
+    # FP8_PER_TOKEN_HEAD (3), NVFP4 (4).
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -271,14 +722,61 @@ def kernel_unified_attention(
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
+    USE_RAW_CURRENT_KV: tl.constexpr = False,
+    USE_NVFP4_BYTEWISE_DECODE: tl.constexpr = False,
+    USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE: tl.constexpr = False,
 ):
-    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE == 2 or KV_QUANT_MODE == 3
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
+    USE_NVFP4: tl.constexpr = KV_QUANT_MODE == 4
+    BYTE_SIZE_PADDED: tl.constexpr = HEAD_SIZE_PADDED // 2
 
     if USE_TD:
         tl.static_assert(
             BLOCK_SIZE % TILE_SIZE == 0,
             "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
+        )
+    if USE_NVFP4:
+        tl.static_assert(not USE_TD, "NVFP4 KV cache does not support TD loads")
+        tl.static_assert(HEAD_SIZE % 16 == 0, "NVFP4 requires head_size % 16 == 0")
+        tl.static_assert(
+            (HEAD_SIZE // 16) % 4 == 0,
+            "NVFP4 requires (head_size // 16) % 4 == 0",
+        )
+        tl.static_assert(BLOCK_SIZE % 4 == 0, "NVFP4 requires block_size % 4 == 0")
+    if USE_NVFP4_BYTEWISE_DECODE:
+        tl.static_assert(
+            USE_NVFP4,
+            "USE_NVFP4_BYTEWISE_DECODE requires NVFP4 KV cache",
+        )
+        tl.static_assert(
+            not USE_RAW_CURRENT_KV,
+            "USE_NVFP4_BYTEWISE_DECODE does not support raw-current KV",
+        )
+        tl.static_assert(
+            not USE_TD_QO,
+            "USE_NVFP4_BYTEWISE_DECODE does not support TD Q/O",
+        )
+        tl.static_assert(
+            SLIDING_WINDOW == 0,
+            "USE_NVFP4_BYTEWISE_DECODE does not support sliding-window masks",
+        )
+        tl.static_assert(
+            not USE_MM_PREFIX,
+            "USE_NVFP4_BYTEWISE_DECODE does not support MM prefix masks",
+        )
+        tl.static_assert(
+            CHUNK_LOOKBACK == -1,
+            "USE_NVFP4_BYTEWISE_DECODE does not support chunk-local masks",
+        )
+        tl.static_assert(
+            not USE_FP8,
+            "USE_NVFP4_BYTEWISE_DECODE does not support FP8 output stores",
+        )
+    if USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE:
+        tl.static_assert(
+            USE_NVFP4_BYTEWISE_DECODE,
+            "USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE requires bytewise decode",
         )
 
     q_block_global_idx = tl.program_id(0)
@@ -313,6 +811,7 @@ def kernel_unified_attention(
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
+    offs_b = tl.arange(0, BYTE_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
@@ -325,31 +824,58 @@ def kernel_unified_attention(
     )
 
     dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
+    byte_mask = tl.where(offs_b < HEAD_SIZE // 2, 1, 0).to(tl.int1)
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
-    # Q : (BLOCK_M, HEAD_SIZE_PADDED)
-    if USE_TD_QO:
-        Q = _load_q_td(
-            query_ptr,
-            q_block_local_len,
-            query_stride_0,
-            query_stride_1,
-            cur_batch_in_all_start_index,
-            q_block_local_idx,
-            kv_head_idx,
-            num_queries_per_kv,
-            BLOCK_Q,
-            BLOCK_M,
-            HEAD_SIZE,
-            HEAD_SIZE_PADDED,
+    if USE_NVFP4_BYTEWISE_DECODE:
+        even_d = offs_b * 2
+        odd_d = even_d + 1
+        query_offset_even = (
+            query_offset_0[:, None] * query_stride_0
+            + query_offset_1[:, None] * query_stride_1
+            + even_d[None, :]
         )
-    else:
-        Q = tl.load(
-            query_ptr + query_offset,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+        query_offset_odd = (
+            query_offset_0[:, None] * query_stride_0
+            + query_offset_1[:, None] * query_stride_1
+            + odd_d[None, :]
+        )
+        Q_even = tl.load(
+            query_ptr + query_offset_even,
+            mask=byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
             other=0.0,
         )
+        Q_odd = tl.load(
+            query_ptr + query_offset_odd,
+            mask=byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+            other=0.0,
+        )
+    else:
+        # Q : (BLOCK_M, HEAD_SIZE_PADDED)
+        if USE_TD_QO:
+            Q = _load_q_td(
+                query_ptr,
+                q_block_local_len,
+                query_stride_0,
+                query_stride_1,
+                cur_batch_in_all_start_index,
+                q_block_local_idx,
+                kv_head_idx,
+                num_queries_per_kv,
+                BLOCK_Q,
+                BLOCK_M,
+                HEAD_SIZE,
+                HEAD_SIZE_PADDED,
+            )
+        else:
+            Q = tl.load(
+                query_ptr + query_offset,
+                mask=(
+                    dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+                other=0.0,
+            )
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -357,13 +883,23 @@ def kernel_unified_attention(
         sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
     )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-    # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-    acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    if USE_NVFP4_BYTEWISE_DECODE:
+        acc_even = tl.zeros([BLOCK_M, BYTE_SIZE_PADDED], dtype=tl.float32)
+        acc_odd = tl.zeros([BLOCK_M, BYTE_SIZE_PADDED], dtype=tl.float32)
+    else:
+        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
+        acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
     score_scale = scale
     value_scale = 1.0
     if USE_FP8_Q_DESCALE:
         score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
         value_scale = tl.load(v_scale)
+    if USE_NVFP4:
+        nvfp4_k_global_scale = tl.load(k_scale).to(tl.float32)
+        nvfp4_v_global_scale = tl.load(v_scale).to(tl.float32)
+    else:
+        nvfp4_k_global_scale = 1.0
+        nvfp4_v_global_scale = 1.0
 
     context_len = seq_len - cur_batch_query_len
 
@@ -402,92 +938,6 @@ def kernel_unified_attention(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        if USE_TD:
-            # All TILE_SIZE slots within a single KV tile map to one
-            # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
-            # from the static_assert above), so load the block index as
-            # a scalar instead of a broadcast reduction.
-            offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
-            physical_block_scalar = tl.load(
-                block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
-            ).to(tl.int64)
-            # K : (HEAD_SIZE, TILE_SIZE)
-            K_load = _load_kv_tile_td(
-                key_cache_ptr,
-                physical_block_scalar,
-                kv_head_idx,
-                offset_in_block,
-                stride_k_cache_0,
-                stride_k_cache_1,
-                stride_k_cache_2,
-                stride_k_cache_3,
-                BLOCK_SIZE,
-                TILE_SIZE,
-                HEAD_SIZE,
-                HEAD_SIZE_PADDED,
-            ).T
-            # V : (TILE_SIZE, HEAD_SIZE)
-            V_load = _load_kv_tile_td(
-                value_cache_ptr,
-                physical_block_scalar,
-                kv_head_idx,
-                offset_in_block,
-                stride_v_cache_0,
-                stride_v_cache_1,
-                stride_v_cache_2,
-                stride_v_cache_3,
-                BLOCK_SIZE,
-                TILE_SIZE,
-                HEAD_SIZE,
-                HEAD_SIZE_PADDED,
-            )
-        else:
-            v_offset = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + offs_d[None, :] * stride_v_cache_3
-                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-            )
-            k_offset = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + offs_d[:, None] * stride_k_cache_3
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-            )
-            # K : (HEAD_SIZE, TILE_SIZE)
-            K_load = tl.load(
-                key_cache_ptr + k_offset,
-                mask=dim_mask[:, None] & tile_mask[None, :],
-                other=0.0,
-            )
-            # V : (TILE_SIZE, HEAD_SIZE)
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
-
-        # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
-        if USE_PER_TOKEN_HEAD_SCALES:
-            scale_idx = (
-                physical_block_idx * stride_ks_blk
-                + (seq_offset % BLOCK_SIZE) * stride_ks_slot
-                + kv_head_idx * stride_ks_head
-            )
-            k_token_head_scales = tl.load(
-                k_scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
-            )
-            v_scale_idx = (
-                physical_block_idx * stride_vs_blk
-                + (seq_offset % BLOCK_SIZE) * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
-            )
-
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = compute_kv_seq_mask(
             query_abs_pos,
@@ -501,25 +951,338 @@ def kernel_unified_attention(
             CHUNK_SIZE,
         )
 
-        # S : (BLOCK_M, TILE_SIZE)
-        S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        if USE_PER_TOKEN_HEAD_SCALES:
-            # Per-token-head quant: fuse softmax_scale with per-head k_scale
-            # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
+        if USE_NVFP4_BYTEWISE_DECODE:
+            if USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE:
+                K_low, K_high = _load_k_tile_nvfp4_bytewise_transposed(
+                    key_cache_ptr,
+                    k_scale_cache_ptr,
+                    nvfp4_k_global_scale,
+                    physical_block_idx,
+                    seq_offset,
+                    kv_head_idx,
+                    offs_b,
+                    byte_mask,
+                    tile_mask,
+                    stride_k_cache_0,
+                    stride_k_cache_1,
+                    stride_k_cache_2,
+                    stride_k_cache_3,
+                    stride_ks_blk,
+                    stride_ks_slot,
+                    stride_ks_head,
+                    stride_ks_dim,
+                    BLOCK_SIZE,
+                    HEAD_SIZE,
+                    Q_even,
+                )
+            else:
+                K_low, K_high = _load_k_tile_nvfp4_bytewise(
+                    key_cache_ptr,
+                    k_scale_cache_ptr,
+                    nvfp4_k_global_scale,
+                    physical_block_idx,
+                    seq_offset,
+                    kv_head_idx,
+                    offs_b,
+                    byte_mask,
+                    tile_mask,
+                    stride_k_cache_0,
+                    stride_k_cache_1,
+                    stride_k_cache_2,
+                    stride_k_cache_3,
+                    stride_ks_blk,
+                    stride_ks_slot,
+                    stride_ks_head,
+                    stride_ks_dim,
+                    BLOCK_SIZE,
+                    HEAD_SIZE,
+                    Q_even,
+                )
+            S = score_scale * (tl.dot(Q_even, K_low) + tl.dot(Q_odd, K_high))
         else:
-            S += score_scale * tl.dot(Q, K)
+            if USE_TD:
+                # All TILE_SIZE slots within a single KV tile map to one
+                # physical block (guaranteed by ``BLOCK_SIZE % TILE_SIZE == 0``
+                # from the static_assert above), so load the block index as
+                # a scalar instead of a broadcast reduction.
+                offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
+                physical_block_scalar = tl.load(
+                    block_tables_ptr
+                    + block_table_offset
+                    + (j * TILE_SIZE) // BLOCK_SIZE
+                ).to(tl.int64)
+                # K : (HEAD_SIZE, TILE_SIZE)
+                K_load = _load_kv_tile_td(
+                    key_cache_ptr,
+                    physical_block_scalar,
+                    kv_head_idx,
+                    offset_in_block,
+                    stride_k_cache_0,
+                    stride_k_cache_1,
+                    stride_k_cache_2,
+                    stride_k_cache_3,
+                    BLOCK_SIZE,
+                    TILE_SIZE,
+                    HEAD_SIZE,
+                    HEAD_SIZE_PADDED,
+                ).T
+                # V : (TILE_SIZE, HEAD_SIZE)
+                V_load = _load_kv_tile_td(
+                    value_cache_ptr,
+                    physical_block_scalar,
+                    kv_head_idx,
+                    offset_in_block,
+                    stride_v_cache_0,
+                    stride_v_cache_1,
+                    stride_v_cache_2,
+                    stride_v_cache_3,
+                    BLOCK_SIZE,
+                    TILE_SIZE,
+                    HEAD_SIZE,
+                    HEAD_SIZE_PADDED,
+                )
+                K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+                V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+            else:
+                v_offset = (
+                    physical_block_idx[:, None] * stride_v_cache_0
+                    + kv_head_idx * stride_v_cache_2
+                    + offs_d[None, :] * stride_v_cache_3
+                    + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+                )
+                k_offset = (
+                    physical_block_idx[None, :] * stride_k_cache_0
+                    + kv_head_idx * stride_k_cache_2
+                    + offs_d[:, None] * stride_k_cache_3
+                    + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+                )
+                if USE_NVFP4:
+                    tile_start = j * TILE_SIZE
+                    if USE_RAW_CURRENT_KV and tile_start >= context_len:
+                        # Current chunk only: raw K/V is still live in the
+                        # flattened per-token tensors, so avoid FP4 dequant
+                        # for this tile.
+                        K = _load_k_tile_raw_current(
+                            raw_key_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_raw_k_0,
+                            stride_raw_k_1,
+                            stride_raw_k_2,
+                            Q,
+                        )
+                        V = _load_v_tile_raw_current(
+                            raw_value_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_raw_v_0,
+                            stride_raw_v_1,
+                            stride_raw_v_2,
+                            Q,
+                        )
+                    elif USE_RAW_CURRENT_KV and tile_start + TILE_SIZE > context_len:
+                        # Boundary tile: prefix lanes come from the FP4 cache,
+                        # current-chunk lanes come from raw K/V.
+                        # K : (HEAD_SIZE, TILE_SIZE)
+                        K_fp4 = _load_k_tile_nvfp4(
+                            key_cache_ptr,
+                            k_scale_cache_ptr,
+                            nvfp4_k_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_k_cache_0,
+                            stride_k_cache_1,
+                            stride_k_cache_2,
+                            stride_k_cache_3,
+                            stride_ks_blk,
+                            stride_ks_slot,
+                            stride_ks_head,
+                            stride_ks_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                        # V : (TILE_SIZE, HEAD_SIZE)
+                        V_fp4 = _load_v_tile_nvfp4(
+                            value_cache_ptr,
+                            v_scale_cache_ptr,
+                            nvfp4_v_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_v_cache_0,
+                            stride_v_cache_1,
+                            stride_v_cache_2,
+                            stride_v_cache_3,
+                            stride_vs_blk,
+                            stride_vs_slot,
+                            stride_vs_head,
+                            stride_vs_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                        current_tile_mask = tile_mask & (seq_offset >= context_len)
+                        K_raw = _load_k_tile_raw_current(
+                            raw_key_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            current_tile_mask,
+                            stride_raw_k_0,
+                            stride_raw_k_1,
+                            stride_raw_k_2,
+                            Q,
+                        )
+                        V_raw = _load_v_tile_raw_current(
+                            raw_value_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            current_tile_mask,
+                            stride_raw_v_0,
+                            stride_raw_v_1,
+                            stride_raw_v_2,
+                            Q,
+                        )
+                        K = tl.where(current_tile_mask[None, :], K_raw, K_fp4)
+                        V = tl.where(current_tile_mask[:, None], V_raw, V_fp4)
+                    else:
+                        # Prefix-only or raw-current disabled: read packed FP4.
+                        # K : (HEAD_SIZE, TILE_SIZE)
+                        K = _load_k_tile_nvfp4(
+                            key_cache_ptr,
+                            k_scale_cache_ptr,
+                            nvfp4_k_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_k_cache_0,
+                            stride_k_cache_1,
+                            stride_k_cache_2,
+                            stride_k_cache_3,
+                            stride_ks_blk,
+                            stride_ks_slot,
+                            stride_ks_head,
+                            stride_ks_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                        # V : (TILE_SIZE, HEAD_SIZE)
+                        V = _load_v_tile_nvfp4(
+                            value_cache_ptr,
+                            v_scale_cache_ptr,
+                            nvfp4_v_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_v_cache_0,
+                            stride_v_cache_1,
+                            stride_v_cache_2,
+                            stride_v_cache_3,
+                            stride_vs_blk,
+                            stride_vs_slot,
+                            stride_vs_head,
+                            stride_vs_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                else:
+                    # K : (HEAD_SIZE, TILE_SIZE)
+                    K_load = tl.load(
+                        key_cache_ptr + k_offset,
+                        mask=dim_mask[:, None] & tile_mask[None, :],
+                        other=0.0,
+                    )
+                    # V : (TILE_SIZE, HEAD_SIZE)
+                    V_load = tl.load(
+                        value_cache_ptr + v_offset,
+                        mask=dim_mask[None, :] & tile_mask[:, None],
+                        other=0.0,
+                    )
+                    K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+                    V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+
+            # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
+            if USE_PER_TOKEN_HEAD_SCALES:
+                scale_idx = (
+                    physical_block_idx * stride_ks_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_ks_slot
+                    + kv_head_idx * stride_ks_head
+                )
+                k_token_head_scales = tl.load(
+                    k_scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
+                )
+                v_scale_idx = (
+                    physical_block_idx * stride_vs_blk
+                    + (seq_offset % BLOCK_SIZE) * stride_vs_slot
+                    + kv_head_idx * stride_vs_head
+                )
+                v_token_head_scales = tl.load(
+                    v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
+                )
+
+            # S : (BLOCK_M, TILE_SIZE)
+            S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
+            if USE_PER_TOKEN_HEAD_SCALES:
+                # Per-token-head quant: fuse softmax_scale with per-head k_scale
+                # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
+                S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
+            else:
+                S += score_scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
 
         S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
+            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask,
+            S,
+            float("-inf"),
         )
 
         if USE_ALIBI_SLOPES:
             S = apply_alibi_to_score(
-                S, alibi_slope, seq_offset, context_len, query_pos, USE_ALIBI_SQRT
+                S,
+                alibi_slope,
+                seq_offset,
+                context_len,
+                query_pos,
+                USE_ALIBI_SQRT,
             )
 
         if USE_QQ_BIAS:
@@ -528,28 +1291,90 @@ def kernel_unified_attention(
             )
 
         M, L, P, alpha = softmax_step(S, M, L)
-        acc = acc * alpha[:, None]
 
-        if SLIDING_WINDOW:
-            qpos_lo = q_block_local_idx * BLOCK_Q
-            V = tl.where(
-                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                V,
-                0.0,
+        if USE_NVFP4_BYTEWISE_DECODE:
+            acc_even = acc_even * alpha[:, None]
+            acc_odd = acc_odd * alpha[:, None]
+
+            V_low, V_high = _load_v_tile_nvfp4_bytewise(
+                value_cache_ptr,
+                v_scale_cache_ptr,
+                nvfp4_v_global_scale,
+                physical_block_idx,
+                seq_offset,
+                kv_head_idx,
+                offs_b,
+                byte_mask,
+                tile_mask,
+                stride_v_cache_0,
+                stride_v_cache_1,
+                stride_v_cache_2,
+                stride_v_cache_3,
+                stride_vs_blk,
+                stride_vs_slot,
+                stride_vs_head,
+                stride_vs_dim,
+                BLOCK_SIZE,
+                HEAD_SIZE,
+                Q_even,
             )
-        if USE_PER_TOKEN_HEAD_SCALES:
-            # Per-token-head quant: apply v_scale to P instead of V.
-            P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
-            acc += tl.dot(P_v, V)
+            P_cast = P.to(V_low.dtype)
+            acc_even += tl.dot(P_cast, V_low)
+            acc_odd += tl.dot(P_cast, V_high)
         else:
-            acc += tl.dot(P.to(V.dtype), V)
+            acc = acc * alpha[:, None]
+
+            if SLIDING_WINDOW:
+                qpos_lo = q_block_local_idx * BLOCK_Q
+                V = tl.where(
+                    (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
+                    V,
+                    0.0,
+                )
+            if USE_PER_TOKEN_HEAD_SCALES:
+                # Per-token-head quant: apply v_scale to P instead of V.
+                P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
+                acc += tl.dot(P_v, V)
+            else:
+                acc += tl.dot(P.to(V.dtype), V)
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
         if USE_FP8_Q_DESCALE:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
-        if USE_TD_QO:
+        if USE_NVFP4_BYTEWISE_DECODE:
+            even_d = offs_b * 2
+            odd_d = even_d + 1
+            segm_output_offset_even = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + even_d[None, :]
+            )
+            segm_output_offset_odd = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + odd_d[None, :]
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset_even,
+                acc_even,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset_odd,
+                acc_odd,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+            )
+        elif USE_TD_QO:
             # 3D target: segm_output[token, head, segm_idx, :].  Advance
             # the base to the correct (token-start, head-start, segm)
             # slice; strides step between tokens / heads of the flattened
@@ -602,44 +1427,78 @@ def kernel_unified_attention(
             NUM_SEGMENTS_PER_SEQ,
         )
     else:
-        acc = acc / L[:, None]
-        if USE_FP8_Q_DESCALE:
-            acc *= value_scale
-        if USE_FP8:
-            acc = acc * tl.load(out_scale)
-            acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-        if USE_TD_QO:
-            # 2D target: flat output[token, head, :].  Strides come
-            # straight from the caller (``output_stride_0`` per token,
-            # ``output_stride_1`` per head).
-            output_base = (
-                output_ptr
-                + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q)
-                * output_stride_0
-                + (kv_head_idx * num_queries_per_kv) * output_stride_1
-            )
-            _store_output_td(
-                output_base,
-                acc,
-                q_block_local_len,
-                output_stride_0,
-                output_stride_1,
-                num_queries_per_kv,
-                BLOCK_Q,
-                HEAD_SIZE,
-                HEAD_SIZE_PADDED,
-            )
-        else:
-            output_offset = (
+        if USE_NVFP4_BYTEWISE_DECODE:
+            acc_even = acc_even / L[:, None]
+            acc_odd = acc_odd / L[:, None]
+            even_d = offs_b * 2
+            odd_d = even_d + 1
+            output_offset_even = (
                 query_offset_0[:, None] * output_stride_0
                 + query_offset_1[:, None] * output_stride_1
-                + offs_d[None, :]
+                + even_d[None, :]
+            )
+            output_offset_odd = (
+                query_offset_0[:, None] * output_stride_0
+                + query_offset_1[:, None] * output_stride_1
+                + odd_d[None, :]
             )
             tl.store(
-                output_ptr + output_offset,
-                acc,
-                mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+                output_ptr + output_offset_even,
+                acc_even,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
             )
+            tl.store(
+                output_ptr + output_offset_odd,
+                acc_odd,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+            )
+        else:
+            acc = acc / L[:, None]
+            if USE_FP8_Q_DESCALE:
+                acc *= value_scale
+            if USE_FP8:
+                acc = acc * tl.load(out_scale)
+                acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+            if USE_TD_QO:
+                # 2D target: flat output[token, head, :].  Strides come
+                # straight from the caller (``output_stride_0`` per token,
+                # ``output_stride_1`` per head).
+                output_base = (
+                    output_ptr
+                    + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q)
+                    * output_stride_0
+                    + (kv_head_idx * num_queries_per_kv) * output_stride_1
+                )
+                _store_output_td(
+                    output_base,
+                    acc,
+                    q_block_local_len,
+                    output_stride_0,
+                    output_stride_1,
+                    num_queries_per_kv,
+                    BLOCK_Q,
+                    HEAD_SIZE,
+                    HEAD_SIZE_PADDED,
+                )
+            else:
+                output_offset = (
+                    query_offset_0[:, None] * output_stride_0
+                    + query_offset_1[:, None] * output_stride_1
+                    + offs_d[None, :]
+                )
+                tl.store(
+                    output_ptr + output_offset,
+                    acc,
+                    mask=(
+                        dim_mask[None, :]
+                        & query_mask_0[:, None]
+                        & query_mask_1[:, None]
+                    ),
+                )
 
 
 @triton.jit
@@ -760,6 +1619,27 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _get_nvfp4_launch_config(
+    default_tile_size: int,
+    head_size: int,
+    head_size_padded: int,
+    is_3d: bool,
+    sliding_window_val: int,
+) -> tuple[int, int, int]:
+    # NVFP4 tile loads materialize packed bytes, nibbles, E2M1 values, and
+    # E4M3 block scales before the attention math.  Cap the per-program
+    # dequant footprint instead of specializing for any model family.
+    if not is_3d:
+        return 16, 8, 3 if head_size == 128 else 1
+    if sliding_window_val > 0:
+        return default_tile_size, 8, 1
+    max_tile_size = max(16, 4096 // head_size_padded)
+    tile_size = min(default_tile_size, max_tile_size)
+    if head_size == 128:
+        return tile_size, 8, 2
+    return tile_size, 8, 1
+
+
 def unified_attention(
     q,
     k,
@@ -790,10 +1670,12 @@ def unified_attention(
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
     use_alibi_sqrt=False,
-    # KV cache quantization mode and per-token-head scale caches.
+    # KV cache quantization mode and auxiliary scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
-    k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
-    v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    k_scale_cache=None,
+    v_scale_cache=None,
+    raw_k=None,
+    raw_v=None,
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
     # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
@@ -810,10 +1692,25 @@ def unified_attention(
         KVQuantMode.INT8_PER_TOKEN_HEAD,
         KVQuantMode.FP8_PER_TOKEN_HEAD,
     )
+    use_nvfp4 = kv_quant_mode == KVQuantMode.NVFP4
+    use_raw_current_kv = use_nvfp4 and raw_k is not None and raw_v is not None
     if use_per_token_head_scales:
         assert k_scale_cache is not None and v_scale_cache is not None, (
             f"{kv_quant_mode.name} requires k_scale_cache / v_scale_cache"
         )
+    if use_nvfp4:
+        assert k_scale_cache is not None and v_scale_cache is not None, (
+            "NVFP4 requires k_scale_cache / v_scale_cache block scales"
+        )
+        assert k_descale is not None and v_descale is not None, (
+            "NVFP4 requires global K/V descale tensors"
+        )
+        use_td = False
+    if use_raw_current_kv:
+        assert raw_k.shape[1] == k.shape[2], "raw K must match KV head count"
+        assert raw_v.shape[1] == v.shape[2], "raw V must match KV head count"
+        assert raw_k.shape[2] == q.shape[2], "raw K must match query head size"
+        assert raw_v.shape[2] == q.shape[2], "raw V must match query head size"
 
     use_mm_prefix = False
     max_mm_ranges = 0
@@ -835,6 +1732,7 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+    head_size_padded = triton.next_power_of_2(head_size)
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
@@ -861,6 +1759,19 @@ def unified_attention(
         assert chunk_size > 0, "sliding_window must be > chunk_lookback+1"
     elif sliding_window_val <= 0:
         chunk_lookback = -1
+
+    use_nvfp4_bytewise_decode = (
+        use_nvfp4
+        and not use_raw_current_kv
+        and sliding_window_val == 0
+        and chunk_lookback == -1
+        and mm_prefix_range is None
+        and output_scale is None
+        and q.dtype != current_platform.fp8_dtype()
+    )
+    use_nvfp4_transposed_k_bytewise_decode = (
+        use_nvfp4_bytewise_decode and head_size in (128, 256)
+    )
 
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
@@ -891,7 +1802,6 @@ def unified_attention(
     # stores don't mask the padded tail.  Fall back to the pointer path
     # for Q/O in that case — KV tile loads are unaffected because their
     # ``shape`` already matches ``block_shape`` on the inner axis.
-    head_size_padded = triton.next_power_of_2(head_size)
     _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
     use_td_qo = use_td and _is_pow2_nq and _is_pow2_hs
@@ -941,14 +1851,40 @@ def unified_attention(
         vs_strides = v_scale_cache.stride()
         ks_blk, ks_slot, ks_head = ks_strides[0], ks_strides[1], ks_strides[2]
         vs_blk, vs_slot, vs_head = vs_strides[0], vs_strides[1], vs_strides[2]
+        ks_dim = vs_dim = 0
+        k_scale_ptr = k_scale_cache
+        v_scale_ptr = v_scale_cache
+    elif use_nvfp4:
+        ks_strides = k_scale_cache.stride()
+        vs_strides = v_scale_cache.stride()
+        ks_blk, ks_slot, ks_head, ks_dim = (
+            ks_strides[0],
+            ks_strides[1],
+            ks_strides[2],
+            ks_strides[3],
+        )
+        vs_blk, vs_slot, vs_head, vs_dim = (
+            vs_strides[0],
+            vs_strides[1],
+            vs_strides[2],
+            vs_strides[3],
+        )
         k_scale_ptr = k_scale_cache
         v_scale_ptr = v_scale_cache
     else:
-        ks_blk = ks_slot = ks_head = 0
-        vs_blk = vs_slot = vs_head = 0
+        ks_blk = ks_slot = ks_head = ks_dim = 0
+        vs_blk = vs_slot = vs_head = vs_dim = 0
         # Pass the K cache as a stand-in pointer; never dereferenced.
         k_scale_ptr = k
         v_scale_ptr = v
+    raw_k_ptr = raw_k if use_raw_current_kv else k
+    raw_v_ptr = raw_v if use_raw_current_kv else v
+    if use_raw_current_kv:
+        raw_k_stride_0, raw_k_stride_1, raw_k_stride_2 = raw_k.stride()
+        raw_v_stride_0, raw_v_stride_1, raw_v_stride_2 = raw_v.stride()
+    else:
+        raw_k_stride_0 = raw_k_stride_1 = raw_k_stride_2 = 0
+        raw_v_stride_0 = raw_v_stride_1 = raw_v_stride_2 = 0
     # 3D needs real segm tensors; 2D never touches them but Triton wants
     # a non-null pointer.  Reuse ``out`` as the placeholder.
     segm_output_ptr = softmax_segm_output if use_3d else out
@@ -963,6 +1899,15 @@ def unified_attention(
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+    launch_kwargs: dict[str, int] = {}
+    if use_nvfp4:
+        tile_size, launch_num_warps, launch_num_stages = _get_nvfp4_launch_config(
+            tile_size, head_size, head_size_padded, use_3d, sliding_window_val
+        )
+        launch_kwargs = {
+            "num_warps": launch_num_warps,
+            "num_stages": launch_num_stages,
+        }
 
     kernel_unified_attention[grid](
         output_ptr=out,
@@ -972,6 +1917,8 @@ def unified_attention(
         query_ptr=q,
         key_cache_ptr=k,
         value_cache_ptr=v,
+        raw_key_ptr=raw_k_ptr,
+        raw_value_ptr=raw_v_ptr,
         sink_ptr=sinks,
         block_tables_ptr=block_table,
         seq_lens_ptr=seqused_k,
@@ -1014,12 +1961,20 @@ def unified_attention(
         stride_v_cache_1=v.stride(1),
         stride_v_cache_2=v.stride(2),
         stride_v_cache_3=v.stride(3),
+        stride_raw_k_0=raw_k_stride_0,
+        stride_raw_k_1=raw_k_stride_1,
+        stride_raw_k_2=raw_k_stride_2,
+        stride_raw_v_0=raw_v_stride_0,
+        stride_raw_v_1=raw_v_stride_1,
+        stride_raw_v_2=raw_v_stride_2,
         stride_ks_blk=ks_blk,
         stride_ks_slot=ks_slot,
         stride_ks_head=ks_head,
+        stride_ks_dim=ks_dim,
         stride_vs_blk=vs_blk,
         stride_vs_slot=vs_slot,
         stride_vs_head=vs_head,
+        stride_vs_dim=vs_dim,
         query_start_len_ptr=cu_seqlens_q,
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
@@ -1033,6 +1988,10 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        USE_RAW_CURRENT_KV=use_raw_current_kv,
+        USE_NVFP4_BYTEWISE_DECODE=use_nvfp4_bytewise_decode,
+        USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE=(use_nvfp4_transposed_k_bytewise_decode),
+        **launch_kwargs,
     )
 
     if use_3d:

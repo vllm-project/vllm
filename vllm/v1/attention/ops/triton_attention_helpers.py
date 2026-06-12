@@ -162,9 +162,9 @@ def compute_tile_loop_bounds(
     Combines three concerns into one helper:
 
     1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active (bidirectional ranges can reach past the
-       causal prefix).
+       Clamped to ``seq_len`` (causal) or set to the full valid sequence
+       when mm_prefix is active (bidirectional ranges can reach past the
+       causal prefix, but never past ``seq_len``).
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
@@ -180,9 +180,10 @@ def compute_tile_loop_bounds(
         + 1
     )
     if USE_MM_PREFIX:
-        # image bidirectional attention ranges require a full range
-        # including q_block padding to make sure doc mask is correct
-        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
+        # Image bidirectional attention ranges require the full valid sequence
+        # to make sure the prefix mask is complete, but q-block padding must
+        # not extend tile loads past seq_len.
+        max_seq_prefix_len = seq_len
     else:
         max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 

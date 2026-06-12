@@ -258,6 +258,15 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_kv_head_size(
+        cls,
+        head_size: int,
+        head_size_v: int | None,
+        kv_cache_dtype: "CacheDType | None",
+    ) -> str | None:
+        return None
+
+    @classmethod
     def supports_combination(
         cls,
         head_size: int,
@@ -289,10 +298,18 @@ class AttentionBackend(ABC):
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
+        head_size_v: int | None = None,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
             invalid_reasons.append("head_size not supported")
+        kv_head_size_reason = cls.supports_kv_head_size(
+            head_size,
+            head_size_v,
+            kv_cache_dtype,
+        )
+        if kv_head_size_reason is not None:
+            invalid_reasons.append(kv_head_size_reason)
         if not cls.supports_dtype(dtype):
             invalid_reasons.append("dtype not supported")
         if not cls.supports_kv_cache_dtype(kv_cache_dtype):

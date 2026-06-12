@@ -19,7 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -49,7 +53,6 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
-
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
@@ -72,6 +75,8 @@ class TritonAttentionMetadata:
     seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+    is_all_pure_prefill: bool
+    is_decode_only: bool
 
     seq_threshold_3D: int
     num_par_softmax_segments: int
@@ -176,6 +181,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
+        attn_metadata.is_all_pure_prefill = False
         return attn_metadata
 
     def build(
@@ -193,6 +199,19 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        is_all_pure_prefill = False
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if max_query_len > 1 and seq_lens_cpu is not None:
+            query_lens = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
+            )
+            seq_lens_cpu = seq_lens_cpu[: query_lens.shape[0]]
+            is_all_pure_prefill = bool(torch.all(seq_lens_cpu == query_lens).item())
+        is_prefilling = common_attn_metadata.is_prefilling
+        is_decode_only = is_prefilling is not None and not bool(
+            torch.any(is_prefilling[: common_attn_metadata.num_reqs]).item()
+        )
 
         use_cascade = common_prefix_len > 0
 
@@ -219,6 +238,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
+            is_all_pure_prefill=is_all_pure_prefill,
+            is_decode_only=is_decode_only,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -255,6 +276,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
         "int8_per_token_head",
         "fp8_per_token_head",
     ]
@@ -305,6 +327,14 @@ class TritonAttentionBackend(AttentionBackend):
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
             return (num_blocks, 2, block_size, num_kv_heads, head_size + scale_pad)
+        if cache_dtype_str == "nvfp4":
+            return (
+                num_blocks,
+                2,
+                block_size,
+                num_kv_heads,
+                nvfp4_kv_cache_full_dim(head_size),
+            )
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -365,6 +395,45 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
+
+    @classmethod
+    def supports_kv_head_size(
+        cls,
+        head_size: int,
+        head_size_v: int | None,
+        kv_cache_dtype: CacheDType | None,
+    ) -> str | None:
+        if (
+            kv_cache_dtype == "nvfp4"
+            and head_size_v is not None
+            and head_size_v != head_size
+        ):
+            return "nvfp4 requires head_size_v equal to head_size in Triton attention"
+        return None
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if kv_cache_dtype == "nvfp4":
+            if dtype not in (torch.float16, torch.bfloat16):
+                return "nvfp4 requires fp16 or bf16 attention dtype"
+            if head_size % 16 != 0:
+                return "nvfp4 requires head_size divisible by 16"
+            if (head_size // 16) % 4 != 0:
+                return "nvfp4 requires (head_size // 16) divisible by 4"
+            if block_size is not None and block_size % 4 != 0:
+                return "nvfp4 requires block_size divisible by 4"
+        return None
 
 
 class TritonAttentionImpl(AttentionImpl):
@@ -477,7 +546,9 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
-        self.supports_quant_query_input = current_platform.is_cuda()
+        self.supports_quant_query_input = (
+            current_platform.is_cuda() and kv_cache_dtype != "nvfp4"
+        )
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
@@ -557,8 +628,52 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+        uses_shared_kv_cache = (
+            self.kv_sharing_target_layer_name is not None
+            or getattr(layer, "kv_sharing_target_layer_name", None) is not None
+        )
+        if (
+            self._kv_quant_mode == KVQuantMode.NVFP4
+            and not uses_shared_kv_cache
+            and attn_metadata.is_all_pure_prefill
+            and key is not None
+            and value is not None
+            and output_scale is None
+            and self.alibi_slopes is None
+            and not self.use_alibi_sqrt
+            and self.sinks is None
+            and mm_prefix_range_tensor is None
+            and self.chunk_lookback == -1
+        ):
+            context_attention_fwd(
+                q=query[:num_actual_tokens],
+                k=key[:num_actual_tokens],
+                v=value[:num_actual_tokens],
+                o=output[:num_actual_tokens],
+                b_start_loc=attn_metadata.query_start_loc,
+                b_seq_len=attn_metadata.seq_lens,
+                max_input_len=attn_metadata.max_query_len,
+                is_causal=True,
+                softmax_scale=self.scale,
+                softcap=self.logits_soft_cap,
+                sliding_window_q=self.sliding_window[0],
+                sliding_window_k=self.sliding_window[1],
+            )
+            return output
+
+        # NVFP4 KV cache: split packed FP4 data and FP8 block-scale views.
+        if self._kv_quant_mode == KVQuantMode.NVFP4:
+            key_cache, value_cache = kv_cache.unbind(1)
+            (key_cache,), (k_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+            (value_cache,), (v_scale_cache,) = nvfp4_kv_cache_split_views(value_cache)
+            k_scale_cache = k_scale_cache.view(torch.uint8)
+            v_scale_cache = v_scale_cache.view(torch.uint8)
+            q_descale = None
+            k_descale = layer._k_scale
+            v_descale = layer._v_scale
         # Per-token-head quantized KV cache: use separate scale caches.
-        if self._is_per_token_head_quant:
+        elif self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
             if key_cache.dtype == torch.uint8:
@@ -606,8 +721,18 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_output = attn_metadata.softmax_segm_output
         softmax_segm_max = attn_metadata.softmax_segm_max
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
-
-        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+        # Decode-only tokens have already been written into paged KV cache by
+        # do_kv_cache_update, so reading them from NVFP4 cache keeps the fast
+        # decode path enabled. Multi-token chunks still use raw K/V for the
+        # current chunk to avoid rereading it from the quantized cache.
+        use_nvfp4_raw_current_kv = (
+            self._kv_quant_mode == KVQuantMode.NVFP4
+            and not uses_shared_kv_cache
+            and key is not None
+            and value is not None
+            and max_seqlen_q > 1
+            and not attn_metadata.is_decode_only
+        )
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -639,6 +764,8 @@ class TritonAttentionImpl(AttentionImpl):
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            raw_k=key if use_nvfp4_raw_current_kv else None,
+            raw_v=value if use_nvfp4_raw_current_kv else None,
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
         )
@@ -720,6 +847,19 @@ class TritonAttentionImpl(AttentionImpl):
                 slot_mapping,
             )
             return
+        if self._kv_quant_mode == KVQuantMode.NVFP4:
+            key_cache, value_cache = kv_cache.unbind(1)
+            triton_reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+            return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -737,7 +877,7 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        if self._is_per_token_head_quant:
+        if self._is_per_token_head_quant or self._kv_quant_mode == KVQuantMode.NVFP4:
             return False
         return rocm_aiter_ops.is_enabled()
 

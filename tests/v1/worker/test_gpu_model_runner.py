@@ -9,6 +9,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+import vllm.config as vllm_config_module
+import vllm.v1.attention.ops.triton_prefill_attention as triton_prefill_attention_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -27,7 +29,11 @@ from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.warmup.kernel_warmup import (
+    _warmup_triton_nvfp4_attention,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -43,6 +49,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
+    TQFullAttentionSpec,
+    get_attn_backend_cache_dtype_str,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -52,11 +61,67 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+class _DTypeSensitiveAttentionBackend:
+    seen_cache_dtype_strs: list[str] = []
+
+    @classmethod
+    def get_kv_cache_shape(
+        cls,
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, int, int, int, int]:
+        cls.seen_cache_dtype_strs.append(cache_dtype_str)
+        last_dim = head_size + 1 if cache_dtype_str == "nvfp4" else head_size
+        return (2, num_blocks, block_size, num_kv_heads, last_dim)
+
+    @staticmethod
+    def get_kv_cache_block_dim(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        return 1
+
+    @staticmethod
+    def get_kv_cache_stride_order():
+        return tuple(range(5))
+
+
+def _reshape_kv_cache_tensor_for_test(
+    kv_cache_spec,
+    raw_tensor: torch.Tensor,
+    layer_name: str = "layer.0",
+    *,
+    backend=_DTypeSensitiveAttentionBackend,
+    cache_dtype: str = "auto",
+):
+    group = AttentionGroup(
+        backend,
+        [layer_name],
+        kv_cache_spec,
+        0,
+    )
+    runner_stub = SimpleNamespace(
+        runner_only_attn_layers=set(),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        _kv_cache_spec_attn_group_iterator=lambda: iter([group]),
+    )
+    return GPUModelRunner._reshape_kv_cache_tensors(
+        runner_stub,
+        {layer_name: raw_tensor},
+        [kv_cache_spec.block_size],
+    )
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -240,6 +305,186 @@ def _make_mock_backend_for_kernel_block_size(
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+
+
+class _NamedAttentionBackend:
+    def __init__(self, name: str):
+        self.name = name
+
+    def get_name(self):
+        return self.name
+
+
+def _make_warmup_runner(
+    *,
+    cache_dtype: str = "nvfp4",
+    backend_name: str = "TRITON_ATTN",
+    is_pooling_model: bool = False,
+    layer_names: list[str] | None = None,
+):
+    calls = []
+    layer_names = layer_names or []
+    runner = SimpleNamespace(
+        is_pooling_model=is_pooling_model,
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        attn_groups=[
+            [
+                SimpleNamespace(
+                    backend=_NamedAttentionBackend(backend_name),
+                    layer_names=layer_names,
+                )
+            ]
+        ],
+        uniform_decode_query_len=1,
+        max_num_tokens=4096,
+        max_model_len=32768,
+        device=torch.device("cpu"),
+        dtype=torch.float16,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context={})
+        ),
+    )
+
+    def _dummy_run(**kwargs):
+        calls.append(kwargs)
+
+    runner._dummy_run = _dummy_run
+    return runner, calls
+
+
+def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
+    runner, calls = _make_warmup_runner()
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 2
+    assert calls[0] == {
+        "num_tokens": 1,
+        "skip_eplb": True,
+        "is_profile": True,
+        "force_attention": True,
+        "uniform_decode": True,
+        "profile_seq_lens": 8192,
+    }
+    assert calls[1] == {
+        "num_tokens": 4096,
+        "skip_eplb": True,
+        "is_profile": True,
+        "force_attention": True,
+        "uniform_decode": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "backend_name", "is_pooling_model"),
+    [
+        ("auto", "TRITON_ATTN", False),
+        ("nvfp4", "FLASHINFER", False),
+        ("nvfp4", "TRITON_ATTN", True),
+    ],
+)
+def test_triton_nvfp4_attention_warmup_skips_other_paths(
+    cache_dtype: str,
+    backend_name: str,
+    is_pooling_model: bool,
+):
+    runner, calls = _make_warmup_runner(
+        cache_dtype=cache_dtype,
+        backend_name=backend_name,
+        is_pooling_model=is_pooling_model,
+    )
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert calls == []
+
+
+class _WarmupAttentionLayer(AttentionLayerBase):
+    def __init__(self, impl):
+        self.impl = impl
+
+    def get_attn_backend(self):
+        return _NamedAttentionBackend("TRITON_ATTN")
+
+    def get_kv_cache_spec(self, vllm_config):
+        return None
+
+
+def _make_nvfp4_warmup_impl(
+    *,
+    num_heads: int = 8,
+    num_kv_heads: int = 2,
+    head_size: int = 256,
+    sliding_window: tuple[int, int] = (1023, 0),
+):
+    return SimpleNamespace(
+        kv_cache_dtype="nvfp4",
+        kv_sharing_target_layer_name=None,
+        alibi_slopes=None,
+        use_alibi_sqrt=False,
+        sinks=None,
+        chunk_lookback=-1,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        scale=0.125,
+        logits_soft_cap=0,
+        sliding_window=sliding_window,
+    )
+
+
+def test_triton_nvfp4_attention_warmup_compiles_prefill_variants(monkeypatch):
+    layer_names = ["layer.0", "layer.1", "layer.2"]
+    runner, calls = _make_warmup_runner(layer_names=layer_names)
+    layers = {
+        "layer.0": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        # Duplicate shape should be warmed once.
+        "layer.1": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        "layer.2": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(
+                num_kv_heads=1, head_size=512, sliding_window=(-1, -1)
+            )
+        ),
+    }
+    prefill_calls = []
+
+    def fake_get_layers_from_vllm_config(vllm_config, layer_type, names):
+        assert layer_type is AttentionLayerBase
+        return {name: layers[name] for name in names}
+
+    def fake_context_attention_fwd(**kwargs):
+        prefill_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        vllm_config_module,
+        "get_layers_from_vllm_config",
+        fake_get_layers_from_vllm_config,
+    )
+    monkeypatch.setattr(
+        triton_prefill_attention_module,
+        "context_attention_fwd",
+        fake_context_attention_fwd,
+    )
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 2
+    assert len(prefill_calls) == 2
+    assert {call["q"].shape for call in prefill_calls} == {
+        torch.Size([64, 8, 256]),
+        torch.Size([64, 8, 512]),
+    }
+    assert {call["k"].shape for call in prefill_calls} == {
+        torch.Size([64, 2, 256]),
+        torch.Size([64, 1, 512]),
+    }
+    assert {
+        (call["sliding_window_q"], call["sliding_window_k"]) for call in prefill_calls
+    } == {(1023, 0), (-1, -1)}
 
 
 def test_select_common_block_size_prefers_manager_block_size():
@@ -1343,6 +1588,92 @@ def test_hybrid_attention_mamba_tensor_shapes():
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
+
+
+def test_attn_backend_cache_dtype_str_uses_spec_quant_mode():
+    base_kwargs = dict(block_size=2, num_kv_heads=1, head_size=16)
+
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(**base_kwargs, dtype=torch.float16)
+        )
+        == "auto"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            )
+        )
+        == "fp8"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.int8,
+                kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+            )
+        )
+        == "int8_per_token_head"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
+            )
+        )
+        == "fp8_per_token_head"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+            )
+        )
+        == "nvfp4"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            TQFullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                tq_slot_size=12,
+                cache_dtype_str="turboquant_k3v4_nc",
+            )
+        )
+        == "turboquant_k3v4_nc"
+    )
+
+
+def test_reshape_skipped_attention_uses_spec_dtype_not_global_cache_dtype():
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+    num_blocks = 2
+    raw_tensor = torch.empty(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+
+    _DTypeSensitiveAttentionBackend.seen_cache_dtype_strs.clear()
+    kv_caches = _reshape_kv_cache_tensor_for_test(
+        spec,
+        raw_tensor,
+        "attn",
+        backend=_DTypeSensitiveAttentionBackend,
+        cache_dtype="nvfp4",
+    )
+
+    assert _DTypeSensitiveAttentionBackend.seen_cache_dtype_strs == ["auto"]
+    assert kv_caches["attn"].shape == (2, num_blocks, spec.block_size, 1, 8)
 
 
 def test_hybrid_block_table_initialization():

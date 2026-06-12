@@ -31,6 +31,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+from vllm.v1.attention.ops.triton_attention_helpers import apply_softcap
 
 
 @triton.jit
@@ -39,6 +40,7 @@ def _fwd_kernel(
     K,
     V,
     sm_scale,
+    softcap,
     B_Start_Loc,
     B_Seqlen,
     Out,
@@ -55,6 +57,7 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
+    USE_SOFTCAP: tl.constexpr,
     SLIDING_WINDOW_Q: tl.constexpr,
     SLIDING_WINDOW_K: tl.constexpr,
     Lk: tl.constexpr,
@@ -100,14 +103,24 @@ def _fwd_kernel(
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
 
-    # Calculate the end position for attention computation
+    # Calculate the key range that can contain at least one unmasked element
+    # for this query block. The masks below remain the source of correctness;
+    # these bounds only avoid loading tiles that every query row will mask out.
+    q_block_start = block_start_loc
+    q_block_end = tl.minimum(block_start_loc + BLOCK_M, cur_batch_seq_len)
+    start_n_limit = 0
     end_n = cur_batch_seq_len
 
-    # Apply causal attention pruning and sliding window attention pruning
-    end_n = tl.minimum(end_n, (start_m + 1) * BLOCK_M) if IS_CAUSAL else end_n
+    if IS_CAUSAL:
+        end_n = tl.minimum(end_n, q_block_end)
 
-    # Calculate the start position for backward sliding window
-    start_n_limit = 0
+    if SLIDING_WINDOW_Q > 0:
+        start_n_limit = tl.maximum(0, q_block_start - SLIDING_WINDOW_Q)
+        start_n_limit = (start_n_limit // BLOCK_N) * BLOCK_N
+
+    if SLIDING_WINDOW_K > 0:
+        end_n = tl.minimum(end_n, q_block_end + SLIDING_WINDOW_K)
+
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
@@ -143,7 +156,10 @@ def _fwd_kernel(
         )
 
         qk = tl.dot(q, k)
-        qk = tl.where(mask, qk * sm_scale, -1.0e8)
+        qk *= sm_scale
+        if USE_SOFTCAP:
+            qk = apply_softcap(qk, softcap)
+        qk = tl.where(mask, qk, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
         p = tl.math.exp2(qk)
@@ -177,15 +193,40 @@ def _fwd_kernel(
     )
 
 
-def get_block_size(dtype: torch.dtype) -> int:
+def _next_power_of_2(x: int) -> int:
+    return 1 << (x - 1).bit_length()
+
+
+def _get_cuda_safe_block_size(
+    dtype: torch.dtype,
+    head_dim: int,
+    max_block: int,
+) -> int:
+    # Keep Q+K staging near 64 KiB. This leaves room for softmax buffers on
+    # 100 KiB shared-memory GPUs such as SM86/SM89, instead of assuming SM80.
+    max_qk_tile_bytes = 64 * 1024
+    block_dmodel = _next_power_of_2(head_dim)
+    elem_size = torch.empty((), dtype=dtype).element_size()
+    block = max_qk_tile_bytes // (2 * block_dmodel * elem_size)
+    if block <= 0:
+        return 8
+    block = 1 << (block.bit_length() - 1)
+    return min(max_block, max(8, block))
+
+
+def get_block_size(dtype: torch.dtype, head_dim: int) -> int:
     if dtype == torch.float32:
-        return 32
+        max_block = 32
     elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
         80
     ):
-        return 128
+        max_block = 128
     else:
         return 64
+
+    if current_platform.is_cuda_alike() and current_platform.has_device_capability(80):
+        return _get_cuda_safe_block_size(dtype, head_dim, max_block)
+    return max_block
 
 
 def context_attention_fwd(
@@ -198,6 +239,7 @@ def context_attention_fwd(
     max_input_len: int,
     is_causal: bool = True,
     softmax_scale: float | None = None,
+    softcap: float = 0.0,
     sliding_window_q: int | None = None,
     sliding_window_k: int | None = None,
 ):
@@ -207,13 +249,15 @@ def context_attention_fwd(
     b_seq_len: [b]
     out: [b * s, head, head_dim]
     """
-    BLOCK = get_block_size(q.dtype)
-
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK = get_block_size(q.dtype, Lk)
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
     sm_scale *= RCP_LN2
+    use_softcap = softcap > 0
+    if use_softcap:
+        softcap *= RCP_LN2
 
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
@@ -229,6 +273,7 @@ def context_attention_fwd(
         k,
         v,
         sm_scale,
+        softcap,
         b_start_loc,
         b_seq_len,
         o,
@@ -245,6 +290,7 @@ def context_attention_fwd(
         BLOCK_DMODEL=triton.next_power_of_2(Lk),
         BLOCK_N=BLOCK,
         IS_CAUSAL=is_causal,
+        USE_SOFTCAP=use_softcap,
         SLIDING_WINDOW_Q=sliding_window_q,
         SLIDING_WINDOW_K=sliding_window_k,
         num_warps=num_warps,
