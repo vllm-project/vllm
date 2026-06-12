@@ -296,7 +296,7 @@ llm = LLM(model="Qwen/Qwen3-8B")
 The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
 vLLM raises a clear `ImportError` at tokenizer load. The override applies to
 any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
-`deepseek_v32`, `deepseek_v4`, `qwen_vl`, …). Models that don't use the HF
+`deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF
 fast tokenizer (`mistral`, `grok2`, `kimi_audio`) ignore the flag.
 
 Tokenizer-bound workloads — long shared prefixes, bursty short prompts,

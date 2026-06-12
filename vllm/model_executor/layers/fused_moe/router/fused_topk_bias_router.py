@@ -262,13 +262,37 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
+    if scoring_func == "sqrtsoftplus":
+        M = hidden_states.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+        return vllm_topk_softplus_sqrt(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
         scores = gating_output.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output.sigmoid()
-    elif scoring_func == "sqrtsoftplus":
-        scores = F.softplus(gating_output).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
     if e_score_correction_bias is not None:

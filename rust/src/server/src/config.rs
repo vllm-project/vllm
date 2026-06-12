@@ -34,6 +34,17 @@ pub enum CoordinatorMode {
     External { address: String },
 }
 
+/// HTTP/API-server behavior switches that affect route-layer responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct ApiServerOptions {
+    /// Log a summary line for each completed request.
+    pub enable_log_requests: bool,
+    /// When `true`, include prompt token cache details in response usage.
+    pub enable_prompt_tokens_details: bool,
+    /// When `true`, set `X-Request-Id` on every HTTP response.
+    pub enable_request_id_headers: bool,
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -66,10 +77,8 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Log a summary line for each completed request.
-    pub enable_log_requests: bool,
-    /// When `true`, set `X-Request-Id` on every HTTP response.
-    pub enable_request_id_headers: bool,
+    /// HTTP/API-server behavior switches.
+    pub api_server_options: ApiServerOptions,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]

@@ -329,8 +329,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
-#if defined(__AVX512F__) || defined(__AVX2__) || \
-    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__)
+#if defined(__AVX512F__) || defined(__AVX2__) ||                               \
+    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
+    defined(__riscv_v)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -428,19 +429,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
 
-  // Adapted from sglang: INT4 W4A8 kernels
-  ops.def(
-      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
-      "scales, int quant_method_4bit) -> (Tensor, "
-      "Tensor, Tensor)");
-  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
-           &convert_weight_packed_scale_zp);
-
-  ops.def(
-      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
-      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
-  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
-
   // Adapted from sglang: FP8 W8A16 kernel
   ops.def(
       "fp8_scaled_mm_cpu(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!) "
@@ -465,6 +453,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+#endif
+
+#if (defined(__AVX512BF16__) && defined(__AVX512F__) && \
+     defined(__AVX512VNNI__)) ||                        \
+    defined(__riscv)
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
+      "scales, int quant_method_4bit) -> (Tensor, "
+      "Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
 #endif
 
   // Adapted from sglang: GDN kernels

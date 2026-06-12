@@ -294,6 +294,21 @@ curl http://localhost:8000/v1/chat/completions \
 !!! note
     The `conversation_id` field is a non-standard extension to the OpenAI API. It is consumed by the proxy and not forwarded to the vLLM engine.
 
+### Benchmarking the multi-turn proxy
+
+[`benchmarks/multi_turn/benchmark_serving_multi_turn.py`](../../benchmarks/multi_turn/benchmark_serving_multi_turn.py) supports targeting the disaggregated multi-turn proxy with the `--send-conversation-id` flag, which injects a per-conversation `conversation_id` into every request payload so the proxy can key cross-turn KV cache reuse.
+
+The flag is **off by default** so the benchmark is compatible with strict OpenAI-compatible frontends that reject unknown top-level fields. When benchmarking the multi-turn proxy you must pass it explicitly — otherwise every turn lands as a cache MISS and the bidirectional KV transfer path is never exercised.
+
+```bash
+python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
+  --model <MODEL> --served-model-name <NAME> \
+  --url http://<proxy_host>:8000 \
+  --input-file benchmarks/multi_turn/generate_multi_turn.json \
+  --num-clients 2 --max-active-conversations 6 \
+  --send-conversation-id
+```
+
 ### Limitations
 
 - Requires a stateful proxy (or equivalent router) to track and forward `kv_transfer_params` between turns.

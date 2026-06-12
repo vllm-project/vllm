@@ -53,6 +53,9 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def remove_request(self, req_id: str) -> None:
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 
@@ -89,3 +92,16 @@ class ModelState(ABC):
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
+
+    def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
+        """Wrap or replace the default sampler.
+
+        Called after model loading with the already-constructed base
+        ``Sampler``.  Return ``None`` to keep the defaults, or
+        ``(sampler, rejection_sampler | None)`` to override.
+        """
+        return None
+
+    num_new_sampled_tokens_per_step: int = 1
+    """New tokens sampled on each decode step 
+    (excluding accepted draft tokens, a.k.a num bonus tokens)."""
