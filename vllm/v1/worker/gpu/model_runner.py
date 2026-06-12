@@ -1454,6 +1454,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
 
+        if lora_load_event := self.take_lora_load_event(self.lora_config):
+            model_runner_output.worker_notifications = [lora_load_event]
+
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
@@ -1486,10 +1489,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Build the model runner output.
+        lora_load_event = self.take_lora_load_event(self.lora_config)
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            worker_notifications=[lora_load_event] if lora_load_event else None,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
