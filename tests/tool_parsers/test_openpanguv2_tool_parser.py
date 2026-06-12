@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for PanguToolParser."""
+"""Unit tests for OpenPanguV2ToolParser."""
 
 import json
 from unittest.mock import MagicMock
@@ -10,7 +10,7 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers import ToolParserManager
-from vllm.tool_parsers.pangu_tool_parser import PanguToolParser
+from vllm.tool_parsers.openpangu_v2_tool_parser import OpenPanguV2ToolParser
 
 TC_START = "<|tool_call_start|>"
 TC_END = "<|tool_call_end|>"
@@ -18,14 +18,14 @@ TC_END = "<|tool_call_end|>"
 
 @pytest.fixture(scope="module")
 def parser():
-    """Create a PanguToolParser instance."""
+    """Create a OpenPanguV2ToolParser instance."""
     mock_tokenizer = MagicMock()
     mock_tokenizer.get_vocab.return_value = {
         TC_START: 104,
         TC_END: 105,
     }
     mock_tokenizer.tokenizer = mock_tokenizer
-    parser = PanguToolParser(mock_tokenizer)
+    parser = OpenPanguV2ToolParser(mock_tokenizer)
     return parser
 
 
@@ -51,10 +51,10 @@ def build_tool_call(tool_calls: list[dict]) -> str:
 
 
 def test_parser_registered():
-    """Test that PanguToolParser is registered in ToolParserManager."""
+    """Test that OpenPanguV2ToolParser is registered in ToolParserManager."""
     # This test may need adjustment based on actual registration
     # Uncomment and modify when parser is properly registered
-    assert ToolParserManager.get_tool_parser("pangu") is PanguToolParser
+    assert ToolParserManager.get_tool_parser("openpangu_v2") is OpenPanguV2ToolParser
 
 
 # Non-streaming extraction tests

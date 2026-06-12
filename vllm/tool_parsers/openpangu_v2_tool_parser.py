@@ -32,7 +32,7 @@ from vllm.tool_parsers.utils import (
 logger = init_logger(__name__)
 
 
-class PanguToolParser(ToolParser):
+class OpenPanguV2ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
