@@ -468,6 +468,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
+        # Needed by MarlinFP8ScaledMMLinearKernel.process_weights_after_loading:
+        # prepare_fp8_layer_for_marlin() casts weight_scale through
+        # layer.orig_dtype. Other FP8 quant methods set this in their own
+        # create_weights(); ModelOptFp8LinearMethod did not until now.
+        layer.orig_dtype = params_dtype
         weight_dtype = (
             torch.float8_e4m3fn
             if self.quant_config.is_checkpoint_fp8_serialized
@@ -2217,7 +2222,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        # Ampere (SM80 / SM86): NVFP4 routed experts run via Marlin W4A16,
+        # FP8 weight-only layers run via CutlassFP8 W8A16 (with the Triton
+        # fp8e4nv type-name patch applied at vllm import). No SM89 FP8
+        # tensor cores are required for modelopt_mixed using W8A16 for FP8 weights.
+        return 80
 
     @classmethod
     def override_quantization_method(
