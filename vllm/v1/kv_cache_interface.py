@@ -115,6 +115,11 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
+    @property
+    def requires_slot_mapping(self) -> bool:
+        """Whether this KV cache needs per-token slot mapping."""
+        return True
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
@@ -614,6 +619,11 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
+    def requires_slot_mapping(self) -> bool:
+        """Mamba-style caches address per-request states, not token KV slots."""
+        return False
+
+    @property
     def page_size_bytes(self) -> int:
         page_size = sum(
             prod(shape) * get_dtype_size(dtype)
@@ -731,6 +741,11 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def requires_slot_mapping(self) -> bool:
+        """Return true if any wrapped spec needs per-token KV slot mapping."""
+        return any(spec.requires_slot_mapping for spec in self.kv_cache_specs.values())
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
