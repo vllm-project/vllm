@@ -301,7 +301,10 @@ def _select_skinny_gfx11_config(
         elif M <= 128:
             if tall:
                 block_m, block_n, block_k, num_warps = 32, 128, 64, 4
-            elif N >= 16384:  # very wide N
+            elif N >= 32768 and K <= 2048:  # extremely wide + tiny K (gemma
+                # gate_up 32768x2048): BLOCK_N=128 collapses (0.6x), needs 64.
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            elif N >= 16384:  # very wide N (K>2048): BLOCK_N=128 wins
                 block_m, block_n, block_k, num_warps = 128, 128, 32, 8
             elif K <= 2048:  # small-K square needs BLOCK_K=128
                 block_m, block_n, block_k, num_warps = 32, 64, 128, 4
