@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall
@@ -43,10 +44,14 @@ class MistralParser(DelegatingParser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._maybe_force_auto_tool_parsing(request)
         reasoning, content, tool_calls = super().parse(
-            model_output, request, enable_auto_tools
+            model_output,
+            request,
+            enable_auto_tools,
+            model_output_token_ids,
         )
         if tool_calls:
             from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
