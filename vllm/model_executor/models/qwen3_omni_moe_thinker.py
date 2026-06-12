@@ -83,6 +83,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -322,6 +323,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def __init__(
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -362,8 +364,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             conv_out_dim,
             config.d_model,
             bias=False,
-            return_bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.conv_out",
+            return_bias=False,
         )
 
         # Transformer encoder layers
@@ -382,17 +385,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.proj1 = ReplicatedLinear(
             config.d_model,
             config.d_model,
-            bias=True,
-            return_bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj1",
+            return_bias=False,
+            bias=True,
         )
         self.act = _ACTIVATION_REGISTRY[config.activation_function]
         self.proj2 = ReplicatedLinear(
             config.d_model,
             config.output_dim,
-            bias=True,
-            return_bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj2",
+            return_bias=False,
+            bias=True,
         )
 
         # Get attention backend
@@ -1639,6 +1644,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
     SupportsTranscription,
@@ -1691,6 +1697,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
                 thinker_config.audio_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
@@ -2354,3 +2361,28 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             connector="visual.merger",
             tower_model=["visual.", "audio_tower."],
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+        modality: str | None = None,
+    ) -> int:
+        if modality == "audio":
+            return num_image_tokens
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+        modality: str | None = None,
+    ) -> int:
+        if modality == "audio":
+            return 0
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2
