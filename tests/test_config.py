@@ -122,8 +122,58 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-30B-A3B",
-                architectures=["Qwen3MoeForCausalLM"],
+                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="ibm-research/PowerMoE-3b",
+                architectures=["GraniteMoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                architectures=["MixtralForCausalLM"],
                 runner_type="generate",
                 is_moe=True,
                 is_quantized=False,

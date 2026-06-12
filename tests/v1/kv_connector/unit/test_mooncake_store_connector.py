@@ -614,3 +614,66 @@ def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
 
     assert call_order == ["remove_all"]
     assert sent == [protocol.RESP_OK]
+
+
+def test_shutdown_closes_worker_store():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    worker = mock_worker_cls.return_value
+    connector.shutdown()
+
+    worker.close.assert_called_once_with()
+
+
+def test_del_invokes_shutdown_and_closes_store():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    worker = mock_worker_cls.return_value
+    # __del__ is the GC backstop; it must route through shutdown() -> close().
+    connector.__del__()
+
+    worker.close.assert_called_once_with()
+
+
+def test_shutdown_scheduler_role_is_noop():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    # Scheduler role holds no store handle, so shutdown must be a safe no-op.
+    assert connector.connector_worker is None
+    connector.shutdown()
