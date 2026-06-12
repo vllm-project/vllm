@@ -251,13 +251,6 @@ class SpecDecodeBaseProposer:
                 DeepseekV4ROCMAiterMLASparseMetadata,
                 DeepseekV4ROCMAiterSparseSWAMetadata,
             )
-            from vllm.v1.attention.backends.mla.indexer import (
-                DeepseekV32IndexerMetadata,
-            )
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-                ROCMAiterMLASparseMetadata,
-            )
-            from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 
             # MiniMax-M3 sparse (lightning-indexer) attention. The multi-step
             # drafting machinery is shared code at num_speculative_tokens>1.
@@ -265,6 +258,13 @@ class SpecDecodeBaseProposer:
             from vllm.models.minimax_m3.common.sparse_attention import (
                 MiniMaxM3SparseMetadata,
             )
+            from vllm.v1.attention.backends.mla.indexer import (
+                DeepseekV32IndexerMetadata,
+            )
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+                ROCMAiterMLASparseMetadata,
+            )
+            from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
 
             rocm_types = [
                 TritonAttentionMetadata,

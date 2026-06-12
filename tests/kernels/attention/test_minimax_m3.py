@@ -230,9 +230,7 @@ def test_decode_index_topk_correctness(
     active_block_table = torch.randperm(
         num_pages, device="cuda", dtype=torch.int32
     ).reshape(active_batch, max_blocks)
-    block_table = torch.zeros(
-        batch, max_blocks, device="cuda", dtype=torch.int32
-    )
+    block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
     block_table[:active_batch] = active_block_table
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"

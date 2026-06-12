@@ -241,6 +241,4 @@ def test_sparse_full(num_tokens, block_size):
         )
         torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
         index_s = index_slot_mapping[t].item()
-        torch.testing.assert_close(
-            idx_flat[index_s], ik_ref[t], rtol=1e-2, atol=1e-2
-        )
+        torch.testing.assert_close(idx_flat[index_s], ik_ref[t], rtol=1e-2, atol=1e-2)

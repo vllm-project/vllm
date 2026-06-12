@@ -102,7 +102,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // conditionally compiled so impl registration is in source file
 
 #endif
-
 }
 
 #ifdef USE_ROCM

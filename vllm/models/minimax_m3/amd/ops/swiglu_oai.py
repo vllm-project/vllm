@@ -118,7 +118,9 @@ def _swiglu_oai_quant_kernel(
         aq,
         mask=m_mask[:, None],
     )
-    tl.store(as_ptr + offs_m * stride_sm + pid_b * stride_sk, sb.to(tl.uint8), mask=m_mask)
+    tl.store(
+        as_ptr + offs_m * stride_sm + pid_b * stride_sk, sb.to(tl.uint8), mask=m_mask
+    )
 
 
 def swiglu_oai_quantize_mxfp8(

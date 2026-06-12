@@ -2105,12 +2105,12 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         # dequant_mxfp8_to_bf16 handles arbitrary leading dims (*x.shape[:-1]),
         # so dequant the whole [E, N, K] weight in one vectorized call.
-        w13_bf16 = dequant_mxfp8_to_bf16(
-            layer.w13_weight, layer.w13_weight_scale
-        ).to(target_dtype)
-        w2_bf16 = dequant_mxfp8_to_bf16(
-            layer.w2_weight, layer.w2_weight_scale
-        ).to(target_dtype)
+        w13_bf16 = dequant_mxfp8_to_bf16(layer.w13_weight, layer.w13_weight_scale).to(
+            target_dtype
+        )
+        w2_bf16 = dequant_mxfp8_to_bf16(layer.w2_weight, layer.w2_weight_scale).to(
+            target_dtype
+        )
 
         replace_parameter(layer, "w13_weight", w13_bf16)
         replace_parameter(layer, "w2_weight", w2_bf16)

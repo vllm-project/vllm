@@ -215,8 +215,8 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     int64_t const* __restrict__ positions,       // [N] i64
     int64_t const* __restrict__ slot_mapping,    // main K/V slots or nullptr
     int64_t const* __restrict__ index_slot_mapping,  // index K slots/nullptr
-    scalar_t* __restrict__ kv_cache,             // [nb,2,bs,nkv,128] or nullptr
-    scalar_t* __restrict__ index_cache,          // [nb*bs, 128] or nullptr
+    scalar_t* __restrict__ kv_cache,     // [nb,2,bs,nkv,128] or nullptr
+    scalar_t* __restrict__ index_cache,  // [nb*bs, 128] or nullptr
     float const eps, int const rotary_dim, int const num_tokens, int const nq,
     int const nkv, int const niq, int const block_size,
     // kv_cache strides (in elements) for logical shape [nb, 2, bs, nkv, 128].
@@ -339,9 +339,9 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     // ── Cache inserts (sparse serving only). ───────────────────────────────
     if constexpr (kInsertKV) {
       // Guard (not early-return) so every thread reaches the PDL trigger below.
-      int64_t const sm =
-          (isK || isV) ? slot_mapping[tokenIdx]
-                       : (isIK ? index_slot_mapping[tokenIdx] : -1);
+      int64_t const sm = (isK || isV)
+                             ? slot_mapping[tokenIdx]
+                             : (isIK ? index_slot_mapping[tokenIdx] : -1);
       if (sm >= 0) {  // skip padded / unscheduled tokens
         if (isIK) {
           scalar_t* dst = index_cache + sm * kHeadDim + dim_base;
@@ -381,13 +381,12 @@ void launchFusedMiniMaxM3(scalar_t* qkv, scalar_t* q_out, scalar_t* index_q_out,
                           int64_t const* positions, int64_t const* slot_mapping,
                           int64_t const* index_slot_mapping, scalar_t* kv_cache,
                           scalar_t* index_cache, float const eps,
-                          int const rotary_dim,
-                          int const num_tokens, int const nq, int const nkv,
-                          int const niq, int const block_size,
-                          int64_t const kv_s_block, int64_t const kv_s_kv,
-                          int64_t const kv_s_token, int64_t const kv_s_head,
-                          bool const has_index, bool const insert_kv,
-                          cudaStream_t stream) {
+                          int const rotary_dim, int const num_tokens,
+                          int const nq, int const nkv, int const niq,
+                          int const block_size, int64_t const kv_s_block,
+                          int64_t const kv_s_kv, int64_t const kv_s_token,
+                          int64_t const kv_s_head, bool const has_index,
+                          bool const insert_kv, cudaStream_t stream) {
   // Slot count must match the kernel's compile-time gating.
   int const v_slots = insert_kv ? nkv : 0;
   int const idx_slots = has_index ? niq + 1 : 0;
@@ -417,13 +416,13 @@ void launchFusedMiniMaxM3(scalar_t* qkv, scalar_t* q_out, scalar_t* index_q_out,
   config.attrs = attrs;
   config.numAttrs = (sm_version >= 90) ? 1 : 0;
 
-  #define LAUNCH(IS_SPARSE, INSERT)                                            \
-    cudaLaunchKernelEx(                                                        \
-        &config,                                                               \
-        fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, IS_SPARSE, INSERT>,    \
-        qkv, q_out, index_q_out, q_norm_w, k_norm_w, iq_norm_w, ik_norm_w,     \
-        cos_sin_cache, positions, slot_mapping, index_slot_mapping, kv_cache,  \
-        index_cache, eps, rotary_dim, num_tokens, nq, nkv, niq, block_size,    \
+  #define LAUNCH(IS_SPARSE, INSERT)                                           \
+    cudaLaunchKernelEx(                                                       \
+        &config,                                                              \
+        fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, IS_SPARSE, INSERT>,   \
+        qkv, q_out, index_q_out, q_norm_w, k_norm_w, iq_norm_w, ik_norm_w,    \
+        cos_sin_cache, positions, slot_mapping, index_slot_mapping, kv_cache, \
+        index_cache, eps, rotary_dim, num_tokens, nq, nkv, niq, block_size,   \
         kv_s_block, kv_s_kv, kv_s_token, kv_s_head)
 #else
   // ROCm: standard kernel launch syntax (no PDL/stream serialization).
@@ -468,11 +467,11 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     int64_t num_heads, int64_t num_kv_heads, int64_t rotary_dim, double eps,
     std::optional<torch::stable::Tensor> index_q_norm_weight,  // [128]
     std::optional<torch::stable::Tensor> index_k_norm_weight,  // [128]
-    int64_t num_index_heads,                            // niq; 0 => dense
-    std::optional<torch::stable::Tensor> slot_mapping,  // [N] i64
+    int64_t num_index_heads,                                  // niq; 0 => dense
+    std::optional<torch::stable::Tensor> slot_mapping,        // [N] i64
     std::optional<torch::stable::Tensor> index_slot_mapping,  // [N] i64
-    std::optional<torch::stable::Tensor> kv_cache,      // [nb,2,bs,nkv,128]
-    std::optional<torch::stable::Tensor> index_cache,   // [nb,bs,128]
+    std::optional<torch::stable::Tensor> kv_cache,     // [nb,2,bs,nkv,128]
+    std::optional<torch::stable::Tensor> index_cache,  // [nb,bs,128]
     int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,  // [N, nq*128] contiguous
     std::optional<torch::stable::Tensor>
@@ -565,8 +564,8 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     kv_s_kv = kv_cache->stride(1);
     kv_s_token = kv_cache->stride(2);
     kv_s_head = kv_cache->stride(3);
-    effective_index_slot_mapping =
-        index_slot_mapping.has_value() ? &index_slot_mapping.value()
+    effective_index_slot_mapping = index_slot_mapping.has_value()
+                                       ? &index_slot_mapping.value()
                                        : &slot_mapping.value();
   }
   // Optional contiguous gather targets: when given, the normed/roped q (and
@@ -622,10 +621,9 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
             insert_kv
                 ? reinterpret_cast<int64_t const*>(slot_mapping->data_ptr())
                 : nullptr,
-            insert_kv
-                ? reinterpret_cast<int64_t const*>(
-                      effective_index_slot_mapping->data_ptr())
-                : nullptr,
+            insert_kv ? reinterpret_cast<int64_t const*>(
+                            effective_index_slot_mapping->data_ptr())
+                      : nullptr,
             insert_kv ? reinterpret_cast<st*>(kv_cache->data_ptr()) : nullptr,
             (insert_kv && has_index)
                 ? reinterpret_cast<st*>(index_cache->data_ptr())
