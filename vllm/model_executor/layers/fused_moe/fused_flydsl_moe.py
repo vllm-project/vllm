@@ -149,12 +149,26 @@ def fused_flydsl_moe_impl(
     in_dtype: str = "int4_bf16",
     out_dtype: str = "bf16",
     scale_is_bf16: bool = True,
+    tile_m : int | None = None,
+    tile_n : int | None = None,
+    tile_k : int | None = None,
+    tile_n2 : int | None = None,
+    tile_k2 : int | None = None,
 ) -> torch.Tensor:
     device = hidden_states.device
     tokens = hidden_states.shape[0]
-    tuned_config = try_get_optimal_config(num_experts, inter_dim)
-    tuned_config = tuned_config[min(tuned_config.keys(), key=lambda x: abs(x - tokens))]
     model_dim = hidden_states.shape[1]
+
+    tuned_config = {}
+    if tile_m and tile_n and tile_k and tile_n2 and tile_k2:
+        tuned_config["tile_m"] = tile_m
+        tuned_config["tile_n"] = tile_n
+        tuned_config["tile_k"] = tile_k
+        tuned_config["tile_n2"] = tile_n2
+        tuned_config["tile_k2"] = tile_k2
+    else:
+        tuned_config = try_get_optimal_config(num_experts, inter_dim)
+        tuned_config = tuned_config[min(tuned_config.keys(), key=lambda x: abs(x - tokens))]
     out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
     tile_m = tuned_config["tile_m"]
@@ -345,6 +359,11 @@ def fused_flydsl_moe_impl_fake(
     in_dtype: str = "int4_bf16",
     out_dtype: str = "bf16",
     scale_is_bf16: bool = True,
+    tile_m : int | None = None,
+    tile_n : int | None = None,
+    tile_k : int | None = None,
+    tile_n2 : int | None = None,
+    tile_k2 : int | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -372,7 +391,19 @@ def fused_flydsl_moe(
     in_dtype: str = "int4_bf16",
     out_dtype: str = "bf16",
     scale_is_bf16: bool = True,
+    config: dict | None = None,
 ) -> torch.Tensor:
+    tile_m = None
+    tile_n = None
+    tile_k = None
+    tile_n2 = None
+    tile_k2 = None
+    if config is not None:
+        tile_m = config.get("tile_m")
+        tile_n = config.get("tile_n")
+        tile_k = config.get("tile_k")
+        tile_n2 = config.get("tile_n2")
+        tile_k2 = config.get("tile_k2")
     return torch.ops.vllm.fused_flydsl_moe_impl(
         hidden_states=hidden_states,
         w1=w1,
@@ -389,4 +420,9 @@ def fused_flydsl_moe(
         in_dtype=in_dtype,
         out_dtype=out_dtype,
         scale_is_bf16=scale_is_bf16,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        tile_n2=tile_n2,
+        tile_k2=tile_k2,
     )

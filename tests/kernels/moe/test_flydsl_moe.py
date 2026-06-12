@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
+    compressed_tensors_moe_w4a16_flydsl,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 
@@ -25,70 +28,12 @@ RoutingBuffers = tuple[
     int,  # blocks
 ]
 
-
-def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
-    """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
-    Each contiguous 8-value block [v0..v7] -> 4 bytes:
-      b0=(v4<<4)|v0, b1=(v5<<4)|v1, b2=(v6<<4)|v2, b3=(v7<<4)|v3.
-    This matches the 7-op in-kernel unpack sequence and avoids any v_perm.
-    """
-    flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
-    assert flat.numel() % 8 == 0
-    u = (flat & 0xF).to(torch.uint8).view(-1, 8)
-    out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
-    out[:, 0] = u[:, 0] | (u[:, 4] << 4)
-    out[:, 1] = u[:, 1] | (u[:, 5] << 4)
-    out[:, 2] = u[:, 2] | (u[:, 6] << 4)
-    out[:, 3] = u[:, 3] | (u[:, 7] << 4)
-    return out.view(-1).to(torch.int8)
-
-
-def _unpack_gptq_int32_to_signed_int4(w_int32):
-    """Unpack GPTQ int32 [E, K//8, N] to signed int4 values [E, N, K] (as int8).
-    Shared by both the packed-int4 and bf16-dequant paths.
-    """
-    E = w_int32.shape[0]
-    # [E, K//8, N] -> transpose -> [E, N, K//8]
-    w = w_int32.transpose(1, 2).contiguous()
-    N = w.shape[1]
-    K_div8 = w.shape[2]
-    K = K_div8 * 8
-
-    # Unpack int32 -> 8 x uint4 values along K
-    w_expanded = w.unsqueeze(-1).expand(E, N, K_div8, 8)  # [E, N, K//8, 8]
-    shifts = torch.arange(8, device=w.device) * 4  # [0, 4, 8, ..., 28]
-    nibbles = ((w_expanded >> shifts) & 0xF).to(torch.int8)  # [E, N, K//8, 8]
-    nibbles = nibbles.reshape(E, N, K)  # [E, N, K] unsigned int4 as int8
-
-    # Convert unsigned [0,15] to signed [-8,7]
-    signed = nibbles.to(torch.int16) - 8
-    signed = signed.to(torch.int8)  # [E, N, K] signed int4 as int8
-    return signed
-
-
-def _gptq_int32_to_flydsl_packed(w_int32):
-    """Convert GPTQ int32 [E, K//8, N] to FlyDSL shuffled packed int4 [E, N, K//2].
-    Steps:
-    1. Unpack int32 to individual signed int4 values (as int8)
-    2. Apply FlyDSL preshuffle (on individual int8 values)
-    3. Pack with FlyDSL's interleaved int4 packing
-    """
-    signed = _unpack_gptq_int32_to_signed_int4(w_int32)
-    E, N, K = signed.shape
-
-    # FlyDSL preshuffle (operates on individual values)
-    shuffled = shuffle_weight(signed, layout=(16, 16))
-
-    # FlyDSL interleaved int4 packing
-    packed = _pack_shuffled_int8_to_packed_int4_no_perm(shuffled).contiguous()
-    return packed.view(E, N, K // 2)
-
-
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and on_gfx950()),
     reason="FlyDSL MoE requires HIP device and gfx950 arch",
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024])
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256,
+                                        512, 1024, 2048, 4096, 8192, 16384])
 @pytest.mark.parametrize("inter_dim", [256, 512])
 def test_flydsl_moe(num_tokens: int, inter_dim: int):
     device = "cuda"
@@ -161,11 +106,11 @@ def test_flydsl_moe(num_tokens: int, inter_dim: int):
     )
 
     w13 = w13_weight
-    w13 = _gptq_int32_to_flydsl_packed(w13)
+    w13 = compressed_tensors_moe_w4a16_flydsl._gptq_int32_to_flydsl_packed(w13)
     w13 = w13.view(-1).contiguous()
 
     w2 = w2_weight
-    w2 = _gptq_int32_to_flydsl_packed(w2)
+    w2 = compressed_tensors_moe_w4a16_flydsl._gptq_int32_to_flydsl_packed(w2)
     w2 = w2.view(-1).contiguous()
 
     w13_scale_flydsl = w13_scale

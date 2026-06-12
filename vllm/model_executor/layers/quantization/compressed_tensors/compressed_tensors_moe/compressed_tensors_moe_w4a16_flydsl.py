@@ -314,24 +314,6 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEExpertsModular:
-        if self.moe.is_lora_enabled:
-            assert self.moe_quant_config is not None
-            from vllm.triton_utils import HAS_TRITON
-
-            if HAS_TRITON:
-                from vllm.model_executor.layers.fused_moe import TritonWNA16Experts
-
-                layer.w13_weight = layer.w13_weight_packed
-                layer.w2_weight = layer.w2_weight_packed
-                return TritonWNA16Experts(
-                    moe_config=self.moe, quant_config=self.moe_quant_config
-                )
-            else:
-                raise NotImplementedError(
-                    "TritonExperts requires Triton. "
-                    "Install triton or disable LoRA for MoE."
-                )
-
         raise NotImplementedError
 
     def apply(
