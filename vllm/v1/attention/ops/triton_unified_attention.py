@@ -256,7 +256,8 @@ def kernel_unified_attention(
     stride_vs_head: tl.int64 = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3).
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
+    # triton_quant_kv.int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -441,6 +442,8 @@ def kernel_unified_attention(
                 HEAD_SIZE,
                 HEAD_SIZE_PADDED,
             )
+            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
         else:
             v_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
@@ -460,14 +463,13 @@ def kernel_unified_attention(
                 mask=dim_mask[:, None] & tile_mask[None, :],
                 other=0.0,
             )
-            # V : (TILE_SIZE, HEAD_SIZE)
+            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
             V_load = tl.load(
                 value_cache_ptr + v_offset,
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0.0,
             )
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -803,6 +805,45 @@ def unified_attention(
     use_td: bool = False,
 ):
     assert causal, "Only causal attention is supported"
+
+    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # sub-byte unpack); everything else goes through the core kernel below.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
+            unified_attention_int4,
+        )
+
+        if sinks is not None:
+            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+        unified_attention_int4(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return
+
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
