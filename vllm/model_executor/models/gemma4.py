@@ -725,10 +725,8 @@ class Gemma4DecoderLayer(nn.Module):
         if self.enable_moe_block:
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
-            # Router and MoE experts see the residual (pre-MLP state),
-            # matching the HF transformers forward path
-            router_logits = self.router(residual)
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
+            router_logits = self.router(residual)
             hidden_states_2 = self.moe(hidden_states_2, router_logits)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 

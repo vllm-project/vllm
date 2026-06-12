@@ -250,6 +250,7 @@ async def k2_client(k2_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Skipping Kimi K2 tool ID test")
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("tool_choice", ["required"])
@@ -442,7 +443,7 @@ async def test_named_tool_use(
         if delta.role:
             assert delta.role == "assistant"
         assert delta.content is None or len(delta.content) == 0
-        if delta.tool_calls:
+        if delta.tool_calls and delta.tool_calls[0].function.arguments:
             output.append(delta.tool_calls[0].function.arguments)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1

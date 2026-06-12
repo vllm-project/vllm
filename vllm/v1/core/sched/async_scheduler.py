@@ -27,10 +27,14 @@ class AsyncScheduler(Scheduler):
             scheduler_output.pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
             )
-            # The request will generate a new token plus num_spec_tokens
-            # in this scheduling step.
+            # The request will generate num_sampled_tokens_per_step new tokens
+            # plus num_spec_tokens in this scheduling step. Diffusion has no AR
+            # bonus token (num_sampled_tokens_per_step == 0) — only the canvas
+            # (spec) tokens.
             cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
-            request.num_output_placeholders += 1 + cur_num_spec_tokens
+            request.num_output_placeholders += (
+                self.num_sampled_tokens_per_step + cur_num_spec_tokens
+            )
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
