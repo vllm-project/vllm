@@ -397,9 +397,63 @@ class StructuredOutputManager:
                 and structured_req.structured_output_key[0]
                 == StructuredOutputOptions.STRUCTURAL_TAG
             ):
+                # The scheduler will advance the grammar with this step's
+                # tokens right away, but the step still contains reasoning
+                # content up to and including the end marker. Record where
+                # it ends so trim_reasoning_for_advance() can drop it.
+                structured_req.reasoning_end_token_index = (
+                    self._find_reasoning_end_index(reasoner, all_token_ids, start)
+                )
                 return True
 
         return False
+
+    @staticmethod
+    def _find_reasoning_end_index(
+        reasoner: "ReasoningParser", all_token_ids: list[int], start: int
+    ) -> int:
+        """Locates the last reasoning token within ``all_token_ids[start:]``.
+
+        Returns:
+            The absolute index of the token at which
+            ``is_reasoning_end_streaming`` first fires. Falls back to the
+            final index when no single token triggers the detection (e.g.
+            a multi-token marker only recognized on the full delta), which
+            conservatively treats the whole step as reasoning content.
+        """
+        prefix = list(itertools.islice(all_token_ids, start))
+        for idx in range(start, len(all_token_ids)):
+            token = all_token_ids[idx]
+            prefix.append(token)
+            if reasoner.is_reasoning_end_streaming(prefix, [token]):
+                return idx
+        return len(all_token_ids) - 1
+
+    def trim_reasoning_for_advance(
+        self, request: "Request", new_token_ids: list[int]
+    ) -> list[int]:
+        """Drops reasoning content from tokens about to advance the grammar.
+
+        When reasoning ends mid-step (see should_advance), the step's output
+        still contains reasoning tokens up to and including the end marker.
+        Those are not grammar content: feeding them to accept_tokens makes
+        the grammar reject the marker and kills the request (#44006).
+
+        Returns:
+            The suffix of ``new_token_ids`` that follows the reasoning-end
+            marker. Steps fully after the boundary are returned unchanged.
+        """
+        structured_req = request.structured_output_request
+        if structured_req is None:
+            return new_token_ids
+        end_idx = structured_req.reasoning_end_token_index
+        if end_idx is None:
+            return new_token_ids
+        first_idx = len(request.all_token_ids) - len(new_token_ids)
+        num_reasoning = end_idx + 1 - first_idx
+        if num_reasoning <= 0:
+            return new_token_ids
+        return new_token_ids[num_reasoning:]
 
     def clear_backend(self) -> None:
         if self.backend is not None:
