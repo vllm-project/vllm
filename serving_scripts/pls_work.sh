@@ -1152,6 +1152,7 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
       --head \\
       --node-ip-address=${HEAD_NODE_IP} \\
       --port=${RAY_PORT} \\
+      --include-dashboard=false \\
       --temp-dir=\"\${RAY_TMPDIR}\" \\
       --plasma-directory=\"\${RAY_PLASMA_DIRECTORY}\" \\
       --object-store-memory=\"\${RAY_OBJECT_STORE_MEMORY}\" \\
@@ -1161,6 +1162,7 @@ else
   \"${RAY_BIN}\" start --block \\
     --head \\
     --node-ip-address=${HEAD_NODE_IP} \\
+    --include-dashboard=false \\
     --port=${RAY_PORT} \\
     --temp-dir=\"\${RAY_TMPDIR}\" \\
     --plasma-directory=\"\${RAY_PLASMA_DIRECTORY}\" \\
@@ -1249,6 +1251,7 @@ if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
     \"${RAY_BIN}\" start --block \\
       --address=${HEAD_NODE_IP}:${RAY_PORT} \\
       --node-ip-address=${WORKER_IP} \\
+      --include-dashboard=false \\
       --temp-dir=\"\${RAY_TMPDIR}\" \\
       --plasma-directory=\"\${RAY_PLASMA_DIRECTORY}\" \\
       --object-store-memory=\"\${RAY_OBJECT_STORE_MEMORY}\" \\
@@ -1258,6 +1261,7 @@ else
   \"${RAY_BIN}\" start --block \\
     --address=${HEAD_NODE_IP}:${RAY_PORT} \\
     --node-ip-address=${WORKER_IP} \\
+    --include-dashboard=false \\
     --temp-dir=\"\${RAY_TMPDIR}\" \\
     --plasma-directory=\"\${RAY_PLASMA_DIRECTORY}\" \\
     --object-store-memory=\"\${RAY_OBJECT_STORE_MEMORY}\" \\
