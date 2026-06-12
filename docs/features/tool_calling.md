@@ -504,6 +504,13 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 !!! warning
     Llama's smaller models frequently fail to emit tool calls in the correct format. Results may vary depending on the model.
 
+## Benchmarking Tool-Calling Performance
+
+To measure serving latency and throughput on realistic tool-calling traffic,
+use the BFCL (Berkeley Function Calling Leaderboard) dataset with
+`vllm bench serve`. See the [BFCL benchmark example](../benchmarking/cli.md#bfcl-tool-calling-benchmark)
+for the full server + client commands.
+
 ## How to Write a Tool Parser Plugin
 
 A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
