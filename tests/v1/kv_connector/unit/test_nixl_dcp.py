@@ -13,6 +13,9 @@ No GPU or NIXL required.
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    compute_nixl_compatibility_hash,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
 )
@@ -136,3 +139,30 @@ class TestDcpSchedulerAccounting:
         assert delay_free
         assert params is not None
         assert params["remote_num_tokens"] == num_tokens
+
+
+class TestDcpCompatibilityHash:
+    """CP sizes are part of the handshake compatibility hash, so P/D pairs
+    with mismatched DCP/PCP sizes are rejected at handshake time."""
+
+    @staticmethod
+    def _hash(dcp_size: int = 1, pcp_size: int = 1) -> str:
+        vllm_config = create_vllm_config()
+        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+        return compute_nixl_compatibility_hash(
+            vllm_config, attn_backend_name="FLASH_ATTN", cross_layers_blocks=False
+        )
+
+    def test_identical_cp_sizes_match(self, default_vllm_config):
+        assert self._hash(dcp_size=8) == self._hash(dcp_size=8)
+
+    def test_dcp_mismatch_changes_hash(self, default_vllm_config):
+        assert self._hash(dcp_size=2) != self._hash(dcp_size=4)
+
+    def test_pcp_mismatch_changes_hash(self, default_vllm_config):
+        assert self._hash(pcp_size=1) != self._hash(pcp_size=2)
+
+    def test_equal_cp_product_different_split_changes_hash(self, default_vllm_config):
+        """dcp*pcp products match but rank interleavings differ; reject."""
+        assert self._hash(dcp_size=4, pcp_size=1) != self._hash(dcp_size=1, pcp_size=4)

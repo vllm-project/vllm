@@ -123,6 +123,10 @@ def compute_nixl_compatibility_hash(
         "cache_dtype": str(cache_config.cache_dtype),
         "cross_layers_blocks": cross_layers_blocks,
         "is_hma_enabled": is_hma_enabled,
+        # KV is interleaved across context-parallel ranks; layouts only pair
+        # up rank-to-rank when P and D use identical CP sizes.
+        "dcp_size": vllm_config.parallel_config.decode_context_parallel_size,
+        "pcp_size": vllm_config.parallel_config.prefill_context_parallel_size,
     }
 
     compat_hash = hash_factors(factors)
