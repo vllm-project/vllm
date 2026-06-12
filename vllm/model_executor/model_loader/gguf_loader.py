@@ -251,7 +251,7 @@ class GGUFModelLoader(BaseModelLoader):
                 for name, tensor in state_dict.items()
             }
 
-        def find_hf_name_in_tensor_map(hf_name: str) -> str | None:
+        def find_hf_name_in_tensor_map(hf_name: str) -> tuple[str, str] | None:
             """
             Map HuggingFace parameter name to GGUF tensor name.
 
@@ -267,16 +267,24 @@ class GGUFModelLoader(BaseModelLoader):
                         'model.multi_modal_projector.mm_soft_emb_norm.weight')
 
             Returns:
-                GGUF tensor name with suffix (e.g., 'mm.soft_emb_norm.weight')
-                or None if no mapping found
+                Tuple of the GGUF tensor name with suffix (e.g.,
+                'mm.soft_emb_norm.weight') and the HF name to store as the
+                mapping value, or None if no mapping found. The stored HF
+                name differs from the input when the 'vision_model.' nesting
+                layer had to be re-added, since vLLM's vision modules (e.g.
+                SiglipVisionModel) still use the nested naming.
             """
+            orig_hf_name = hf_name
+
             # In transformers v5, multimodal models (e.g. Gemma3) wrap
             # all sub-models under an outer 'model.' attribute, producing
             # state_dict keys like 'model.language_model.layers.0...' and
             # 'model.vision_tower.vision_model...'.  Strip this outer
             # prefix so the keys match what gguf-py expects.
+            had_outer_model_prefix = False
             if is_multimodal and hf_name.startswith("model."):
                 hf_name = hf_name[6:]  # Remove outer 'model.'
+                had_outer_model_prefix = True
 
             # Strip 'language_model.' prefix for multimodal models - gguf-py
             # tensor mappings expect parameter names without this prefix.
@@ -292,14 +300,18 @@ class GGUFModelLoader(BaseModelLoader):
             # Parse parameter name and suffix
             if hf_name.endswith((".weight", ".bias")):
                 base_name, suffix = hf_name.rsplit(".", 1)
+                suffix_sep = "."
             else:
                 base_name, suffix = hf_name, ""
+                suffix_sep = ""
                 # Handle '_weight' suffix (Gemma3 naming: parameter ends with
                 # '_weight' instead of '.weight')
                 if base_name.endswith("_weight"):
                     base_name = base_name[:-7]  # Remove '_weight'
                     suffix = "weight"
+                    suffix_sep = "_"
 
+            stored_hf_name = orig_hf_name
             gguf_name = None
             # Priority 1: Search vision/projector parameters for multimodal models
             if vision_name_map is not None:
@@ -308,15 +320,20 @@ class GGUFModelLoader(BaseModelLoader):
                     # Transformers v5.6 removed a layer of nesting from CLIP models.
                     # gguf-py tensor maps still expect the old nesting, so if gguf_name
                     # is not found, try adding back the 'vision_model.' nesting layer.
-                    gguf_name = vision_name_map.get_name(
-                        re.sub(
-                            # Pattern exhaustively matches everything that precedes
-                            # `vision_model.` in gguf.tensor_mapping.TensorNameMap
-                            r"^((model|siglip2|vision_tower)\.)(?!vision_model\.)(.*)$",
-                            r"\1vision_model.\3",
-                            base_name,
-                        )
+                    renested_base_name = re.sub(
+                        # Pattern exhaustively matches everything that precedes
+                        # `vision_model.` in gguf.tensor_mapping.TensorNameMap
+                        r"^((model|siglip2|vision_tower)\.)(?!vision_model\.)(.*)$",
+                        r"\1vision_model.\3",
+                        base_name,
                     )
+                    gguf_name = vision_name_map.get_name(renested_base_name)
+                    if gguf_name is not None:
+                        # vLLM's vision modules still use the nested naming, so
+                        # store the re-nested name as the mapping value too.
+                        stored_hf_name = renested_base_name + suffix_sep + suffix
+                        if had_outer_model_prefix:
+                            stored_hf_name = "model." + stored_hf_name
 
             # Priority 2: Search text backbone parameters
             if gguf_name is None:
@@ -325,17 +342,20 @@ class GGUFModelLoader(BaseModelLoader):
             if gguf_name is None:
                 return None
 
-            return gguf_name + "." + suffix
+            return gguf_name + "." + suffix, stored_hf_name
 
         # Build mapping and track unmapped parameters
         unmapped_params = []
         for hf_name in state_dict:
-            gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
+            mapped_names = find_hf_name_in_tensor_map(hf_name)
 
             # Track mapping success
-            if gguf_name_with_suffix is not None:
-                gguf_to_hf_name_map[gguf_name_with_suffix] = hf_name
-                logger.debug("Mapped GGUF %s → HF %s", gguf_name_with_suffix, hf_name)
+            if mapped_names is not None:
+                gguf_name_with_suffix, stored_hf_name = mapped_names
+                gguf_to_hf_name_map[gguf_name_with_suffix] = stored_hf_name
+                logger.debug(
+                    "Mapped GGUF %s → HF %s", gguf_name_with_suffix, stored_hf_name
+                )
             elif hf_name not in gguf_to_hf_name_map.values():
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)
