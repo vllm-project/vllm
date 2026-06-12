@@ -8,6 +8,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
@@ -50,6 +51,8 @@ class WorkerSentinel:
         params = ft_request.params
         self._clean_worker_state()
         if self.dp_size > 1:
+            old_cpu_group = get_dp_group().cpu_group
+            stateless_destroy_torch_distributed_process_group(old_cpu_group)
             port = params["new_stateless_dp_group_port"]
             get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
                 self.data_parallel_master_ip,
