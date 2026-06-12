@@ -202,7 +202,8 @@ def test_pynccl_all_gather():
 
 @worker_fn_wrapper
 def cuda_communicator_all_gather_dim_worker_fn():
-    ensure_model_parallel_initialized(2, 1)
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 1)
 
     tp_group = get_tp_group()
     comm = tp_group.device_communicator

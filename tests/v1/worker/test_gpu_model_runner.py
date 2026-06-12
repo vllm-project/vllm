@@ -42,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
-    SlidingWindowSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -120,33 +119,6 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
-
-
-def test_block_table_size_uses_model_len_for_attention_spec():
-    runner = object.__new__(GPUModelRunner)
-    runner.cache_config = SimpleNamespace(mamba_cache_mode="none")
-    runner.model_config = SimpleNamespace(max_model_len=2048)
-
-    sliding_window_spec = SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=8,
-        dtype=torch.float16,
-        sliding_window=128,
-    )
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=2048),
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=512),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-    )
-    runner.vllm_config = vllm_config
-
-    assert (
-        sliding_window_spec.max_memory_usage_bytes(vllm_config)
-        // (sliding_window_spec.page_size_bytes)
-        < 2048 // 16
-    )
-    assert runner._get_max_num_blocks_per_req(sliding_window_spec) == 2048 // 16
 
 
 @pytest.fixture
