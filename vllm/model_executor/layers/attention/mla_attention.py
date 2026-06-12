@@ -1437,18 +1437,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             and backend_supports_prefill_query_quantization()
         )
 
-        # Some backends (e.g. AITER ASM on gfx950) only accept FP8 Q. Honor
-        # their declared requirement even when the user-facing flag is off.
+        # For backends only supporting FP8 Q, auto-enable FP8 even if
+        # user flag use_prefill_query_quantization is not set.
         if not use_fp8 and is_quantized_kv_cache(vllm_config.cache_config.cache_dtype):
             from vllm.v1.attention.backends.mla.prefill import (
                 get_mla_prefill_backend,
             )
 
-            try:
-                backend_cls = get_mla_prefill_backend(vllm_config)
-            except Exception:  # noqa: BLE001
-                backend_cls = None
-            if backend_cls is not None and backend_cls.requires_fp8_query_quantization:
+            backend_cls = get_mla_prefill_backend(vllm_config)
+            if backend_cls.requires_fp8_query_quantization:
                 use_fp8 = True
                 logger.info_once(
                     "FP8 prefill attention auto-enabled: %s backend "
