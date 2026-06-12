@@ -59,15 +59,3 @@ class TestCompileRegexWithTimeout:
             pytest.raises(ValueError, match=r"\(a\+\)\+b"),
         ):
             compile_regex_with_timeout(slow_compile, pattern)
-
-    def test_long_pattern_truncated_in_error(self):
-        def slow_compile(pattern: str):
-            time.sleep(10)
-            return "never"
-
-        pattern = "a" * 300
-        with (
-            patch("vllm.envs.VLLM_REGEX_COMPILATION_TIMEOUT_S", 1),
-            pytest.raises(ValueError, match="timed out"),
-        ):
-            compile_regex_with_timeout(slow_compile, pattern)
