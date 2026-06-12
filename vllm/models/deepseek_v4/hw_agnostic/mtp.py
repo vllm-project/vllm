@@ -33,16 +33,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.deepseek_mtp import SharedHead
+from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.models.deepseek_mtp import SharedHead
-from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .model import (
     DeepseekV4DecoderLayer,
     hc_head,
 )
-from vllm.model_executor.models.utils import maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -112,6 +112,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         import vllm.model_executor.layers.mhc as mhc  # noqa: F401
 
         self.hc_head_op = mhc.HCHeadOp()
+        self.mhc_post_op = mhc.MHCPostOp()
 
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
@@ -147,9 +148,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        hidden_states = self.mtp_block.hc_post(
-            hidden_states, residual, post_mix, res_mix
-        )
+        hidden_states = self.mhc_post_op(hidden_states, residual, post_mix, res_mix)
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.

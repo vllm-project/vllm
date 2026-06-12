@@ -9,25 +9,16 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.models.deepseek_v4.hw_agnostic.ops.attention import (
-    DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionWrapper,
-)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
-    MoERunner,
-    UnquantizedFusedMoEMethod,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,15 +28,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import (
-    QuantizationConfig,
-    QuantizationMethods,
-)
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -53,10 +36,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -66,8 +45,13 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-
-_DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+from vllm.models.deepseek_v4.hw_agnostic.ops.attention import (
+    DeepseekV4Indexer,
+    DeepseekV4MLAModules,
+    DeepseekV4MultiHeadLatentAttentionWrapper,
+)
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 
 class DeepseekV4MLP(nn.Module):
@@ -119,98 +103,6 @@ class DeepseekV4MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-
-class DeepseekV4FP8Config(Fp8Config):
-    """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
-
-    DeepSeek V4 checkpoints always use FP8 block quantization for
-    linear/attention layers. The MoE expert weights vary by checkpoint:
-    - ``expert_dtype="fp4"`` (e.g. DeepSeek-V4-Flash): MXFP4 experts
-      with ue8m0 (e8m0fnu) FP8 linear scales.
-    - ``expert_dtype="fp8"`` (e.g. DeepSeek-V4-Flash-Base): FP8 block
-      experts with float32 FP8 linear scales.
-
-    The dispatch and the linear scale dtype are both keyed off
-    ``expert_dtype`` from the model's hf_config; missing values default
-    to ``"fp4"`` so existing FP4 checkpoints stay unchanged.
-
-    NOTE: ``expert_dtype`` is resolved lazily because this config is
-    constructed during VllmConfig setup, before ``set_current_vllm_config``
-    is active. Reading hf_config eagerly in ``__init__`` would always see
-    the default ``"fp4"`` and silently misroute Flash-Base checkpoints.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._resolved_expert_dtype: str | None = None
-        # ``is_scale_e8m0`` is a property that resolves on first read,
-        # by which time the current vllm_config has been set.
-
-    @property
-    def expert_dtype(self) -> str:
-        if self._resolved_expert_dtype is None:
-            try:
-                hf_config = get_current_vllm_config().model_config.hf_config
-            except Exception:
-                # vllm_config not yet set; defer the decision until a
-                # later call lands inside set_current_vllm_config.
-                return "fp4"
-            expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
-            if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
-                raise ValueError(
-                    f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r}; "
-                    f"expected one of {_DEEPSEEK_V4_EXPERT_DTYPES}."
-                )
-            self._resolved_expert_dtype = expert_dtype
-            from vllm.logger import init_logger
-
-            init_logger(__name__).info_once(
-                "DeepSeek V4 expert_dtype resolved to %r", expert_dtype
-            )
-        return self._resolved_expert_dtype
-
-    @property
-    def is_scale_e8m0(self) -> bool:
-        # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
-        # checkpoints (Flash-Base) store them as float32.
-        return self.expert_dtype == "fp4"
-
-    @classmethod
-    def get_name(cls) -> QuantizationMethods:
-        return "deepseek_v4_fp8"
-
-    @classmethod
-    def override_quantization_method(
-        cls, hf_quant_cfg, user_quant, hf_config=None
-    ) -> QuantizationMethods | None:
-        if not (
-            isinstance(hf_quant_cfg, dict)
-            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
-        ):
-            return None
-        model_type = getattr(hf_config, "model_type", None)
-        if model_type == "deepseek_v4" or user_quant == "deepseek_v4_fp8":
-            return "deepseek_v4_fp8"
-        return None
-
-    def get_quant_method(self, layer, prefix):
-        if isinstance(layer, FusedMoE):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            if self.expert_dtype == "fp4":
-                return Mxfp4MoEMethod(layer.moe_config)
-            # expert_dtype == "fp8": fall through to Fp8Config which
-            # returns Fp8MoEMethod with block-wise float32 scales.
-        return super().get_quant_method(layer, prefix)
-
-    def is_mxfp4_quant(self, prefix, layer):
-        return isinstance(layer, FusedMoE) and self.expert_dtype == "fp4"
-
 
 
 class DeepseekV4MoE(nn.Module):
@@ -286,7 +178,6 @@ class DeepseekV4MoE(nn.Module):
             )
 
         self._init_fused_moe_experts(config, quant_config, prefix)
-
 
     def _init_fused_moe_experts(
         self,
@@ -520,10 +411,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         super().__init__()
 
         # Lazy import to avoid top-level tilelang dependency.
-        # Registers both torch.ops.vllm.mhc_pre and mhc_post
-        import vllm.model_executor.layers.mhc  as mhc # noqa: F401
+        # Registers torch.ops.vllm.mhc_pre / mhc_fused_post_pre.
+        import vllm.model_executor.layers.mhc as mhc  # noqa: F401
 
-        self.mhc_post = mhc.MHCPostOp()
         self.mhc_pre = mhc.MHCPreOp()
         self.mhc_fused_post_pre = mhc.MHCFusedPostPreOp()
 
@@ -609,16 +499,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             sinkhorn_repeat=self.hc_sinkhorn_iters,
         )
         return layer_input, post_mix, res_mix
-
-    def hc_post(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ):
-        # return torch.ops.vllm.mhc_post(x, residual, post, comb)
-        return self.mhc_post(x, residual, post, comb)
 
     def forward(
         self,
@@ -751,6 +631,7 @@ class DeepseekV4Model(nn.Module):
         import vllm.model_executor.layers.mhc as mhc  # noqa: F401
 
         self.hc_head_op = mhc.HCHeadOp()
+        self.mhc_post_op = mhc.MHCPostOp()
 
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
@@ -818,8 +699,7 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        else:
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+        hidden_states = self.mhc_post_op(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -967,9 +847,7 @@ def hc_head(
     compilation config. Callers (``DeepseekV4Model``, the MTP layer) build
     the op once and pass it in here.
     """
-    return hc_head_op(
-        hidden_states, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps
-    )
+    return hc_head_op(hidden_states, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:

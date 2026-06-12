@@ -106,7 +106,13 @@ class DeepseekV4MLAModules:
 
 
 # --8<-- [start:multi_head_latent_attention]
-@PluggableLayer.register("deepseek_v4_multi_head_latent_attention")
+# Public name for this PluggableLayer. Out-of-tree subclasses that override 
+# this layer should reuse the same suffix so the static-forward-context 
+# lookup keeps resolving to the layer instance.
+LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
+
+
+@PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
@@ -236,10 +242,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             topk_indices_buffer=self.topk_indices_buffer,
         )
         # Register this layer in the compilation config's static forward context
-        # This allows the custom op to retrieve the layer during execution
+        # so the ``deepseek_v4_attention`` custom op (registered below) can
+        # retrieve the per-layer instance by name during execution.
         compilation_config = mla_modules.vllm_config.compilation_config
-        # HACK
-        self.layer_name = prefix + ".deepseek_v4_multi_head_latent_attention"
+        self.layer_name = f"{prefix}.{LAYER_NAME}"
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
