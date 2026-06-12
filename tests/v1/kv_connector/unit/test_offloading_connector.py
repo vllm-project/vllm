@@ -554,3 +554,91 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     finally:
         subscriber.close()
         del llm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="HMA mamba-align CPU offload test is CUDA-only",
+)
+@pytest.mark.parametrize(
+    "model,block_size,tp_size",
+    [
+        # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
+        # ("tiiuae/falcon-mamba-7b", 16, 1),
+        ("state-spaces/mamba-1.4b-hf", 16, 1)
+    ],
+)
+def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 << 30,
+            "block_size": block_size,
+        },
+    )
+    llm = LLM(
+        model=model,
+        max_model_len=block_size * 10,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=tp_size,
+        kv_transfer_config=kv_transfer_config,
+        language_model_only=True,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+        disable_hybrid_kv_cache_manager=False,
+    )
+
+    _PROMPT_SIZE: int = block_size * 2
+    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+
+    # build prompt ids to match prompt_size
+    tokenizer = llm.get_tokenizer()
+    raw_ids: list[int] = tokenizer.encode(_PROMPT_TEXT)
+    while len(raw_ids) < _PROMPT_SIZE:
+        raw_ids = tokenizer.encode("....") + raw_ids
+    initial_ids: list[int] = raw_ids[:_PROMPT_SIZE]
+
+    sampling_params = SamplingParams(max_tokens=128, temperature=0, ignore_eos=True)
+
+    failures: list[str] = []
+
+    def _get_output_str(outputs):
+        return outputs[0].outputs[0].text
+
+    def _verify(llm, prompt, label: str):
+        cold_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+        _wait_for_prefix_cache_reset(llm)
+        cpu_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+
+        cold_text = _get_output_str(cold_outputs)
+        cpu_text = _get_output_str(cpu_outputs)
+        print(f"{label} : cold outputs\n{cold_text}")
+        print(f"{label} : cpu outputs\n{cpu_text}")
+
+        if cold_text != cpu_text:
+            failures.append(
+                f"{label}: mismatch\n  cold: {cold_text!r}\n  cpu:  {cpu_text!r}"
+            )
+
+    try:
+        # Mamba has only a single state. The CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at the boundary,
+        # The CPU offload should not load the cached block.
+        # This is because we'd use that state to recompute the last token. This
+        # does not work for mamba as there is only one KV value and that is for
+        # for the token at the boundary.
+        # This is fine for other attention types as we have all the necessary
+        # token KV values in the hit blocks.
+        prompt = TokensPrompt(prompt_token_ids=initial_ids)
+        _verify(llm, prompt, "block-boundary-prompt")
+
+        # Test for prompt token ids at non-block boundaries.
+        # Reuse is okay for this case.
+        prompt = TokensPrompt(prompt_token_ids=[0] + initial_ids)
+        _verify(llm, prompt, "block-mid-prompt")
+
+        assert not failures, "\n\n".join(failures)
+
+    finally:
+        del llm
