@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
+
 else:
     try:
         from torch.library import register_fake
@@ -496,9 +497,9 @@ def silu_and_mul_per_block_quant(
     is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
-    assert input.shape[-1] % 2 == 0, (
-        f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
-    )
+    assert (
+        input.shape[-1] % 2 == 0
+    ), f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
 
     # Output is half the width of input (after silu_and_mul)
     num_tokens = input.shape[0]
@@ -1633,16 +1634,19 @@ def scaled_fp4_quant(
     block_size = 16
 
     assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
-    assert input.dtype in (torch.float16, torch.bfloat16), (
-        f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
-    )
+    assert input.dtype in (
+        torch.float16,
+        torch.bfloat16,
+    ), f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     if padded_n is not None:
         assert padded_n >= n, f"padded_n must be >= n, got padded_n={padded_n}, n={n}."
-        assert padded_n % block_size == 0, (
-            f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
-        )
+        assert (
+            padded_n % block_size == 0
+        ), f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
 
-    use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
+    use_8x4_sf_layout = (
+        True if "trtllm" in backend and m <= 32 else False
+    )  # noqa: SIM210
     if use_8x4_sf_layout and padded_n is not None and padded_n != n:
         # TODO: support this case
         raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
@@ -1691,9 +1695,9 @@ def scaled_fp4_experts_quant(
         output_scales: The blockscale tensor in FP8-E4M3
     """
     assert not current_platform.is_rocm()
-    assert input_tensor.ndim == 2, (
-        f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
-    )
+    assert (
+        input_tensor.ndim == 2
+    ), f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
@@ -1754,9 +1758,9 @@ def silu_and_mul_scaled_fp4_experts_quant(
         output_scales: The blockscale tensor in FP8-E4M3
     """
     assert not current_platform.is_rocm()
-    assert input_tensor.ndim == 2, (
-        f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
-    )
+    assert (
+        input_tensor.ndim == 2
+    ), f"input.ndim needs to be == 2, but got {input_tensor.ndim}."
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
@@ -2004,9 +2008,9 @@ def allspark_repack_weight(
     scale_reorder = torch.empty((1, N_32align), device=scale.device, dtype=scale.dtype)
     zero_point_reorder = None
     if has_zp:
-        assert zero_point is not None, (
-            "zero_point must be provided for asymmetric quantization."
-        )
+        assert (
+            zero_point is not None
+        ), "zero_point must be provided for asymmetric quantization."
         zero_point_reorder = torch.empty(
             (1, N_32align), device=zero_point.device, dtype=zero_point.dtype
         )
@@ -2079,9 +2083,9 @@ def scaled_int8_quant(
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
-        assert symmetric == (azp is None), (
-            "azp must only be provided for asymmetric quantization."
-        )
+        assert symmetric == (
+            azp is None
+        ), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, azp
 
@@ -3484,9 +3488,9 @@ def onednn_scaled_int8_quant(
     input = input.view((token_num, input.shape[-1]))
     if scale is not None:
         # static-per-tensor quantization.
-        assert symmetric == (azp is None), (
-            "azp must only be provided for asymmetric quantization."
-        )
+        assert symmetric == (
+            azp is None
+        ), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, azp
 
@@ -3784,6 +3788,19 @@ def fusedQuantizeMx(
         raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
 
 
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+
+    @register_fake("_qutlass_C::fusedQuantizeNv")
+    def _fake_fused_quantize_nv(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        xh_e2m1: torch.Tensor,
+        xh_e4m3: torch.Tensor,
+        global_scale: torch.Tensor,
+    ):
+        return xh_e2m1, xh_e4m3
+
+
 def fusedQuantizeNv(
     a: torch.Tensor, b: torch.Tensor, global_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -3800,32 +3817,11 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    safeFusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
-    return xh_e2m1, xh_e4m3
+    out1, out2 = torch.ops._qutlass_C.fusedQuantizeNv(
+        a, b, xh_e2m1, xh_e4m3, global_scale
+    )
+    return out1, out2
 
-@torch.library.custom_op("vllm::safeFusedQuantizeNv", mutates_args=())
-def safeFusedQuantizeNv(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    xh_e2m1: torch.Tensor,
-    xh_e4m3: torch.Tensor,
-    global_scale: torch.Tensor,
-) -> None:
-    torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
-    return
-
-
-if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
-
-    @register_fake("vllm::safeFusedQuantizeNv")
-    def _fake_fused_quantize_nv(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        xh_e2m1: torch.Tensor,
-        xh_e4m3: torch.Tensor,
-        global_scale: torch.Tensor,
-    ) -> None:
-        return
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     """

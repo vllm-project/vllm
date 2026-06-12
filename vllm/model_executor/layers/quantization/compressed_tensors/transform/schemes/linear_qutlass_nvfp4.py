@@ -30,11 +30,19 @@ def is_qutlass_fp4_scheme(
     quant_scheme: CompressedTensorsScheme | None,
     input_tfms: dict[int, TransformTuple],
 ) -> bool:
-    return (
-        isinstance(quant_scheme, (CompressedTensorsW4A4Fp4,))
-        and len(input_tfms) == 1
-        and input_tfms[0].scheme.head_dim == quant_scheme.group_size
-    )
+    if not isinstance(quant_scheme, (CompressedTensorsW4A4Fp4,)):
+        return False
+
+    if not input_tfms:
+        return False
+
+    # Check if all input transforms have head_dim == group_size
+    # Supports both single layers and merged layers (QKV, gate+up)
+    for tfm_tuple in input_tfms.values():
+        if tfm_tuple.scheme.head_dim != quant_scheme.group_size:
+            return False
+
+    return True
 
 
 class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
@@ -61,11 +69,9 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         )
 
         assert self.input_transform is not None
-        assert len(self.input_transform.weight.partitions) == 1
-        assert (
-            self.input_transform.weight.partitions[0].data.shape[0]
-            == layer.scheme.group_size
-        )
+        assert len(self.input_transform.weight.partitions) >= 1
+        for partition in self.input_transform.weight.partitions.values():
+            assert partition.data.shape[0] == layer.scheme.group_size
 
         return ret
 
