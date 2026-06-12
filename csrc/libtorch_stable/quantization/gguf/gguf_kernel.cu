@@ -282,6 +282,11 @@ torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,  // quant weight
             (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
             (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
         break;
+      case 20:
+        ggml_mul_mat_iq4_nl_q8_1_cuda(
+            (void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+            (scalar_t*)Y.data_ptr(), col, row, batch, padded, row, stream);
+        break;
     }
   });
   return Y;
