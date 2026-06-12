@@ -312,16 +312,39 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             device=device,
         )
 
+        self.fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+
         # DCP is only supported on the mixed-batch fp8 path: the separate
         # prefill/decode path returns LSE only for decode tokens while the
         # merge needs LSE for every token (see PR #34429 discussion).
         if parallel_config.decode_context_parallel_size > 1:
-            fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
-            if not fp8_use_mixed_batch:
+            if not self.fp8_use_mixed_batch:
                 raise NotImplementedError(
                     "DCP for FlashMLA sparse is only supported on the "
                     "mixed-batch fp8 path (num_heads < "
                     f"{MIN_HEADS_FOR_BF16_PREFILL})"
+                )
+            # The fp8 decode kernel envelope (head padding and the
+            # tile-scheduler metadata sized from it) is computed from this
+            # rank's local head count, but under DCP the kernel runs on
+            # num_heads * dcp_world_size heads after the q all-gather. Reject
+            # configs where the two round to different kernel envelopes
+            # (e.g. 128 q-heads with TP=8, DCP=8: local 16 pads to 64 while
+            # the gathered 128 needs 128).
+            gathered_num_heads = (
+                self.num_heads * parallel_config.decode_context_parallel_size
+            )
+            gathered_padded_heads = FlashMLASparseImpl._compute_fp8_decode_padded_heads(
+                gathered_num_heads
+            )
+            if self.fp8_decode_padded_heads != gathered_padded_heads:
+                raise NotImplementedError(
+                    "DCP for FlashMLA sparse requires the local and "
+                    "DCP-gathered head counts to pad to the same fp8 decode "
+                    f"kernel envelope; got {self.num_heads} local heads "
+                    f"(pad to {self.fp8_decode_padded_heads}) vs "
+                    f"{gathered_num_heads} gathered heads (pad to "
+                    f"{gathered_padded_heads})"
                 )
 
     def _build_fp8_mixed_decode_prefill(
@@ -524,9 +547,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             | FlashMLASparseMetadata.FP8KernelMetadata
             | None
         ) = None
-        fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
         if self.use_fp8_kv_cache:
-            if fp8_use_mixed_batch:
+            if self.fp8_use_mixed_batch:
                 fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(cm)
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
@@ -543,7 +565,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
             fp8_extra_metadata=fp8_extra_metadata,
-            fp8_use_mixed_batch=fp8_use_mixed_batch,
+            fp8_use_mixed_batch=self.fp8_use_mixed_batch,
         )
 
         return metadata
@@ -789,39 +811,36 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         )
         fp8_metadata = attn_metadata.fp8_extra_metadata
 
-        if self.need_to_return_lse_for_decode:
-            # DCP: keep the LSE so the caller can merge the partial attention
-            # outputs across DCP ranks (cp_lse_ag_out_rs).
-            _attn_out, _lse = self._fp8_flash_mla_kernel(
-                q=q.unsqueeze(0),  # add batch_dim: (T, H, D) -> (1, T, H, D)
-                kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
-                topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
-                kernel_metadata=fp8_metadata,
-            )
-            # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
-            out = _attn_out.squeeze(0)
-            # LSE is (1, H, T) -- heads BEFORE seq -- so squeeze and
-            # transpose to get (T, H), matching attn_out token order.
-            lse = _lse.squeeze(0).transpose(0, 1)
-            # Rows where this rank owns none of the selected tokens (all
-            # converted indices are -1; routine for the first tokens of a
-            # request under DCP) produce undefined out/lse. Neutralize them
-            # so the cross-rank merge ignores this rank: (out=0, lse=-inf)
-            # is the identity element of the LSE merge. No device sync here.
-            empty_rows = (topk_indices == -1).all(dim=-1)  # (T,) bool
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
-            return out, lse
-
-        _attn_out, _ = self._fp8_flash_mla_kernel(
+        _attn_out, _lse = self._fp8_flash_mla_kernel(
             q=q.unsqueeze(0),  # unsqueeze to add batch_dim: (T, H, D) -> (1, T, H, D)
             kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
             topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
             kernel_metadata=fp8_metadata,
         )
-
         # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
-        return _attn_out.squeeze(0), None
+        out = _attn_out.squeeze(0)
+
+        if not self.need_to_return_lse_for_decode:
+            return out, None
+
+        # DCP: keep the LSE so the caller can merge the partial attention
+        # outputs across DCP ranks (cp_lse_ag_out_rs).
+        # LSE is (1, H, T) -- heads BEFORE seq -- so squeeze and
+        # transpose to get (T, H), matching attn_out token order.
+        lse = _lse.squeeze(0).transpose(0, 1)
+        # Rows where this rank owns none of the selected tokens (all
+        # converted indices are -1; routine for the first tokens of a
+        # request under DCP) produce undefined out/lse. Neutralize them
+        # so the cross-rank merge ignores this rank: (out=0, lse=-inf)
+        # is the identity element of the LSE merge. No device sync here.
+        empty_rows = (topk_indices == -1).all(dim=-1)  # (T,) bool
+        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        # The head-padding slice in _fp8_flash_mla_kernel can leave `out`
+        # non-contiguous, and it feeds reduce_scatter in the cp merge;
+        # no-op when no padding was applied. lse is made contiguous by
+        # the merge itself (_cp_lse_common).
+        return out.contiguous(), lse
 
     def _fp8_flash_mla_kernel(
         self,
