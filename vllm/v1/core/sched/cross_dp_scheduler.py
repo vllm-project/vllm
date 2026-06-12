@@ -102,7 +102,8 @@ class RequestManager:
                 i for i in range(self.cp_world_size)
             ]
         # Short request (or long with specify_dp=True):
-        # pick the least-loaded rank that has capacity and budget.
+        # pick the rank with the most remaining token budget; when budgets
+        # are equal, prefer the rank with fewer active requests.
         candidates = [
             rank for rank in range(self.cp_world_size)
             if self.num_req_per_dp[rank] < self.max_num_seqs
@@ -110,7 +111,7 @@ class RequestManager:
         ]
         if not candidates:
             return None
-        return [min(candidates, key=lambda rank: self.num_req_per_dp[rank])]
+        return [max(candidates, key=lambda rank: (rank_budgets[rank], -self.num_req_per_dp[rank]))]
 
     def add_req(self, request: Request) -> None:
         request_id = request.request_id
@@ -1217,9 +1218,9 @@ class CrossDPScheduler(Scheduler):
                     continue
 
                 if len(selected_dp) > 1:
-                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                    logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}, specify_dp: {specify_dp}, num_new_tokens: {num_new_tokens} rank_budgets: {rank_budgets}, num_req_per_dp: {self.request_manager.num_req_per_dp}")
                 else:
-                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}")
+                    logger.info(f"It's a short req, selected_dp: {selected_dp}, request id: {request.request_id}, specify_dp: {specify_dp}, num_new_tokens: {num_new_tokens}, rank_budgets: {rank_budgets}, num_req_per_dp: {self.request_manager.num_req_per_dp}")
 
                 # [vllm add]
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -1280,6 +1281,12 @@ class CrossDPScheduler(Scheduler):
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
+                    # Count the request now so that num_req_per_dp is accurate
+                    # while the request waits for KV. add_req is idempotent, so
+                    # the subsequent call (when the request enters running) will
+                    # be a no-op.
+                    self.request_manager.add_req(request)
+                    self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
