@@ -239,8 +239,7 @@ On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so vLLM 
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
 vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
