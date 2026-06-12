@@ -369,12 +369,22 @@ class ReplicatedLinear(LinearBase):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
 
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
+        # GGUF omits the leading 1 on single-output weights; unsqueeze before
+        # materialize so UninitializedParameter gets shape [1, hidden], not [hidden].
+        if (
+            is_gguf_weight
+            and self.output_size == 1
+            and loaded_weight.dim() == 1
+            and loaded_weight.size(0) == self.input_size
+        ):
+            loaded_weight = loaded_weight.unsqueeze(0)
+
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
-
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
 
         assert param.size() == loaded_weight.size(), (
             f"Tried to load weights of size {loaded_weight.size()}"
@@ -700,9 +710,28 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if isinstance(loaded_shard_id, tuple) and (
             is_gguf_weight or is_gguf_weight_type
         ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
+            # GGUF can fuse multiple framework slots into one on-disk tensor.
+            # Split along output_dim by per-slot sizes and recurse.
+            if is_gguf_weight_type:
+                for slot in loaded_shard_id:
+                    self.weight_loader(param, loaded_weight, slot)
+                return
+            output_dim = getattr(param, "output_dim", None)
+            assert output_dim is not None, (
+                "GGUF fused tuple-shard requires param.output_dim to be set."
             )
+            slot_sizes = [self.output_sizes[i] for i in loaded_shard_id]
+            assert sum(slot_sizes) == loaded_weight.size(output_dim), (
+                f"Fused GGUF weight along dim {output_dim} has size "
+                f"{loaded_weight.size(output_dim)} but slots "
+                f"{loaded_shard_id} sum to {sum(slot_sizes)}."
+            )
+            offset = 0
+            for slot, size in zip(loaded_shard_id, slot_sizes):
+                slice_ = loaded_weight.narrow(output_dim, offset, size)
+                self.weight_loader(param, slice_, slot)
+                offset += size
+            return
         if is_gguf_weight_type:
             if loaded_shard_id is not None:
                 param.data[loaded_shard_id].copy_(loaded_weight)
