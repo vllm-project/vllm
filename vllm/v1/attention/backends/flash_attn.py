@@ -707,6 +707,7 @@ class FlashAttentionImpl(AttentionImpl):
             provider="fa4_attention",
             model_runner_modes=("prefill", "mixed", "uniform_decode"),
             cudagraph_capture_modes=True,
+            dedupe_key=("fa4_attention", self.dcp_world_size),
         )
 
     def forward(

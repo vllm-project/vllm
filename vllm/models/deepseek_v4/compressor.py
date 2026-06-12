@@ -283,6 +283,7 @@ class DeepseekCompressor(nn.Module):
             provider="deepseek_v4_compressor",
             model_runner_modes=("mixed",),
             cudagraph_capture_modes=True,
+            dedupe_key=("deepseek_v4_compressor", self.head_dim),
         )
 
     def forward(

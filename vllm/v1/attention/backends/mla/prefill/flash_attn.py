@@ -100,6 +100,14 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             provider="fa4_mla_prefill",
             cudagraph_capture_modes=True,
             warmup_callbacks=(self._run_cutedsl_warmup,),
+            dedupe_key=(
+                "fa4_mla_prefill",
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            ),
         )
 
     def _get_cutedsl_warmup_seq_lens(

@@ -66,6 +66,14 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             provider="flashinfer_cutedsl_moe",
             model_runner_modes=("mixed",),
             cudagraph_capture_modes=True,
+            dedupe_key=(
+                "flashinfer_cutedsl_moe",
+                self.hidden_dim,
+                self.intermediate_size_per_partition,
+                self.topk,
+                self.local_num_experts,
+                self.global_num_experts,
+            ),
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

@@ -305,6 +305,20 @@ class KernelConfig:
             "device_capability": repr(current_platform.get_device_capability()),
             "vllm_config": self._get_cutedsl_cache_config_factors(vllm_config),
         }
+        try:
+            from vllm.compilation.caching import aot_compile_hash_factors
+
+            factors["aot_compile_hash_factors"] = aot_compile_hash_factors(
+                vllm_config
+            )
+        except Exception as e:
+            logger.debug(
+                "Could not include AOT compile hash factors in CuTeDSL cache "
+                "namespace: %s",
+                e,
+            )
+            factors["aot_compile_hash_factors"] = "unavailable"
+
         for package_name in (
             "vllm",
             "vllm-flash-attn",
