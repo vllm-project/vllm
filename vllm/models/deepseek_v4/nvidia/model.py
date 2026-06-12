@@ -736,8 +736,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     device_capability = current_platform.get_device_capability()
     if backend in (
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
-        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4,
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
     ):
+        raise ValueError(
+            f"{backend.name} is not a DeepSeek V4 attention backend. "
+            "Use FLASHINFER_MLA_SPARSE_DSV4 for DeepSeek V4 FlashInfer "
+            "sparse MLA."
+        )
+    if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4:
         return DeepseekV4FlashInferSM120Attention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,

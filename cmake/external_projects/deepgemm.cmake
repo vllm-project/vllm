@@ -58,7 +58,8 @@ else()
 endif()
 
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
-# 12.8+ for SM120 / SM12x family when using vLLM's CUDA arch naming (12.0f, 12.0a, …).
+# and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
+# arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
 set(DEEPGEMM_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
   list(APPEND DEEPGEMM_SUPPORT_ARCHS "9.0a")
@@ -69,7 +70,11 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
   else()
     list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
   endif()
-  list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f" "12.0a" "12.1a")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f")
+  else()
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0a" "12.1a")
+  endif()
 endif()
 
 cuda_archs_loose_intersection(DEEPGEMM_ARCHS

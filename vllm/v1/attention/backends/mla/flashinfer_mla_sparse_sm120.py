@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SM120 implementation variant for ``FLASHINFER_MLA_SPARSE``."""
+"""SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
 
 from typing import TYPE_CHECKING, cast
 
@@ -49,12 +49,12 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
     ) -> None:
         if any([alibi_slopes, sliding_window, logits_soft_cap]):
             raise NotImplementedError(
-                "FLASHINFER_MLA_SPARSE SM120 does not support alibi_slopes / "
+                "FLASHINFER_MLA_SPARSE_SM120 does not support alibi_slopes / "
                 "sliding_window / logits_soft_cap"
             )
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "FLASHINFER_MLA_SPARSE SM120 only supports decoder self-attention"
+                "FLASHINFER_MLA_SPARSE_SM120 only supports decoder self-attention"
             )
 
         self.num_heads = num_heads
@@ -64,7 +64,7 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         self.kv_cache_dtype = kv_cache_dtype
         if self.kv_cache_dtype != "fp8_ds_mla":
             raise NotImplementedError(
-                "FLASHINFER_MLA_SPARSE SM120 requires the packed fp8_ds_mla "
+                "FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla "
                 f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
             )
 
@@ -82,7 +82,7 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         self.kv_scale_format = _kv_scale_format_for_model(model_type)
 
         assert indexer is not None, (
-            "FLASHINFER_MLA_SPARSE SM120 requires a sparse-MLA indexer "
+            "FLASHINFER_MLA_SPARSE_SM120 requires a sparse-MLA indexer "
             "(model with index_topk in its config)."
         )
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
@@ -90,7 +90,7 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
 
         if not has_flashinfer_sparse_mla_sm120():
             raise RuntimeError(
-                "FLASHINFER_MLA_SPARSE SM120 requires FlashInfer's "
+                "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API."
             )
         assert self.topk_indices_buffer is not None

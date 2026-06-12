@@ -12,6 +12,7 @@ from vllm.utils import flashinfer as fi_utils
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseSM120Backend,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def _fake_vllm_config(model_type: str) -> SimpleNamespace:
@@ -19,6 +20,14 @@ def _fake_vllm_config(model_type: str) -> SimpleNamespace:
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(model_type=model_type, index_topk=2048),
         ),
+    )
+
+
+def test_sm120_backend_uses_dedicated_backend_name() -> None:
+    assert FlashInferMLASparseSM120Backend.get_name() == "FLASHINFER_MLA_SPARSE_SM120"
+    assert (
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120.get_class()
+        is FlashInferMLASparseSM120Backend
     )
 
 

@@ -150,6 +150,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     ]
 
     @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER_MLA_SPARSE_SM120"
+
+    @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [64, 256]
 
@@ -182,7 +186,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
         if not has_flashinfer_sparse_mla_sm120():
             return (
-                "FLASHINFER_MLA_SPARSE SM120 requires FlashInfer's "
+                "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API"
             )
         if dtype != torch.bfloat16:
@@ -201,12 +205,12 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
             index_topk = getattr(hf_text_config, "index_topk", None)
             if index_topk is None:
                 return (
-                    "FLASHINFER_MLA_SPARSE SM120 requires a model with "
+                    "FLASHINFER_MLA_SPARSE_SM120 requires a model with "
                     "index_topk config"
                 )
             if int(index_topk) != 2048:
                 return (
-                    "FLASHINFER_MLA_SPARSE SM120 requires index_topk=2048; "
+                    "FLASHINFER_MLA_SPARSE_SM120 requires index_topk=2048; "
                     f"got {index_topk}"
                 )
         return None
