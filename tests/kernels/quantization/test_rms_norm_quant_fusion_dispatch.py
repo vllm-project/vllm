@@ -57,6 +57,28 @@ def test_no_quant_key_falls_back_to_plain_norm(default_vllm_config):
     torch.testing.assert_close(residual, x)
 
 
+@pytest.mark.cpu_test
+def test_linear_none_falls_back_to_plain_norm(default_vllm_config):
+    """`linear=None` (decoder-layer subclasses that swap self_attn/mlp for
+    modules without the expected projection, e.g. Aria's MoE mlp) must take
+    the plain-norm path, with and without residual."""
+    torch.manual_seed(0)
+    norm = RMSNorm(32, eps=1e-6)
+    x = torch.randn(4, 32)
+
+    out, residual = rms_norm_input_quant(norm, x.clone(), None, None)
+    assert not isinstance(out, QuantizedActivation)
+    torch.testing.assert_close(out, norm(x))
+    torch.testing.assert_close(residual, x)
+
+    res_in = torch.randn(4, 32)
+    ref_out, ref_res = norm(x.clone(), res_in.clone())
+    out2, res2 = rms_norm_input_quant(norm, x.clone(), res_in.clone(), None)
+    assert not isinstance(out2, QuantizedActivation)
+    torch.testing.assert_close(out2, ref_out)
+    torch.testing.assert_close(res2, ref_res)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA fused ops")
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)

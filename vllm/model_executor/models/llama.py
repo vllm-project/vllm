@@ -324,11 +324,14 @@ class LlamaDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention. The norm is fused with the input quantization of
         # qkv_proj when the quant scheme advertises one (RFC #43224).
+        # getattr with None: subclasses may swap self_attn/mlp for modules
+        # without these projections (e.g. Aria's MoE mlp); they then take
+        # the plain-norm path.
         hidden_states, residual = rms_norm_input_quant(
             self.input_layernorm,
             hidden_states,
             residual,
-            self.self_attn.qkv_proj,
+            getattr(self.self_attn, "qkv_proj", None),
         )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
@@ -337,7 +340,7 @@ class LlamaDecoderLayer(nn.Module):
             self.post_attention_layernorm,
             hidden_states,
             residual,
-            self.mlp.gate_up_proj,
+            getattr(self.mlp, "gate_up_proj", None),
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
