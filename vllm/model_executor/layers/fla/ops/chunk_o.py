@@ -16,7 +16,13 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_navi, is_nvidia_hopper
+from .utils import (
+    FLA_CHUNK_SIZE,
+    check_shared_mem,
+    is_navi,
+    is_nvidia_hopper,
+    navi_gdn_prefill_config,
+)
 
 # Autotune dimensions for chunk_fwd_kernel_o.
 #
@@ -54,6 +60,19 @@ def _chunk_o_configs() -> list:
     return cfgs
 
 
+def _chunk_o_early_prune(configs, named_args, **kwargs):
+    # Pin the in-model-validated config for known navi GDN prefill shapes
+    # (table in utils.navi_gdn_prefill_config); other shapes fall through to
+    # the normal autotune list.  This kernel streams the large h state and
+    # favors big tiles, so smaller tiles are markedly worse in-model.
+    pinned = navi_gdn_prefill_config(
+        "chunk_o", kwargs.get("H"), kwargs.get("K"), kwargs.get("V"), kwargs.get("BT")
+    )
+    if pinned is not None:
+        return [pinned[0]]
+    return configs
+
+
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
@@ -63,6 +82,7 @@ def _chunk_o_configs() -> list:
 @triton.autotune(
     configs=_chunk_o_configs(),
     key=["H", "K", "V", "BT"],
+    prune_configs_by={"early_config_prune": _chunk_o_early_prune},
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
@@ -196,10 +216,16 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
-    # BK, BV autotuned via _chunk_o_configs.  waves_per_eu is a ROCm
-    # launch-site kwarg (not a triton.Config attribute), so it's passed
-    # here as a constant -- 3 lets three waves fit per SIMD on gfx11.
-    extra = {"waves_per_eu": 3} if is_navi else {}
+    # waves_per_eu is a ROCm launch-site kwarg (not a triton.Config
+    # attribute): use the pinned value for known navi GDN prefill shapes,
+    # else the navi default of 3 (three waves per SIMD on gfx11).
+    pinned = navi_gdn_prefill_config("chunk_o", H, K, V, BT)
+    if pinned is not None:
+        extra = {"waves_per_eu": pinned[1]}
+    elif is_navi:
+        extra = {"waves_per_eu": 3}
+    else:
+        extra = {}
     chunk_fwd_kernel_o[grid](
         q,
         k,

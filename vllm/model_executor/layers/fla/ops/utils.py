@@ -165,6 +165,62 @@ is_tma_supported = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Pinned navi (gfx1151) configs for the Gated DeltaNet (GDN) prefill kernels.
+#
+# The triton autotuner's do_bench ranks configs unreliably on this iGPU, so for
+# GDN prefill shapes that have been validated *in-model* (a real vLLM prefill
+# profile, not a microbenchmark) we pin the measured-best config and skip
+# autotuning.  Any shape not listed here falls back to the kernels' normal
+# autotune lists.
+#
+# The table is keyed by the shape tuple ``(H, K, V, BT)`` and, for each shape,
+# holds the best config for each of the three GDN prefill kernels as
+# ``(triton.Config, waves_per_eu)``.  ``waves_per_eu`` is a ROCm launch-site
+# kwarg, not a ``triton.Config`` field.  Add one row per newly validated shape.
+# ---------------------------------------------------------------------------
+_NAVI_GDN_PREFILL_CONFIGS: dict[tuple[int, int, int, int], dict[str, tuple]] = {
+    # Qwen3.5 / Qwen3.6 35B-A3B (and any same-shape variant): 32 v-heads,
+    # K=V=128, chunk size 64.  Validated in-model on gfx1151 against the
+    # autotuner baseline: chunk_delta_h -32%, kkt -9%, chunk_o unchanged (its
+    # autotune pick was already optimal -- pinned only for determinism since
+    # the do_bench is noisy).  num_warps/num_stages/waves_per_eu do not change
+    # kernel numerics (h and kkt verified bit-identical).
+    (32, 128, 128, 64): {
+        "chunk_o": (
+            triton.Config({"BK": 128, "BV": 128}, num_warps=2, num_stages=2),
+            3,
+        ),
+        "chunk_delta_h": (
+            triton.Config({"BV": 32}, num_warps=8, num_stages=1),
+            1,
+        ),
+        "kkt": (
+            triton.Config({"BK": 32, "BV": 32}, num_warps=2, num_stages=1),
+            1,
+        ),
+    },
+}
+
+
+def navi_gdn_prefill_config(
+    kernel: str, H: int, K: int, V: int, BT: int
+) -> tuple | None:
+    """Pinned config for a GDN prefill kernel at a given shape on navi.
+
+    Returns ``(triton.Config, waves_per_eu)`` for ``kernel`` (one of
+    ``"chunk_o"``, ``"chunk_delta_h"``, ``"kkt"``) if the ``(H, K, V, BT)``
+    shape is in the in-model-validated table above, else ``None`` -- in which
+    case the caller falls back to normal autotuning.
+    """
+    if not is_navi:
+        return None
+    entry = _NAVI_GDN_PREFILL_CONFIGS.get((H, K, V, BT))
+    if entry is None:
+        return None
+    return entry.get(kernel)
+
+
 def get_all_max_shared_mem():
     try:
         return [

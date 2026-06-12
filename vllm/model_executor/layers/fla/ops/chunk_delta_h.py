@@ -14,10 +14,33 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
-from .utils import FLA_CHUNK_SIZE, is_navi, use_cuda_graph
+from .utils import (
+    FLA_CHUNK_SIZE,
+    is_navi,
+    navi_gdn_prefill_config,
+    use_cuda_graph,
+)
 
 NUM_WARPS = [2, 4, 8, 16]
 _CDH_STAGES = [2] if is_navi else [2, 3, 4]
+
+
+def _cdh_early_prune(configs, named_args, **kwargs):
+    # Pin the in-model-validated config for known navi GDN prefill shapes
+    # (table in utils.navi_gdn_prefill_config); other shapes fall through to
+    # the normal autotune list.  The autotuner's do_bench is unreliable on
+    # this iGPU and was picking num_warps=4/num_stages=2; the pinned
+    # num_warps=8/num_stages=1 cuts this kernel ~32% in-model.
+    pinned = navi_gdn_prefill_config(
+        "chunk_delta_h",
+        kwargs.get("H"),
+        kwargs.get("K"),
+        kwargs.get("V"),
+        kwargs.get("BT"),
+    )
+    if pinned is not None:
+        return [pinned[0]]
+    return configs
 
 
 @triton.heuristics(
@@ -38,6 +61,7 @@ _CDH_STAGES = [2] if is_navi else [2, 3, 4]
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
+    prune_configs_by={"early_config_prune": _cdh_early_prune},
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
@@ -358,6 +382,11 @@ def chunk_gated_delta_rule_fwd_h(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
 
+    # waves_per_eu is a ROCm launch-site kwarg (not a triton.Config
+    # attribute in Triton 3.6): use the pinned value for known navi GDN
+    # prefill shapes, else leave unset (driver default).
+    pinned = navi_gdn_prefill_config("chunk_delta_h", H, K, V, BT)
+    extra = {"waves_per_eu": pinned[1]} if pinned is not None else {}
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
         v=u,
@@ -377,5 +406,6 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        **extra,
     )
     return h, v_new, final_state
