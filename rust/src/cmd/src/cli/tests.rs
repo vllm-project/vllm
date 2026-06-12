@@ -101,6 +101,40 @@ fn serve_args_auto_forward_enable_lora_to_python() {
 }
 
 #[test]
+fn serve_args_forward_shutdown_timeout_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--shutdown-timeout",
+        "60",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.shutdown_timeout, 60);
+
+    let config = args.to_managed_engine_config(5555);
+    assert_eq!(config.python_args, vec!["--shutdown-timeout", "60"]);
+}
+
+#[test]
+fn serve_args_forward_disable_log_stats_to_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--disable-log-stats"])
+        .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.disable_log_stats);
+
+    let config = args.to_managed_engine_config(5555);
+    assert_eq!(config.python_args, vec!["--disable-log-stats"]);
+}
+
+#[test]
 fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "-tp", "2"]).unwrap();
 

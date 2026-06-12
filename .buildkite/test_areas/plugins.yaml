@@ -50,3 +50,17 @@ steps:
       - vllm/plugins/
       - tests/plugins/
       - vllm/platforms/rocm.py
+
+
+- label: GGUF Plugin
+  key: gguf-plugin
+  device: h200_18gb
+  timeout_in_minutes: 30
+  soft_fail: true
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/test_gguf_plugin.py
+  commands:
+    - pip install "vllm-gguf-plugin >= 0.0.2"
+    - pytest -v -s plugins_tests/gguf
