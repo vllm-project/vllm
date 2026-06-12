@@ -662,6 +662,45 @@ true
     assert isinstance(args["verbose"], bool)
 
 
+def test_qwen3coder_streaming_closes_function_after_parameter_fragment(qwen3_tokenizer):
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_pdf",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer"},
+                    },
+                },
+            },
+        )
+    ]
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+    model_output = """<tool_call>
+<function=read_pdf>
+<parameter=page>
+1
+</parameter>
+</function>
+</tool_call>"""
+
+    accumulated_args = ""
+
+    for delta in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta and delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                function = tool_call.function
+                if function and function.arguments is not None:
+                    accumulated_args += function.arguments
+
+    assert json.loads(accumulated_args) == {"page": 1}
+
+
 @pytest.mark.parametrize(
     ids=[
         "no_tools",
