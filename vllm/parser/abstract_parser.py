@@ -756,6 +756,7 @@ class DelegatingParser(Parser):
 
         current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
+        reasoning_transitioned = False
 
         # Reasoning extraction
         if self._in_reasoning_phase(state):
@@ -778,6 +779,7 @@ class DelegatingParser(Parser):
                 )
             if should_transition:
                 state.reasoning_ended = True
+                reasoning_transitioned = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if self._engine_based:
                     current_text = (
@@ -785,7 +787,7 @@ class DelegatingParser(Parser):
                         if current_token_ids
                         else ""
                     )
-                    if delta_message:
+                    if delta_message and self._tool_parser is not None:
                         delta_message.content = None
                 else:
                     current_text = (
@@ -836,9 +838,13 @@ class DelegatingParser(Parser):
             ):
                 state.history_tool_call_cnt += 1
 
-        # No phase active: pass through as content
+        # No phase active: pass through as content.
+        # Skip when reasoning just ended in this delta — the engine already
+        # consumed the end-of-reasoning marker (e.g. </think>) and
+        # delta_text still contains the raw marker text.
         if (
             delta_message is None
+            and not reasoning_transitioned
             and not self._in_reasoning_phase(state)
             and not self._in_tool_call_phase(state)
         ):

@@ -642,6 +642,135 @@ class TestAdapterFinishOnStreamEnd:
         )
 
 
+# ── TestReasoningOnlyDelegatingParser ─────────────────────────────
+
+
+class _ReasoningOnlyDelegating(DelegatingParser):
+    """DelegatingParser with reasoning adapter but NO tool adapter."""
+
+    reasoning_parser_cls = _CombinedReasoningAdapter
+    tool_parser_cls = None
+
+
+class TestReasoningOnlyEndTokenLeak:
+    """When there is no tool parser, the content passthrough must not
+    re-emit the end-of-reasoning marker (e.g. ``</think>``) as content.
+
+    Regression test for the scenario where ``</think>`` arrives as a
+    single-token delta: the engine correctly consumes it (emitting
+    REASONING_END with no content), but the content passthrough
+    fired because ``delta_message is None`` and reasoning had just ended.
+    """
+
+    def test_think_end_not_leaked_as_content(self):
+        tokenizer = make_mock_tokenizer(_VOCAB)
+        parser = _ReasoningOnlyDelegating(tokenizer)
+        request = _make_delegating_request()
+
+        # Feed reasoning text.
+        d1 = parser.parse_delta(
+            "I am thinking",
+            [],
+            request,
+            finished=False,
+        )
+        assert d1 is not None
+        assert d1.reasoning is not None
+        assert d1.content is None
+
+        # Feed </think> as a single-token delta.
+        d2 = parser.parse_delta(
+            "</think>",
+            [201],
+            request,
+            finished=False,
+        )
+        # The end-of-reasoning marker must NOT appear as content.
+        if d2 is not None:
+            assert d2.content is None, f"</think> leaked as content: {d2.content!r}"
+
+        # Feed content after reasoning.
+        d3 = parser.parse_delta(
+            "\n\nHello!",
+            [],
+            request,
+            finished=False,
+        )
+        assert d3 is not None
+        assert d3.content is not None
+        assert "</think>" not in d3.content
+
+    def test_streaming_content_matches_non_streaming(self):
+        """Concatenated streaming content must match extract_reasoning."""
+        tokenizer = make_mock_tokenizer(_VOCAB)
+        # No <think> in input: the combined config starts in REASONING
+        # state, so all text before </think> is reasoning.
+        full_text = "reasoning</think>\n\nHello!"
+
+        # Non-streaming extraction.
+        parser_ns = _ReasoningOnlyDelegating(tokenizer)
+        request = _make_delegating_request()
+        reasoning, content = parser_ns.extract_reasoning(full_text, request)
+        assert reasoning == "reasoning"
+        assert content == "\n\nHello!"
+
+        # Streaming extraction — simulate per-token deltas.
+        parser_s = _ReasoningOnlyDelegating(tokenizer)
+        deltas = [
+            ("reasoning", []),
+            ("</think>", [201]),
+            ("\n\n", []),
+            ("Hello!", []),
+        ]
+        content_parts: list[str] = []
+        for text, ids in deltas:
+            dm = parser_s.parse_delta(text, ids, request, finished=False)
+            if dm is not None and dm.content:
+                content_parts.append(dm.content)
+        dm = parser_s.parse_delta("", [], request, finished=True)
+        if dm is not None and dm.content:
+            content_parts.append(dm.content)
+
+        streaming_content = "".join(content_parts)
+        assert streaming_content == content, (
+            f"Streaming content {streaming_content!r} "
+            f"does not match non-streaming {content!r}"
+        )
+
+    def test_multi_token_delta_preserves_content_after_think_end(self):
+        """Content after </think> in the same delta must not be lost."""
+        tokenizer = make_mock_tokenizer(_VOCAB)
+        parser = _ReasoningOnlyDelegating(tokenizer)
+        request = _make_delegating_request()
+
+        # Feed reasoning text.
+        d1 = parser.parse_delta(
+            "thinking",
+            [],
+            request,
+            finished=False,
+        )
+        assert d1 is not None
+        assert d1.reasoning is not None
+
+        # Feed </think> and content in the same delta (e.g. speculative
+        # decoding accepting multiple tokens at once).  Token IDs must
+        # cover all text so the scanner can split correctly.
+        # chr(10)='\n', chr(72)='H', chr(105)='i', chr(33)='!'
+        d2 = parser.parse_delta(
+            "</think>\n\nHi!",
+            [201, 10, 10, 72, 105, 33],
+            request,
+            finished=False,
+        )
+        assert d2 is not None, "Content after </think> in multi-token delta was lost"
+        assert d2.content is not None, (
+            "Content after </think> in multi-token delta was nullified"
+        )
+        assert "</think>" not in d2.content
+        assert "Hi!" in d2.content
+
+
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────
 
 
