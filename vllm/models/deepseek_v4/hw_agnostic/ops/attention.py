@@ -53,16 +53,18 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_q_kv_rmsnorm,
 )
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
-from vllm.models.deepseek_v4.hw_agnostic.flashmla_sparse import (
-    DeepseekV4FlashMLASparseBackend,
-    FlashMLASparseBackend,
-    FlashMLASparseMetadata,
+from vllm.models.deepseek_v4.hw_agnostic.backend import (
+    DeepseekV4HWAgnosticBackend,
 )
 from vllm.models.deepseek_v4.hw_agnostic.ops import (
     triton_bf16_mla_sparse_interface,
     triton_inv_rope_einsum,
     triton_qnorm_rope_kv_fp8_insert,
     triton_sparse_decode_fp8,
+)
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
@@ -549,16 +551,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             f"DeepseekV4 only supports fp8 kv-cache format for now, "
             f"got {kv_cache_dtype}"
         )
-        assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
-            "Only FlashMLA Sparse Attention backend is supported for DeepseekV4 for now"
+        assert issubclass(self.get_attn_backend(), DeepseekV4FlashMLABackend), (
+            "hw_agnostic DeepseekV4 attention requires the V4 sparse-MLA backend"
         )
-        # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
-        # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
-        if (
-            issubclass(self.get_attn_backend(), FlashMLASparseBackend)
-            and kv_cache_dtype.startswith("fp8")
-            and kv_cache_dtype != "fp8_ds_mla"
-        ):
+        # The V4 sparse-MLA backend uses the fp8_ds_mla cache layout (584B per
+        # token, UE8M0-block-scaled FP8). Auto-convert any "fp8" alias.
+        if kv_cache_dtype != "fp8_ds_mla":
             assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
@@ -576,7 +574,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return DeepseekV4FlashMLASparseBackend
+        return DeepseekV4HWAgnosticBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         if (
@@ -613,7 +611,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         attn_metadata = forward_context.attn_metadata
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            FlashMLASparseMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -657,7 +655,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
@@ -683,11 +681,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
-                # C128A: pre-computed during metadata build. Lives on the SWA
-                # metadata (DeepseekSparseSWAMetadata), not on the FlashMLA
-                # metadata.
-                topk_indices = swa_metadata.c128a_global_decode_topk_indices
-                topk_lens = swa_metadata.c128a_decode_topk_lens
+                # C128A: pre-computed during metadata build by the V4 backend.
+                topk_indices = attn_metadata.c128a_global_decode_topk_indices
+                topk_lens = attn_metadata.c128a_decode_topk_lens
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
@@ -720,7 +716,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         compressed_k_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_k_cache: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> None:
         swa_only = attn_metadata is None
@@ -749,10 +745,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 topk_indices = self.topk_indices_buffer[num_decode_tokens:]
                 topk_indices = topk_indices[:num_prefill_tokens]
             else:
-                # C128A: pre-computed during metadata build. Lives on the SWA
-                # metadata (DeepseekSparseSWAMetadata), not on the FlashMLA
-                # metadata.
-                topk_indices = swa_metadata.c128a_prefill_topk_indices
+                # C128A: pre-computed during metadata build by the V4 backend.
+                assert attn_metadata is not None
+                topk_indices = attn_metadata.c128a_prefill_topk_indices
                 assert topk_indices is not None
             top_k = topk_indices.shape[-1]
             # Compressed region must fit the full compressed pool (seq_len //

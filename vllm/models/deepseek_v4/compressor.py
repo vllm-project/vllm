@@ -354,11 +354,7 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if (
-            cutedsl_enabled()
-            and current_platform.is_cuda()
-            and self.head_dim == 512
-        ):
+        if cutedsl_enabled() and current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
             )
