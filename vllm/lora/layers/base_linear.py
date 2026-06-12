@@ -312,13 +312,19 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)
-        return self._apply_lora_to_output(x, output, bias_was_added=bias is not None)
+        return self._apply_lora_to_output(x, output, base_output_bias=bias)
 
     def _apply_base_forward(self, x: torch.Tensor) -> torch.Tensor:
         base_output = self.base_layer(x)
         output = base_output[0] if isinstance(base_output, tuple) else base_output
-        bias_was_added = self.bias is not None and not self.base_layer.skip_bias_add
-        return self._apply_lora_to_output(x, output, bias_was_added=bias_was_added)
+        base_output_bias = (
+            self.bias
+            if self.bias is not None and not self.base_layer.skip_bias_add
+            else None
+        )
+        return self._apply_lora_to_output(
+            x, output, base_output_bias=base_output_bias
+        )
 
     def _apply_standard_lora(
         self,
@@ -363,9 +369,21 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         output: torch.Tensor,
         token_lora_indices: torch.Tensor,
         has_dora: torch.Tensor,
+        base_output_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        dora_scale = self.dora_scale_stacked[token_lora_indices[has_dora]]
-        output[has_dora] = output[has_dora] * dora_scale.to(dtype=output.dtype)
+        dora_scale = self.dora_scale_stacked[token_lora_indices[has_dora]].to(
+            dtype=output.dtype
+        )
+        dora_output = output[has_dora]
+        if base_output_bias is not None:
+            # DoRA scales only the weight path. If the base linear already
+            # added bias, remove it before scaling and add it back after.
+            bias = base_output_bias.to(dtype=output.dtype)
+            dora_output = (dora_output - bias) * dora_scale
+            dora_output = dora_output + bias
+        else:
+            dora_output = dora_output * dora_scale
+        output[has_dora] = dora_output
         return output
 
     def _apply_lora_to_output(
@@ -373,7 +391,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         x: torch.Tensor,
         output: torch.Tensor,
         *,
-        bias_was_added: bool = False,
+        base_output_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         original_shape = output.shape if output.ndim == 3 else None
 
@@ -389,16 +407,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             if has_dora.any().item():
                 if not current_platform.is_cuda_alike():
                     raise NotImplementedError("DoRA currently only supports CUDA.")
-                if bias_was_added:
-                    raise NotImplementedError(
-                        "DoRA currently only supports linear layers without "
-                        "an added bias in the base output."
-                    )
 
                 # DoRA needs the unscaled base-plus-LoRA value before applying
                 # the per-output magnitude scale for DoRA tokens only.
                 output.add_(self._compute_lora_delta(x, output))
-                output = self._apply_dora_scale(output, token_lora_indices, has_dora)
+                output = self._apply_dora_scale(
+                    output,
+                    token_lora_indices,
+                    has_dora,
+                    base_output_bias=base_output_bias,
+                )
             else:
                 output = self._apply_standard_lora(x, output)
         else:

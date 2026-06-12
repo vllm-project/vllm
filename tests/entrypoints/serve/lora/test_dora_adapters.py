@@ -34,7 +34,7 @@ def server_with_dora(qwen25_05b_dora_files):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float16",
         "--max-model-len",
         "2048",
         "--enforce-eager",

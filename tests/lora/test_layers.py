@@ -846,8 +846,9 @@ def test_packed_qkv_dora_scale_stacked(
 )
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("bias", [False, True])
 def test_packed_qkv_dora_forward(
-    default_vllm_config, dist_init, device, stage
+    default_vllm_config, dist_init, device, stage, bias
 ) -> None:
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
@@ -868,11 +869,19 @@ def test_packed_qkv_dora_forward(
         2,
         2,
         total_num_kv_heads=1,
-        bias=False,
+        bias=bias,
         params_dtype=dtype,
         prefix="dora_qkv_forward",
     )
     linear.weight.data.copy_(base_weight)
+    if bias:
+        linear.bias.data.copy_(
+            torch.tensor(
+                [0.25, -0.5, 0.75, -1.0, 0.5, -0.25, 1.25, -0.75],
+                dtype=dtype,
+                device=device,
+            )
+        )
     lora_linear = MergedQKVParallelLinearWithLoRA(linear)
     lora_linear.create_lora_weights(max_loras, lora_config)
     lora_linear.set_mapping(punica_wrapper)
@@ -965,6 +974,8 @@ def test_packed_qkv_dora_forward(
             standard_offset : standard_offset + output_size,
         ] += standard_delta @ lora_b_i.float().T
         standard_offset += output_size
+    if bias:
+        expected += linear.bias.float()
 
     rtol, atol = TOLERANCES[actual.dtype]
     torch.testing.assert_close(
@@ -979,7 +990,10 @@ def test_packed_qkv_dora_forward(
 )
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-def test_linear_dora_forward(default_vllm_config, dist_init, device, stage) -> None:
+@pytest.mark.parametrize("bias", [False, True])
+def test_linear_dora_forward(
+    default_vllm_config, dist_init, device, stage, bias
+) -> None:
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     dtype = torch.float16
@@ -991,7 +1005,7 @@ def test_linear_dora_forward(default_vllm_config, dist_init, device, stage) -> N
     )
     punica_wrapper = get_punica_wrapper(16, 4, device, lora_config=lora_config)
 
-    linear = ReplicatedLinear(4, 3, bias=False, params_dtype=dtype)
+    linear = ReplicatedLinear(4, 3, bias=bias, params_dtype=dtype)
     linear.weight.data = torch.tensor(
         [
             [0.5, -0.25, 0.75, 1.0],
@@ -1001,6 +1015,10 @@ def test_linear_dora_forward(default_vllm_config, dist_init, device, stage) -> N
         dtype=dtype,
         device=device,
     )
+    if bias:
+        linear.bias.data.copy_(
+            torch.tensor([0.25, -0.5, 0.75], dtype=dtype, device=device)
+        )
     lora_linear = ReplicatedLinearWithLoRA(linear)
     lora_linear.create_lora_weights(max_loras, lora_config)
     lora_linear.set_mapping(punica_wrapper)
@@ -1074,6 +1092,8 @@ def test_linear_dora_forward(default_vllm_config, dist_init, device, stage) -> N
     )
     dora_rows = torch.tensor([True, False, False, True], device=device)
     expected[dora_rows] = x[dora_rows].float() @ dora_weight.T
+    if bias:
+        expected += linear.bias.float()
 
     rtol, atol = TOLERANCES[actual.dtype]
     torch.testing.assert_close(

@@ -39,7 +39,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         return layer._apply_lora_to_output(
             x,
             output,
-            bias_was_added=bias is not None,
+            base_output_bias=bias,
         )
 
     x = x.view(-1, x.shape[-1])
