@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     V_SCALE_CONSTANT: int = 100
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
+    VLLM_USE_EXPERIMENTAL_DYNAMO_RUST_PARSER: bool = False
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -1250,6 +1251,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the binary installed with the vllm package. Only used when
     # VLLM_USE_RUST_FRONTEND=1.
     "VLLM_RUST_FRONTEND_PATH": lambda: _resolve_rust_frontend_path(),
+    # Experimental: use Dynamo's Rust parser crate for supported Rust frontend
+    # tool parsers.
+    "VLLM_USE_EXPERIMENTAL_DYNAMO_RUST_PARSER": lambda: bool(
+        int(os.getenv("VLLM_USE_EXPERIMENTAL_DYNAMO_RUST_PARSER", "0"))
+    ),
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`

@@ -31,6 +31,13 @@ impl ToolParser for FakeToolParser {
     }
 }
 
+fn parse_complete(parser: &mut dyn ToolParser, text: &str) -> Result<ToolParserOutput> {
+    let mut output = ToolParserOutput::default();
+    parser.parse_into(text, &mut output)?;
+    output.append(parser.finish()?);
+    Ok(output.coalesce_calls())
+}
+
 #[test]
 fn default_factory_starts_empty() {
     let factory = ToolParserFactory::default();
@@ -206,3 +213,31 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_uses_native_deepseek_v4_by_default() {
+    let factory = ToolParserFactory::new_with_options(false);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let error = parse_complete(&mut *parser, DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap_err();
+
+    assert!(error.to_string().contains("incomplete DeepSeek DSML tool call"));
+}
+
+#[test]
+fn factory_uses_dynamo_deepseek_v4_when_enabled() {
+    let factory = ToolParserFactory::new_with_options(true);
+    let mut parser = factory.create(names::DEEPSEEK_V4, &[]).unwrap();
+
+    let result = parse_complete(&mut *parser, DEEPSEEK_V4_MISSING_OUTER_CLOSE).unwrap();
+
+    assert_eq!(result.normal_text, "");
+    assert_eq!(result.calls.len(), 1);
+    assert_eq!(result.calls[0].name.as_deref(), Some("get_datetime"));
+    assert_eq!(result.calls[0].arguments, r#"{"timezone":"Asia/Shanghai"}"#);
+}
+
+const DEEPSEEK_V4_MISSING_OUTER_CLOSE: &str = "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_datetime\">\n\
+<｜DSML｜parameter name=\"timezone\" string=\"true\">Asia/Shanghai</｜DSML｜parameter>\n\
+</｜DSML｜invoke>";
