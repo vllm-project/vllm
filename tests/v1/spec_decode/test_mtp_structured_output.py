@@ -260,3 +260,84 @@ def test_validate_tokens_then_bitmask_round_trip(backend):
     assert bitmask is not None
     assert bitmask.shape[0] == len(padded) + 1
     assert not grammar.is_terminated()
+
+
+class _MarkerReasoner:
+    """Stub reasoner whose reasoning-end marker is a single fixed token."""
+
+    def __init__(self, marker: int):
+        self.marker = marker
+
+    def is_reasoning_end(self, input_ids):
+        return self.marker in list(input_ids)
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        return self.marker in list(delta_ids)
+
+
+def _setup_boundary_request(backend: str):
+    """Request with a structural-tag key and reasoning not yet ended."""
+    from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
+    marker = tokenizer.encode("\n")[0]
+    structured_req = request.structured_output_request
+    # The grammar itself is JSON (cheap to build); only the key kind matters
+    # for the should_advance structural-tag branch, so pre-seed the cached
+    # property.
+    structured_req.__dict__["structured_output_key"] = (
+        StructuredOutputOptions.STRUCTURAL_TAG,
+        "",
+    )
+    manager.reasoner_cls = _MarkerReasoner
+    structured_req.reasoner = _MarkerReasoner(marker)
+    structured_req.reasoning_ended = False
+    return tokenizer, manager, request, prompt, marker
+
+
+def test_should_advance_records_reasoning_end_index():
+    """Regression for #44006 on post-#42452 main: the boundary step must
+    record where reasoning ends so the scheduler can trim before advancing.
+    """
+    tokenizer, manager, request, prompt, marker = _setup_boundary_request("xgrammar")
+    structured_req = request.structured_output_request
+
+    pre = tokenizer.encode(" ")[0]
+    post = tokenizer.encode("{")[0]
+    request.append_output_token_ids([pre, marker, post])
+
+    assert manager.should_advance(request)
+    assert structured_req.reasoning_ended
+    # Marker sits at absolute index len(prompt) + 1.
+    assert structured_req.reasoning_end_token_index == len(prompt) + 1
+
+
+def test_trim_reasoning_for_advance():
+    """trim drops the marker and everything before it; later steps and
+    requests without a recorded boundary pass through unchanged.
+    """
+    tokenizer, manager, request, prompt, marker = _setup_boundary_request("xgrammar")
+    structured_req = request.structured_output_request
+
+    pre = tokenizer.encode(" ")[0]
+    post = tokenizer.encode("{")[0]
+
+    # No boundary recorded yet: pass-through.
+    assert manager.trim_reasoning_for_advance(request, [pre]) == [pre]
+
+    # Boundary step: marker mid-step keeps only the suffix.
+    step_tokens = [pre, marker, post]
+    request.append_output_token_ids(step_tokens)
+    assert manager.should_advance(request)
+    assert manager.trim_reasoning_for_advance(request, step_tokens) == [post]
+
+    # Boundary step variant: marker last (the #44006 crash shape
+    # [198, </think>]) trims to empty -> scheduler skips accept_tokens.
+    structured_req.reasoning_end_token_index = len(request.all_token_ids) - 1
+    assert manager.trim_reasoning_for_advance(request, step_tokens) == []
+
+    # Later steps: tokens are past the boundary, returned unchanged.
+    structured_req.reasoning_end_token_index = len(prompt) + 1
+    next_step = [post, post]
+    request.append_output_token_ids(next_step)
+    assert manager.trim_reasoning_for_advance(request, next_step) == next_step
