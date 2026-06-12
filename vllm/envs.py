@@ -258,6 +258,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
+    VLLM_ENABLE_PREFIX_PROC_LOGS: bool = True
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_SKIP_MODEL_NAME_VALIDATION: bool = False
@@ -1808,6 +1809,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Flag to prefix each log line with a human-friendly and coloured process name.
+    # The feature goes against the standard log formatter, if you want to keep this
+    # information, set VLLM_ENABLE_PREFIX_PROC_LOGS=0 and add %(processName)s
+    # to the log format.
+    "VLLM_ENABLE_PREFIX_PROC_LOGS": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_PREFIX_PROC_LOGS", "1"))
+    ),
     # Enable CUDA compatibility mode for datacenter GPUs with older
     # driver versions than the CUDA toolkit major version of vLLM.
     "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
