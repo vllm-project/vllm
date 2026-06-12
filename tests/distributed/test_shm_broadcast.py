@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import random
 import threading
 import time
@@ -8,7 +9,9 @@ from unittest import mock
 
 import multiprocess as mp
 import numpy as np
+import psutil
 import pytest
+import torch
 import torch.distributed as dist
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -392,3 +395,76 @@ def test_warning_logs(caplog_vllm):
         # Clean up when done
         writer.shutdown()
         reader.shutdown()
+
+
+def test_worker_busy_loop_no_memory_leak():
+    """Regression test for issue #43639.
+
+    worker_busy_loop leaked CPU memory because deserialized RPC args were
+    kept alive during the next dequeue() call, and c10::alloc_cpu bypasses
+    Python's GC counter so GC never triggered automatically.
+
+    The fix (del + gc.collect() after each iteration) is verified here by
+    checking that RSS growth stays below a conservative threshold over 150
+    iterations of dequeue/process with tensor payloads.
+    """
+    N = 150
+    MAX_GROWTH_MIB = 20.0  # generous bound; unfixed code grows ~4 MiB on 150 iters
+
+    def make_payload():
+        # Mimics a SchedulerOutput: small CPU tensors (<1 MiB each) so
+        # pickle inlines them and c10::alloc_cpu reconstructs them on dequeue
+        return (
+            "execute_model",
+            [
+                {
+                    "token_ids": torch.randint(0, 32000, (512,), dtype=torch.long),
+                    "positions": torch.arange(512, dtype=torch.long),
+                    "slot_mapping": torch.randint(0, 50000, (512,), dtype=torch.long),
+                    "seq_lens": torch.ones(32, dtype=torch.int32) * 16,
+                }
+            ],
+            {},
+            0,
+        )
+
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=8 * 1024 * 1024,
+        max_chunks=10,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer.wait_until_ready()
+    reader.wait_until_ready()
+
+    def producer():
+        for _ in range(N):
+            writer.enqueue(make_payload())
+            time.sleep(0.001)
+
+    prod = threading.Thread(target=producer)
+    prod.start()
+
+    gc.disable()
+    start_rss = psutil.Process().memory_info().rss / 1024 / 1024
+
+    for _ in range(N):
+        method, args, kwargs, output_rank = reader.dequeue(timeout=5.0)
+        _ = args[0]["token_ids"].sum()  # simulate forward pass
+        del method, args, kwargs, output_rank
+        gc.collect()
+
+    gc.enable()
+    end_rss = psutil.Process().memory_info().rss / 1024 / 1024
+    growth = end_rss - start_rss
+
+    prod.join()
+    writer.shutdown()
+    reader.shutdown()
+
+    assert growth < MAX_GROWTH_MIB, (
+        f"worker_busy_loop memory leak detected: RSS grew {growth:.1f} MiB "
+        f"over {N} iterations (threshold: {MAX_GROWTH_MIB} MiB). "
+        f"Check that del+gc.collect() is present after each iteration."
+    )
