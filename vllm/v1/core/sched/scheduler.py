@@ -218,6 +218,13 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
+        self.use_grammar_spec = (
+            speculative_config is not None and speculative_config.method == "grammar"
+        )
+        # Real (non-pad) grammar drafts scheduled in flight, per request.
+        # Pads never pass verification, so only real drafts can consume the
+        # forced run.
+        self._inflight_grammar_drafts: dict[str, int] = {}
         if speculative_config is not None:
             if speculative_config.use_eagle():
                 self.use_eagle = True
@@ -549,6 +556,10 @@ class Scheduler(SchedulerInterface):
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+                    if self.use_grammar_spec:
+                        self._inflight_grammar_drafts[request_id] = sum(
+                            1 for t in spec_token_ids if t != -1
+                        )
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
@@ -1053,6 +1064,7 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
+        self._inflight_grammar_drafts.pop(request.request_id, None)
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1385,6 +1397,11 @@ class Scheduler(SchedulerInterface):
         if not structured_output_request_ids:
             return None
 
+        if self.use_grammar_spec:
+            self._revalidate_grammar_spec_tokens(
+                scheduler_output, structured_output_request_ids
+            )
+
         bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
@@ -1544,6 +1561,21 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
                     stopped = True
+                elif self.use_grammar_spec and not stopped:
+                    # Draft the grammar-forced continuation, padded to a fixed
+                    # length so decode batches stay uniform for full CUDA
+                    # graphs. The in-flight step consumes its bonus token plus
+                    # its real drafts (pads always fail verification), so
+                    # draft what follows them.
+                    ff_tokens = struct_output_request.grammar.compute_ff_tokens()
+                    skip = (
+                        1 + self._inflight_grammar_drafts.get(req_id, 0)
+                        if request.num_output_placeholders > 0
+                        else 0
+                    )
+                    drafts = ff_tokens[skip : skip + self.num_spec_tokens]
+                    drafts += [-1] * (self.num_spec_tokens - len(drafts))
+                    request.spec_token_ids = drafts
 
             routed_experts = None
             if (
@@ -1825,6 +1857,50 @@ class Scheduler(SchedulerInterface):
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
 
+    def _revalidate_grammar_spec_tokens(
+        self,
+        scheduler_output: SchedulerOutput,
+        structured_output_request_ids: list[str],
+    ) -> None:
+        """Trim scheduled grammar drafts left stale by in-flight rejections.
+
+        Invalid drafts are replaced with -1, which is skipped by the grammar
+        bitmask walk and never matched by the rejection sampler.
+        """
+        num_invalid_spec_tokens: dict[str, int] = {}
+
+        sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        for req_id in structured_output_request_ids:
+            spec_token_ids = sched_spec_tokens.get(req_id)
+            if not spec_token_ids:
+                continue
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            if not self.structured_output_manager.should_advance(request):
+                continue
+
+            metadata = request.structured_output_request
+            assert metadata is not None and metadata.grammar is not None
+            num_real = (
+                spec_token_ids.index(-1)
+                if -1 in spec_token_ids
+                else len(spec_token_ids)
+            )
+            if num_real == 0:
+                continue
+            valid_token_ids = metadata.grammar.validate_tokens(
+                spec_token_ids[:num_real]
+            )
+            num_invalid_tokens = num_real - len(valid_token_ids)
+            if num_invalid_tokens:
+                num_pads = len(spec_token_ids) - len(valid_token_ids)
+                sched_spec_tokens[req_id] = valid_token_ids + [-1] * num_pads
+                num_invalid_spec_tokens[req_id] = num_invalid_tokens
+
+        if num_invalid_spec_tokens:
+            scheduler_output.num_invalid_spec_tokens = num_invalid_spec_tokens
+
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
@@ -1960,6 +2036,7 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        self._inflight_grammar_drafts.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id

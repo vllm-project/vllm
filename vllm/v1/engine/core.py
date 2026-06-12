@@ -155,10 +155,12 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
-        self.use_spec_decode = vllm_config.speculative_config is not None
+        spec_config = vllm_config.speculative_config
+        self.use_spec_decode = spec_config is not None
+        # Grammar spec drafts are computed in the scheduler, not the worker.
         self.check_for_draft_tokens = (
-            self.use_spec_decode or vllm_config.model_config.is_diffusion
-        )
+            spec_config is not None and spec_config.method != "grammar"
+        ) or vllm_config.model_config.is_diffusion
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 

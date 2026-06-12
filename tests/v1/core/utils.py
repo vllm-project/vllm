@@ -12,6 +12,7 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    StructuredOutputsConfig,
     VllmConfig,
 )
 from vllm.multimodal.inputs import (
@@ -53,6 +54,7 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    speculative_method: str = "ngram",
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -123,10 +125,19 @@ def create_scheduler(
         )
 
     speculative_config: SpeculativeConfig | None = None
+    structured_outputs_config = StructuredOutputsConfig()
     if num_speculative_tokens is not None:
-        speculative_config = SpeculativeConfig(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
-        )
+        if speculative_method == "grammar":
+            speculative_config = SpeculativeConfig(
+                method="grammar", num_speculative_tokens=num_speculative_tokens
+            )
+            # Grammar spec decoding requires the guidance backend.
+            structured_outputs_config = StructuredOutputsConfig(backend="guidance")
+        else:
+            speculative_config = SpeculativeConfig(
+                model=speculative_method,
+                num_speculative_tokens=num_speculative_tokens,
+            )
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -146,6 +157,7 @@ def create_scheduler(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        structured_outputs_config=structured_outputs_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
