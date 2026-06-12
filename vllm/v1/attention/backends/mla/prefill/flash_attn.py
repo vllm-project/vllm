@@ -141,7 +141,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         max_num_seqs = getattr(scheduler_config, "max_num_seqs", 1)
         qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
-        warmed: set[tuple[int, ...]] = set()
+        warmed: set[tuple[tuple[int, ...], bool]] = set()
         for num_tokens in token_sizes:
             for seq_lens in self._get_cutedsl_warmup_seq_lens(
                 num_tokens, max_num_seqs
@@ -187,15 +187,17 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                     device=device,
                 )
 
-                if seq_lens in warmed:
-                    continue
-                warmed.add(seq_lens)
-                self.run_prefill_new_tokens(
-                    q=q,
-                    k=k,
-                    v=v,
-                    return_softmax_lse=False,
-                )
+                for return_softmax_lse in (False, True):
+                    warmup_key = (seq_lens, return_softmax_lse)
+                    if warmup_key in warmed:
+                        continue
+                    warmed.add(warmup_key)
+                    self.run_prefill_new_tokens(
+                        q=q,
+                        k=k,
+                        v=v,
+                        return_softmax_lse=return_softmax_lse,
+                    )
 
     def _flash_attn_varlen_diff_headdims(
         self,
