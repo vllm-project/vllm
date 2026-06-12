@@ -106,8 +106,8 @@ class DeepseekV4MLAModules:
 
 
 # --8<-- [start:multi_head_latent_attention]
-# Public name for this PluggableLayer. Out-of-tree subclasses that override 
-# this layer should reuse the same suffix so the static-forward-context 
+# Public name for this PluggableLayer. Out-of-tree subclasses that override
+# this layer should reuse the same suffix so the static-forward-context
 # lookup keeps resolving to the layer instance.
 LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 

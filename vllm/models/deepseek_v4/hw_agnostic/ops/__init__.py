@@ -6,6 +6,7 @@ Each kernel lives in its own file. This package never imports from
 ``nvidia/``, ``amd/``, or ``xpu/`` — the hw-agnostic stream is
 self-contained at the kernel level (see study doc §52).
 """
+
 from .triton_inv_rope_einsum import triton_inv_rope_einsum
 from .triton_mla_sparse import triton_bf16_mla_sparse_interface
 from .triton_qnorm_rope_kv_fp8_insert import triton_qnorm_rope_kv_fp8_insert
