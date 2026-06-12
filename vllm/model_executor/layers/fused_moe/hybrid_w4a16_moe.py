@@ -269,12 +269,20 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 num_stages=1,
             )
         # gemm1-style: long contraction (K >= 1024; K=2048 on
-        # Qwen3.5-A3B).  (BN=16, BK=group, GM=4, nw=2, ns=1) wins
-        # ~2x over the prior baseline across all routing densities
-        # at NUM_TOKENS=128.
+        # Qwen3.5-A3B).  BLOCK_N is M-sensitive: BN=16 wins for small
+        # batches (the NUM_TOKENS=128 decode/small-prefill regime),
+        # but BN=64 wins once the routed batch is large.  Per-shape
+        # sweep on Strix Halo (gfx1151) for gemm1 (K=2048, N=1024,
+        # E=256, group=128) found the crossover at M_routed ~ 4096:
+        # BN=64 is ~1.14x faster at M_routed=7952 and ~1.26x at 16384,
+        # while BN=16 stays ~3-8% ahead below the threshold.  BN=128
+        # regresses 5-7x at every size.  num_stages>1 also regresses
+        # (weak ROCm Triton pipeliner), so it stays at 1.
+        # M here is M_routed (= num_tokens * top_k); see apply().
+        large_batch = M is not None and M >= 4096
         return {
             "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,
-            "BLOCK_SIZE_N": 16,
+            "BLOCK_SIZE_N": 64 if large_batch else 16,
             "BLOCK_SIZE_K": BLOCK_SIZE_K,
             "GROUP_SIZE_M": 4,
             "num_warps": 2,
