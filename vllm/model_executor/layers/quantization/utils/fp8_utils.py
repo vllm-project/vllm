@@ -281,8 +281,7 @@ def silu_mul_quant_fp8_packed_triton(
 
     groups_per_row = hidden_size // group_size
     groups_per_pack = 4  # pack 4 UE8M0 scales to a single INT32
-    assert groups_per_row % groups_per_pack == 0
-    packs_per_row = groups_per_row // groups_per_pack
+    packs_per_row = triton.cdiv(groups_per_row, groups_per_pack)
 
     if output_q is None:
         output_q = torch.empty((M, hidden_size), dtype=fp8_dtype, device=input.device)
