@@ -34,7 +34,11 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    WeightsMapper,
+    maybe_prefix,
+)
+
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -126,6 +130,12 @@ direct_register_custom_op(
 
 
 class MoEMixin(MixtureOfExperts):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "block_sparse_moe": "mlp",
+        }
+    )
+
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
@@ -267,14 +277,7 @@ class MoEMixin(MixtureOfExperts):
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                # Naive implementations will have experts as ModuleList
-                is_modulelist = isinstance(child_module, nn.ModuleList)
-                # Packed implementations will have experts as 3D tensors of shapes like:
-                # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
-                # down_proj = (num_experts, intermediate_size, hidden_size)
-                params = list(child_module.parameters())
-                is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
-                if child_name == "experts" and (is_modulelist or is_3d):
+                if child_name == "experts": #and isinstance(child_module, nn.ModuleList):
                     # Alias for readability
                     mlp = module
                     experts = child_module
