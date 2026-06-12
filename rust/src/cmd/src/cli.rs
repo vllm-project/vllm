@@ -468,6 +468,8 @@ impl ServeArgs {
             self.runtime.model.clone(),
             self.runtime.max_model_len,
             self.runtime.language_model_only,
+            self.runtime.disable_log_stats,
+            self.runtime.shutdown_timeout,
             handshake_port,
         )
     }
