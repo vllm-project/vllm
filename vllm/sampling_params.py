@@ -4,6 +4,7 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -503,10 +504,21 @@ class SamplingParams(
             raise ValueError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
+        if not math.isfinite(self.repetition_penalty):
+            raise ValueError(
+                "repetition_penalty must be a finite number, "
+                f"got {self.repetition_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        if not math.isfinite(self.temperature):
+            raise VLLMValidationError(
+                f"temperature must be a finite number, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
             )
         if self.temperature < 0.0:
             raise VLLMValidationError(
@@ -736,6 +748,20 @@ class SamplingParams(
                     f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
                     parameter="logprob_token_ids",
                     value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in logprob_token_ids "
+                    f"contain out-of-vocab token ids. Vocabulary size: "
+                    f"{vocab_size}",
+                    parameter="logprob_token_ids",
+                    value=invalid_token_ids,
                 )
             if self.logprobs is not None and self.logprobs != n:
                 raise VLLMValidationError(
@@ -1022,3 +1048,4 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    structured_outputs: StructuredOutputsParams | None = None

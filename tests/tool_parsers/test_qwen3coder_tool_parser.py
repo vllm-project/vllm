@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Generator
+from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
@@ -19,14 +20,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
-)
-from vllm.tool_parsers.qwen3xml_tool_parser import (
-    Qwen3XMLToolParser,
-    StreamingXMLToolCallParser,
 )
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
@@ -43,17 +41,8 @@ def qwen3_tool_parser(qwen3_tokenizer, sample_tools):
 
 
 @pytest.fixture
-def qwen3_xml_tool_parser(qwen3_tokenizer, sample_tools):
-    return Qwen3XMLToolParser(qwen3_tokenizer, tools=sample_tools)
-
-
-@pytest.fixture(params=["xml"])
-def qwen3_tool_parser_parametrized(qwen3_tool_parser, qwen3_xml_tool_parser, request):
-    """Parameterized fixture that provides both parser types for testing"""
-    if request.param == "original":
-        return qwen3_tool_parser
-    else:
-        return qwen3_xml_tool_parser
+def qwen3_tool_parser_parametrized(qwen3_tool_parser):
+    return qwen3_tool_parser
 
 
 WEATHER_PARAMS = {
@@ -166,47 +155,6 @@ def assert_tool_calls(
         assert json.loads(actual_tool_call.function.arguments) == json.loads(
             expected_tool_call.function.arguments
         )
-
-
-def test_qwen3xml_deferred_array_parses_json_literals():
-    parser = StreamingXMLToolCallParser()
-    parser.set_tools(
-        [
-            ChatCompletionToolsParam(
-                type="function",
-                function={
-                    "name": "AskUserQuestion",
-                    "parameters": QUESTION_PARAMS,
-                },
-            )
-        ]
-    )
-
-    delta = parser.parse_single_streaming_chunks(
-        """<tool_call>
-<function=AskUserQuestion>
-<parameter=questions>
-[{"question": "Pick a color", "multiSelect": false, "answer": null}]
-</parameter>
-</function>
-</tool_call>"""
-    )
-
-    arguments = "".join(
-        tool_call.function.arguments or ""
-        for tool_call in delta.tool_calls or []
-        if tool_call.function and tool_call.function.arguments is not None
-    )
-
-    assert json.loads(arguments) == {
-        "questions": [
-            {
-                "question": "Pick a color",
-                "multiSelect": False,
-                "answer": None,
-            }
-        ]
-    }
 
 
 def stream_delta_message_generator(
@@ -523,7 +471,7 @@ hello world
 </function>
 </tool_call>"""
 
-    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
@@ -1146,125 +1094,6 @@ TX
     assert parsed_args["state"] == "TX"
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tokenizer,
-):
-    """Test parameter type conversion based on tool schema"""
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"},
-                    },
-                },
-            },
-        )
-    ]
-
-    model_output = """<tool_call>
-<function=test_types>
-<parameter=obj_param>
-{'key': 'value'}
-</parameter>
-</function>
-</tool_call>"""
-
-    parser = Qwen3XMLToolParser(qwen3_tokenizer, tools=tools)
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
-
-    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
-    assert args["obj_param"] == {"key": "value"}
-
-
-def test_extract_tool_calls_streaming_missing_opening_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer
-):
-    """Test streaming with missing opening <tool_call> tag
-
-    This tests that the streaming parser correctly handles
-    tool calls that start directly with <function=...>
-    """
-    model_output = """I'll check the weather for you.
-
-<function=get_current_weather>
-<parameter=city>
-Dallas
-</parameter>
-<parameter=state>
-TX
-</parameter>
-<parameter=unit>
-fahrenheit
-</parameter>
-</function>
-</tool_call>"""
-
-    request = ChatCompletionRequest(model=MODEL, messages=[])
-
-    other_content = ""
-    tool_states = {}
-
-    for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
-    ):
-        if delta_message.content:
-            other_content += delta_message.content
-
-        if delta_message.tool_calls:
-            for tool_call in delta_message.tool_calls:
-                idx = tool_call.index
-
-                if idx not in tool_states:
-                    tool_states[idx] = {
-                        "id": None,
-                        "name": None,
-                        "arguments": "",
-                        "type": None,
-                    }
-
-                if tool_call.id:
-                    tool_states[idx]["id"] = tool_call.id
-
-                if tool_call.type:
-                    assert tool_call.type == "function"
-                    tool_states[idx]["type"] = tool_call.type
-
-                if tool_call.function:
-                    if tool_call.function.name:
-                        tool_states[idx]["name"] = tool_call.function.name
-
-                    if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
-
-    # Verify content was streamed
-    assert "I'll check the weather for you." in other_content
-
-    # Verify we got the tool call
-    assert len(tool_states) == 1
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == 1
-
-    state = tool_states[0]
-    assert state["id"] is not None
-    assert state["type"] == "function"
-    assert state["name"] == "get_current_weather"
-
-    # Verify arguments were parsed correctly despite missing opening tag
-    assert state["arguments"] is not None
-    args = json.loads(state["arguments"])
-    assert args["city"] == "Dallas"
-    assert args["state"] == "TX"
-    assert args["unit"] == "fahrenheit"
-
-
 def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser):
     """Regression: malformed XML without '>' must not crash (PR #36774)."""
     model_output = (
@@ -1456,15 +1285,12 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
 def test_adjust_request_auto_uses_vllm_registry_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
-    qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
     include_reasoning: bool,
 ) -> None:
-    monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
-    )
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3CoderToolParser
+
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
@@ -1473,7 +1299,7 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )
-    out = qwen3_tool_parser.adjust_request(req)
+    out = TestParser(MagicMock(), tools=sample_tools).adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
     assert isinstance(out.structured_outputs.structural_tag, str)
@@ -1482,14 +1308,11 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
 
 
 def test_adjust_request_required_prefers_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
-    qwen3_tool_parser: Qwen3CoderToolParser,
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
-    monkeypatch.setattr(
-        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
-        True,
-    )
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Qwen3CoderToolParser
+
     request_tools = _as_chat_completion_tools(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
@@ -1497,6 +1320,6 @@ def test_adjust_request_required_prefers_structural_tag(
         tools=request_tools,
         tool_choice="required",
     )
-    out = qwen3_tool_parser.adjust_request(req)
+    out = TestParser(MagicMock(), tools=sample_tools).adjust_request(req)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
