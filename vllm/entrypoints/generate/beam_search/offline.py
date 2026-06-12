@@ -229,9 +229,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_key,
                 structured_output_bitmask,
             )
-            active_indices = [i for i, e in enumerate(beam_entries) if e is not None]
-            for i, e in enumerate(beam_entries):
-                if e is None:
+            active_indices = [
+                i for i, entry in enumerate(beam_entries) if entry is not None
+            ]
+            for i, entry in enumerate(beam_entries):
+                if entry is None:
                     beam = all_beams[i]
                     assert beam.orig_prompt["type"] != "enc_dec"
                     prompt_len = len(beam.orig_prompt["prompt_token_ids"])
