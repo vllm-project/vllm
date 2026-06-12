@@ -48,34 +48,16 @@ def aiter_triton_kernel_w4a8_moe_forward(
     )
     from vllm.platforms.rocm import on_gfx1250
 
-    # aiter exposes its MoE routing under two module paths across versions;
-    # prefer the nested `moe.moe_routing` location, fall back to the legacy one.
-    #
-    # On gfx1250 use aiter's pure-torch ``routing_torch`` instead of the triton
-    # ``routing``: the triton routing kernel compiles a TMA (TDM) descriptor
-    # whose last dim is ``topk * 2`` bytes, which is < 16 bytes (the descriptor
-    # minimum) for a power-of-2 topk such as gpt-oss' topk=4 and fails to
-    # compile for small batches (warmup dummy run + every decode step).
-    # ``routing_torch`` avoids the TDM kernel and is numerically identical
-    # (validated on the FFM sim: gather/scatter/gate_scal match the triton path
-    # exactly where the latter compiles). DeepSeek-V4's topk=6 dodged this since
-    # ``next_power_of_2(6) == 8 != 6`` disables the descriptor branch.
+    try:
+        from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
+    except ImportError:
+        from aiter.ops.triton.moe_routing import routing as _routing_mod
+
+    # TODO: (JPVILLAM) This causes a tl compile error on 1250.
+    # Need to figure out why this is a problem and sync with triton team
     if on_gfx1250():
-        try:
-            from aiter.ops.triton.moe.moe_routing.routing import (
-                routing_torch as aiter_routing,
-            )
-        except ImportError:
-            from aiter.ops.triton.moe_routing.routing import (
-                routing as aiter_routing,
-            )
-    else:
-        try:
-            from aiter.ops.triton.moe.moe_routing.routing import (
-                routing as aiter_routing,
-            )
-        except ImportError:
-            from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+        _routing_mod.is_tdm_avail = lambda: False
+    aiter_routing = _routing_mod.routing
 
     routing_data, gather_idx, scatter_idx = aiter_routing(
         gating_output, topk, sm_first=not renormalize
