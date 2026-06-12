@@ -276,13 +276,14 @@ class KVCacheCoordinator(ABC):
         Pop the request's bookkeeping from all single-type managers and
         return its blocks without returning them to the block pool. The
         caller must eventually pass the returned blocks to
-        `block_pool.free_blocks`.
+        `block_pool.free_blocks`, freeing them in reverse order (so that
+        tail blocks are evicted first).
 
         Args:
             request_id: The request ID.
 
         Returns:
-            The request's blocks in the order they should be freed.
+            The request's blocks in allocation order.
         """
         blocks: list[KVCacheBlock] = []
         for manager in self.single_type_managers:

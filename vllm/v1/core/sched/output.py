@@ -240,11 +240,6 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
-    # Used as a fence for deferred block freeing under async scheduling:
-    # when this step's output is processed, every GPU write enqueued
-    # by this step (or earlier steps) has completed.
-    sched_seq: int = 0
-
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

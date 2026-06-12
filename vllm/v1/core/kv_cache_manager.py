@@ -460,18 +460,14 @@ class KVCacheManager:
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without
-        returning them to the block pool.
-
-        Used by the scheduler to defer the actual free (ref_cnt decrement)
-        until in-flight GPU steps that may still write these blocks have
-        completed (see Scheduler._free_request_blocks). The caller must
-        eventually pass the returned blocks to `block_pool.free_blocks`.
+        returning them to the block pool. The caller must eventually free
+        them in reverse order (so that tail blocks are evicted first).
 
         Args:
             request: The request to pop the blocks for.
 
         Returns:
-            The request's blocks in the order they should be freed.
+            The request's blocks in allocation order.
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
 

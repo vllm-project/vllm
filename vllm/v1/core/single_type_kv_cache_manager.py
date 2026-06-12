@@ -362,27 +362,21 @@ class SingleTypeKVCacheManager(ABC):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         """
-        Pop the request's bookkeeping and return its blocks without
+        Pop the request's bookkeeping and return its blocks without yet
         returning them to the block pool. The caller is responsible for
-        eventually passing the returned blocks to
-        `block_pool.free_blocks` (used by the scheduler to defer the
-        actual free until in-flight GPU steps that may still write these
-        blocks have completed).
+        eventually passing the returned blocks to `block_pool.free_blocks`,
+        freeing them in reverse order (so that tail blocks are evicted first).
 
         Args:
             request_id: The request ID.
 
         Returns:
-            The request's blocks in the order they should be freed
-            (reversed, so that tail blocks are evicted first).
+            The request's blocks in allocation order.
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
-
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
-        return req_blocks[::-1]
+        return req_blocks
 
     def free(self, request_id: str) -> None:
         """
@@ -391,7 +385,8 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             request_id: The request ID.
         """
-        self.block_pool.free_blocks(self.pop_blocks_for_free(request_id))
+        # Free blocks in reverse order so that the tail blocks are freed first.
+        self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:

@@ -52,7 +52,7 @@ def _create_deferring_scheduler():
     the mechanism itself is independent of it.
     """
     scheduler = create_scheduler(model=MODEL, async_scheduling=True)
-    scheduler._defer_block_free = True
+    scheduler.defer_block_free = True
     return scheduler
 
 
@@ -85,14 +85,14 @@ def test_gate_enabled_for_async_consumer():
         async_scheduling=True,
         use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
     )
-    assert scheduler._defer_block_free
+    assert scheduler.defer_block_free
 
 
 def test_gate_disabled_without_connector():
     # Async scheduling alone (no PD connector): the gate must stay off
     # and freeing must remain immediate.
     scheduler = create_scheduler(model=MODEL, async_scheduling=True)
-    assert not scheduler._defer_block_free
+    assert not scheduler.defer_block_free
 
     pool = scheduler.kv_cache_manager.block_pool
     num_free_initially = pool.get_num_free_blocks()
@@ -106,7 +106,7 @@ def test_gate_disabled_without_connector():
         out0, _make_model_runner_output(out0, token_id=STOP_TOKEN_ID)
     )
     assert request.is_finished()
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
 
 
@@ -125,13 +125,13 @@ def test_finish_defers_free_until_inflight_step_done():
         out0, _make_model_runner_output(out0, token_id=STOP_TOKEN_ID)
     )
     assert request.is_finished()
-    assert len(scheduler._deferred_frees) == 1
+    assert len(scheduler.deferred_frees) == 1
     assert pool.get_num_free_blocks() == num_free_running
 
     # Step 2's output is processed: every GPU write of step 2 has
     # completed, so the blocks can now be returned to the pool.
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
 
 
@@ -156,7 +156,7 @@ def test_finish_frees_immediately_when_no_inflight_step():
         out0, _make_model_runner_output(out0, token_id=STOP_TOKEN_ID)
     )
     assert request.is_finished()
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
 
 
@@ -170,17 +170,17 @@ def test_abort_defers_free():
 
     # External abort arrives while steps 1 and 2 are both in flight.
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
-    assert len(scheduler._deferred_frees) == 1
+    assert len(scheduler.deferred_frees) == 1
     assert pool.get_num_free_blocks() == num_free_running
 
     # Step 1's output: step 2 is still in flight, keep holding the blocks.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
-    assert len(scheduler._deferred_frees) == 1
+    assert len(scheduler.deferred_frees) == 1
     assert pool.get_num_free_blocks() == num_free_running
 
     # Step 2's output: now the blocks can be freed.
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
 
 
@@ -200,7 +200,7 @@ def test_preempt_defers_free_and_clears_bookkeeping():
 
     # Blocks are withheld from the pool, but the manager bookkeeping is
     # cleared immediately so the request can be rescheduled safely.
-    assert len(scheduler._deferred_frees) == 1
+    assert len(scheduler.deferred_frees) == 1
     assert pool.get_num_free_blocks() == num_free_running
     for manager in scheduler.kv_cache_manager.coordinator.single_type_managers:
         assert request.request_id not in manager.req_to_blocks
@@ -208,9 +208,9 @@ def test_preempt_defers_free_and_clears_bookkeeping():
     # Outputs of both in-flight steps are processed: blocks return to the
     # pool only after the newest one.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
-    assert len(scheduler._deferred_frees) == 1
+    assert len(scheduler.deferred_frees) == 1
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
 
 
@@ -235,9 +235,134 @@ def test_multiple_deferred_frees_drain_in_order():
     scheduler.update_from_output(
         out0, _make_model_runner_output(out0, token_id=STOP_TOKEN_ID)
     )
-    assert len(scheduler._deferred_frees) == 2
+    assert len(scheduler.deferred_frees) == 2
     assert pool.get_num_free_blocks() < num_free_initially
 
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
-    assert not scheduler._deferred_frees
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_initially
+
+
+def test_fence_held_across_multiple_inflight_steps():
+    """Pipeline-parallel / deep async: with several steps scheduled ahead,
+    a freed request's blocks must stay held until the *newest* in-flight
+    step's output is processed, not the first.
+
+    Depth-1 tests only check a single intervening update; with PP the
+    scheduler can dispatch up to pp_size steps ahead, so the fence must
+    survive multiple intervening update_from_output calls.
+    """
+    scheduler = _create_deferring_scheduler()
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_initially = pool.get_num_free_blocks()
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=10,
+    )[0]
+    scheduler.add_request(request)
+
+    # Schedule three steps ahead without processing any output: a prefill
+    # plus two speculatively over-scheduled decodes, all in flight at once.
+    outs = [scheduler.schedule() for _ in range(3)]
+    assert outs[0].num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS
+    assert outs[1].num_scheduled_tokens[request.request_id] == 1
+    assert outs[2].num_scheduled_tokens[request.request_id] == 1
+    assert scheduler.sched_step_seq == 3
+    num_free_running = pool.get_num_free_blocks()
+    assert num_free_running < num_free_initially
+
+    # Abort while all three steps are in flight: the fence is the newest
+    # scheduled step (3), since any of them may still write the blocks.
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert len(scheduler.deferred_frees) == 1
+    assert scheduler.deferred_frees[0][0] == 3
+    assert pool.get_num_free_blocks() == num_free_running
+
+    # Draining the two earlier in-flight steps must NOT release the blocks:
+    # their outputs don't fence the still-pending newest write.
+    for out in (outs[0], outs[1]):
+        scheduler.update_from_output(out, _make_model_runner_output(out))
+        assert len(scheduler.deferred_frees) == 1
+        assert pool.get_num_free_blocks() == num_free_running
+
+    # Only once the newest scheduled step's output is processed do the
+    # blocks return to the pool.
+    scheduler.update_from_output(outs[2], _make_model_runner_output(outs[2]))
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_initially
+
+
+def test_max_tokens_finish_frees_immediately_with_other_inflight():
+    """A request finishing by reaching max_tokens is never over-scheduled past
+    its final-token step, so no in-flight step writes its blocks: it is freed
+    immediately even while another request's step is still in flight.
+    """
+    scheduler = _create_deferring_scheduler()
+    pool = scheduler.kv_cache_manager.block_pool
+
+    # Short request finishes at max_tokens=1; long request keeps running.
+    short = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=1, req_ids=["short"]
+    )[0]
+    long = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=100, req_ids=["long"]
+    )[0]
+    scheduler.add_request(short)
+    scheduler.add_request(long)
+
+    out0 = scheduler.schedule()  # prefill both
+    out1 = scheduler.schedule()  # short is skipped (at max_tokens); long decodes
+    assert "short" not in out1.num_scheduled_tokens
+    assert "long" in out1.num_scheduled_tokens
+
+    free_before = pool.get_num_free_blocks()
+    # Process step 0: `short` reaches max_tokens and finishes while step 1
+    # (which scheduled `long`, not `short`) is still in flight.
+    scheduler.update_from_output(out0, _make_model_runner_output(out0))
+
+    assert short.is_finished()
+    # A step IS globally in flight (the old global fence would have deferred),
+    # but the per-request gate frees `short` immediately since nothing writes
+    # its blocks anymore.
+    assert scheduler.sched_step_seq > scheduler.processed_step_seq
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() > free_before  # short's blocks returned
+
+
+def test_abort_mid_prefill_defers_free():
+    """Intermediate prefill chunks don't allocate output placeholders, so the
+    deferral must key off is_prefill_chunk: aborting a request whose prefill
+    chunk is still in flight must withhold its blocks.
+    """
+    scheduler = create_scheduler(
+        model=MODEL, async_scheduling=True, long_prefill_token_threshold=16
+    )
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_initially = pool.get_num_free_blocks()
+
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=5
+    )[0]
+    scheduler.add_request(request)
+
+    out0 = scheduler.schedule()
+    # Partial prefill: a chunk is in flight, with no output placeholders yet.
+    assert out0.num_scheduled_tokens[request.request_id] == 16
+    assert request.num_output_placeholders == 0
+    assert request.is_prefill_chunk
+    num_free_running = pool.get_num_free_blocks()
+    assert num_free_running < num_free_initially
+
+    # Abort while the prefill chunk is in flight: blocks must be withheld
+    # (keyed off is_prefill_chunk, since there are no placeholders).
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert len(scheduler.deferred_frees) == 1
+    assert pool.get_num_free_blocks() == num_free_running
+
+    # Once the in-flight prefill step's output is processed, blocks return.
+    scheduler.update_from_output(out0, _make_model_runner_output(out0))
+    assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
