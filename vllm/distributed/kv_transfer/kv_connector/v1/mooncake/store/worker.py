@@ -91,12 +91,11 @@ def _replicate_config_supports_group_ids(
 
 
 def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
+    # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
+    # a prefix chunk, so shard dimensions stay only in the object key.
     return (
         "vllm-mooncake-store:"
         f"{metadata.model_name}"
-        f"@pcp{metadata.pcp_rank}"
-        f"@dcp{metadata.dcp_rank}"
-        f"@group:{metadata.group_id}"
         f"@{chunk_hash}"
     )
 

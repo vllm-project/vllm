@@ -656,8 +656,8 @@ def test_store_sending_thread_sets_group_ids_when_enabled():
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert config is replicate_config
     assert config.group_ids == [
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6130",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
     ]
     assert len(config.group_ids) == len(keys)
 
@@ -702,7 +702,7 @@ def test_store_sending_thread_leaves_group_ids_unchanged_when_unsupported():
     assert replicate_config.group_ids == ["existing"]
 
 
-def test_mooncake_group_id_uses_logical_chunk_not_tp_or_pp_rank():
+def test_mooncake_group_id_uses_logical_chunk_and_excludes_physical_ranks():
     group_id = worker._make_mooncake_group_id(
         KeyMetadata(
             "test-model",
@@ -715,12 +715,15 @@ def test_mooncake_group_id_uses_logical_chunk_not_tp_or_pp_rank():
         "abcdef",
     )
 
-    assert group_id == "vllm-mooncake-store:test-model@pcp5@dcp7@group:13@abcdef"
+    assert group_id == "vllm-mooncake-store:test-model@abcdef"
     assert "tp_rank" not in group_id
     assert "pp_rank" not in group_id
+    assert "pcp" not in group_id
+    assert "dcp" not in group_id
+    assert "group:" not in group_id
 
 
-def test_store_sending_thread_group_id_excludes_physical_tp_rank():
+def test_store_sending_thread_group_id_excludes_physical_sharding():
     store = MagicMock()
     store.batch_is_exist.return_value = [0, 0]
     store.batch_put_from_multi_buffers.return_value = [256, 256]
@@ -756,8 +759,8 @@ def test_store_sending_thread_group_id_excludes_physical_tp_rank():
         "test-model@tp_rank:2@pcp0@dcp0@pp_rank:0@group:0@6131",
     ]
     assert config.group_ids == [
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6130",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
     ]
 
 
@@ -788,12 +791,12 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
     assert addrs == [[0x1000, 0x2000], [0x1100, 0x2100]]
     assert sizes == [[256, 256], [256, 256]]
     assert config.group_ids == [
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6130",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
     ]
 
 
-def test_store_sending_thread_group_ids_distinguish_kv_cache_groups():
+def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     store = MagicMock()
@@ -839,12 +842,16 @@ def test_store_sending_thread_group_ids_distinguish_kv_cache_groups():
     ]
     assert addrs == [[0x1000], [0x1100], [0x3200], [0x3300]]
     assert sizes == [[256], [256], [256], [256]]
+    # Different vLLM KV cache groups for the same prefix chunk share the
+    # same Mooncake lifecycle group id.
     assert config.group_ids == [
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6130",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6131",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:1@6130",
-        "vllm-mooncake-store:test-model@pcp0@dcp0@group:1@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
     ]
+    assert config.group_ids[0] == config.group_ids[2]
+    assert config.group_ids[1] == config.group_ids[3]
 
 
 def test_store_sending_thread_group_ids_follow_missing_key_filter():
@@ -864,7 +871,7 @@ def test_store_sending_thread_group_ids_follow_missing_key_filter():
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131"]
-    assert config.group_ids == ["vllm-mooncake-store:test-model@pcp0@dcp0@group:0@6131"]
+    assert config.group_ids == ["vllm-mooncake-store:test-model@6131"]
 
 
 def test_estimate_disk_offload_staging_bytes_sums_multi_segment_sizes():
