@@ -6,7 +6,7 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Form, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -53,6 +53,9 @@ async def create_transcriptions(
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
+
+    elif isinstance(generator, str):
+        return PlainTextResponse(content=generator)
 
     elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
