@@ -19,7 +19,6 @@ from vllm.distributed import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -164,26 +163,6 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
     model.embedding_modules = {"lm_head": "lm_head"}
     model.unpadded_vocab_size = 32064
 
-    return model
-
-
-@pytest.fixture
-def baichuan_dummy_model(default_vllm_config, dist_init) -> nn.Module:
-    # Only includes BaiChuan's lora modules so get_supported_lora_modules will work
-    model = DummyLoRAModel(
-        OrderedDict(
-            [
-                ("W_pack", QKVParallelLinear(64, 8, 8)),
-                ("o_proj", RowParallelLinear(64, 64)),
-                ("gate_up_proj", MergedColumnParallelLinear(64, [16, 16])),
-                ("down_proj", RowParallelLinear(16, 64)),
-            ]
-        )
-    )
-    model.config = MagicMock()
-    # Match the expected format for BaiChuan checkpoints
-    model.W_pack.checkpoint_format = "fused"
-    model.gate_up_proj.checkpoint_format = "sharded"
     return model
 
 
