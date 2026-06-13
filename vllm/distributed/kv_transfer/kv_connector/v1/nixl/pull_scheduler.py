@@ -263,7 +263,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             block_ids = self.get_sw_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
-            if is_p_node and request.output_token_ids:
+            if (
+                self.enable_speculative_handoff
+                and is_p_node
+                and request.output_token_ids
+            ):
                 first_gen_token_ids = [int(request.output_token_ids[0])]
                 if request.spec_token_ids:
                     draft_token_ids = [

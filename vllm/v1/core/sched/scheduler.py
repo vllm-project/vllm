@@ -217,6 +217,13 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.enable_kv_transfer_spec_decode_handoff = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "enable_speculative_handoff", self.num_spec_tokens > 0
+            )
+            if vllm_config.kv_transfer_config is not None
+            else False
+        )
         self.num_lookahead_tokens = 0
         if speculative_config is not None:
             if speculative_config.use_eagle():
@@ -309,7 +316,8 @@ class Scheduler(SchedulerInterface):
     ) -> bool:
         params = request.kv_transfer_params
         if (
-            not params
+            not self.enable_kv_transfer_spec_decode_handoff
+            or not params
             or not request.spec_token_ids
             or request.num_output_tokens == 0
             or num_computed_tokens < request.num_prompt_tokens
@@ -326,7 +334,8 @@ class Scheduler(SchedulerInterface):
     ) -> bool:
         params = request.kv_transfer_params
         return bool(
-            self.num_spec_tokens > 0
+            self.enable_kv_transfer_spec_decode_handoff
+            and self.num_spec_tokens > 0
             and params
             and params.get("do_remote_decode")
             and request.num_output_tokens == 0
@@ -339,7 +348,8 @@ class Scheduler(SchedulerInterface):
     ) -> None:
         params = request.kv_transfer_params
         if (
-            self.num_spec_tokens <= 0
+            not self.enable_kv_transfer_spec_decode_handoff
+            or self.num_spec_tokens <= 0
             or not params
             or request.num_output_tokens > 0
             or request.spec_token_ids
