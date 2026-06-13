@@ -1570,14 +1570,26 @@ def test_store_worker_close_releases_store():
     assert worker.store is None
 
 
+def test_store_worker_close_releases_lookup_server():
+    worker = _make_bare_worker()
+    mock_server = MagicMock()
+    worker.lookup_server = mock_server
+
+    worker.close()
+
+    assert worker.lookup_server is None
+    mock_server.close.assert_called_once_with()
+
+
 def test_store_worker_close_is_idempotent():
     worker = _make_bare_worker()
     store = worker.store
+    worker.lookup_server = MagicMock()
 
     worker.close()
     worker.close()
 
-    # Second call short-circuits because store was already released.
+    # Second call short-circuits because both resources were already released.
     store.close.assert_called_once_with()
 
 
@@ -1589,3 +1601,14 @@ def test_store_worker_close_swallows_store_errors():
     worker.close()
 
     assert worker.store is None
+
+
+def test_store_worker_close_swallows_lookup_server_errors():
+    worker = _make_bare_worker()
+    mock_server = MagicMock()
+    mock_server.close.side_effect = RuntimeError("boom")
+    worker.lookup_server = mock_server
+
+    worker.close()
+
+    assert worker.lookup_server is None
