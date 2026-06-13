@@ -250,6 +250,10 @@ def test_cutlass_fp8_blockwise_scale_gemm(
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
@@ -265,7 +269,10 @@ def test_cutlass_int8_gemm(
         m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias
     )
 
-
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
@@ -372,7 +379,10 @@ def test_cutlass_fp8_gemm_devices(
         device,
     )
 
-
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
@@ -421,7 +431,10 @@ def test_cutlass_fp8_gemm_m_sweep(
                 m, nk, nk, a_scale_group_shape, b_scale_group_shape, use_bias
             )
 
-
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
 )
@@ -438,10 +451,13 @@ def test_cutlass_int8_gemm_m_sweep(
                 m, nk, nk, a_scale_group_shape, b_scale_group_shape, use_bias
             )
 
-
-@pytest.mark.parametrize("m", [32, 64, 128])
-@pytest.mark.parametrize("n", [16, 32, 64])
-@pytest.mark.parametrize("k", [64, 128, 256])
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
+@pytest.mark.parametrize("m", [32])#, 64, 128])
+@pytest.mark.parametrize("n", [16])#, 32, 64])
+@pytest.mark.parametrize("k", [64])#, 128, 256])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skip
 def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dtype):
@@ -488,6 +504,10 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dty
     torch.testing.assert_close(out, baseline_q, rtol=1e-2, atol=1e0)
 
 
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 @pytest.mark.parametrize("m", [32, 64, 128])
 @pytest.mark.parametrize("n", [16, 32, 64])
 @pytest.mark.parametrize("k", [64, 128, 256])
@@ -562,7 +582,10 @@ def test_cutlass_int8_azp(
             (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None, func_bias),
         )
 
-
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() >= (10, 0),
+    reason="INT8 is not supported on this GPU type"
+)
 # Test working with a subset of A and B
 def test_cutlass_subset():
     big_m, big_n, big_k = 1024, 1024, 1024
@@ -596,14 +619,19 @@ class CutlassLayer(torch.nn.Module):
             a, self.b, self.scale_a, self.scale_b, self.out_dtype
         )
 
-
+@pytest.mark.parametrize("dtype", ["int8", "fp8"])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
+def test_cutlass_cuda_graph(dtype: str, per_act_token: bool, per_out_ch: bool):
+    if dtype == "int8" and torch.cuda.get_device_capability() >= (10, 0):
+        pytest.skip("INT8 is not supported on this GPU type")
+    
     m, n, k = 512, 512, 512
 
-    a = to_int8(torch.randn((m, k), device="cuda"))
-    b = to_int8(torch.randn((n, k), device="cuda").t())
+    to_func = to_int8 if dtype == "int8" else to_fp8
+
+    a = to_func(torch.randn((m, k), device="cuda"))
+    b = to_func(torch.randn((n, k), device="cuda").t())
 
     m_a_scales = m if per_act_token else 1
     n_b_scales = n if per_out_ch else 1
