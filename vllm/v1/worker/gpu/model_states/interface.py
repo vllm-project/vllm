@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.tasks import GenerationTask
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
+
+
+class ModelSpecificAttnMetadata:
+    """Base class for model-specific attention metadata."""
+
+    def get_extra_common_attn_kwargs(
+        self,
+        kv_cache_group_id: int,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {}
+
+    def get_extra_attn_kwargs(
+        self,
+        attn_metadata_builder: Any,
+        num_reqs: int,
+    ) -> dict[str, Any]:
+        return {}
+
+
+class ModelState(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
+        raise NotImplementedError
+
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        return None
+
+    def remove_request(self, req_id: str) -> None:
+        return None
+
+    def apply_staged_writes(self) -> None:
+        return None
+
+    def postprocess_state(
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+    ) -> None:
+        return None
+
+    @abstractmethod
+    def get_mm_embeddings(
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
+    ) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
+        """Wrap or replace the default sampler.
+
+        Called after model loading with the already-constructed base
+        ``Sampler``.  Return ``None`` to keep the defaults, or
+        ``(sampler, rejection_sampler | None)`` to override.
+        """
+        return None
+
+    num_new_sampled_tokens_per_step: int = 1
+    """New tokens sampled on each decode step 
+    (excluding accepted draft tokens, a.k.a num bonus tokens)."""

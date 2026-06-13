@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# This script build the CPU docker image and run the offline inference inside the container.
+# It serves a sanity check for compilation and basic model usage.
+set -ex
+
+# allow to bind to different cores
+CORE_RANGE=${CORE_RANGE:-0-31}
+OMP_CORE_RANGE=${OMP_CORE_RANGE:-0-31}
+
+export CMAKE_BUILD_PARALLEL_LEVEL=16
+
+# Setup cleanup
+remove_docker_container() {
+    set -e;
+    docker rm -f cpu-test || true;
+}
+trap remove_docker_container EXIT
+remove_docker_container
+
+# Try building the docker image
+docker build --tag cpu-test --target vllm-test -f docker/Dockerfile.cpu .
+
+# Run the image
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test cpu-test
+
+function cpu_tests() {
+  set -e
+
+  docker exec cpu-test bash -c "
+    set -e
+    pip list"
+
+  # Run kernel tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+    pytest -x -v -s tests/kernels/core/test_cpu_activation.py
+    pytest -x -v -s tests/kernels/moe/test_moe.py -k test_cpu_fused_moe_basic
+    pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py"
+
+  # skip tests requiring model downloads if HF_TOKEN is not set
+  # due to rate-limits
+  if [ -z "$HF_TOKEN" ]; then
+    echo "Warning: HF_TOKEN is not set. Skipping tests that require model downloads."
+    return
+  fi
+
+  # offline inference
+  docker exec cpu-test bash -c "
+    set -e
+    python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m"
+
+  # Run model tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model"
+
+  # Run quantized model tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+
+
+  # basic online serving
+  docker exec cpu-test bash -c '
+    set -e
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3-0.6B --max-model-len 2048 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+      --backend vllm \
+      --dataset-name random \
+      --model Qwen/Qwen3-0.6B \
+      --num-prompts 20 \
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+
+  # smoke test for Gated DeltaNet
+  docker exec cpu-test bash -c '
+    set -e
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3.5-0.8B --max-model-len 2048 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+      --backend vllm \
+      --dataset-name random \
+      --model Qwen/Qwen3.5-0.8B \
+      --num-prompts 20 \
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+
+}
+
+# All of CPU tests are expected to be finished less than 40 mins.
+export -f cpu_tests
+timeout 2h bash -c cpu_tests
