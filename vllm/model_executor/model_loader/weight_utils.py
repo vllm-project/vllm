@@ -732,15 +732,53 @@ def _prefetch_checkpoint(
 ) -> None:
     """Prefetch a checkpoint file into the OS page cache.
 
-    Reads the file in blocks so the kernel caches its pages before workers load
-    the same file.
+    Synchronously prefetches the file into page cache using zero-copy splice.
     """
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    with open(file_path, "rb") as f:
-        while f.read(block_size):
-            pass
+    size = os.path.getsize(file_path)
+    if size == 0:
+        return
+
+    if not hasattr(os, "splice"):
+        # Fallback for platforms where os.splice is not available
+
+        with open(file_path, "rb") as f:
+            while f.read(block_size):
+                pass
+        return
+
+    # Open target file and /dev/null
+    fd = os.open(file_path, os.O_RDONLY)
+    null_fd = os.open("/dev/null", os.O_WRONLY)
+
+    # Create the pipe required by splice()
+    r, w = os.pipe()
+
+    try:
+        remaining = size
+        while remaining > 0:
+            # Splice in blocks
+            chunk = min(remaining, block_size)
+
+            # Splice from file to the pipe's write end
+            bytes_spliced = os.splice(fd, w, chunk, None, None, os.SPLICE_F_MOVE)
+            if bytes_spliced <= 0:
+                break
+
+            # Splice from the pipe's read end to /dev/null to discard it
+            os.splice(r, null_fd, bytes_spliced, None, None, os.SPLICE_F_MOVE)
+            remaining -= bytes_spliced
+
+        if remaining > 0:
+            raise OSError("Could not prefetch the entire file.")
+
+    finally:
+        os.close(fd)
+        os.close(null_fd)
+        os.close(r)
+        os.close(w)
 
 
 def _prefetch_all_checkpoints(
