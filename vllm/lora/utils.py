@@ -210,8 +210,7 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     In vLLM, all linear layers support LoRA.
     """
 
-    packed_modules_mapping = get_packed_modules_mapping(model)
-    supported_lora_modules: set[str] = set(sum(packed_modules_mapping.values(), []))
+    supported_lora_modules: set[str] = set()
     for name, module in model.named_modules():
         # get the embedding modules if the module's embedding_modules
         # is not empty.
@@ -220,11 +219,12 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
             for name in embedding_modules:
                 supported_lora_modules.add(name)
 
-        if (
-            isinstance(module, (LinearBase, MoERunner))
-            and (supported_name := name.split(".")[-1]) not in packed_modules_mapping
-        ):
-            supported_lora_modules.add(supported_name)
+        # get all the linear subfixes.
+        if isinstance(module, (LinearBase,)):
+            supported_lora_modules.add(name.split(".")[-1])
+
+        if isinstance(module, (MoERunner,)):
+            supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)
 

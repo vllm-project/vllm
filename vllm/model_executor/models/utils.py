@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 import regex as re
@@ -130,22 +130,24 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
-    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
-        """Derive a `packed_modules_mapping` from `self.orig_to_new_substr`."""
+    def get_unfused_mapper(self) -> "WeightsMapper":
+        """Mapper variant that drops the QKV/MLP fusion substr maps, keeping
+        all genuine renames/prefixes.
+
+        Consumers that reference the checkpoint's *unfused* module names — LoRA
+        name parsing and the quantization config's layer lists
+        (`modules_in_block_to_quantize`, ignored layers) — need the constituent
+        names (e.g. `q_proj`) to survive rather than being rewritten to the
+        fused vLLM name (`qkv_proj.q`)."""
         qkv_shards = {"q", "k", "v"}
-        packed_modules_mapping: dict[str, list[str]] = {}
+        substr = {}
         for old, new in self.orig_to_new_substr.items():
-            if new is None or "." not in new:
-                continue
-            param_path, _, shard_id = new.rpartition(".")
-            # Is shard_id actually a shard ID?
-            if not (shard_id.isdigit() or shard_id in qkv_shards):
-                continue
-            _, _, weight_name = old.rpartition(".")
-            _, _, param_name = param_path.rpartition(".")
-            packed_names = packed_modules_mapping.setdefault(param_name, [])
-            packed_names.extend([weight_name, shard_id])
-        return packed_modules_mapping
+            if new is not None and "." in new:
+                shard_id = new.rpartition(".")[2]
+                if shard_id.isdigit() or shard_id in qkv_shards:
+                    continue
+            substr[old] = new
+        return replace(self, orig_to_new_substr=substr)
 
 
 class AutoWeightsLoader:
@@ -392,9 +394,6 @@ class AutoWeightsLoader:
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
-            # If mapper contains packed_modules_mapping, update them in quant_config
-            if packed_modules_mapping := mapper.get_packed_modules_mapping():
-                quant_config.packed_modules_mapping.update(packed_modules_mapping)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name

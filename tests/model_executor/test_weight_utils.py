@@ -281,27 +281,5 @@ class TestKvCacheScaleMapper:
         )
 
 
-def test_weights_mapper_get_packed_modules_mapping():
-    from vllm.model_executor.models.utils import WeightsMapper
-
-    mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".q_proj": ".qkv_proj.q",
-            ".k_proj": ".qkv_proj.k",
-            ".v_proj": ".qkv_proj.v",
-            ".gate_proj": ".gate_up_proj.0",
-            ".up_proj": ".gate_up_proj.1",
-            # Non-fusion entries must not contribute
-            ".word_embeddings": "",
-            "llm.model.": "model.decoder.",
-            "llm.lm_head": "lm_head",
-        }
-    )
-    assert mapper.get_packed_modules_mapping() == {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-
 if __name__ == "__main__":
     test_download_weights_from_hf()
