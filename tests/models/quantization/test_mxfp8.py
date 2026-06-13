@@ -19,6 +19,7 @@ diverse prompts from ``tests/prompts/example.txt``.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
 
@@ -31,13 +32,24 @@ MAX_MODEL_LEN = 1024
 MAX_TOKENS = 4
 NUM_LOG_PROBS = 8
 
+_MODELS = [
+    DENSE_MODEL,
+    pytest.param(
+        MOE_MODEL,
+        marks=pytest.mark.skipif(
+            current_platform.is_rocm(),
+            reason="Online MXFP8 MoE has no ROCm backend yet.",
+        ),
+    ),
+]
+
 
 @pytest.mark.skipif(
     not is_quant_method_supported("mxfp8"),
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize("model", _MODELS, ids=["dense", "moe"])
 def test_mxfp8_logprobs(
     vllm_runner,
     example_prompts,
@@ -86,7 +98,7 @@ def test_mxfp8_logprobs(
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize("model", _MODELS, ids=["dense", "moe"])
 def test_mxfp8_generation(vllm_runner, model: str) -> None:
     """Smoke test: verify online MXFP8 model generates coherent text."""
     prompt = "1 2 3 4 5"
