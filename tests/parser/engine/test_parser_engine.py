@@ -712,67 +712,6 @@ class TestEngineBasedPath:
         assert len(result.tool_calls) > 0
 
 
-# ── TestExtractResponseOutputs ───────────────────────────────────────
-
-
-class TestExtractResponseOutputs:
-    """Tests for ParserEngine.extract_response_outputs()."""
-
-    def test_plain_content(self, mock_request):
-        engine = _make_engine(_hermes_config())
-        outputs = engine.extract_response_outputs(
-            model_output="Hello world",
-            model_output_token_ids=[],
-            request=mock_request,
-        )
-        assert len(outputs) == 1
-        assert outputs[0].type == "message"
-        assert outputs[0].content[0].text == "Hello world"
-
-    def test_reasoning_and_content(self, mock_request):
-        engine = _make_engine()
-        outputs = engine.extract_response_outputs(
-            model_output="Let me think</think>The answer is 42",
-            model_output_token_ids=[],
-            request=mock_request,
-        )
-        types = [o.type for o in outputs]
-        assert "reasoning" in types
-        assert "message" in types
-
-        reasoning_item = next(o for o in outputs if o.type == "reasoning")
-        assert reasoning_item.content[0].text == "Let me think"
-
-        message_item = next(o for o in outputs if o.type == "message")
-        assert message_item.content[0].text == "The answer is 42"
-
-    def test_tool_call(self, mock_request):
-        engine = _make_engine(_hermes_config())
-        text = '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
-        outputs = engine.extract_response_outputs(
-            model_output=text,
-            model_output_token_ids=[],
-            request=mock_request,
-        )
-        types = [o.type for o in outputs]
-        assert "function_call" in types
-
-        tc = next(o for o in outputs if o.type == "function_call")
-        assert tc.name == "f"
-
-    def test_reasoning_plus_tool_call(self, mock_request):
-        engine = _make_engine()
-        text = 'hmm</think><tool_call>{"name": "g", "arguments": {}}</tool_call>'
-        outputs = engine.extract_response_outputs(
-            model_output=text,
-            model_output_token_ids=[],
-            request=mock_request,
-        )
-        types = [o.type for o in outputs]
-        assert "reasoning" in types
-        assert "function_call" in types
-
-
 # ── TestParseTokenIdPassthrough ────────────────────────────────────
 
 

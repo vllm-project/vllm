@@ -34,9 +34,6 @@ from vllm.tool_parsers.utils import (
 )
 
 if TYPE_CHECKING:
-    from openai.types.responses.response_output_item import ResponseOutputItem
-    from openai.types.responses.response_output_text import Logprob
-
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
@@ -584,95 +581,6 @@ class ParserEngine(Parser):
             ]
 
         return reasoning, content, tool_calls
-
-    # ── Response outputs (Responses API) ──────────────────────────────
-
-    def extract_response_outputs(
-        self,
-        *,
-        model_output: str,
-        model_output_token_ids: Sequence[int],
-        request: ResponsesRequest,
-        enable_auto_tools: bool = False,
-        tool_call_id_type: str = "random",
-        logprobs: list[Logprob] | None = None,
-    ) -> list[ResponseOutputItem]:
-        from openai.types.responses import (
-            ResponseFunctionToolCall,
-            ResponseOutputMessage,
-            ResponseOutputText,
-        )
-        from openai.types.responses.response_reasoning_item import (
-            Content as ResponseReasoningTextContent,
-        )
-        from openai.types.responses.response_reasoning_item import (
-            ResponseReasoningItem,
-        )
-
-        from vllm.utils import random_uuid
-
-        # Token IDs let the engine distinguish real special tokens
-        # from text that happens to look like them.
-        reasoning, content, tool_call_info = self._single_pass_parse(
-            model_output,
-            model_output_token_ids,
-        )
-
-        outputs: list[ResponseOutputItem] = []
-
-        if reasoning:
-            outputs.append(
-                ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(
-                            text=reasoning, type="reasoning_text"
-                        )
-                    ],
-                    status=None,
-                )
-            )
-
-        if content:
-            outputs.append(
-                ResponseOutputMessage(
-                    id=f"msg_{random_uuid()}",
-                    content=[
-                        ResponseOutputText(
-                            text=content,
-                            annotations=[],
-                            type="output_text",
-                            logprobs=logprobs,
-                        )
-                    ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            )
-
-        if tool_call_info.tools_called:
-            for i, tc in enumerate(tool_call_info.tool_calls):
-                outputs.append(
-                    ResponseFunctionToolCall(
-                        id=f"fc_{random_uuid()}",
-                        call_id=tc.id
-                        if tc.id
-                        else make_tool_call_id(
-                            id_type=tool_call_id_type,
-                            func_name=tc.function.name,
-                            idx=i,
-                        ),
-                        type="function_call",
-                        status="completed",
-                        name=tc.function.name,
-                        arguments=tc.function.arguments,
-                    )
-                )
-
-        return outputs
 
     # ── Event-to-delta conversion ─────────────────────────────────────
 
