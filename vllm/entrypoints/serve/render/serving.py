@@ -8,6 +8,8 @@ from typing import Any, cast
 from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -360,6 +362,19 @@ class OpenAIServingRender:
             )
 
         return conversation, engine_inputs
+
+    async def render_messages_request(
+        self,
+        request: AnthropicMessagesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess an Anthropic Messages request.
+
+        Converts the request to the OpenAI chat format using the same
+        conversion as the /v1/messages server path, then delegates to
+        render_chat_request so the rendered tokens match the server exactly.
+        """
+        chat_req = AnthropicServingMessages.to_chat_completion_request(request)
+        return await self.render_chat_request(chat_req)
 
     async def render_completion_request(
         self,
