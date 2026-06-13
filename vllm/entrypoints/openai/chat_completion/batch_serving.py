@@ -268,7 +268,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         output.text,
                         request=request,  # type: ignore[arg-type]
                     )
-                    if not getattr(request, "include_reasoning", True):
+                    if not request.include_reasoning:
                         reasoning = None
                 else:
                     reasoning = None
