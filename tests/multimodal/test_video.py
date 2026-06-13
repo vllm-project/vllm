@@ -13,6 +13,7 @@ from vllm.multimodal.video import (
     DynamicVideoBackend,
     GLM46VVideoBackend,
     Molmo2VideoBackend,
+    Qwen2VLVideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
@@ -83,6 +84,19 @@ def test_video_loader_type_doesnt_exist():
             "zai-org/GLM-4.6V-Flash",
             GLM46VVideoBackend,
             id="glm46v",
+        ),
+        # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
+        # preprocessor config, so resolution relies on the model_type ->
+        # video processor fallback in get_video_processor_cls_name_from_config.
+        pytest.param(
+            "Qwen/Qwen2-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            id="qwen2vl",
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            id="qwen2_5_vl",
         ),
     ],
 )
