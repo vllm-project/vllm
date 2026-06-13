@@ -366,6 +366,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         grid_thw = mm_kwargs["image_grid_thw"]
         n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
@@ -381,12 +382,14 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(values["pixel_values"])
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(mm_kwargs["pixel_values"])
 
@@ -680,6 +683,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         n_out = _count_output_tokens(self._get_grid_thw(mm_kwargs), _SPATIAL_MERGE)
         p = next(self.parameters())
@@ -694,12 +698,14 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(values["pixel_values"])
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 
