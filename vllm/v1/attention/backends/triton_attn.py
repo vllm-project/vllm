@@ -468,7 +468,7 @@ class TritonAttentionImpl(AttentionImpl):
         # SM89+. On older GPUs the Triton path otherwise dies deep in inductor
         # autotuning ("type fp8e4nv not supported in this architecture"); fail
         # early with an actionable message instead.
-        if is_quantized_kv_cache(self.kv_cache_dtype) and not (
+        if self.kv_cache_dtype.startswith("fp8") and not (
             current_platform.has_device_capability(89)
         ):
             cap = current_platform.get_device_capability()

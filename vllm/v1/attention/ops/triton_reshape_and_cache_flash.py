@@ -20,16 +20,17 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     """Whether the Triton reshape-and-cache path can store this kv_cache_dtype
     on the current device.
 
-    Native (16/32-bit) dtypes are always fine. A quantized (fp8) KV cache lowers
-    the store to a native fp8e4nv cast, which only exists on SM89+; on older GPUs
-    Triton has no fp8e4nv and the kernel fails to compile, so report it as
-    unsupported here rather than crash deep in inductor autotuning.
+    Native (16/32-bit) dtypes are always fine. An fp8 KV cache stores via
+    ``current_platform.fp8_dtype()`` (``float8_e4m3fn`` == ``fp8e4nv``), which
+    has no Triton lowering before SM89; on older GPUs the kernel fails to
+    compile, so report it as unsupported here rather than crash deep in inductor
+    autotuning. Other quantized dtypes (int8, nvfp4) do not use fp8e4nv.
     """
-    if kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES:
-        return True
-    if is_quantized_kv_cache(kv_cache_dtype):
+    if kv_cache_dtype.startswith("fp8"):
         return current_platform.has_device_capability(89)
-    return False
+    return kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES or is_quantized_kv_cache(
+        kv_cache_dtype
+    )
 
 
 @triton.jit
