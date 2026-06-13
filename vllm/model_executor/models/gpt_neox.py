@@ -210,6 +210,8 @@ class GPTNeoXModel(nn.Module):
         self.embed_in = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_in",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
