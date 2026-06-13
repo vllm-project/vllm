@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int] | None:
+def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     """Sum per-modality placeholder tokens from ``mm_placeholders``.
 
     Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
@@ -82,14 +82,11 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int] | None:
     mm_placeholders = cast(
         "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
     )
-    if not mm_placeholders:
-        return None
-    counts = {
+    return {
         modality: sum(p.length for p in ranges)
-        for modality, ranges in mm_placeholders.items()
+        for modality, ranges in (mm_placeholders or {}).items()
         if ranges
     }
-    return counts or None
 
 
 def _make_prompt_tokens_details(

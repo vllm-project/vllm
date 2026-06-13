@@ -642,7 +642,7 @@ def test_async_serving_chat_init():
 
 def test_mm_prompt_tokens_details():
     # Text-only input has no multimodal placeholders.
-    assert _get_mm_token_counts({"type": "tokens"}) is None
+    assert _get_mm_token_counts({"type": "tokens"}) == {}
 
     # Per-modality counts sum each modality's placeholder ranges.
     counts = _get_mm_token_counts(
