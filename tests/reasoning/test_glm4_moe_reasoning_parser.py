@@ -59,6 +59,20 @@ MULTILINE_REASONING = {
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
+EMPTY_THINK_BLOCK = {
+    "output": "<think></think>This is the rest",
+    "reasoning": None,
+    "content": "This is the rest",
+    "is_reasoning_end": True,
+}
+
+EMPTY_THINK_BLOCK_NO_CONTENT = {
+    "output": "<think></think>",
+    "reasoning": None,
+    "content": None,
+    "is_reasoning_end": True,
+}
+
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
     "reasoning": None,
@@ -113,6 +127,26 @@ TEST_CASES = [
         True,
         MULTILINE_REASONING,
         id="multiline_reasoning_stream",
+    ),
+    pytest.param(
+        False,
+        EMPTY_THINK_BLOCK,
+        id="empty_think_block",
+    ),
+    pytest.param(
+        True,
+        EMPTY_THINK_BLOCK,
+        id="empty_think_block_stream",
+    ),
+    pytest.param(
+        False,
+        EMPTY_THINK_BLOCK_NO_CONTENT,
+        id="empty_think_block_no_content",
+    ),
+    pytest.param(
+        True,
+        EMPTY_THINK_BLOCK_NO_CONTENT,
+        id="empty_think_block_no_content_stream",
     ),
     pytest.param(
         False,
