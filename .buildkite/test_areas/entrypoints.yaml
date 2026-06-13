@@ -128,6 +128,10 @@ steps:
       device: mi300_1
       depends_on:
       - image-build-amd
+      commands:
+      # TODO(@micah-wil): Remove after PyTorch ROCm hipBLASLt accuracy regression.
+      - export TORCH_BLAS_PREFER_HIPBLASLT=0
+      - pytest -v -s entrypoints/openai/responses
 
 - label: Entrypoints Integration (Speech to Text)
   device: h200_35gb
