@@ -61,6 +61,36 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def get_layer_sliding_window_size(
+    first_layers_types: list[str],
+    last_layers_types: list[str],
+    hybrid_layers_types_block: list[str],
+    num_hybrid_layers_types_block: int,
+    layer_idx: int,
+    sliding_window_size: int,
+) -> int | None:
+    num_first_layers = len(first_layers_types)
+    num_hybrid_block_layers = (
+        len(hybrid_layers_types_block) * num_hybrid_layers_types_block
+    )
+
+    if layer_idx < num_first_layers:
+        current_layer_type = first_layers_types[layer_idx]
+    elif layer_idx < num_first_layers + num_hybrid_block_layers:
+        effective_layer_idx = layer_idx - num_first_layers
+        current_layer_type = hybrid_layers_types_block[
+            effective_layer_idx % len(hybrid_layers_types_block)
+        ]
+    else:
+        effective_layer_idx = layer_idx - num_first_layers - num_hybrid_block_layers
+        current_layer_type = last_layers_types[effective_layer_idx]
+
+    if current_layer_type == "full_attention":
+        return None
+    else:
+        return sliding_window_size
+
+
 class IquestMoeRMSNorm(nn.Module):
     """RMSNorm (equivalent to T5LayerNorm)."""
 
@@ -240,6 +270,40 @@ class IquestMoeAttention(nn.Module):
                 rope_parameters = {"partial_rotary_factor": partial_rotary_factor}
             else:
                 rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta:
+            if rope_parameters is None:
+                rope_parameters = {"rope_theta": rope_theta}
+            else:
+                rope_parameters["rope_theta"] = rope_theta
+
+        # NOTE(yxing): setup hybrid attention for model
+        layer_idx = extract_layer_index(prefix)
+        use_hybrid_layers = vllm_config.model_config.get_use_hybrid_layers()
+        if use_hybrid_layers:
+            first_layers_types = vllm_config.model_config.get_first_layers_types()
+            hybrid_layers_types_block = (
+                vllm_config.model_config.get_hybrid_layers_types_block()
+            )
+            num_hybrid_layers_types_block = (
+                vllm_config.model_config.get_num_hybrid_layers_block()
+            )
+            last_layers_types = vllm_config.model_config.get_last_layers_types()
+            sliding_window_size = vllm_config.model_config.get_sliding_window()
+            real_sliding_window = get_layer_sliding_window_size(
+                first_layers_types=first_layers_types,
+                last_layers_types=last_layers_types,
+                hybrid_layers_types_block=hybrid_layers_types_block,
+                num_hybrid_layers_types_block=num_hybrid_layers_types_block,
+                layer_idx=layer_idx,
+                sliding_window_size=sliding_window_size,
+            )
+            # update sliding window size
+            self.cache_config.sliding_window = real_sliding_window
+            if real_sliding_window:
+                rope_parameters["rope_theta"] = config.swa_rope_theta
+
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
@@ -250,8 +314,6 @@ class IquestMoeAttention(nn.Module):
         self.shared_kv_num_layers = config.shared_kv_num_layers
         kv_sharing_target_layer_name = None
         self.cross_kv_cache = False
-        layer_idx = extract_layer_index(prefix)
-        self.layer_idx = layer_idx
         if self.shared_kv_num_layers:
             # use shared kv cache
             # attn name is like:
@@ -361,7 +423,12 @@ class IquestMoeAttention(nn.Module):
 
 
 class IquestMoeDecoderLayer(nn.Module):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
