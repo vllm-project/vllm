@@ -6,8 +6,15 @@ from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
+from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
     get_numel_loaded,
@@ -18,8 +25,59 @@ from vllm.model_executor.model_loader.reload.meta import (
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader,
+    default_weight_loader,
+)
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import cuda_device_count_stateless
+
+
+def _fp8_reload_unsupported() -> bool:
+    """Whether the FP8 reload/online-quantize tests should be skipped.
+
+    ``supports_fp8()`` returns True on MI250 (gfx90a) because the general
+    quantization paths upcast FP8 weights, but gfx90a has no native FP8 and
+    cannot run these reload models, so treat it as unsupported here.
+    """
+    if not current_platform.supports_fp8():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx90a
+
+        return on_gfx90a()
+    return False
+
+
+class _AliasedBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        self.weight = torch.nn.Parameter(weight)
+        self.register_buffer(
+            "weight_view", self.weight.detach().view(-1), persistent=False
+        )
+
+
+class _ParentAliasedChildBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scale = torch.nn.Parameter(torch.ones(1))
+        self.conv1d = torch.nn.Linear(3, 2, bias=False)
+        self.conv1d.weight.data.copy_(
+            torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        )
+        self.register_buffer(
+            "conv_weights", self.conv1d.weight.detach().view(-1), persistent=False
+        )
+
+
+class _AliasedBufferWithUninitializedChildLayer(_AliasedBufferLayer):
+    def __init__(self):
+        super().__init__()
+        self.child = torch.nn.Module()
+        self.child.register_parameter(
+            "lazy_weight", UninitializedParameter(requires_grad=False)
+        )
 
 
 def test_move_metatensors():
@@ -38,7 +96,10 @@ def test_move_metatensors():
 
 def test_reload_lifecycle():
     layer = torch.nn.Linear(2, 3)
-    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
 
     restore_layer_on_meta(layer, info)
     for name, tensor in get_layer_tensors(layer).items():
@@ -48,7 +109,7 @@ def test_reload_lifecycle():
         assert tensor.__class__ == meta_tensor.__class__
         assert tensor.__dict__ == meta_tensor.__dict__
 
-    materialize_layer(layer)
+    materialize_layer(layer, info)
     for name, tensor in get_layer_tensors(layer).items():
         materialized_tensor = getattr(layer, name)
         assert tensor.dtype == materialized_tensor.dtype
@@ -57,10 +118,41 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+def test_materialize_layer_preserves_non_meta_tensors():
+    """Ensure that materialize_layer does not overwrite non meta tensors."""
+    layer = torch.nn.Linear(2, 3, bias=True)
+
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
+    bias_values = torch.ones(3)
+    layer.bias.data.copy_(bias_values)
+    layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
+
+    assert layer.weight.is_meta
+    assert not layer.bias.is_meta
+
+    # materialize the layer weights after the bias is initialized
+    info = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=torch.device("cpu"),
+    )
+    materialize_layer(layer, info)
+
+    # Ensure the weight materialized off meta
+    assert not layer.weight.is_meta
+    assert layer.weight.device.type == "cpu"
+
+    # Ensure that the bias is (still) not meta and values are unchanged
+    assert not layer.bias.is_meta
+    assert torch.equal(layer.bias.data, bias_values)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
-    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
 
     mock_info_dict: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
         WeakKeyDictionary()
@@ -90,47 +182,206 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-@pytest.mark.parametrize("tp_size", [2])
+def test_get_numel_loaded_caps_at_param_size():
+    # composed_weight_loader copies into the param twice (the load and the
+    # in-place post-load transform), but only param.numel() distinct elements
+    # are loaded. get_numel_loaded must not double-count, otherwise a layer's
+    # loaded-element total can be reached early and trailing params get dropped.
+    param = torch.empty(10)
+    loaded_weight = torch.ones(10)
+    loader = composed_weight_loader(default_weight_loader, lambda x: x + 1)
+
+    args = inspect.signature(loader).bind(param, loaded_weight)
+    num_loaded, _ = get_numel_loaded(loader, args)
+    assert num_loaded == 10
+
+
+class _ComposedLoaderLayer(torch.nn.Module):
+    """Mimics a Mamba2 mixer's equal-numel direct params (A, D, dt_bias).
+
+    ``A`` uses ``composed_weight_loader`` (an extra in-place transform copy),
+    matching ``MambaMixer2`` where ``A`` is loaded as ``-exp(A_log)``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.A = torch.nn.Parameter(torch.empty(4, dtype=torch.float32))
+        self.D = torch.nn.Parameter(torch.ones(4))
+        self.dt_bias = torch.nn.Parameter(torch.ones(4))
+        self.A.weight_loader = composed_weight_loader(
+            default_weight_loader, lambda x: -torch.exp(x.float())
+        )
+        self.D.weight_loader = default_weight_loader
+        self.dt_bias.weight_loader = default_weight_loader
+
+
+def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
+    # Regression test: a composed_weight_loader param (A) used to double-count
+    # its elements, finalizing the layer before the trailing param (D) was
+    # loaded and leaving it as uninitialized materialized memory.
+    layer = _ComposedLoaderLayer()
+    model = torch.nn.Sequential(layer)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(float("nan"))
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    loaded = {
+        "A": torch.full((4,), 0.5),
+        "dt_bias": torch.full((4,), 3.0),
+        "D": torch.full((4,), 7.0),
+    }
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    # Mimic real load_weights: resolve params once, then load in checkpoint
+    # order with D last (the param that was dropped).
+    params = dict(layer.named_parameters())
+    for name in ("A", "dt_bias", "D"):
+        param = params[name]
+        param.weight_loader(param, loaded[name])
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.A, -torch.exp(loaded["A"]))
+    assert torch.equal(layer.dt_bias, loaded["dt_bias"])
+    assert torch.equal(layer.D, loaded["D"])
+
+
+def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
+    layer = _AliasedBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.weight_view.untyped_storage().data_ptr() == (
+        layer.weight.untyped_storage().data_ptr()
+    )
+
+
+def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
+    layer = _AliasedBufferWithUninitializedChildLayer()
+
+    _, buffers = capture_layer_to_meta(layer)
+
+    assert "weight_view" not in buffers
+
+
+def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):
+    layer = _ParentAliasedChildBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_conv = torch.full_like(layer.conv1d.weight, 7.0)
+    loaded_scale = torch.full_like(layer.scale, 3.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.conv1d.weight.weight_loader(layer.conv1d.weight, loaded_conv)
+    layer.scale.weight_loader(layer.scale, loaded_scale)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.conv1d.weight, loaded_conv)
+    assert torch.equal(layer.conv_weights, loaded_conv.view(-1))
+    assert layer.conv_weights.untyped_storage().data_ptr() == (
+        layer.conv1d.weight.untyped_storage().data_ptr()
+    )
+
+
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
+)
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model",
     [
-        (
+        pytest.param(
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/Qwen3-0.6B-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-add-FP8_BLOCK",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/Qwen3-0.6B-W4A16-G128",
             "inference-optimization/Qwen3-0.6B-debug-multiply-W4A16-G128",
             "inference-optimization/Qwen3-0.6B-debug-add-W4A16-G128",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty-FP8_DYNAMIC",
             "inference-optimization/DeepSeek-V3-debug-multiply-FP8_DYNAMIC",
             "inference-optimization/DeepSeek-V3-debug-add-FP8_DYNAMIC",
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-multiply-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-add-NVFP4A16",
+            marks=[pytest.mark.slow_test],
         ),
     ],
 )
 def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
-    if cuda_device_count_stateless() < tp_size:
+    if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
-    if "FP8" in base_model and not current_platform.supports_fp8():
+    if "FP8" in base_model and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(
@@ -138,6 +389,103 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         tensor_parallel_size=tp_size,
         enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
         enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert mul_perp < add_perp
+
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert add_perp < mul_perp
+
+
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if _fp8_reload_unsupported():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
+
+
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
+)
+@pytest.mark.parametrize(
+    "base_model,mul_model,add_model,quantization",
+    [
+        pytest.param(
+            "Qwen/Qwen3-0.6B",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
+            "fp8",
+        ),
+        pytest.param(
+            "inference-optimization/DeepSeek-V3-debug-empty",
+            "inference-optimization/DeepSeek-V3-debug-multiply",
+            "inference-optimization/DeepSeek-V3-debug-add",
+            "fp8",
+            marks=[pytest.mark.slow_test],
+        ),
+        pytest.param(
+            "Qwen/Qwen3-0.6B",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
+            "mxfp8",
+            marks=[pytest.mark.slow_test],
+        ),
+        pytest.param(
+            "inference-optimization/DeepSeek-V3-debug-empty",
+            "inference-optimization/DeepSeek-V3-debug-multiply",
+            "inference-optimization/DeepSeek-V3-debug-add",
+            "mxfp8",
+            marks=[
+                pytest.mark.slow_test,
+                pytest.mark.xfail(reason="mxfp4 & mla is not supported yet"),
+            ],
+        ),
+    ],
+)
+def test_online_quantize_reload(
+    base_model, mul_model, add_model, quantization, tp_size, vllm_runner
+):
+    if current_platform.device_count() < tp_size:
+        pytest.skip(reason="Not enough GPU devices")
+
+    if quantization == "fp8" and _fp8_reload_unsupported():
+        pytest.skip(reason="Requires FP8 support")
+
+    with vllm_runner(
+        model_name=base_model,
+        quantization=quantization,
+        tensor_parallel_size=tp_size,
+        enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
     ) as llm:
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]

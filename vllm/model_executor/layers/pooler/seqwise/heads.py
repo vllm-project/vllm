@@ -43,6 +43,16 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         self.head_dtype = head_dtype
         self.activation = activation
 
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.projector is not None:
+            attrs.append("projector=True")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"embed"}
 
@@ -52,33 +62,43 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
         pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
+        if len(pooled_data) != len(pooling_params):
+            raise ValueError(
+                f"pooled_data length ({len(pooled_data)}) does not match "
+                f"pooling_params length ({len(pooling_params)})"
+            )
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
-        # pooled_data shape: [batchsize, hidden_dimension]
+        # pooled_data shape: [batchsize, hidden_size]
 
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)
 
         # Apply ST projector
         if self.projector is not None:
-            pooled_data = self.projector(pooled_data)
-        # pooled_data shape: [batchsize, embedding_dimension]
+            embeddings = self.projector(pooled_data)
+        else:
+            embeddings = pooled_data
+        # embeddings shape: [batchsize, embedding_size]
 
         # for matryoshka representation
         dimensions_list = [pooling_param.dimensions for pooling_param in pooling_params]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
-            assert len(pooled_data) == len(dimensions_list)
-            if len(set(dimensions_list)) == 1 and not isinstance(pooled_data, list):
+            if len(embeddings) != len(dimensions_list):
+                raise ValueError(
+                    f"embeddings length ({len(embeddings)}) does not match "
+                    f"dimensions_list length ({len(dimensions_list)})"
+                )
+            if len(set(dimensions_list)) == 1 and not isinstance(embeddings, list):
                 # if all dimensions are the same
                 d = dimensions_list[0]
-                pooled_data = pooled_data[..., :d]
+                embeddings = embeddings[..., :d]
             else:
-                pooled_data = [
+                embeddings = [
                     vecs if d is None else vecs[..., :d]
-                    for vecs, d in zip(pooled_data, dimensions_list)
+                    for vecs, d in zip(embeddings, dimensions_list)
                 ]
 
         # for normalize
@@ -86,34 +106,50 @@ class EmbeddingPoolerHead(SequencePoolerHead):
             flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
                 if flags[0]:
-                    pooled_data = self.activation(pooled_data)
+                    embeddings = self.activation(embeddings)
             else:
-                pooled_data = [
+                embeddings = [
                     self.activation(vecs) if f else vecs
-                    for vecs, f in zip(pooled_data, flags)
+                    for vecs, f in zip(embeddings, flags)
                 ]
 
-        # pooled_data shape: [batchsize, embedding_dimension]
-        return pooled_data
+        # embeddings shape: [batchsize, embedding_size]
+        return embeddings
 
 
 class ClassifierPoolerHead(SequencePoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
-        logit_bias: float | None = None,
+        logit_mean: float | None = None,
+        logit_sigma: float | None = None,
         head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
         self.classifier = classifier
-        self.logit_bias = logit_bias
+        self.logit_mean = logit_mean
+        self.logit_sigma = logit_sigma
         self.head_dtype = head_dtype
         self.activation = activation
 
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.classifier is not None:
+            attrs.append("classifier=True")
+        if self.logit_mean is not None:
+            attrs.append(f"logit_mean={self.logit_mean}")
+        if self.logit_sigma is not None:
+            attrs.append(f"logit_sigma={self.logit_sigma}")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"classify", "score"}
+        return {"classify"}
 
     def forward(
         self,
@@ -121,7 +157,11 @@ class ClassifierPoolerHead(SequencePoolerHead):
         pooling_metadata: PoolingMetadata,
     ) -> SequencePoolerHeadOutput:
         pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
+        if len(pooled_data) != len(pooling_params):
+            raise ValueError(
+                f"pooled_data length ({len(pooled_data)}) does not match "
+                f"pooling_params length ({len(pooling_params)})"
+            )
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
@@ -131,21 +171,26 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            pooled_data = self.classifier(pooled_data)
-        # pooled_data shape: [batchsize, num_labels]
+            logits = self.classifier(pooled_data)
+        else:
+            logits = pooled_data
 
-        if self.logit_bias is not None:
-            pooled_data -= self.logit_bias
+        # logits shape: [batchsize, num_labels]
+        # Affine score calibration: activation((logit - mean) / sigma)
+        if self.logit_mean is not None:
+            logits = logits - self.logit_mean
+        if self.logit_sigma is not None:
+            logits = logits / self.logit_sigma
 
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
-                pooled_data = self.activation(pooled_data) if flags[0] else pooled_data
+                logits = self.activation(logits) if flags[0] else logits
             else:
-                pooled_data = [
+                logits = [
                     self.activation(vecs) if f else vecs
-                    for vecs, f in zip(pooled_data, flags)
+                    for vecs, f in zip(logits, flags)
                 ]
 
-        # pooled_data shape: [batchsize, num_labels]
-        return pooled_data
+        # logits shape: [batchsize, num_labels]
+        return logits

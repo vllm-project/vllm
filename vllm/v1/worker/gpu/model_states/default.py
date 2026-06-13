@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -61,6 +62,28 @@ class DefaultModelState(ModelState):
             device=self.device,
         )
 
+    def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
+        from vllm.model_executor.models.interfaces import (
+            supports_realtime,
+            supports_transcription,
+        )
+        from vllm.model_executor.models.interfaces_base import is_text_generation_model
+
+        supported_tasks = list[GenerationTask]()
+
+        if is_text_generation_model(self.model):
+            supported_tasks.append("generate")
+
+        if supports_transcription(self.model):
+            if self.model.supports_transcription_only:
+                return ("transcription",)
+            supported_tasks.append("transcription")
+
+        if supports_realtime(self.model):
+            supported_tasks.append("realtime")
+
+        return tuple(supported_tasks)
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
@@ -79,7 +102,6 @@ class DefaultModelState(ModelState):
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
-        req_states: RequestState,
     ) -> torch.Tensor:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
@@ -95,8 +117,8 @@ class DefaultModelState(ModelState):
             input_batch.num_tokens,
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
-            req_states.prefill_len.np[input_batch.idx_mapping_np],
-            req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
+            input_batch.prefill_len_np,
+            input_batch.num_computed_prefill_tokens_np,
         )
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
@@ -150,6 +172,12 @@ class DefaultModelState(ModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if for_capture:
+            # Capture with worst-case max_seq_len so the graph is valid at any replay.
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -158,10 +186,13 @@ class DefaultModelState(ModelState):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
-            max_seq_len=self.max_model_len,
+            max_seq_len=max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            positions=input_batch.positions,
+            for_cudagraph_capture=for_capture,
         )
         return attn_metadata

@@ -5,7 +5,6 @@
 """PyTorch Ultravox model."""
 
 import copy
-import inspect
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypeAlias
@@ -23,13 +22,13 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -397,19 +396,14 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
         )
         hidden_states = hidden_states + positions
 
-        # Backward compatibility for Transformers v4 where layer_head_mask
-        # was a required argument for WhisperEncoderLayer.forward
-        kwargs = {}
-        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
-            kwargs["layer_head_mask"] = None
-
         for layer in self.layers:
-            layer_outputs = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
-                **kwargs,
             )
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.ln_post(hidden_states)
         hidden_states = self.linear_out(hidden_states)
@@ -502,20 +496,14 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
         attention_mask = self.get_attention_mask_by_audio_len(audio_lens, hidden_states)
 
-        # Backward compatibility for Transformers v4 where layer_head_mask
-        # was a required argument for WhisperEncoderLayer.forward
-        kwargs = {}
-        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
-            kwargs["layer_head_mask"] = None
-
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+            hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
-                **kwargs,
             )
-
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
@@ -563,7 +551,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.audio_model_id,
-                    revision=None,
+                    revision=vllm_config.model_config.revision,
                     prefix="audio_tower.",
                 )
             )
@@ -573,7 +561,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.text_model_id,
-                    revision=None,
+                    revision=vllm_config.model_config.revision,
                     prefix="language_model.",
                 )
             )

@@ -11,6 +11,14 @@ MODELS = [
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",  # with g_idx
     "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
+    "RedHatAI/Qwen3-1.7B-quantized.w4a16",  # with zp
+    "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
+    "Qwen/Qwen3-0.6B-FP8",  # FP8 W8A16 block-quantized linear
+    "Qwen/Qwen3-30B-A3B-FP8",  # FP8 W8A16 block-quantized MoE
+    "openai/gpt-oss-20b",  # MXFP4 W4A16
+    "QuixiAI/Qwen3-30B-A3B-AWQ",  # AWQ W4A16 MoE
+    "Qwen/Qwen3-30B-A3B-GPTQ-Int4",  # GPTQ W4A16 MoE
+    "RedHatAI/Qwen3-30B-A3B-quantized.w4a16",  # compressed-tensors W4A16 MoE
 ]
 DTYPE = ["bfloat16"]
 

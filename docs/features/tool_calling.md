@@ -107,6 +107,37 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
+## Constrained Decoding Behavior
+
+Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode:
+
+| `tool_choice` value | Schema-constrained decoding | Behavior |
+| --- | --- | --- |
+| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
+| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
+| `"auto"` | Depends on the parser | Model-specific structural-tag parsers can constrain tool-call arguments with structured outputs. Other parsers generate freely and extract tool calls from raw text. |
+| `"none"` | N/A | No tool calls are produced. |
+
+### Strict Mode
+
+Strict tool calling makes function-call arguments adhere to the function schema instead of relying only on best-effort parsing. vLLM implements strict tool calling for structural-tag based tool parsers by using the structured outputs backend under the hood.
+
+For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
+
+* Set `additionalProperties` to `false` for each object in `parameters`.
+* Mark all fields in `properties` as required.
+* Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
+
+vLLM controls structural-tag strict tool calling with the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable. It defaults to `true`.
+
+```bash
+VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
+```
+
+When this variable is `true`, structural-tag based tool parsers attach a structural tag to the request, so the structured outputs backend can constrain the model-specific tool-call format and function-call arguments. When it is `false`, vLLM does not attach structural tags for tool calling. In that case, `tool_choice="auto"` falls back to best-effort parser extraction from the raw model output, and no structural-tag constraint is applied.
+
+This environment variable only affects structural-tag based tool calling. It does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
@@ -123,6 +154,9 @@ template configured in the `tokenizer_config.json`. In this case, it will be use
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
+
+!!! note
+    With `tool_choice="auto"`, schema-level constraint depends on the selected parser and `VLLM_ENFORCE_STRICT_TOOL_CALLING`. Structural-tag parsers can enforce tool-call constraints when it is `true`; when it is `false`, or when the selected parser has no structural-tag support, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
@@ -219,7 +253,7 @@ Supported models:
 
 * `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
 
-    Recommended flags: `--tool-call-parser hermes`
+    Recommended flags: `--tool-call-parser granite4`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
@@ -345,6 +379,16 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
+### Cohere Command A Reasoning (`cohere_command3`)
+
+Supported models:
+
+* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025)
+
+Flags: `--tool-call-parser cohere_command3 --reasoning-parser cohere_command3`
+
+Note: the Cohere tool parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
+
 ### LongCat-Flash-Chat Models (`longcat`)
 
 Supported models:
@@ -430,6 +474,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+### Apertus Models (`apertus`)
+
+Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
+
+Supported models:
+
+* `swiss-ai/Apertus-8B-Instruct-2509`
+* `swiss-ai/Apertus-70B-Instruct-2509`
+
+Flags: `--tool-call-parser apertus`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
@@ -459,6 +514,13 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 !!! warning
     Llama's smaller models frequently fail to emit tool calls in the correct format. Results may vary depending on the model.
 
+## Benchmarking Tool-Calling Performance
+
+To measure serving latency and throughput on realistic tool-calling traffic,
+use the BFCL (Berkeley Function Calling Leaderboard) dataset with
+`vllm bench serve`. See the [BFCL benchmark example](../benchmarking/cli.md#bfcl-tool-calling-benchmark)
+for the full server + client commands.
+
 ## How to Write a Tool Parser Plugin
 
 A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
@@ -481,7 +543,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest | ResponsesRequest) -> ChatCompletionRequest | ResponsesRequest:
             return request
 
         # implement the tool call parse for stream call

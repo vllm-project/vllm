@@ -88,14 +88,14 @@ cd vllm_source
 Install the required dependencies:
 
 ```bash
-uv pip install -r requirements/cpu-build.txt --torch-backend cpu
-uv pip install -r requirements/cpu.txt --torch-backend cpu
+uv pip install -r requirements/build/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
+uv pip install -r requirements/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
 ```
 
 ??? console "pip"
     ```bash
     pip install --upgrade pip
-    pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install -v -r requirements/build/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
     pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 

@@ -9,6 +9,7 @@
 static const char* PYARGS_PARSE = "KKKK";
 #else
   #include <cstdlib>
+  #include <cstdint>
   #include <cerrno>
   #include <climits>
 
@@ -44,6 +45,29 @@ static unsigned long long get_memcreate_chunk_size() {
 static inline unsigned long long my_min(unsigned long long a,
                                         unsigned long long b) {
   return a < b ? a : b;
+}
+
+static CUresult reserve_rocm_address(CUdeviceptr* d_mem, size_t size,
+                                     size_t alignment) {
+  CUresult status = cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+  if (status == CUresult(0) || alignment == 0) {
+    return status;
+  }
+
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Let HIP choose the default
+  // alignment, then verify that the returned address still satisfies the
+  // requested alignment before accepting it.
+  status = cuMemAddressReserve(d_mem, size, 0, 0, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+  if (((std::uintptr_t)(*d_mem) % alignment) == 0) {
+    return status;
+  }
+
+  (void)cuMemAddressFree(*d_mem, size);
+  return hipErrorNotSupported;
 }
 
 static const char* PYARGS_PARSE = "KKKO";
@@ -109,16 +133,18 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 #ifndef USE_ROCM
   int flag = 0;
-  CUDA_CHECK(cuDeviceGetAttribute(
+  CUresult rdma_result = cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-      device));
-  if (flag) {  // support GPUDirect RDMA if possible
+      device);
+  if (rdma_result == CUDA_SUCCESS &&
+      flag) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
-  CUDA_CHECK(cuDeviceGetAttribute(
-      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
-  if (fab_flag) {  // support fabric handle if possible
+  CUresult fab_result = cuDeviceGetAttribute(
+      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+  if (fab_result == CUDA_SUCCESS &&
+      fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
 #endif
@@ -323,7 +349,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
   if (error_code != 0) {
     return nullptr;
   }
