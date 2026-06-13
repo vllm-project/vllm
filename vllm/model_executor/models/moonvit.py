@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/modeling_kimi_vl.py
-# This file is meant to be used in kimi_vl.py only
+# This file is shared by kimi_vl.py and locate_anything.py (both use MoonViT)
 # Copyright 2025 The Moonshot AI Team, DeepSeek-AI, and HuggingFace Inc. team. All rights reserved.
 #
 # The code is based on llava (llava/modeling_llava.py) and DeepSeek-V3 (DeepSeek-V3/modeling_deepseek.py), but modified for KimiVL.
@@ -42,6 +42,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+import math
 from collections.abc import Sequence
 from copy import deepcopy
 from functools import cached_property
@@ -67,6 +68,49 @@ from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.utils.torch_utils import async_tensor_h2d
+
+
+def get_num_image_tokens(
+    *,
+    image_width: int,
+    image_height: int,
+    patch_size: int,
+    merge_kernel_size: tuple[int, int],
+    in_token_limit: int,
+) -> int:
+    """Number of merged vision tokens MoonViT emits for one image.
+
+    Shared by KimiVL and LocateAnything, which both feed images through the
+    MoonViT image processor (downscale to ``in_token_limit`` patches, pad to a
+    multiple of ``merge_kernel_size * patch_size``, then 2x2-merge). Keeping the
+    geometry in one place ensures the placeholder count stays in sync with the
+    vision tower's output length for both models.
+    """
+    height = image_height
+    width = image_width
+    assert isinstance(height, int), f"height must be int, current height {height}"
+    assert isinstance(width, int), f"width must be int, current width {width}"
+    assert merge_kernel_size is not None, "merge_kernel_size must be specified"
+
+    if (width // patch_size) * (height // patch_size) > in_token_limit:
+        scale = math.sqrt(
+            in_token_limit / ((width // patch_size) * (height // patch_size))
+        )
+        new_w, new_h = int(width * scale), int(height * scale)
+        width, height = new_w, new_h
+
+    kernel_height, kernel_width = merge_kernel_size
+
+    pad_height = (
+        kernel_height * patch_size - height % (kernel_height * patch_size)
+    ) % (kernel_height * patch_size)
+    pad_width = (kernel_width * patch_size - width % (kernel_width * patch_size)) % (
+        kernel_width * patch_size
+    )
+
+    token_height = (height + pad_height) // (kernel_height * patch_size)
+    token_width = (width + pad_width) // (kernel_width * patch_size)
+    return int(token_height * token_width)
 
 
 def _apply_rope_input_validation(x, freqs_cis):
