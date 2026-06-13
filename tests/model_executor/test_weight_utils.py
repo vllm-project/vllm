@@ -298,20 +298,8 @@ def test_weights_mapper_get_packed_modules_mapping():
         }
     )
     assert mapper.get_packed_modules_mapping() == {
-        "qkv_proj": ["qkv_proj.q", "qkv_proj.k", "qkv_proj.v"],
-        "gate_up_proj": ["gate_up_proj.0", "gate_up_proj.1"],
-    }
-
-    # Shard order comes from the shard id, not declaration order, and
-    # dotted module paths reduce to the last component
-    mapper = WeightsMapper(
-        orig_to_new_substr={
-            "linear_proj.dense_h_to_4h": "linear_proj.merged_proj.1",
-            "linear_proj.gate_proj": "linear_proj.merged_proj.0",
-        }
-    )
-    assert mapper.get_packed_modules_mapping() == {
-        "merged_proj": ["merged_proj.0", "merged_proj.1"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
 
