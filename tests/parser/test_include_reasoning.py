@@ -352,76 +352,91 @@ class TestParseDeltaIncludeReasoning:
                 assert r.reasoning is None
 
 
-# ── Legacy ResponsesParser.process() ─────────────────────────────────
+# ── ParsableContext.process() ─────────────────────────────────────────
 
 
-class TestResponsesParserIncludeReasoning:
-    def _make_responses_parser(self, tokenizer, request):
-        from vllm.entrypoints.openai.parser.responses_parser import (
-            ResponsesParser,
-        )
+class TestParsableContextIncludeReasoning:
+    def _make_context(self, tokenizer, request):
+        from vllm.entrypoints.openai.responses.context import ParsableContext
 
         class TestParser(DelegatingParser):
             reasoning_parser_cls = ThinkReasoningParser
             tool_parser_cls = None
 
-        response_messages: list = []
-
-        return ResponsesParser(
+        return ParsableContext(
             tokenizer=tokenizer,
             parser_cls=TestParser,
-            response_messages=response_messages,
+            response_messages=[],
             request=request,
+            available_tools=None,
             chat_template=None,
             chat_template_content_format="auto",
         )
 
     def test_process_include_false_suppresses_reasoning(self, tokenizer):
-        """ResponsesParser.process() suppresses reasoning items."""
-        from vllm.outputs import CompletionOutput
+        """ParsableContext.process() suppresses reasoning items."""
+        from vllm.outputs import CompletionOutput, RequestOutput
 
         request = make_responses_request(include_reasoning=False)
-        parser = self._make_responses_parser(tokenizer, request)
+        ctx = self._make_context(tokenizer, request)
 
-        output = CompletionOutput(
-            index=0,
-            text=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            cumulative_logprob=None,
-            logprobs=None,
-            finish_reason="stop",
+        output = RequestOutput(
+            request_id="test",
+            prompt=None,
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text=MODEL_OUTPUT_REASONING_AND_CONTENT,
+                    token_ids=tokenizer.encode(
+                        MODEL_OUTPUT_REASONING_AND_CONTENT,
+                        add_special_tokens=False,
+                    ),
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
         )
 
-        parser.process(output)
+        ctx.append_output(output)
 
-        types = [getattr(m, "type", None) for m in parser.response_messages]
+        types = [getattr(m, "type", None) for m in ctx.response_messages]
         assert "reasoning" not in types
         assert "message" in types
 
     def test_process_include_true_has_reasoning(self, tokenizer):
-        """ResponsesParser.process() includes reasoning by default."""
-        from vllm.outputs import CompletionOutput
+        """ParsableContext.process() includes reasoning by default."""
+        from vllm.outputs import CompletionOutput, RequestOutput
 
         request = make_responses_request(include_reasoning=True)
-        parser = self._make_responses_parser(tokenizer, request)
+        ctx = self._make_context(tokenizer, request)
 
-        output = CompletionOutput(
-            index=0,
-            text=MODEL_OUTPUT_REASONING_AND_CONTENT,
-            token_ids=tokenizer.encode(
-                MODEL_OUTPUT_REASONING_AND_CONTENT,
-                add_special_tokens=False,
-            ),
-            cumulative_logprob=None,
-            logprobs=None,
-            finish_reason="stop",
+        output = RequestOutput(
+            request_id="test",
+            prompt=None,
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text=MODEL_OUTPUT_REASONING_AND_CONTENT,
+                    token_ids=tokenizer.encode(
+                        MODEL_OUTPUT_REASONING_AND_CONTENT,
+                        add_special_tokens=False,
+                    ),
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
         )
 
-        parser.process(output)
+        ctx.append_output(output)
 
-        types = [getattr(m, "type", None) for m in parser.response_messages]
+        types = [getattr(m, "type", None) for m in ctx.response_messages]
         assert "reasoning" in types
         assert "message" in types
