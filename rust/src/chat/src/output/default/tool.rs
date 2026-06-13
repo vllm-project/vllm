@@ -473,7 +473,7 @@ mod tests {
             })));
         let parser = DeepSeekV4ToolParser::create(&deepseek_v4_test_tools()).unwrap();
         let assistant_events = tool_event_stream(stream::iter(events), Some(parser));
-        let chat_events = structured_chat_event_stream(assistant_events);
+        let chat_events = structured_chat_event_stream(assistant_events, true);
 
         ChatEventStream::new("req_deepseek_v4".to_string(), Box::pin(chat_events))
             .collect_message()
@@ -717,9 +717,10 @@ mod tests {
 
         let message = ChatEventStream::new(
             "req_fallback".to_string(),
-            Box::pin(structured_chat_event_stream(stream::iter(
-                events.into_iter().map(Ok),
-            ))),
+            Box::pin(structured_chat_event_stream(
+                stream::iter(events.into_iter().map(Ok)),
+                true,
+            )),
         )
         .collect_message()
         .await
@@ -968,9 +969,10 @@ mod tests {
         ));
         let collected = ChatEventStream::new(
             "req_final_only".to_string(),
-            Box::pin(structured_chat_event_stream(stream::iter(
-                events.into_iter().map(Ok),
-            ))),
+            Box::pin(structured_chat_event_stream(
+                stream::iter(events.into_iter().map(Ok)),
+                true,
+            )),
         )
         .collect_message()
         .await
