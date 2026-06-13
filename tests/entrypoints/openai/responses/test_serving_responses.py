@@ -524,6 +524,196 @@ class TestExtractAllowedToolsFromMcpRequests:
         }
 
 
+class TestAllowedSubtoolsEnforcement:
+    """Regression tests for CVE: allowed_tools enforcement at execution time.
+
+    Verifies that HarmonyContext and ParsableContext reject sub-tool calls
+    that are not in the request's allowed_tools, even when the coarse
+    namespace gate passes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_harmony_context_blocks_disallowed_browser_subtool(self):
+        """browser.open must be blocked when only 'search' is allowed."""
+        from unittest.mock import MagicMock
+
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
+
+        ctx = HarmonyContext(
+            messages=[],
+            available_tools=["browser"],
+            allowed_subtools={"browser": ["search"]},
+        )
+        ctx._tool_sessions = {"browser": MagicMock()}
+
+        last_msg = MagicMock()
+        last_msg.recipient = "browser.open"
+        last_msg.channel = "commentary"
+        last_msg.content = [MagicMock(text='{"url": "http://evil.com"}')]
+
+        result = await ctx.call_search_tool(ctx._tool_sessions["browser"], last_msg)
+
+        assert len(result) == 1
+        assert "not in allowed_tools" in result[0].content[0].text
+
+    @pytest.mark.asyncio
+    async def test_harmony_context_allows_permitted_browser_subtool(self):
+        """browser.search must be allowed when 'search' is in allowed_tools."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = [MagicMock(text="search results")]
+        mock_session.call_tool.return_value = mock_result
+
+        ctx = HarmonyContext(
+            messages=[],
+            available_tools=["browser"],
+            allowed_subtools={"browser": ["search"]},
+        )
+        ctx._tool_sessions = {"browser": mock_session}
+
+        last_msg = MagicMock()
+        last_msg.recipient = "browser.search"
+        last_msg.channel = "commentary"
+        last_msg.content = [MagicMock(text='{"query": "test"}')]
+
+        result = await ctx.call_search_tool(mock_session, last_msg)
+
+        assert len(result) == 1
+        assert "search results" in result[0].content[0].text
+        mock_session.call_tool.assert_called_once_with("search", {"query": "test"})
+
+    @pytest.mark.asyncio
+    async def test_harmony_context_allows_all_when_no_restriction(self):
+        """All sub-tools allowed when allowed_subtools is None for namespace."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.content = [MagicMock(text="open result")]
+        mock_session.call_tool.return_value = mock_result
+
+        ctx = HarmonyContext(
+            messages=[],
+            available_tools=["browser"],
+            allowed_subtools={},
+        )
+        ctx._tool_sessions = {"browser": mock_session}
+
+        last_msg = MagicMock()
+        last_msg.recipient = "browser.open"
+        last_msg.channel = "commentary"
+        last_msg.content = [MagicMock(text='{"url": "http://example.com"}')]
+
+        result = await ctx.call_search_tool(mock_session, last_msg)
+
+        assert len(result) == 1
+        assert "open result" in result[0].content[0].text
+        mock_session.call_tool.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_harmony_context_blocks_disallowed_container_subtool(self):
+        """container.list must be blocked when only 'exec' is allowed."""
+        from unittest.mock import MagicMock
+
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
+
+        ctx = HarmonyContext(
+            messages=[],
+            available_tools=["container"],
+            allowed_subtools={"container": ["exec"]},
+        )
+        ctx._tool_sessions = {"container": MagicMock()}
+
+        last_msg = MagicMock()
+        last_msg.recipient = "container.list"
+        last_msg.channel = "commentary"
+        last_msg.content = [MagicMock(text="{}")]
+
+        result = await ctx.call_container_tool(
+            ctx._tool_sessions["container"], last_msg
+        )
+
+        assert len(result) == 1
+        assert "not in allowed_tools" in result[0].content[0].text
+
+    def test_harmony_context_need_builtin_tool_call_unaffected(self):
+        """need_builtin_tool_call still gates on namespace availability."""
+        from unittest.mock import MagicMock
+
+        from vllm.entrypoints.openai.responses.context import HarmonyContext
+
+        ctx = HarmonyContext(
+            messages=[],
+            available_tools=["browser"],
+            allowed_subtools={"browser": ["search"]},
+        )
+
+        msg_open = MagicMock()
+        msg_open.recipient = "browser.open"
+        ctx._messages = [msg_open]
+        assert ctx.need_builtin_tool_call() is True
+
+        msg_python = MagicMock()
+        msg_python.recipient = "python"
+        ctx._messages = [msg_python]
+        assert ctx.need_builtin_tool_call() is False
+
+    def test_demo_tool_server_filters_browser_tools(self):
+        """DemoToolServer.get_tool_description respects allowed_tools."""
+        from vllm.entrypoints.mcp.tool_server import DemoToolServer
+
+        server = DemoToolServer()
+        server.tools = {"browser": MagicMock()}
+
+        cfg_all = server.get_tool_description("browser", allowed_tools=None)
+        assert cfg_all is not None
+        all_tool_names = {t.name for t in cfg_all.tools}
+        assert "search" in all_tool_names
+
+        cfg_search = server.get_tool_description("browser", allowed_tools=["search"])
+        assert cfg_search is not None
+        assert all(t.name == "search" for t in cfg_search.tools)
+
+        cfg_none = server.get_tool_description("browser", allowed_tools=["nonexistent"])
+        assert cfg_none is None
+
+    def test_build_allowed_subtools_map(self):
+        """_build_allowed_subtools_map correctly maps tool types to namespaces."""
+        from unittest.mock import MagicMock
+
+        from vllm.entrypoints.openai.responses.serving import (
+            OpenAIServingResponses,
+        )
+
+        request = MagicMock()
+        request.tools = [
+            Mcp(
+                type="mcp",
+                server_label="web_search_preview",
+                allowed_tools=["search"],
+            ),
+            Mcp(
+                type="mcp",
+                server_label="code_interpreter",
+                allowed_tools=None,
+            ),
+        ]
+
+        serving = MagicMock(spec=OpenAIServingResponses)
+        result = OpenAIServingResponses._build_allowed_subtools_map(serving, request)
+
+        assert result == {
+            "browser": ["search"],
+            "python": None,
+        }
+
+
 class TestHarmonyPreambleStreaming:
     """Tests for preamble (commentary with no recipient) streaming events."""
 
