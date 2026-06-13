@@ -141,7 +141,8 @@ class WeightsMapper:
                 continue
             _, _, weight_name = old.rpartition(".")
             _, _, param_name = param_path.rpartition(".")
-            packed_modules_mapping.setdefault(param_name, []).append(weight_name)
+            packed_names = packed_modules_mapping.setdefault(param_name, [])
+            packed_names.extend([weight_name, shard_id])
         return packed_modules_mapping
 
 
