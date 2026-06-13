@@ -30,8 +30,6 @@ from .serving import OpenAIServingRealtime
 
 logger = init_logger(__name__)
 
-MAX_AUDIO_QUEUE_SIZE = 256
-
 
 class RealtimeConnection:
     """Manages WebSocket lifecycle and state for realtime transcription.
@@ -49,7 +47,7 @@ class RealtimeConnection:
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(
-            maxsize=MAX_AUDIO_QUEUE_SIZE
+            maxsize=envs.VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE
         )
         self.generation_task: asyncio.Task | None = None
 

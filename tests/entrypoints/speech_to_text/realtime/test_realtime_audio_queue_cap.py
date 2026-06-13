@@ -11,10 +11,10 @@ import json
 import pybase64 as base64
 import pytest
 
-from vllm.entrypoints.speech_to_text.realtime.connection import (
-    MAX_AUDIO_QUEUE_SIZE,
-    RealtimeConnection,
-)
+from vllm import envs
+from vllm.entrypoints.speech_to_text.realtime.connection import RealtimeConnection
+
+MAX_AUDIO_QUEUE_SIZE = envs.VLLM_MAX_REALTIME_AUDIO_QUEUE_SIZE
 
 
 class FakeWebSocket:
