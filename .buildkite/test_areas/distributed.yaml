@@ -195,7 +195,7 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Distributed Tests (2 GPUs)(H100)
+- label: Distributed Tests (2xH100-2xMI300)
   key: distributed-tests-2-gpus-h100
   timeout_in_minutes: 15
   device: h100
@@ -209,6 +209,12 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
+  mirror:
+    amd:
+      device: mi300_2
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
 
 - label: Distributed Tests (2 GPUs)(B200)
   key: distributed-tests-2-gpus-b200
@@ -221,8 +227,6 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
-
-    
 
 - label: 2 Node Test (4 GPUs)
   key: 2-node-test-4-gpus
