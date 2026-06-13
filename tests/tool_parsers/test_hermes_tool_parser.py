@@ -412,3 +412,55 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+def test_hermes_parser_non_streaming_literal_end_tag_in_string(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    # A literal </tool_call> inside a JSON string argument must not be treated
+    # as the end tag; otherwise the whole tool call is silently dropped.
+    content = "예시 태그: </tool_call> 포함 한국어 본문"
+    call = {"name": "edit_file", "arguments": {"content": content}}
+    text = "<tool_call>\n" + json.dumps(call, ensure_ascii=False) + "\n</tool_call>"
+
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    tool_call = parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call.tools_called
+    assert tool_call.tool_calls[0].function.name == "edit_file"
+    assert json.loads(tool_call.tool_calls[0].function.arguments) == {
+        "content": content
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<tool_call>{"name": "a", "arguments": {}} trailing prose',
+        '<tool_call>{"name": "a", "arguments": {}}'
+        '{"name": "b", "arguments": {}}</tool_call>',
+        '<tool_call>{"name": "a", "arguments": {}}'
+        '<tool_call>{"name": "b", "arguments": {}}</tool_call>',
+    ],
+)
+def test_hermes_parser_non_streaming_trailing_data_falls_back_to_content(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    text: str,
+) -> None:
+    # A valid JSON object followed by junk inside the block (trailing prose or a
+    # concatenated second object) is malformed and must fall back to content,
+    # the same as the original json.loads behavior -- not silently accept only
+    # the leading object.
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    tool_call = parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert not tool_call.tools_called
+    assert tool_call.content == text
