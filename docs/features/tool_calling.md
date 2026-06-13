@@ -115,18 +115,28 @@ Whether vLLM enforces the tool parameter schema during generation depends on the
 | --- | --- | --- |
 | Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
 | `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | No | The model generates freely. A tool-call parser extracts tool calls from the raw text. Arguments may be malformed or not match the schema. |
+| `"auto"` | Depends on the parser | Model-specific structural-tag parsers can constrain tool-call arguments with structured outputs. Other parsers generate freely and extract tool calls from raw text. |
 | `"none"` | N/A | No tool calls are produced. |
 
-When schema conformance matters, prefer `tool_choice="required"` or named function calling over `"auto"`.
+### Strict Mode
 
-### Strict Mode (`strict` parameter)
+Strict tool calling makes function-call arguments adhere to the function schema instead of relying only on best-effort parsing. vLLM implements strict tool calling for structural-tag based tool parsers by using the structured outputs backend under the hood.
 
-The [OpenAI API](https://platform.openai.com/docs/guides/function-calling#strict-mode) supports a `strict` field on function definitions. When set to `true`, OpenAI uses constrained decoding to guarantee that tool-call arguments match the function schema, even in `tool_choice="auto"` mode.
+For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
 
-vLLM **does not implement** `strict` mode today. The `strict` field is accepted in requests (to avoid breaking clients that set it), but it has no effect on decoding behavior. In auto mode, argument validity depends entirely on the model's output quality and the parser's extraction logic.
+* Set `additionalProperties` to `false` for each object in `parameters`.
+* Mark all fields in `properties` as required.
+* Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
 
-Tracking issues: [#15526](https://github.com/vllm-project/vllm/issues/15526), [#16313](https://github.com/vllm-project/vllm/issues/16313).
+vLLM controls structural-tag strict tool calling with the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable. It defaults to `true`.
+
+```bash
+VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
+```
+
+When this variable is `true`, structural-tag based tool parsers attach a structural tag to the request, so the structured outputs backend can constrain the model-specific tool-call format and function-call arguments. When it is `false`, vLLM does not attach structural tags for tool calling. In that case, `tool_choice="auto"` falls back to best-effort parser extraction from the raw model output, and no structural-tag constraint is applied.
+
+This environment variable only affects structural-tag based tool calling. It does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
 
 ## Automatic Function Calling
 
@@ -146,7 +156,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, tool-call arguments are extracted from the model's raw text output by the selected parser. No schema-level constraint is applied during decoding, so arguments may occasionally be malformed or violate the function's parameter schema. See [Constrained Decoding Behavior](#constrained-decoding-behavior) for details.
+    With `tool_choice="auto"`, schema-level constraint depends on the selected parser and `VLLM_ENFORCE_STRICT_TOOL_CALLING`. Structural-tag parsers can enforce tool-call constraints when it is `true`; when it is `false`, or when the selected parser has no structural-tag support, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
@@ -503,6 +513,13 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 !!! warning
     Llama's smaller models frequently fail to emit tool calls in the correct format. Results may vary depending on the model.
+
+## Benchmarking Tool-Calling Performance
+
+To measure serving latency and throughput on realistic tool-calling traffic,
+use the BFCL (Berkeley Function Calling Leaderboard) dataset with
+`vllm bench serve`. See the [BFCL benchmark example](../benchmarking/cli.md#bfcl-tool-calling-benchmark)
+for the full server + client commands.
 
 ## How to Write a Tool Parser Plugin
 

@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -171,6 +173,13 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        """Only static per-tensor activation quantization is supported for external
+        quantization."""
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
+
     @staticmethod
     def _pad_to_alignment(
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
@@ -312,7 +321,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
         if self.is_hopper:
-            return torch.ops.vllm.padded_cutlass(
+            return torch.ops.vllm.dynamic_padded_cutlass(
                 A,
                 B,
                 As,
@@ -320,14 +329,14 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 list(self.weight_group_shape),
                 out_dtype,
             )
-        else:
-            return ops.cutlass_scaled_mm(
-                A,
-                B.T,
-                out_dtype=out_dtype,
-                scale_a=As,
-                scale_b=Bs.T,
-            )
+
+        return ops.cutlass_scaled_mm(
+            A,
+            B.T,
+            out_dtype=out_dtype,
+            scale_a=As,
+            scale_b=Bs.T,
+        )
 
 
 def cutlass_scaled_mm(
@@ -397,8 +406,56 @@ def _padded_cutlass_fake(
     )
 
 
+def _dynamic_padded_cutlass(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    def run_padded(
+        qx: torch.Tensor,
+        weight: torch.Tensor,
+        x_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return _padded_cutlass(
+            qx, weight, x_scale, weight_scale, block_size, output_dtype
+        )
+
+    def run_direct(
+        qx: torch.Tensor,
+        weight: torch.Tensor,
+        x_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return cutlass_scaled_mm(
+            qx, weight, x_scale, weight_scale, block_size, output_dtype
+        )
+
+    if torch.compiler.is_compiling():
+        return torch.cond(
+            qx.shape[0] % 4 != 0,
+            run_padded,
+            run_direct,
+            (qx, weight, x_scale, weight_scale),
+        )
+
+    if qx.shape[0] % 4 != 0:
+        return run_padded(qx, weight, x_scale, weight_scale)
+
+    return run_direct(qx, weight, x_scale, weight_scale)
+
+
 direct_register_custom_op(
     "padded_cutlass",
     _padded_cutlass,
+    fake_impl=_padded_cutlass_fake,
+)
+
+direct_register_custom_op(
+    "dynamic_padded_cutlass",
+    _dynamic_padded_cutlass,
     fake_impl=_padded_cutlass_fake,
 )

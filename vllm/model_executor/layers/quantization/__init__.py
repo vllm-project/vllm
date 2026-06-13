@@ -18,7 +18,6 @@ QuantizationMethods = Literal[
     "modelopt_fp4",
     "modelopt_mxfp8",
     "modelopt_mixed",
-    "gguf",
     "auto_gptq",
     "gptq",
     "gptq_marlin",
@@ -40,13 +39,13 @@ QuantizationMethods = Literal[
     # _ONLINE_SHORTHANDS by the assertion in get_quantization_config().
     "fp8_per_tensor",
     "fp8_per_block",
+    "fp8_per_channel",
     "int8_per_channel_weight_only",
     "mxfp8",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
-    "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
 ]
@@ -125,7 +124,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
-    from .gguf import GGUFConfig
     from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
@@ -148,7 +146,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
-        "gguf": GGUFConfig,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,

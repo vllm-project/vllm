@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import regex as re
 import torch
-from huggingface_hub import snapshot_download
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
@@ -26,6 +25,7 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vll
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -629,7 +629,7 @@ def serialize_extra_artifacts(
         )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        snapshot_download(
+        hf_api().snapshot_download(
             served_model_name,
             local_dir=tmpdir,
             ignore_patterns=[
@@ -687,7 +687,7 @@ def serialize_vllm_model(
         serializer = TensorSerializer(
             stream,
             encryption=encryption_params,
-            **tensorizer_config.serialization_kwargs,
+            **(tensorizer_config.serialization_kwargs or {}),
         )
         serializer.write_module(model)
         serializer.close()
