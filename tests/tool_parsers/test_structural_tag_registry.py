@@ -20,6 +20,7 @@ from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 from vllm.tool_parsers.deepseekv31_tool_parser import DeepSeekV31ToolParser
 from vllm.tool_parsers.deepseekv32_tool_parser import DeepSeekV32ToolParser
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
+from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
@@ -179,6 +180,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (DeepSeekV32ToolParser, "deepseek_v3_2"),
         (DeepSeekV4ToolParser, "deepseek_v4"),
         (Glm47MoeModelToolParser, "glm_4_7"),
+        (GptOssToolParser, "harmony"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
         (Llama3JsonToolParser, "llama"),

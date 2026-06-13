@@ -563,7 +563,12 @@ def _build_renderer(model_config: MockModelConfig):
 
 
 def _build_serving_render(
-    engine, model_registry: OpenAIModelRegistry
+    engine,
+    model_registry: OpenAIModelRegistry,
+    *,
+    reasoning_parser: str = "",
+    tool_parser: str | None = None,
+    enable_auto_tools: bool = False,
 ) -> OpenAIServingRender:
     return OpenAIServingRender(
         model_config=engine.model_config,
@@ -572,6 +577,9 @@ def _build_serving_render(
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
     )
 
 
@@ -586,7 +594,13 @@ def _build_serving_chat(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(engine, models.registry)
+    openai_serving_render = _build_serving_render(
+        engine,
+        models.registry,
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
+    )
 
     serving_chat = OpenAIServingChat(
         engine,
@@ -1283,6 +1297,54 @@ class TestServingChatWithHarmony:
                 "content": "What's the weather like in Paris today?",
             },
         ]
+
+    def test_required_tool_choice_sets_harmony_structural_tag(
+        self,
+        serving_chat,
+        weather_tools,
+        weather_messages_start,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        captured: dict[str, Any] = {}
+
+        class FakeStructuralTag:
+            def model_dump(self):
+                return {
+                    "type": "structural_tag",
+                    "format": {
+                        "type": "tags_with_separator",
+                        "tags": [],
+                        "separator": "",
+                        "at_least_one": True,
+                    },
+                }
+
+        def fake_get_model_structural_tag(**kwargs):
+            captured.update(kwargs)
+            return FakeStructuralTag()
+
+        monkeypatch.setattr(
+            "vllm.tool_parsers.structural_tag_registry.get_model_structural_tag",
+            fake_get_model_structural_tag,
+        )
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=weather_messages_start,
+            tools=weather_tools,
+            tool_choice="required",
+        )
+
+        serving_chat.openai_serving_render._make_request_with_harmony(req)
+
+        assert captured["model"] == "harmony"
+        assert captured["tool_choice"] == "required"
+        assert captured["tools"] == req.tools
+        assert captured["reasoning"] is False
+        assert req.structured_outputs is not None
+        assert req.structured_outputs.structural_tag == json.dumps(
+            FakeStructuralTag().model_dump()
+        )
 
     async def generate_response_from_harmony_str(
         self,
