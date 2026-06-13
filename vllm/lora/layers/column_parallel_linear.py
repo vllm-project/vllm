@@ -167,10 +167,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         if type(source_layer) is maybe_get_oot_by_class(ColumnParallelLinear):
             return True
         if isinstance(source_layer, maybe_get_oot_by_class(MergedColumnParallelLinear)):
-            if (
-                len(packed_modules_list) != 1
-                or source_layer.checkpoint_format == "sharded"
-            ):
+            if len(packed_modules_list) != 1:
                 return False
             # Exclude layers with 3+ output sizes - those are handled by
             # MergedColumnParallelLinearVariableSliceWithLoRA since this
@@ -350,11 +347,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         decorate: bool = True,
     ) -> bool:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
-        if (
-            not isinstance(source_layer, merged_cls)
-            or len(source_layer.output_sizes) != 2
-            or source_layer.checkpoint_format == "fused"
-        ):
+        if not isinstance(source_layer, merged_cls) or len(packed_modules_list) != 2:
             return False
 
         tp_size = getattr(source_layer, "tp_size", 1)
@@ -429,8 +422,9 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear) and (
-            len(packed_modules_list) == 1 or source_layer.checkpoint_format == "fused"
+        return (
+            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
+            and len(packed_modules_list) == 1
         )
 
 
@@ -489,8 +483,9 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear) and (
-            len(packed_modules_list) == 3 or source_layer.checkpoint_format == "sharded"
+        return (
+            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
+            and len(packed_modules_list) == 3
         )
 
 

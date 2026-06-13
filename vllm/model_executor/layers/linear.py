@@ -4,7 +4,6 @@
 import itertools
 from abc import abstractmethod
 from collections.abc import Iterable
-from typing import Literal
 
 import torch
 from torch.nn.parameter import Parameter
@@ -619,8 +618,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
+
         assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
-        self.checkpoint_format: Literal["fused", "sharded"] | None = None
         super().__init__(
             input_size=input_size,
             output_size=sum(output_sizes),
@@ -920,7 +919,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Checkpoint is sharded
                 shard_id_str, _, name = name.partition(".")
                 shard_id = int(shard_id_str)
-                self.checkpoint_format = "sharded"
                 logger.debug(
                     "Loaded shard %s into %s for layer %s.%s",
                     shard_id,
@@ -930,7 +928,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 )
             else:
                 shard_id = None
-                self.checkpoint_format = "fused"
                 logger.debug(
                     "Loaded weight %s.%s with shape %s",
                     self.prefix,
@@ -1021,7 +1018,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
             self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
         ]
-        self.checkpoint_format: Literal["fused", "sharded"] | None = None
 
         super().__init__(
             input_size=input_size,
@@ -1349,7 +1345,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # Checkpoint is sharded
                 shard_id, _, name = name.partition(".")
                 self.validate_shard_id(shard_id)
-                self.checkpoint_format = "sharded"
                 logger.debug(
                     "Loaded shard %s into %s for layer %s.%s",
                     shard_id,
@@ -1360,7 +1355,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             else:
                 # Checkpoint is fused
                 shard_id = None
-                self.checkpoint_format = "fused"
                 logger.debug(
                     "Loaded weight %s.%s with shape %s",
                     self.prefix,
