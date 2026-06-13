@@ -83,3 +83,8 @@ ECConnectorFactory.register_connector(
     "vllm.distributed.ec_transfer.ec_connector.example_connector",
     "ECExampleConnector",
 )
+ECConnectorFactory.register_connector(
+    "SHMConnector",
+    "vllm.distributed.ec_transfer.ec_connector.shm_connector",
+    "SHMConnector",
+)
