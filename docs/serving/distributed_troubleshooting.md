@@ -14,3 +14,16 @@ The error message `Error: No available node types can fulfill resource request` 
 
 Debugging a distributed system can be challenging due to the large scale and complexity. Ray provides a suite of tools to help monitor, debug, and optimize Ray applications and clusters. For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
 [official KubeRay troubleshooting guide](https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html).
+
+## Per-worker vLLM log files
+
+To keep one log file per distributed worker process, set `VLLM_LOGGING_FILE_DIR`
+on the driver and worker environments:
+
+```bash
+export VLLM_LOGGING_FILE_DIR=/tmp/vllm_logs
+```
+
+In Ray cluster scripts, pass it through each node's environment (for example,
+`-e VLLM_LOGGING_FILE_DIR=/tmp/vllm_logs` in
+`examples/online_serving/run_cluster.sh`).
