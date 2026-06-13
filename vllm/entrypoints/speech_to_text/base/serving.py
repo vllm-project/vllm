@@ -254,7 +254,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -302,7 +302,18 @@ class OpenAISpeechToText(OpenAIServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        # Compute cumulative start offsets from actual chunk lengths so that
+        # segment timestamps stay in sync even when split_audio places
+        # boundaries before the nominal chunk duration (e.g. at 29.5s instead
+        # of 30s).  Without this, each segment's timestamps drift by up to
+        # ~0.5 s per chunk.
+        chunk_start_offsets: list[float] = []
+        cumulative = 0.0
+        for chunk in chunks:
+            chunk_start_offsets.append(cumulative)
+            cumulative += get_audio_duration(y=chunk, sr=sr)
+
+        return engine_inputs, duration, chunk_start_offsets
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -463,10 +474,12 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
-            request=request,
-            audio_data=audio_data,
-            request_id=request_id,
+        engine_inputs, duration_s, chunk_start_offsets = (
+            await self._preprocess_speech_to_text(
+                request=request,
+                audio_data=audio_data,
+                request_id=request_id,
+            )
         )
 
         # Schedule the request and get the result generator.
@@ -578,16 +591,12 @@ class OpenAISpeechToText(OpenAIServing):
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            chunk_size_in_s = self.asr_config.max_audio_clip_s
-            if chunk_size_in_s is None:
-                assert len(list_result_generator) == 1, (
-                    "`max_audio_clip_s` is set to None, audio cannot be chunked"
-                )
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                # Use cumulative actual chunk offsets rather than
+                # idx * nominal_chunk_size to avoid timestamp drift when
+                # split_audio places boundaries before the nominal duration.
+                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
