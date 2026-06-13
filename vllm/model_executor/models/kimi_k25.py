@@ -10,7 +10,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
+import numpy as np
 import torch
+from PIL import Image
 from torch import nn
 from transformers import BatchFeature
 
@@ -66,6 +68,123 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _format_video_timestamp(
+    timestamp: float,
+    timestamp_mode: str = "hh:mm:ss.fff",
+) -> str:
+    timestamp = max(timestamp, 0)
+    total_ms = int(timestamp * 1000)
+    total_seconds, milliseconds = divmod(total_ms, 1000)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if timestamp_mode == "hh:mm:ss.fff":
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+    if timestamp_mode == "mm:ss.fff":
+        return f"{minutes + hours * 60:02d}:{seconds:02d}.{milliseconds:03d}"
+    if timestamp_mode == "mm:ss":
+        return f"{minutes + hours * 60:02d}:{seconds:02d}"
+    raise ValueError(f"Invalid Kimi video timestamp mode: {timestamp_mode}")
+
+
+def _frames_to_pil_images(frames: object) -> list[Image.Image]:
+    if isinstance(frames, np.ndarray):
+        if frames.ndim != 4:
+            raise ValueError(f"Kimi video frames must be 4D, got shape={frames.shape}")
+        if frames.shape[-1] not in (1, 3, 4):
+            raise ValueError(
+                f"Kimi video frames must have 1/3/4 channels, got shape={frames.shape}"
+            )
+        if frames.dtype != np.uint8:
+            raise ValueError(f"Kimi video frames must be uint8, got {frames.dtype}")
+
+        pil_frames: list[Image.Image] = []
+        for frame in frames:
+            if frame.shape[-1] == 1:
+                frame = frame[..., 0]
+            pil_frames.append(Image.fromarray(frame).convert("RGB"))
+        return pil_frames
+
+    if isinstance(frames, list):
+        pil_frames = []
+        for frame in frames:
+            if isinstance(frame, Image.Image):
+                pil_frames.append(frame.convert("RGB"))
+            elif isinstance(frame, np.ndarray):
+                frame_array = np.asarray(frame)
+                if frame_array.ndim == 3:
+                    frame_array = frame_array[None, ...]
+                pil_frames.extend(_frames_to_pil_images(frame_array))
+            else:
+                raise ValueError(f"Unsupported Kimi video frame item: {type(frame)!r}")
+        return pil_frames
+
+    raise ValueError(f"Unsupported Kimi video frame container: {type(frames)!r}")
+
+
+def _split_video_chunks(
+    video_data: object,
+    image_processor: object,
+) -> list[dict[str, Any]]:
+    metadata: dict[str, Any] = {}
+    frames = video_data
+    if isinstance(video_data, tuple) and len(video_data) >= 1:
+        frames = video_data[0]
+        if len(video_data) >= 2 and isinstance(video_data[1], dict):
+            metadata = video_data[1]
+
+    pil_frames = _frames_to_pil_images(frames)
+    if not pil_frames:
+        raise ValueError("Kimi video input decoded to zero frames")
+
+    media_proc_cfg = getattr(image_processor, "media_proc_cfg", {}) or {}
+    temporal_merge_kernel_size = int(
+        media_proc_cfg.get(
+            "temporal_merge_kernel_size",
+            getattr(image_processor, "num_frames_per_chunk", 4),
+        )
+        or 4
+    )
+    if temporal_merge_kernel_size <= 0:
+        raise ValueError(
+            "Kimi temporal_merge_kernel_size must be positive, "
+            f"got {temporal_merge_kernel_size}"
+        )
+
+    timestamp_mode = media_proc_cfg.get("timestamp_mode", "hh:mm:ss.fff")
+    fps_value = metadata.get("fps", metadata.get("avg_fps", 1.0))
+    if fps_value is None:
+        fps_value = 1.0
+    fps = float(fps_value)
+    if fps <= 0:
+        raise ValueError(f"Kimi video fps must be positive, got {fps}")
+
+    frame_indices = metadata.get("frames_indices")
+    if frame_indices is not None and len(frame_indices) != len(pil_frames):
+        raise ValueError(
+            f"Kimi video frames_indices length ({len(frame_indices)}) must "
+            f"match frame count ({len(pil_frames)})"
+        )
+
+    chunk_prompt_template = (
+        "{timestamp}<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
+    )
+    chunks: list[dict[str, Any]] = []
+    for start in range(0, len(pil_frames), temporal_merge_kernel_size):
+        chunk_frames = pil_frames[start : start + temporal_merge_kernel_size]
+        start_frame = frame_indices[start] if frame_indices is not None else start
+        timestamp = _format_video_timestamp(start_frame / fps, timestamp_mode)
+        chunks.append(
+            {
+                "type": "video_chunk",
+                "video_chunk": chunk_frames,
+                "prompt": chunk_prompt_template.format(timestamp=timestamp),
+            }
+        )
+
+    return chunks
 
 
 # Dummy input dimensions for profiling.
@@ -210,6 +329,11 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
 
     Handles both image and video-chunk modalities.
     """
+
+    requires_video_chunk_splitting = True
+
+    def split_video_chunks(self, video_data: object) -> list[dict[str, Any]]:
+        return _split_video_chunks(video_data, self.info.image_processor)
 
     def _get_mm_fields_config(
         self,
