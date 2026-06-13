@@ -218,8 +218,8 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         if not delta_text:
             # Nothing left after stripping start token.
             return None
-        elif self.end_token_id in previous_token_ids:
-            # End token already passed: everything is content now.
+        elif self.end_token_id in previous_token_ids or not self.thinking_enabled:
+            # End token already passed or thinking disabled: everything is content now.
             return DeltaMessage(content=delta_text)
         elif (
             self._tool_call_token_id is not None
