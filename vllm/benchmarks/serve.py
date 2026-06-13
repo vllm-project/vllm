@@ -960,24 +960,19 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    # Optional rate-gating of the actual sends, applied AFTER the concurrency
-    # semaphore is acquired. Pacing only task creation (get_request) is not enough
-    # when max_concurrency is set: requests queue on the semaphore and exit it in
-    # lumps, since a batch of synchronized completions frees many slots at once,
-    # so the freed sends all fire together and burst the engine above the target
-    # rate. Reserving an evenly spaced slot per send caps instantaneous arrivals
-    # at the target rate. Off by default so it does not alter arrival patterns
-    # (or override burstiness) unless explicitly requested; a send_rate of 0
-    # (self-timed traces) or inf is never gated.
-    send_next_ts = [0.0]  # next allowed send time (perf_counter); mutable cell
+    # Optionally space the actual sends after the concurrency semaphore so
+    # batched slot releases don't burst above request_rate (see --rate-gate-sends).
+    # send_next_ts holds the next allowed send time, advanced per reserved slot.
+    send_next_ts = 0.0
 
     async def limited_request_func(request_func_input, session, pbar, send_rate):
+        nonlocal send_next_ts
         async with semaphore:
             if rate_gate_sends and 0.0 < send_rate < float("inf"):
                 now = time.perf_counter()
-                # Reserve this slot atomically: no await between read and write.
-                slot = max(send_next_ts[0], now)
-                send_next_ts[0] = slot + 1.0 / send_rate
+                # No await between reading and writing send_next_ts.
+                slot = max(send_next_ts, now)
+                send_next_ts = slot + 1.0 / send_rate
                 if slot > now:
                     await asyncio.sleep(slot - now)
             return await request_func(
