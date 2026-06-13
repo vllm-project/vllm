@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
 from collections.abc import Sequence
 from functools import cached_property
 from pathlib import Path
@@ -188,6 +189,53 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
+class _MistralCommonBackendWithSpecialTokens(MistralCommonBackend):
+    """`MistralCommonBackend` that encodes special tokens found in text.
+
+    mistral-common deliberately never encodes special tokens from text:
+    `encode("[IMG]")` tokenizes the literal string instead of returning
+    the id of the `[IMG]` token. However, HF processors (such as
+    `PixtralProcessor`) insert special placeholder tokens into the
+    prompt text and rely on the tokenizer to encode them back to their
+    token ids, like HF tokenizers do for added tokens.
+
+    This backend implements the HF behavior so that HF processors can
+    be used with Mistral tokenizers. It must only be used to tokenize
+    trusted text, not user-provided prompts.
+    """
+
+    @cached_property
+    def _special_token_to_id(self) -> dict[str, int]:
+        # `all_special_tokens` is constructed from `all_special_ids`
+        # in `MistralCommonBackend.__init__` so the two are aligned.
+        return dict(zip(self.all_special_tokens, self.all_special_ids))
+
+    @cached_property
+    def _special_token_pattern(self) -> re.Pattern[str]:
+        # Sort by length so that the longest match takes priority
+        # when one special token is a prefix of another.
+        special_tokens = sorted(self.all_special_tokens, key=len, reverse=True)
+        return re.compile(f"({'|'.join(map(re.escape, special_tokens))})")
+
+    def _text_to_ids(self, text: str, add_special_tokens: bool) -> list[int]:
+        tokenizer = self.tokenizer.instruct_tokenizer.tokenizer
+
+        token_ids = list[int]()
+        # Segments at odd indices correspond to special tokens.
+        for i, segment in enumerate(self._special_token_pattern.split(text)):
+            if i % 2:
+                token_ids.append(self._special_token_to_id[segment])
+            elif segment:
+                token_ids.extend(tokenizer.encode(segment, bos=False, eos=False))
+
+        if add_special_tokens:
+            token_ids.insert(0, tokenizer.bos_id)
+            if self._mode == ValidationMode.finetuning:
+                token_ids.append(tokenizer.eos_id)
+
+        return token_ids
+
+
 class MistralTokenizer(TokenizerLike):
     IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
 
@@ -254,6 +302,27 @@ class MistralTokenizer(TokenizerLike):
         self._special_token_ids_set = set(self._special_token_ids)
         self._special_tokens = self._get_special_tokens(self._special_token_ids)
         self._special_tokens_set = set(self._special_tokens)
+
+    @cached_property
+    def transformers_tokenizer_with_special_tokens(self) -> MistralCommonBackend:
+        """Variant of `transformers_tokenizer` that encodes special tokens
+        found in text, which mistral-common deliberately never does.
+
+        This is required by HF processors, which insert special placeholder
+        tokens (e.g. `"[IMG]"`) into the prompt text and rely on the
+        tokenizer to encode them back to their token ids. It must only be
+        used to tokenize trusted text, not user-provided prompts.
+        """
+        backend = self.transformers_tokenizer
+        return _MistralCommonBackendWithSpecialTokens(
+            tokenizer_path=backend._tokenizer_path,
+            mode=backend.mode,
+            model_max_length=backend.model_max_length,
+            padding_side=backend.padding_side,
+            truncation_side=backend.truncation_side,
+            model_input_names=backend.model_input_names,
+            clean_up_tokenization_spaces=backend.clean_up_tokenization_spaces,
+        )
 
     def _get_special_token_ids(self) -> list[int]:
         return [i for i in range(len(self._vocab)) if self.tokenizer.is_special(i)]
