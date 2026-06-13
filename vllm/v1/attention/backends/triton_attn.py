@@ -570,7 +570,6 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
-        self.supports_quant_query_input = current_platform.is_cuda()
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
@@ -581,6 +580,14 @@ class TritonAttentionImpl(AttentionImpl):
             and current_platform.is_cuda()
             and current_platform.has_device_capability(80)
             and not current_platform.has_device_capability(89)
+        )
+        # When fp8 KV is software-emulated there is no native fp8e4nv cast, so we
+        # cannot quantize the query to fp8 either (torch.compile would fuse a
+        # query->fp8e4nv cast into the RoPE kernel, which fails to compile on
+        # SM80/86). Keep the query in bf16/fp16; _cast_kv_tile dequantizes K/V to
+        # the query dtype, so attention runs in the query's dtype.
+        self.supports_quant_query_input = (
+            current_platform.is_cuda() and not self._fp8_software_conv
         )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
