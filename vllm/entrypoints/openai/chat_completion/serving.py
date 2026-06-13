@@ -71,26 +71,24 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Multimodal modalities surfaced in ``usage.prompt_tokens_details``.
-_MM_USAGE_MODALITIES = ("image", "audio", "video")
-
 
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int] | None:
     """Sum per-modality placeholder tokens from ``mm_placeholders``.
 
-    ``PlaceholderRange.length`` is the placeholder's prompt token span, so the
-    sum matches the placeholder tokens already in ``usage.prompt_tokens``.
+    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
+    prompt token span, so each sum matches the placeholder tokens already
+    counted in ``usage.prompt_tokens``.
     """
     mm_placeholders = cast(
         "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
     )
     if not mm_placeholders:
         return None
-    counts: dict[str, int] = {}
-    for modality in _MM_USAGE_MODALITIES:
-        ranges = mm_placeholders.get(modality)
-        if ranges:
-            counts[modality] = sum(p.length for p in ranges)
+    counts = {
+        modality: sum(p.length for p in ranges)
+        for modality, ranges in mm_placeholders.items()
+        if ranges
+    }
     return counts or None
 
 
@@ -104,12 +102,9 @@ def _make_prompt_tokens_details(
         return None
     if num_cached_tokens is None and not mm_token_counts:
         return None
-    counts = mm_token_counts or {}
     return PromptTokenUsageInfo(
         cached_tokens=num_cached_tokens,
-        image_tokens=counts.get("image"),
-        audio_tokens=counts.get("audio"),
-        video_tokens=counts.get("video"),
+        multimodal_tokens=mm_token_counts or None,
     )
 
 

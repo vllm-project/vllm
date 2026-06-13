@@ -667,9 +667,7 @@ def test_mm_prompt_tokens_details():
     assert _make_prompt_tokens_details(True, 0, None).cached_tokens == 0
     details = _make_prompt_tokens_details(True, None, counts)
     assert details.cached_tokens is None
-    assert details.image_tokens == 600
-    assert details.video_tokens == 1200
-    assert details.audio_tokens is None
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
     assert _make_prompt_tokens_details(True, 3, counts).cached_tokens == 3
 
 
