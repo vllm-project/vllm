@@ -702,7 +702,7 @@ class OpenAIServingResponses(OpenAIServing):
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
-                    context.parser.response_messages,
+                    context.response_messages,
                     context.tool_dicts,
                     context.parser_cls,
                     context.chat_template,
@@ -805,7 +805,7 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            output = context.parser.make_response_output_items_from_parsable_context()
+            output = context.make_response_output_items()
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -816,7 +816,7 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = 0
 
             # Check finish reason from the parser
-            if context.parser.finish_reason == "length":
+            if context.finish_reason == "length":
                 status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
