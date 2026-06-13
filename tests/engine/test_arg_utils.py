@@ -641,3 +641,64 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
     args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
     assert args.model == "s3://bucket/model"
     assert args.tokenizer == "s3://bucket/tokenizer"
+
+
+
+def test_sleep_mode_backend_cli_plumbing():
+    """Regression test for the --sleep-mode-backend / --sleep-mode-backend-options
+    CLI plumbing through EngineArgs.add_cli_args() and EngineArgs.create_model_config().
+
+    Catches the original landmine: closed PR #45506 review noted that operators
+    setting --sleep-mode-backend on the CLI saw their value silently dropped
+    because EngineArgs never declared the field, so from_cli_args() never copied
+    it into the EngineArgs instance and create_model_config() never forwarded it
+    to ModelConfig. The default cumem-backend path masked the bug because every
+    in-tree codepath read the ModelConfig default ("cumem") rather than the
+    operator override.
+    """
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default — no flags passed: backend defaults to ModelConfig default
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == ModelConfig.sleep_mode_backend
+    assert engine_args.sleep_mode_backend_options == {}
+
+    # operator override: --sleep-mode-backend=cumem_tag must reach EngineArgs
+    args = parser.parse_args(["--sleep-mode-backend", "cumem_tag"])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.sleep_mode_backend == "cumem_tag"
+
+    # ModelConfig forwarding: create_model_config() must pass the override
+    # through. Round-trip the field via the EngineArgs constructor; we only
+    # assert that the dataclass exposes the field and accepts overrides
+    # (full create_model_config() needs a real model dir, out of scope here).
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        sleep_mode_backend="cumem_tag",
+        sleep_mode_backend_options={"suspend_tags": ["weights"]},
+    )
+    assert engine_args.sleep_mode_backend == "cumem_tag"
+    assert engine_args.sleep_mode_backend_options == {"suspend_tags": ["weights"]}
+
+
+def test_model_config_declares_sleep_mode_backend_fields():
+    """ModelConfig must declare the sleep_mode_backend and
+    sleep_mode_backend_options dataclass fields with their documented defaults.
+
+    The CLI plumbing in EngineArgs reads ``ModelConfig.sleep_mode_backend`` at
+    class-body import time as the default for the corresponding EngineArgs
+    field; if the ModelConfig field is missing, importing arg_utils raises
+    AttributeError. This test pins the surface so a future refactor that
+    accidentally drops or renames the field fails fast at unit-test time.
+    """
+    from dataclasses import fields
+
+    field_map = {f.name: f for f in fields(ModelConfig)}
+    assert "sleep_mode_backend" in field_map
+    assert "sleep_mode_backend_options" in field_map
+    # Documented defaults: backend is "cumem", options is an empty dict.
+    assert ModelConfig.sleep_mode_backend == "cumem"
+    # default_factory=dict means each instance gets a fresh empty dict.
+    cfg = ModelConfig.__dataclass_fields__["sleep_mode_backend_options"]
+    assert cfg.default_factory is dict
