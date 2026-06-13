@@ -5,7 +5,6 @@
 import copy
 import json as json_mod
 import math
-from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any
@@ -67,9 +66,7 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
-# maybe make msgspec?
-@dataclass
-class StructuredOutputsParams:
+class StructuredOutputsParams(msgspec.Struct, omit_defaults=True):  # type: ignore[call-arg]
     # One of these fields will be used to build a logit processor.
     json: str | dict | None = None
     regex: str | None = None
@@ -82,13 +79,22 @@ class StructuredOutputsParams:
     whitespace_pattern: str | None = None
     structural_tag: str | None = None
 
-    _backend: str | None = field(default=None, init=False)
+    _backend: str | None = None
     """CAUTION: Should only be set by Processor._validate_structured_output"""
-    _backend_was_auto: bool = field(default=False, init=False)
+    _backend_was_auto: bool = False
     """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
-        """Validate that some fields are mutually exclusive."""
+        if self._backend is not None or self._backend_was_auto:
+            raise TypeError(
+                "__init__() got unexpected internal fields: "
+                "'_backend' and '_backend_was_auto' must not be set at "
+                "construction time."
+            )
+        self._validate_constraints()
+
+    def _validate_constraints(self):
+        """Validate that constraint fields are mutually exclusive."""
         count = sum(
             [
                 self.json is not None,
@@ -1016,9 +1022,9 @@ class SamplingParams(
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
 
-        # Run post-init validation. This is also important to ensure subsequent
+        # Run constraint validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
-        self.structured_outputs.__post_init__()
+        self.structured_outputs._validate_constraints()
 
     def __repr__(self) -> str:
         return (
