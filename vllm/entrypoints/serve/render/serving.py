@@ -527,6 +527,13 @@ class OpenAIServingRender:
         prompt_token_ids = render_for_completion(messages)
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
+        if self.parser is not None and request.tool_choice != "none":
+            request = self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
+
         return messages, [engine_input]
 
     async def derender_chat_response(
