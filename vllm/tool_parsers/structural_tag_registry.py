@@ -114,12 +114,26 @@ def get_model_structural_tag(
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
 
-    return get_xgrammar_model_structural_tag(
+    structural_tag = get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+    if model == "deepseek_v4" and not reasoning:
+        _allow_deepseek_v4_chat_think_end(structural_tag)
+    return structural_tag
+
+
+def _allow_deepseek_v4_chat_think_end(structural_tag: StructuralTag) -> None:
+    """Allow DSv4 chat-mode outputs to emit an extra ``</think>``."""
+    fmt = structural_tag.format
+    if getattr(fmt, "type", None) != "triggered_tags":
+        return
+    excludes = getattr(fmt, "excludes", None)
+    if not isinstance(excludes, list):
+        return
+    fmt.excludes = [exclude for exclude in excludes if exclude != "</think>"]
 
 
 def _dump_tool_for_xgrammar(
