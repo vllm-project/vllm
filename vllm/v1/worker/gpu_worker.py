@@ -5,29 +5,24 @@
 import gc
 import os
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import regex as re
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.ec_transfer import (
-    ensure_ec_transfer_initialized,
-    ensure_ec_transfer_shutdown,
-)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -35,18 +30,12 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorHandshakeMetadata,
-)
 from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import (
-    WeightTransferEngine,
-    WeightTransferEngineFactory,
-)
+from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -55,7 +44,6 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
-from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -170,11 +158,15 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine is created in `load_model` once the model
-        # is available, since the engine needs a reference to the model.
-        self.weight_transfer_engine: WeightTransferEngine | None = None
-        self._weight_update_active = False
-        self._is_checkpoint_format = True
+        # Weight transfer engine (initialized on-demand)
+        self.weight_transfer_engine = (
+            WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config.parallel_config,
+            )
+            if self.vllm_config.weight_transfer_config is not None
+            else None
+        )
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -186,11 +178,13 @@ class Worker(WorkerBase):
         if self.profiler_config.profiler not in ("torch", "cuda", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
-        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -200,7 +194,7 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        allocator = get_mem_allocator_instance()
+        allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -213,7 +207,9 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        allocator = get_mem_allocator_instance()
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
@@ -224,55 +220,28 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
-            self.model_runner.post_kv_cache_wake_up()
+        # If the KV cache has just been woken up,
+        # the internal state of cache_engine must be reset,
+        # especially the FP8 scaling factor.
+        if (
+            (tags is None or "kv_cache" in tags)
+            and self.cache_config.cache_dtype.startswith("fp8")
+            and hasattr(self.model_runner, "init_fp8_kv_scales")
+        ):
+            self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if (
-            current_platform.is_cuda_alike()
-            and not self.vllm_config.model_config.enable_cumem_allocator
-        ):
+        if not self.vllm_config.model_config.enable_sleep_mode:
             return nullcontext()
 
-        if (
-            current_platform.is_xpu()
-            and not self.vllm_config.model_config.enable_sleep_mode
-        ):
-            return nullcontext()
+        from vllm.device_allocator.cumem import CuMemAllocator
 
-        if current_platform.is_cpu():
-            return nullcontext()
-
-        allocator = get_mem_allocator_instance()
+        allocator = CuMemAllocator.get_instance()
         if tag == "weights":
             assert allocator.get_current_usage() == 0, (
-                "CuMem allocator can only be used for one instance per process."
+                "Sleep mode can only be used for one instance per process."
             )
         return allocator.use_memory_pool(tag=tag)
-
-    @contextmanager
-    def _scoped_allocator_max_split(self, max_split_size_mb: int):
-        """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
-        cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit."""
-        if not current_platform.is_cuda():
-            yield
-            return
-
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        match = re.search(r"max_split_size_mb:(\d+)", conf)
-        original_value = match.group(1) if match else None
-
-        torch._C._accelerator_setAllocatorSettings(
-            f"max_split_size_mb:{max_split_size_mb}"
-        )
-        try:
-            yield
-        finally:
-            # PyTorch defaults to SIZE_MAX (no limit).
-            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
-            restore = original_value if original_value else str(_SIZE_MAX_MB)
-            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
 
     @instrument(span_name="Init device")
     def init_device(self):
@@ -327,7 +296,7 @@ class Worker(WorkerBase):
             )
 
             if self.use_v2_model_runner:
-                logger.info_once("Using V2 Model Runner")
+                logger.info_once("Using V2 Model Runner", scope="local")
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
@@ -373,21 +342,30 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self, *, load_dummy_weights: bool = False) -> None:
+    def load_model(self) -> None:
+        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+        if dummy_weights:
+            (
+                expanded_physical_to_logical,
+                num_logical_experts,
+                old_num_physical_experts,
+            ) = self.elastic_ep_executor.receive_expert_mapping()
+            num_physical_experts = expanded_physical_to_logical.shape[1]
+            self.parallel_config.eplb_config.num_redundant_experts = (
+                num_physical_experts - num_logical_experts
+            )
+
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
-            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
-            self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            self.model_runner.load_model(load_dummy_weights=dummy_weights)
 
-        if self.vllm_config.weight_transfer_config is not None:
-            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-                self.model_runner.get_model(),
+        if dummy_weights:
+            self.model_runner.setup_eplb_from_mapping(
+                expanded_physical_to_logical, old_num_physical_experts
             )
+            self.model_runner.eep_eplb_suppressed = True
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -436,29 +414,31 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+            # Capture both peak and current allocation at the same point
+            # (after profile_run, before cudagraph) so transient headroom
+            # is measured consistently without cudagraph interference.
+            stats = torch.accelerator.memory_stats(self.device)
+            profile_torch_peak = stats.get("allocated_bytes.all.peak", 0)
+            profile_torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
+            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if (
-                current_platform.is_cuda()
-                and self.vllm_config.compilation_config.cudagraph_mode
-                != CUDAGraphMode.NONE
-            ):
+            if not self.model_config.enforce_eager and not current_platform.is_rocm():
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
         )
+        # transient_peak_headroom = peak - current (both pre-cudagraph).
+        # This is the extra memory needed at peak above the persistent level.
+        # Using torch_peak_increase (peak - before_profile) would double-count
+        # persistent torch allocations already included in total_consumed.
+        transient_peak_headroom = profile_torch_peak - profile_torch_allocated
         profile_result.non_kv_cache_memory = (
-            profile_result.non_torch_increase
-            + profile_result.torch_peak_increase
-            + profile_result.weights_memory
+            profile_result.total_consumed + transient_peak_headroom
         )
 
         # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
@@ -469,8 +449,10 @@ class Worker(WorkerBase):
             else 0
         )
 
-        self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
+        self.total_consumed = profile_result.total_consumed
+        self.peak_activation_memory = (
+            transient_peak_headroom + cudagraph_memory_estimate_applied
+        )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -507,6 +489,7 @@ class Worker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
+            scope="local",
         )
 
         if cudagraph_memory_estimate > 0:
@@ -520,13 +503,14 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "CUDA graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
-                    "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To maintain the same "
-                    "effective KV cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f. To disable, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                    "CUDA graph memory profiling is enabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
+                    "This will become the default in v0.19. "
+                    "The current --gpu-memory-utilization=%.4f is equivalent "
+                    "to --gpu-memory-utilization=%.4f without CUDA graph "
+                    "memory profiling. To maintain the same effective KV "
+                    "cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f.",
                     current_util,
                     equiv_util,
                     suggested_util,
@@ -536,27 +520,22 @@ class Worker(WorkerBase):
                     round(current_util + cg_util_delta, 4),
                     1.0,
                 )
-                logger.warning(
-                    "CUDA graph memory profiling is disabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
-                    "Without it, CUDA graph memory is not accounted for "
-                    "during KV cache allocation, which may require lowering "
-                    "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
-                    "--gpu-memory-utilization from %.4f to %.4f.",
+                logger.info(
+                    "In v0.19, CUDA graph memory profiling will be enabled "
+                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
+                    "which more accurately accounts for CUDA graph memory "
+                    "during KV cache allocation. To try it now, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
+                    "--gpu-memory-utilization from %.4f to %.4f to maintain "
+                    "the same effective KV cache size.",
                     current_util,
                     suggested_util,
                 )
 
         return int(self.available_kv_cache_memory_bytes)
 
-    def get_kv_connector_handshake_metadata(
-        self,
-    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
-        """Get KV connector metadata from this worker if available.
-
-        Returned dict is keyed by `(pp_rank, tp_rank)`.
-        """
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
 
         if not has_kv_transfer_group():
             return None
@@ -567,9 +546,8 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
-        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {(pp_rank, tp_rank): metadata}
+        return {tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -601,7 +579,13 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
+        if self.vllm_config.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            with allocator.use_memory_pool(tag="kv_cache"):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
+        else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
@@ -687,11 +671,9 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
-
             non_kv_cache_memory = (
-                self.model_runner.model_memory_usage
+                self.total_consumed
                 + self.peak_activation_memory
-                + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
@@ -712,10 +694,10 @@ class Worker(WorkerBase):
                 f"Desired GPU memory utilization is "
                 f"({self.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_memory)} GiB). "
-                f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
-                f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
-                f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
+                f"Actual usage is {format_gib(self.total_consumed)} "
+                f"GiB for consumed memory (weights + non-torch), "
+                f"{format_gib(self.peak_activation_memory)} GiB "
+                f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
@@ -758,19 +740,6 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-        # All warmup is done — start monitoring for unexpected JIT
-        # compilations that would cause latency spikes during inference.
-        from vllm.triton_utils.jit_monitor import (
-            activate as activate_triton_jit_monitor,
-        )
-
-        activate_triton_jit_monitor()
-
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
-        freeze_gc_heap()
-        maybe_attach_gc_debug_callback()
-
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -787,11 +756,6 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
-
-    def get_compilation_match_table(self) -> dict[str, int]:
-        from vllm.compilation.passes.vllm_inductor_pass import get_match_table
-
-        return get_match_table()
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         """Get encoder timing stats from model runner."""
@@ -1018,13 +982,6 @@ class Worker(WorkerBase):
             model_config=self.model_config,
         )
 
-    def _check_weight_transfer_engine(self) -> None:
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
-            )
-
     def init_weight_transfer_engine(self, init_info: dict) -> None:
         """
         Initialize weight transfer mechanism.
@@ -1033,154 +990,74 @@ class Worker(WorkerBase):
         Args:
             init_info: Dictionary containing backend-specific initialization info
         """
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
+            )
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Start a new weight update session.
-
-        Args:
-            is_checkpoint_format: Whether incoming weights are in checkpoint
-                format (need layerwise processing) or kernel format (direct
-                copy / sparse patch application).
-        """
-        self._check_weight_transfer_engine()
-
-        if self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update called while a weight update is already "
-                "active. Call finish_weight_update first."
-            )
-
-        if is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import (
-                initialize_layerwise_reload,
-            )
-
-            model = self.model_runner.model
-            with torch.device(self.device):
-                initialize_layerwise_reload(model)
-
-        self._is_checkpoint_format = is_checkpoint_format
-        self._weight_update_active = True
-
     def update_weights(self, update_info: dict) -> None:
         """
-        Receive one weight update chunk from the trainer.
-
-        start_weight_update must be called before update_weights and
-        finish_weight_update must be called after all chunks have been sent.
+        Batched weight update from the trainer.
 
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        self._check_weight_transfer_engine()
-        assert self.weight_transfer_engine is not None
-
-        if not self._weight_update_active:
+        if self.weight_transfer_engine is None:
             raise RuntimeError(
-                "start_weight_update must be called before update_weights."
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
             )
 
-        update_succeeded = False
-        try:
-            # Parse dict into backend-specific typed dataclass
-            typed_update_info = self.weight_transfer_engine.parse_update_info(
-                update_info
-            )
+        # Parse dict into backend-specific typed dataclass
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
 
-            with torch.device(self.device):
-                if self._is_checkpoint_format:
-                    if typed_update_info.update_kind != "dense":
-                        raise ValueError(
-                            "Sparse weight updates require "
-                            "`start_weight_update(is_checkpoint_format=False)`."
-                        )
+        model = self.model_runner.model
 
-                    model = self.model_runner.model
-
-                    # Use layerwise reload pattern for checkpoint format weights
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=model.load_weights,
-                    )
-                elif typed_update_info.update_kind == "sparse_flat":
-                    if self.parallel_config.world_size != 1:
-                        raise NotImplementedError(
-                            "Sparse weight updates currently require TP=1 and PP=1"
-                        )
-                    self.weight_transfer_engine.receive_sparse_weights(
-                        typed_update_info,
-                        apply_patches=self.model_runner.apply_sparse_weight_patches,
-                    )
-                else:
-                    model = self.model_runner.model
-
-                    # Weights are already in kernel format, copy directly.
-                    def load_weights_direct(
-                        weights: list[tuple[str, torch.Tensor]],
-                    ) -> None:
-                        for name, weight in weights:
-                            param = model.get_parameter(name)
-                            param.copy_(weight)
-
-                    self.weight_transfer_engine.receive_weights(
-                        typed_update_info,
-                        load_weights=load_weights_direct,
-                    )
-
-            # NCCL broadcast/packed path are asynchronous.
-            # Sync here so the next step uses the new weights.
-            torch.accelerator.synchronize()
-            update_succeeded = True
-        finally:
-            if not update_succeeded:
-                self._weight_update_active = False
-                self._is_checkpoint_format = True
-
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update session."""
-        self._check_weight_transfer_engine()
-
-        if not self._weight_update_active:
-            raise RuntimeError(
-                "finish_weight_update called without a matching start_weight_update."
-            )
-
-        if self._is_checkpoint_format:
+        if typed_update_info.is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
                 finalize_layerwise_reload,
+                initialize_layerwise_reload,
             )
 
-            model = self.model_runner.model
+            # Use layerwise reload pattern for checkpoint format weights
             with torch.device(self.device):
+                initialize_layerwise_reload(model)
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=model.load_weights,
+                )
                 finalize_layerwise_reload(model, self.model_config)
+        else:
+            # Weights are already in kernel format, copy directly
+            def load_weights_direct(
+                weights: list[tuple[str, torch.Tensor]],
+            ) -> None:
+                for name, weight in weights:
+                    param = model.get_parameter(name)
+                    param.copy_(weight)
 
-        self._weight_update_active = False
-        self._is_checkpoint_format = True
+            self.weight_transfer_engine.receive_weights(
+                typed_update_info,
+                load_weights=load_weights_direct,
+            )
+
+        # NCCL broadcast/packed path are asynchronous.
+        # Sync here so the next step uses the new weights.
+        torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
-        gc.unfreeze()
-
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
-        if ensure_ec_transfer_shutdown is not None:
-            ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
-
-        # Release GPU resources held by the model runner so that memory
-        # can be reclaimed when running in-process
-        if model_runner := getattr(self, "model_runner", None):
-            model_runner.shutdown()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
@@ -1194,14 +1071,12 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
+    attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-    init_batch_invariance()
-    override_envs_for_eplb(
-        parallel_config,
-        moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
-    )
+    init_batch_invariance(attention_config.backend)
+    override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
