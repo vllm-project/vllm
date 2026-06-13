@@ -387,8 +387,8 @@ class AutoWeightsLoader:
             # Get mappings and ignore prefixes for KV cache quantization scales
             mapper = mapper or WeightsMapper()
             mapper |= quant_config.get_cache_scale_mapper()
-            ignore_unexpected_prefixes = quant_config._ignore_unexpected_prefixes
-            self.ignore_unexpected_suffixes.extend(ignore_unexpected_prefixes)
+            ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
