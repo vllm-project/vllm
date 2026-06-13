@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+    fn deepseek_v32_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let output = parser
             .parse_complete(&build_tool_call(
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "location": "Hangzhou </｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+                "location": "Hangzhou &lt;/｜DSML｜parameter&gt;&lt;/｜DSML｜invoke&gt;&lt;/｜DSML｜function_calls&gt;",
                 "date": "2026-05-08",
             })
         );

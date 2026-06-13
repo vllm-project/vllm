@@ -133,11 +133,11 @@ def test_nvfp4(vllm_runner, model, eager, backend):
     not current_platform.is_rocm(),
     reason="NVFP4 MOE emulation is only useful on AMD Instinct MI3xx",
 )
-def test_nvfp4_moe(vllm_runner, model, backend, monkeypatch):
-    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
+def test_nvfp4_moe(vllm_runner, model, backend):
     with vllm_runner(
         model,
         moe_backend=backend,
+        linear_backend=backend,
         load_format="dummy",
         hf_overrides={"num_hidden_layers": 2},
     ) as llm:

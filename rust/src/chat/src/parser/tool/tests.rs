@@ -146,6 +146,10 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GEMMA4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
+        Some(names::GRANITE4)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
     );
@@ -190,4 +194,15 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("internlm/Intern-S1-Pro"),
         None
     );
+}
+
+#[test]
+fn factory_new_registers_phi4_mini_json_by_name() {
+    // phi-4-mini is registered by explicit name only (matching Python's
+    // `--tool-call-parser phi4_mini_json`); it is intentionally not mapped to
+    // any model-name pattern.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::PHI4_MINI_JSON));
+    factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
