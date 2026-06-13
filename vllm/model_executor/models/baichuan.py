@@ -350,6 +350,10 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant
             ".up_proj": ".gate_up_proj.1",
         }
     )
+    packed_modules_mapping = {
+        "W_pack": ["W_pack"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(
         self,

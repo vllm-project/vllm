@@ -377,6 +377,10 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".c_fc_1": ".gate_up_proj.1",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["c_fc_0", "c_fc_1"],
+    }
 
     # LoRA specific attributes
     embedding_modules = {

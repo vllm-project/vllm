@@ -265,6 +265,9 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".v_proj": ".qkv_proj.v",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

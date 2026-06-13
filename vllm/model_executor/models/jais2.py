@@ -371,6 +371,9 @@ class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".v_proj": ".qkv_proj.v",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     embedding_modules = {
         "embed_tokens": "input_embeddings",

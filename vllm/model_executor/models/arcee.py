@@ -286,6 +286,11 @@ class ArceeForCausalLM(
             ".v_proj": ".qkv_proj.v",
         }
     )
+    # Map fused module names to their submodule components
+    # (for quantization and LoRA)
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()

@@ -335,6 +335,9 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             "decoder.": "model.decoder.",
         },
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

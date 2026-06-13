@@ -334,6 +334,10 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             ".up_proj": ".gate_up_proj.1",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

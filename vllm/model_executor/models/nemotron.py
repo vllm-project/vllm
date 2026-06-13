@@ -369,6 +369,9 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ".v_proj": ".qkv_proj.v",
         }
     )
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     # LoRA specific attributes
     embedding_modules = {

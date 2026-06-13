@@ -321,6 +321,11 @@ class InternLM2Model(nn.Module, SupportsQuant):
 
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "wqkv": ["wqkv"],
+        "gate_up_proj": ["w1", "w3"],
+    }
+
     def __init__(
         self,
         *,
