@@ -678,6 +678,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
                                     id=origin_chunk.id,
+                                    # Set explicitly: this event is serialized
+                                    # with exclude_unset=True, which drops
+                                    # default-valued fields, while strict
+                                    # Anthropic SDK clients require
+                                    # message.type/role (issue #45367).
+                                    type="message",
+                                    role="assistant",
                                     content=[],
                                     model=origin_chunk.model,
                                     stop_reason=None,
