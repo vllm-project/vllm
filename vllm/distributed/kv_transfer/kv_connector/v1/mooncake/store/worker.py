@@ -1136,31 +1136,32 @@ class MooncakeStoreWorker:
         self.num_blocks = self.cache_config.num_gpu_blocks
 
         seen_ptrs: set[int] = set()
-        addrs: list[int] = []
-        block_lens: list[int] = []
+        segments_by_layer: dict[str, tuple[int, list[int], list[int]]] = {}
 
-        for value in kv_caches.values():
-            cache = _repr_tensor(value)
+        def _get_cache_segments(
+            cache: torch.Tensor,
+        ) -> tuple[int, list[int], list[int]]:
             cache_storage = cache.untyped_storage()
             base_addr = cache_storage.data_ptr()
-            if base_addr in seen_ptrs:
-                continue
-            seen_ptrs.add(base_addr)
             region_len = cache_storage.nbytes()
 
-            ret = self.store.register_buffer(base_addr, region_len)
-            if ret != 0:
-                logger.error(
-                    "register_buffer failed for addr %#x len %d: %d",
-                    base_addr,
-                    region_len,
-                    ret,
-                )
+            if base_addr not in seen_ptrs:
+                seen_ptrs.add(base_addr)
+                ret = self.store.register_buffer(base_addr, region_len)
+                if ret != 0:
+                    logger.error(
+                        "register_buffer failed for addr %#x len %d: %d",
+                        base_addr,
+                        region_len,
+                        ret,
+                    )
 
             # Detect layout via stride: a dim whose byte-stride exceeds
             # page_size_bytes is an outer segment dim (e.g. the K/V dim of
             # FlashAttn's (2, num_blocks, ...)). FlashInfer/MLA's blocks-
             # outermost layout has no such dim and yields a single segment.
+            addrs: list[int] = []
+            block_lens: list[int] = []
             el = cache.element_size()
             page_size_bytes = region_len // self.num_blocks
             outer_dims = [
@@ -1176,17 +1177,53 @@ class MooncakeStoreWorker:
                 for idx in range(cache.shape[outer_dims[0]]):
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self.num_blocks)
+            return base_addr, addrs, block_lens
 
-        logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",
-            len(self.token_dbs),
-            len(addrs),
-            self.num_blocks,
+        for layer_name, value in kv_caches.items():
+            cache = _repr_tensor(value)
+            segments_by_layer[layer_name] = _get_cache_segments(cache)
+
+        cross_layer_only = set(kv_caches) == {"__cross_layer__"}
+        num_segments_by_group: list[int] = []
+
+        # Register KV cache memory for each group for their respective layers
+        for db, group in zip(self.token_dbs, self._kv_cache_groups, strict=True):
+            group_addrs: list[int] = []
+            group_block_lens: list[int] = []
+            group_seen_ptrs: set[int] = set()
+            layer_names = (
+                ["__cross_layer__"] if cross_layer_only else group.layer_names
+            )
+            for layer_name in layer_names:
+                segments = segments_by_layer.get(layer_name)
+                if segments is None:
+                    continue
+                base_addr, addrs, block_lens = segments
+                if base_addr in group_seen_ptrs:
+                    continue
+                group_seen_ptrs.add(base_addr)
+                group_addrs.extend(addrs)
+                group_block_lens.extend(block_lens)
+
+            db.set_kv_caches_base_addr(group_addrs)
+            db.set_block_len(group_block_lens)
+            num_segments_by_group.append(len(group_addrs))
+
+        num_unique_segments = sum(
+            {
+                base_addr: len(addrs)
+                for base_addr, addrs, _ in segments_by_layer.values()
+            }.values()
         )
 
-        for db in self.token_dbs:
-            db.set_kv_caches_base_addr(addrs)
-            db.set_block_len(block_lens)
+        logger.info(
+            "Registered KV caches: num_groups=%d, num_unique_segments=%d, "
+            "num_segments_by_group=%s, num_blocks=%d",
+            len(self.token_dbs),
+            num_unique_segments,
+            num_segments_by_group,
+            self.num_blocks,
+        )
 
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
