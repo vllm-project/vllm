@@ -102,10 +102,8 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{type(enable_multithread_load).__name__}"
             )
         num_threads = extra_config.get("num_threads")
-        if num_threads is not None and (
-            not isinstance(num_threads, int)
-            or isinstance(num_threads, bool)
-            or num_threads <= 0
+        if num_threads is not None and not (
+            isinstance(num_threads, int) and num_threads > 0
         ):
             raise ValueError(
                 f"num_threads must be a positive integer, got {num_threads!r}"
