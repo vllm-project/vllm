@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=r32_sp128_sd128_pp2_tp2_qwen3_30b_raydebug_v3
+#SBATCH --job-name=r32_sp128_sd128_pp2_tp2_qwen3_30b_raydebug_v4
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
-#SBATCH --time=00:15:00
+#SBATCH --time=00:45:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="ray-debug-v3-qwen3-30b-tp2-pp2-no-ray-stop-dashboard-off"
+SCRIPT_VERSION="ray-debug-v4-qwen3-30b-tp2-pp2-export-launcher-env"
 
 # This script is intentionally a minimal Ray/vLLM connectivity test:
 #   2 nodes x 2 H100s/node = 4 total GPUs
@@ -33,6 +33,7 @@ SCRIPT_VERSION="ray-debug-v3-qwen3-30b-tp2-pp2-no-ray-stop-dashboard-off"
 #   - Python Ray probes are bounded with timeout.
 #   - Requires 2 alive Ray nodes and 4 Ray GPUs before starting vLLM.
 #   - Nsight is off by default. Re-enable only after Ray/vLLM startup is stable.
+#   - v4 exports launcher variables so srun children can see VENV_DIR/RAY_BIN/TRACE_RUN_DIR.
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
@@ -235,6 +236,13 @@ export RAY_CGRAPH_get_timeout RAY_CGRAPH_submit_timeout
 
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 LAUNCHER="${TRACE_RUN_DIR}/ray_node_start.sh"
+
+# These must be exported because the Ray launcher is executed by srun as a
+# separate process. Bash shell variables are not inherited unless exported.
+export REPO_ROOT VENV_DIR RAY_BIN TRACE_RUN_DIR SERVE_SCRIPT LAUNCHER
+export MODEL_ID PORT GPUS_PER_NODE TP PP EP MAX_MODEL_LEN MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS GPU_MEMORY_UTILIZATION
+export RAY_PORT RAY_ADDRESS HEAD_NODE HEAD_NODE_IP WORKER_NODES NUM_NODES TOTAL_GPUS
+export SP SD NUM_PROMPTS REQUEST_RATE NSYS_ENABLE NSYS_PROFILE_WORKERS
 
 cat > "${LAUNCHER}" <<'NODE_LAUNCHER'
 #!/usr/bin/env bash
