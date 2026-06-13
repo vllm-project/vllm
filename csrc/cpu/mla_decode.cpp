@@ -31,7 +31,14 @@ struct KernelVecType<c10::Half> {
 #endif
 };
 
-#ifdef __AVX512BF16__
+#if defined(__riscv_zvfbfwma)
+template <>
+struct KernelVecType<c10::BFloat16> {
+  using qk_load_vec_type = vec_op::BF16Vec16;
+  using qk_vec_type = vec_op::BF16Vec16;
+  using v_load_vec_type = vec_op::BF16Vec16;
+};
+#elif defined(__AVX512BF16__)
 template <>
 struct KernelVecType<c10::BFloat16> {
   using qk_load_vec_type = vec_op::BF16Vec32;
