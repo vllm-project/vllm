@@ -57,12 +57,7 @@ from .interfaces import (
 )
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    extract_layer_index,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
 

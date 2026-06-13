@@ -1035,7 +1035,7 @@ class SupportsQuant:
             if packed_modules_mapping := hf_to_vllm_mapper.get_packed_modules_mapping():
                 self.packed_modules_mapping = self.packed_modules_mapping or {}
                 self.packed_modules_mapping.update(packed_modules_mapping)
-        if self.packed_modules_mapping:
+        if self.packed_modules_mapping is not None:
             self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
 
 
