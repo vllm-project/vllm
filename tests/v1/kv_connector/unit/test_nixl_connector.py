@@ -1067,6 +1067,65 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_hybrid_mamba_attention_remote_descs_use_packed_head_slices(
+        self, default_vllm_config, dist_init
+    ):
+        worker = FakeNixlConnectorWorker(
+            create_vllm_config(), "engine", hand_shake_latency=0
+        )
+
+        remote_block_len = 2048
+        local_block_len = remote_block_len // 2
+        worker.block_len_per_layer = [local_block_len]
+        worker._region_is_mla = [False]
+        worker.num_blocks = 1
+        worker.num_regions = 1
+        worker._has_mamba = True
+        worker._mamba_ssm_size = (128, 256)
+        worker.transfer_topo = TransferTopology(
+            tp_rank=1,
+            tp_size=2,
+            block_size=worker.block_size,
+            engine_id=worker.engine_id,
+            is_mla=False,
+            is_mamba=True,
+            total_num_kv_heads=2,
+            attn_backends=worker.attn_backends,
+            tensor_shape=None,
+        )
+        assert worker.transfer_topo.virtually_split_kv_in_blocks
+
+        plan = MagicMock(
+            source_ranks_per_group=((0,), (0,)),
+            rank_offset_factor=1,
+        )
+        meta = MagicMock(
+            kv_caches_base_addr=[0x1000],
+            device_id=0,
+            num_blocks=1,
+            block_lens=[remote_block_len],
+        )
+
+        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
+            local_block_len
+        )
+        assert (
+            worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
+            == worker._mamba_ssm_size[0]
+        )
+        assert (
+            worker.get_backend_aware_kv_block_len(0, first_split=False, mamba_view=True)
+            == worker._mamba_ssm_size[1]
+        )
+
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
+            (0x1000 + local_block_len, local_block_len, 0)
+        ]
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_handshake_mixed_fa_mla_hetero_tp(self, default_vllm_config, dist_init):
         """Mixed full-attn (SPLIT) + MLA (REPLICATE) single KV group under
         heterogeneous TP must NOT raise (previously a NotImplementedError),
