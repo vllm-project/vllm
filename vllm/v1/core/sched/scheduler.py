@@ -1808,9 +1808,14 @@ class Scheduler(SchedulerInterface):
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
-            elif start_pos + num_tokens <= request.num_computed_tokens:
-                # The encoder output is already processed and stored
-                # in the decoder's KV cache.
+            elif (
+                start_pos + num_tokens
+                <= request.num_computed_tokens - request.num_output_placeholders
+            ):
+                # The encoder output is already processed and stored in the
+                # decoder's KV cache, and progress is far enough past the
+                # placeholder range that no pending draft-token rejection can
+                # roll num_computed_tokens back into it.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
