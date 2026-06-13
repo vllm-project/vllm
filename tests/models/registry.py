@@ -419,7 +419,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Remote modeling_minicpm.py imports "
+                "`is_torch_fx_available` from `transformers.utils.import_utils`, "
+                "which was removed in Transformers v5."
+            )
+        },
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
