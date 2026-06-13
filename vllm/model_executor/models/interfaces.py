@@ -1032,11 +1032,11 @@ class SupportsQuant:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
             self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            if packed_modules_mapping := hf_to_vllm_mapper.get_packed_modules_mapping():
+                self.packed_modules_mapping = self.packed_modules_mapping or {}
+                self.packed_modules_mapping.update(packed_modules_mapping)
         if self.packed_modules_mapping:
             self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
-        elif hf_to_vllm_mapper is not None:
-            packed_modules_mapping = hf_to_vllm_mapper.get_packed_modules_mapping()
-            self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
 
 @runtime_checkable
