@@ -32,6 +32,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.config import is_rope_parameters_nested
 
 if TYPE_CHECKING:
@@ -94,7 +95,13 @@ def init_on_device_without_buffers(device: torch.device):
             setattr(torch, torch_function_name, old_torch_function)
 
 
-Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
+Style = Literal[
+    "colwise",
+    "rowwise",
+    "replicate",
+    "colwise_gather_output",
+    "rowwise_split_input",
+]
 
 
 def replace_linear_class(
@@ -120,10 +127,10 @@ def replace_linear_class(
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise": (RowParallelLinear, {}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
         "replicate": (ReplicatedLinear, {}),
+        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
@@ -213,6 +220,34 @@ def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
         # No weight, fall back to weightless RMSNorm
         kwargs["has_weight"] = False
     return RMSNorm(**kwargs)
+
+
+def recursive_replace_linear(
+    model: nn.Module,
+    quant_config: "QuantizationConfig | None",
+    prefix: str = "",
+):
+    """Recursively replace linear modules in the model as needed."""
+
+    def _recursive_replace(module: nn.Module, prefix: str):
+        for child_name, child_module in module.named_children():
+            new_module = child_module
+            qual_name = maybe_prefix(prefix, child_name)
+            # Replace modules as needed
+            if isinstance(child_module, nn.Linear):
+                style = "replicate"
+                new_module = replace_linear_class(
+                    child_module,
+                    style,
+                    quant_config,
+                    prefix=qual_name,
+                )
+            else:
+                _recursive_replace(child_module, prefix=qual_name)
+            if new_module is not child_module:
+                setattr(module, child_name, new_module)
+
+    _recursive_replace(model, prefix=prefix)
 
 
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):

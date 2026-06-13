@@ -29,7 +29,7 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
     )
 else:
     VllmConfig = object
@@ -207,7 +208,8 @@ class SupportsMultiModal(Protocol):
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
-            "You should initialize it via `_mark_language_model`."
+            "You should initialize it via `_mark_language_model`, "
+            "and make sure `embed_input_ids` is implemented."
         )
 
     @contextmanager
@@ -1119,13 +1121,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
@@ -1284,6 +1280,41 @@ def supports_any_eagle(
 ) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
     """Check if model supports any EAGLE variant (1, 2, or 3)."""
     return supports_eagle(model) or supports_eagle3(model)
+
+
+class LocalArgmaxMixin:
+    """Mixin for draft model heads in speculative decoding.
+
+    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    local-argmax communication reduction even when the draft vocabulary
+    is smaller than the target vocabulary.
+
+    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    containing per-token offset to target vocab id), the draft argmax index
+    ``k`` is mapped to the target vocab id via::
+
+        target_id = k + draft_id_to_target_id[k]
+
+    This is mathematically equivalent to computing the full-vocab scatter
+    logits and taking the global argmax, but requires only
+    O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
+
+    Requires the subclass to expose:
+        ``self.logits_processor``: LogitsProcessor
+        ``self.lm_head``: ParallelLMHead
+        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+    """
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Vocab-parallel argmax with optional D2T remapping."""
+        top = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
+        )
+        d2t = getattr(self, "draft_id_to_target_id", None)
+        if d2t is not None:
+            top = top + d2t[top]
+        return top
 
 
 class EagleModelMixin:
@@ -1524,6 +1555,19 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """Return the modality of the inputs (default: image-only)."""
+        return "image"
+
+    def get_max_frames_per_video(
+        self,
+    ) -> int:
+        """Return model-specific max frames per video."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -1536,35 +1580,20 @@ class SupportsEncoderCudaGraph(Protocol):
           (e.g. max_num_batched_tokens)
 
         Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
         specified by the user.
         """
         ...
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        """Return the number of items (e.g. images) in the batch."""
-        ...
+    ) -> list["EncoderItemSpec"]:
+        """Return specs describing each item in the batch.
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return output token count for each item.
-
-        Used for greedy packing and DP load balancing.
-        """
-        ...
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return input size (e.g. patch count) for each item.
-
-        Used for input tensor slicing offsets.
+        Replaces the former separate methods for num_items,
+        per_item_output_tokens, and per_item_input_sizes.
+        The manager derives all three from this single return value.
         """
         ...
 
@@ -1586,10 +1615,32 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Post-process encoder output, directly call scatter_output_slices by default.
+
+        By default, delegates directly to scatter_output_slices.
+        Override this for models that require additional processing on the raw
+        encoder output prior to scattering, e.g. Step3-VL, which merges features
+        according to dynamic patch counts before scattering.
+        """
+        from vllm.model_executor.models.utils import scatter_output_slices
+
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> "EncoderCudaGraphCaptureInputs":
@@ -1600,14 +1651,14 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
+        max_frames_per_batch: int,
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 

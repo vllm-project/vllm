@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from enum import IntEnum
 
 import torch
 
 import vllm.envs as envs
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -42,22 +36,15 @@ class SharedExpertsOrder(IntEnum):
     MULTI_STREAM_OVERLAPPED = (3,)
 
 
-class SharedExperts:
+class SharedExperts(torch.nn.Module):
     def __init__(
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        quant_method: QuantizeMethodBase,
-        reduce_results: bool,
         enable_dbo: bool,
+        mk_can_overlap_shared_experts: Callable[[], bool],
     ):
-        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-            FusedMoEMethodBase,
-        )
-
-        # quant_method must be a FusedMoEMethodBase but we can't use the type
-        # due to circular imports.
-        assert isinstance(quant_method, FusedMoEMethodBase)
+        super().__init__()
 
         # The SharedExperts need to handle DBO since they can be called from
         # an MK's finalize method.  We keep a list of outputs indexed by current
@@ -67,50 +54,50 @@ class SharedExperts:
         self._output: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
-        self._quant_method = quant_method
-        self._reduce_results = reduce_results
-        self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
+
+        self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
-            logger.debug_once("Disabling MoE shared_experts cuda stream", scope="local")
+            logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
             # TODO(rob): enable shared expert overlap with non-cuda-alike.
             # aux_stream() returns None on non-cuda-alike platforms.
             self._stream = aux_stream()
             if self._stream is not None:
-                logger.debug_once(
-                    "Enabled separate cuda stream for MoE shared_experts", scope="local"
-                )
+                logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
+
+    # TODO(bnell): Hack for elastic_ep. Get rid of this
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
+        self.moe_config = new_moe_config
 
     @property
-    def _use_external_experts(self) -> bool:
-        if self._use_dp_chunking:
-            return False
-
+    def _disable_shared_experts_overlap(self) -> bool:
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
-        backend = self._moe_config.moe_parallel_config.all2all_backend
+        parallel_config = self._moe_config.moe_parallel_config
         return (
-            self._moe_config.moe_parallel_config.enable_eplb
-            and backend != "allgather_reducescatter"
-        ) or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
+            parallel_config.enable_eplb
+            and parallel_config.all2all_backend != "allgather_reducescatter"
+        ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._quant_method.mk_owns_shared_expert:
+        if self._disable_shared_experts_overlap:
+            return SharedExpertsOrder.NO_OVERLAP
+
+        if self._mk_can_overlap_shared_experts():
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
-            and not self._use_dp_chunking
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
@@ -129,7 +116,6 @@ class SharedExperts:
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
-            assert self._moe_config.disable_inplace
 
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone
@@ -155,18 +141,6 @@ class SharedExperts:
 
         return output
 
-    def _maybe_reduce_shared_out(self, shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
-        if (
-            self._reduce_results
-            and self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-            and get_tensor_model_parallel_world_size() > 1
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
-
     @property
     def _output_idx(self) -> int:
         return dbo_current_ubatch_id() if self.enable_dbo else 0
@@ -178,7 +152,7 @@ class SharedExperts:
         self._output[self._output_idx] = None
         return output
 
-    def apply(
+    def forward(
         self,
         shared_experts_input: torch.Tensor,
         order: SharedExpertsOrder,

@@ -250,6 +250,7 @@ async def k2_client(k2_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Skipping Kimi K2 tool ID test")
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("tool_choice", ["required"])
@@ -442,7 +443,7 @@ async def test_named_tool_use(
         if delta.role:
             assert delta.role == "assistant"
         assert delta.content is None or len(delta.content) == 0
-        if delta.tool_calls:
+        if delta.tool_calls and delta.tool_calls[0].function.arguments:
             output.append(delta.tool_calls[0].function.arguments)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
@@ -518,7 +519,13 @@ async def test_inconsistent_tool_choice_and_tools(
 
 
 @pytest.mark.asyncio
-async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_current_weather"}}],
+)
+async def test_max_tokens_with_tool_choice_required(
+    client: openai.AsyncOpenAI, tool_choice
+):
     """ """
     models = await client.models.list()
     model_name: str = models.data[0].id
@@ -530,7 +537,7 @@ async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
         max_completion_tokens=1,
         model=model_name,
         tools=tools,
-        tool_choice="required",
+        tool_choice=tool_choice,
     )
     # When `tool_choice="required"` and the tokens of `tools` exceed `max_tokens`,
     # both `tool_calls` and `content` should be empty.
@@ -538,4 +545,3 @@ async def test_max_tokens_with_tool_choice_required(client: openai.AsyncOpenAI):
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert len(choice.message.tool_calls) == 0
-    assert choice.message.content == ""

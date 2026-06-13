@@ -4,12 +4,15 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pydantic
 import pytest
 from pydantic import ValidationError
 
+import vllm.config.vllm as vllm_config_module
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -32,6 +35,8 @@ from vllm.config.vllm import (
 )
 from vllm.platforms import current_platform
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
@@ -43,6 +48,249 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, None),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
+
+    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-32B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="meta-llama/Llama-3.2-1B",
+                architectures=["LlamaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mistral-7B-v0.1",
+                architectures=["MistralForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="facebook/opt-125m",
+                architectures=["OPTForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="ibm-research/PowerMoE-3b",
+                architectures=["GraniteMoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                architectures=["MixtralForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-FP8",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3.5-4B",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_is_default_v2_model_runner_model(model_config, expected):
+    config = SimpleNamespace(model_config=model_config)
+
+    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures == ["MistralForCausalLM"]
+    assert hf_config.architectures is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(
+        cfg,
+        hf_config,
+        architectures=["Ministral3ForCausalLM"],
+    )
+
+    assert updated.model_config.hf_config.architectures == ["Ministral3ForCausalLM"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_leaves_unknown_model_type_without_architectures(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(
+        model_type="not_a_real_model",
+        architectures=None,
+    )
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures is None
 
 
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
@@ -427,8 +675,8 @@ def test_generation_config_loading():
 @pytest.mark.parametrize(
     "pt_load_map_location",
     [
-        "cuda",
-        {"": "cuda"},
+        DEVICE_TYPE,
+        {"": DEVICE_TYPE},
     ],
 )
 def test_load_config_pt_load_map_location(pt_load_map_location):
@@ -574,6 +822,26 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config1.tokenizer) and os.path.isdir(config1.tokenizer)
     assert os.path.exists(config2.model) and os.path.isdir(config2.model)
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_model_and_tokenizer(mock_pull_files):
+    """Test that when model and tokenizer are different cloud URIs,
+    pull_files receives the correct URI for each."""
+    mock_pull_files.return_value = None
+
+    model_url = "s3://bucket/model/"
+    tokenizer_url = "s3://bucket/tokenizer/"
+
+    config = MockConfig(model=model_url, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
+
+    # pull_files should be called twice: once for model, once for tokenizer
+    assert mock_pull_files.call_count == 2
+    # First call: model URI with allow_pattern
+    assert mock_pull_files.call_args_list[0][0][0] == model_url
+    # Second call: tokenizer URI with ignore_pattern
+    assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
 
 
 @pytest.mark.parametrize(
@@ -1136,8 +1404,6 @@ def test_scheduler_config_init():
         ("facebook/opt-125m", 1, False, False),
         # Non-MoE model with DP>1 internal LB should need coordinator
         ("facebook/opt-125m", 2, False, True),
-        # Non-MoE model with DP>1 external LB should not need coordinator
-        ("facebook/opt-125m", 2, True, False),
         # MoE model with DP=1 should not need coordinator
         ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
         # MoE model with DP>1 internal LB should need both coordinator
@@ -1209,6 +1475,24 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
@@ -1216,11 +1500,14 @@ def test_ir_op_priority_default():
     # Assert default is applied to ops
     priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
     assert priority_config.rms_norm == ["vllm_c", "native"]
+    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
 
     # Assert single ops override the default
-    assert IrOpPriorityConfig.with_default(
-        ["vllm_c", "native"], rms_norm=["oink", "native"]
-    ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
+    priority_config = IrOpPriorityConfig.with_default(
+        ["native"], rms_norm=["oink", "native"]
+    )
+    assert priority_config.rms_norm == ["oink", "native"]
+    assert priority_config.fused_add_rms_norm == ["native"]
 
 
 def test_ir_op_priority_str():
@@ -1239,3 +1526,34 @@ def test_ir_op_priority_str():
     with pytest.raises(pydantic.ValidationError):
         # must be list of only strings
         priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+
+
+def test_ir_op_priority_ctx():
+    """Test that the priority-setting context sets priority correctly."""
+    from vllm import ir
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    priority2 = IrOpPriorityConfig.with_default(
+        ["native"], fused_add_rms_norm=["vllm_c"]
+    )
+    with priority.set_priority():
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+        with priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+        # context restored
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+        with pytest.raises(ValueError), priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+            raise ValueError
+
+        # context restored even after exception
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]

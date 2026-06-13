@@ -85,6 +85,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_null_value(self):
+        # Bare `null` must parse as None (Python), not the string "null".
+        # Without this, tool_choice=auto would emit `{"param": "null"}`
+        # instead of `{"param": null}` for nullable tool parameters.
+        result = _parse_gemma4_args("param:null")
+        assert result == {"param": None}
+        assert json.dumps(result) == '{"param": null}'
+
     def test_mixed_types(self):
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
@@ -127,6 +135,31 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
         assert result == {"name": "test"}
 
+    def test_trailing_dot_float_partial_withheld(self):
+        """Bare float ending with '.' is withheld in partial mode.
+
+        Regression test for #42047: float("108.") → 108.0 causes
+        streaming diff corruption (108.0 → 108.2 becomes 108.02).
+        """
+        # Single key with trailing dot — withheld entirely
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=True)
+        assert result == {}
+
+        # Stable key before trailing-dot key — stable key is kept
+        result = _parse_gemma4_args(
+            'name:<|"|>test<|"|>,score:3.,count:1', partial=True
+        )
+        assert result == {"name": "test"}
+
+        # Non-partial mode parses trailing dot normally
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
+        assert result == {"left": 108.0, "right": 22.8}
+
+    @pytest.mark.timeout(5)
+    def test_malformed_partial_array(self):
+        result = _parse_gemma4_args(":[t:[]")
+        assert isinstance(result, dict)
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -140,6 +173,25 @@ class TestParseGemma4Array:
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
+
+    @pytest.mark.timeout(5)
+    def test_string_element_with_closing_bracket(self):
+        result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
+        assert result == [["a]b", "c"], "tail"]
+
+    @pytest.mark.timeout(5)
+    def test_stray_closing_bracket(self):
+        result = _parse_gemma4_array("42,]trailing")
+        assert result == [42]
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Array elements with trailing dot withheld in partial mode."""
+        result = _parse_gemma4_array("108.,22.8", partial=True)
+        assert result == []
+
+        # Stable elements before trailing-dot element are kept
+        result = _parse_gemma4_array("42,108.,3", partial=True)
+        assert result == [42]
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +701,88 @@ class TestStreamingExtraction:
             '    <meta charset="UTF-8">\n'
             '    <meta name="viewport" content="width=device-width">\n'
         )
+
+    def _collect_tool_calls_by_index(self, results):
+        """Group streamed tool-call fragments by their ``index``.
+
+        Returns ``{index: {"name": str | None, "arguments": str}}`` where
+        ``arguments`` is the concatenation of every streamed argument
+        fragment for that index (which should form valid JSON once complete).
+        """
+        by_index: dict[int, dict[str, Any]] = {}
+        for delta, _ in results:
+            if not (delta and delta.tool_calls):
+                continue
+            for tc in delta.tool_calls:
+                entry = by_index.setdefault(tc.index, {"name": None, "arguments": ""})
+                func = tc.function
+                if isinstance(func, dict):
+                    name = func.get("name")
+                    arg = func.get("arguments", "")
+                else:
+                    name = getattr(func, "name", None)
+                    arg = getattr(func, "arguments", "") or ""
+                if name:
+                    entry["name"] = name
+                if arg:
+                    entry["arguments"] += arg
+        return by_index
+
+    def test_streaming_single_chunk_complete_tool_call(self, parser, mock_request):
+        """A backend may deliver a whole tool call in one streaming delta.
+
+        The start token, ``call:name{...}`` payload and the end token all
+        arrive in a single chunk. The parser must still emit one
+        ``DeltaToolCall`` with the correct name + complete arguments JSON
+        (rather than swallowing it and finishing with finish_reason="stop").
+        """
+        chunks = [
+            '<|tool_call>call:name_a_color{color_hex:<|"|>00ff11<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Exactly one delta should carry tool_calls, and it must not be
+        # emitted as plain content (which would yield finish_reason="stop").
+        tool_call_deltas = [
+            delta for delta, _ in results if delta is not None and delta.tool_calls
+        ]
+        assert len(tool_call_deltas) == 1, (
+            "Expected exactly one delta carrying the batched tool call"
+        )
+        assert all(
+            delta.content is None for delta, _ in results if delta is not None
+        ), "Complete tool call must not leak as content"
+
+        by_index = self._collect_tool_calls_by_index(results)
+        assert set(by_index) == {0}
+        assert by_index[0]["name"] == "name_a_color"
+        assert json.loads(by_index[0]["arguments"]) == {"color_hex": "00ff11"}
+
+    def test_streaming_multi_chunk_batched_tool_calls(self, parser, mock_request):
+        """A single delta may batch MULTIPLE complete tool calls.
+
+        ``<|tool_call>...<tool_call|><|tool_call>...<tool_call|>`` arriving in
+        one chunk must emit BOTH calls (one DeltaToolCall each, with distinct
+        indices), not just the first.
+        """
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+            '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        by_index = self._collect_tool_calls_by_index(results)
+        assert set(by_index) == {0, 1}, (
+            f"Expected two tool calls (indices 0 and 1), got {sorted(by_index)}"
+        )
+
+        assert by_index[0]["name"] == "get_weather"
+        assert json.loads(by_index[0]["arguments"]) == {"location": "London"}
+
+        assert by_index[1]["name"] == "get_time"
+        assert json.loads(by_index[1]["arguments"]) == {"timezone": "GMT"}
 
     def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
         """Trailing bare boolean must not be streamed twice."""

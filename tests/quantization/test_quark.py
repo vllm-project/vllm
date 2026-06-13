@@ -36,6 +36,8 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
+DEVICE_TYPE = current_platform.device_type
+
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
     from quark.torch.kernel import mx as mx_kernel
@@ -144,8 +146,8 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             layer = model.model.layers[0]
             # MoE experts should use QuarkW8A8Int8MoEMethod
             moe = layer.mlp.experts
-            assert isinstance(moe.quant_method, QuarkW8A8Int8MoEMethod), (
-                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
             )
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
@@ -238,8 +240,13 @@ WIKITEXT_ACCURACY_CONFIGS = [
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
+)
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+)
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     device_count = torch.accelerator.device_count()
     if device_count < tp_size:
@@ -254,6 +261,53 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
         model_args=config.get_model_args(
             tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_nvfp4_wikitext_correctness(tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
+    expected_value = 11.2391
+
+    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
+    task = "wikitext"
+
+    rtol = 0.25
+
+    config = AccuracyTestConfig(
+        model_name=model_name,
+        excepted_value=expected_value,
+    )
+
+    model_args = config.get_model_args(
+        tp_size=tp_size,
+        kwargs={
+            "cudagraph_capture_sizes": [16],
+        },
+    )
+    model_args.pop("add_bos_token")
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
         tasks=task,
         batch_size=64,
     )
@@ -309,7 +363,7 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
     torch.manual_seed(0)
 
     hidden_size = 64 * 32
-    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device="cuda") - 0.5) * 2
+    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
     for i in range(hidden_size // 32):
         inp[:, i * 32 : (i + 1) * 32] = (
             inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
@@ -353,15 +407,15 @@ def test_mxfp4_dequant_kernel_match_quark(
         reorder=False,
         real_quantized=True,
         float_dtype=float_dtype,
-        device="cuda",
+        device=DEVICE_TYPE,
     )
 
-    observer = qspec.observer_cls(qspec, device="cuda")
+    observer = qspec.observer_cls(qspec, device=DEVICE_TYPE)
 
     hidden_size = 512
     shape = (11008, hidden_size)
 
-    w = (torch.rand(shape, device="cuda", dtype=float_dtype) - 0.5) * 2
+    w = (torch.rand(shape, device=DEVICE_TYPE, dtype=float_dtype) - 0.5) * 2
 
     # Make it so that different groups have different scales.
     for i in range(hidden_size // 32):
@@ -373,7 +427,7 @@ def test_mxfp4_dequant_kernel_match_quark(
     scale, _ = observer._calculate_qparams()
     weight_quantizer.scale = scale
 
-    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to("cuda")
+    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to(DEVICE_TYPE)
     weight_quantizer.maybe_convert_and_transpose_scale()
 
     scale = weight_quantizer.scale

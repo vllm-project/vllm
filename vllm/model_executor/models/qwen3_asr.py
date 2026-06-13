@@ -23,9 +23,9 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -33,6 +33,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
@@ -90,6 +91,31 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
+# User-supplied `prompt` / `response_prefix` must not inject extra ChatML turns.
+_CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
+
+
+def _sanitize_transcription_user_text(text: str) -> str:
+    """Strip ChatML-style special tokens from user-controlled transcription fields.
+
+    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    payloads cannot reconstruct a valid token after a single pass:
+
+    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+      (a real ChatML control token).
+    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
+      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+
+    Looping both substitutions until the string stabilises eliminates these
+    reconstruction attacks.
+    """
+    if not text:
+        return ""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _CHATML_LIKE_TOKEN.sub("", text).replace(_ASR_TEXT_TAG, "")
+    return text
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -363,8 +389,6 @@ class Qwen3ASRForConditionalGeneration(
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -551,17 +575,25 @@ class Qwen3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
-        """Get the generation prompt to be used for transcription requests."""
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        """Get the generation prompt to be used for transcription requests.
+
+        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
+        is only emitted when the caller supplied a ``prompt``, mirroring the
+        SDK's ``_build_messages`` (which omits the system role when context is
+        empty) and preserving the prior no-prompt behavior:
+
+          [system: {context}]                         # only when prompt given
+          user: {audio}
+          assistant: [language {Lang}<asr_text>]      # when language is forced
+        """
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        request_prompt = stt_params.request_prompt
+        to_language = stt_params.to_language
+
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 
@@ -570,17 +602,20 @@ class Qwen3ASRForConditionalGeneration(
                 f"Unsupported task_type '{task_type}'. "
                 "Supported task types are 'transcribe' and 'translate'."
             )
-        full_lang_name_to = cls.supported_languages.get(to_language, to_language)
-        if to_language is None:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-            )
-        else:
-            prompt = (
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
-            )
+
+        context = _sanitize_transcription_user_text(request_prompt)
+        system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
+
+        prompt = (
+            f"{system_turn}"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        lang_code = to_language if task_type == "translate" else language
+        if lang_code is not None:
+            full_lang_name = cls.supported_languages.get(lang_code, lang_code)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
         prompt_token_ids = tokenizer.encode(prompt)
 

@@ -31,7 +31,6 @@ The most fundamental application of classification models is to categorize input
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
-| `ErnieForSequenceClassification` | BERT-like Chinese ERNIE | `Forrest20231206/ernie-3.0-base-zh-cls` | | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `jason9693/Qwen2.5-1.5B-apeach` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
@@ -77,7 +76,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.classify`
 
-The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
+The [classify][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.classify] method outputs a probability vector for each prompt.
 
 ```python
 from vllm import LLM
@@ -93,7 +92,7 @@ A code example can be found here: [examples/basic/offline_inference/classify.py]
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="classify"` when using `LLM.encode` for classification Models:
 
@@ -273,27 +272,25 @@ Affine Score Calibration, also known as [Platt Scaling](https://en.wikipedia.org
 
 The calibration follows the transformation:
 
-`activation(logit_scale * (logit - logit_bias))`
+`activation((logit - logit_mean) / logit_sigma)`
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `logit_bias` | `None` | Bias subtracted from logits before activation |
-| `logit_scale` | `None` | Scale factor applied to logits after bias subtraction |
-
-Note: `logit_bias` is **subtracted** from the logits (not added), consistent with the `sigmoid_normalize` convention where `sigmoid(x - bias)` centers the sigmoid around the bias value.
+| `logit_mean` | `None` | Mean subtracted from logits (centers scores) |
+| `logit_sigma` | `None` | Standard deviation used to scale logits after mean subtraction |
 
 The computation order is as follows:
 
 ```python
-logits -= logit_bias    # subtract bias (center scores)
-logits *= logit_scale   # scale logits
+logits -= logit_mean   # subtract mean (center scores)
+logits /= logit_sigma  # divide by sigma (scale)
 logits = activation(logits)  # e.g. sigmoid
 ```
 
 Example configuration:
 
 ```bash
---pooler-config '{"use_activation": true, "logit_bias": 4.5, "logit_scale": 1.0}'
+--pooler-config '{"use_activation": true, "logit_mean": 4.5, "logit_sigma": 1.0}'
 ```
 
 ## Removed Features
