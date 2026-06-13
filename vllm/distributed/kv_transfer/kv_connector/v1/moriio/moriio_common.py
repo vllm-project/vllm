@@ -268,6 +268,7 @@ class MoRIIOConfig:
     num_workers: int = 1
     backend: str = "rdma"
     node_hosts: list[str] = field(default_factory=list)
+    handshake_timeout: float = 10.0
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -348,6 +349,11 @@ class MoRIIOConfig:
             node_hosts=get_moriio_node_hosts(kv_transfer_config, local_ip),
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            handshake_timeout=float(
+                extra_config.get(
+                    "handshake_timeout", MoRIIOConstants.DEFAULT_HANDSHAKE_TIMEOUT
+                )
+            ),
         )
 
 
@@ -379,6 +385,14 @@ class MoRIIOConstants:
     # scheduler probes active after a deferred send is created.
     # Overridable via kv_connector_extra_config["defer_drain_grace"].
     DEFAULT_DEFER_DRAIN_GRACE = 2.0
+    # Timeout (seconds) for a single MoRIIO handshake metadata exchange. Bounds
+    # a dead/slow remote handshake listener so a missing prefill rank fails fast
+    # (HandshakeError) instead of blocking a TP worker forever on recv() and
+    # desyncing the TP collective. The eager all-rank handshake runs at first
+    # request (post health-gate), so the remote listener is already up and
+    # answers in ~ms; this is a safety net for genuine mid-run faults.
+    # Overridable via kv_connector_extra_config["handshake_timeout"].
+    DEFAULT_HANDSHAKE_TIMEOUT = 10.0
 
 
 # The router embeds both zmq_addresses in the request_id:

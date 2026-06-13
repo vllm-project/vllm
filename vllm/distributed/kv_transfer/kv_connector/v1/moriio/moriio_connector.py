@@ -995,6 +995,11 @@ class MoRIIOConnectorWorker:
         self._handshake_futures: dict[EngineId, Future[set[str]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
+        # Base remote engines ("host:handshake_port") whose full DP-rank set has
+        # been eagerly handshaked AND TP-barriered. Gates
+        # _eager_handshake_all_dp_ranks to fire once per remote engine (first
+        # contact), not per request/step.
+        self._eager_handshaked_engines: set[str] = set()
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -1329,6 +1334,22 @@ class MoRIIOConnectorWorker:
                         req_id.decode(),
                     )
 
+    def _remote_tp_rank(self, remote_tp_size: int) -> int:
+        """Map this local TP rank onto the remote engine's TP layout for port
+        addressing. WHICH remote DP rank to read is chosen separately by the
+        per-request remote_dp_rank (the single prefill rank that holds this
+        request's KV); this only resolves the remote TP index.
+
+        The remote TP width may differ from ours (e.g. TP1/DP8 prefill ↔ TP8
+        decode). When the remote is TP1 (remote_tp_size == 1) there is a single
+        rank per DP group, so every local rank must target tp0 — modulo gives 0.
+        When TP sizes are equal, modulo is the identity (tp_rank), preserving
+        symmetric-TP behaviour exactly. For the wider-remote mirror (TP8 prefill
+        ↔ TP1 decode), MLA replicates the latent KV across the remote TP ranks,
+        so collapsing onto a valid remote rank still yields the full KV.
+        """
+        return self.tp_rank % max(1, int(remote_tp_size))
+
     def _moriio_handshake(
         self,
         host: str,
@@ -1345,15 +1366,36 @@ class MoRIIOConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        port_offset = get_port_offset(remote_dp_rank, self.tp_rank, remote_tp_size)
+        # Heterogeneous-TP port mapping: dial the remote's TP index, not our own
+        # local tp_rank. For TP1/DP8 prefill ↔ TP8 decode this collapses every
+        # decode rank onto the prefill rank's tp0 (remote_dp_rank picks the DP
+        # rank). Identity for symmetric TP. See _remote_tp_rank.
+        port_offset = get_port_offset(
+            remote_dp_rank, self._remote_tp_rank(remote_tp_size), remote_tp_size
+        )
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.debug("handshake Querying metadata on path: %s", path)
 
         # Send query for the request.
+        timeout_ms = int(self.moriio_config.handshake_timeout * 1000)
         with zmq_ctx(zmq.DEALER, path) as sock:
+            # Bound the handshake so a dead/slow remote listener fails fast
+            # (HandshakeError) instead of blocking this TP worker forever on
+            # recv() and desyncing the TP collective. LINGER=0 discards a
+            # timed-out socket cleanly without a half-sent reply.
+            sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            sock.setsockopt(zmq.LINGER, 0)
             logger.debug("prepare send msg INSTAZNCE: %s", path)
             sock.send(MoRIIOConstants.GET_META_MSG)
-            received_frame = sock.recv_multipart()
+            try:
+                received_frame = sock.recv_multipart()
+            except zmq.error.Again as e:
+                raise HandshakeError(
+                    f"MoRIIO handshake metadata recv timed out after "
+                    f"{timeout_ms}ms on path {path} (remote dp rank "
+                    f"{remote_dp_rank}); remote handshake listener unreachable"
+                ) from e
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"Unexpected frame! {received_frame = }")
 
@@ -1395,7 +1437,14 @@ class MoRIIOConnectorWorker:
                 )
                 self.remote_kv_cache_metadata = []
 
-            received_frame = sock.recv_multipart()
+            try:
+                received_frame = sock.recv_multipart()
+            except zmq.error.Again as e:
+                raise HandshakeError(
+                    f"MoRIIO handshake layer-metadata recv timed out after "
+                    f"{timeout_ms}ms on path {path} (remote dp rank "
+                    f"{remote_dp_rank})"
+                ) from e
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"unexpected frame! {received_frame = }")
             buf = received_frame[1]
@@ -1890,6 +1939,122 @@ class MoRIIOConnectorWorker:
     def get_engine_name_with_dp(self, engine_name, dp_rank):
         return f"{engine_name}_dp{dp_rank}"
 
+    def _eager_handshake_all_dp_ranks(
+        self, metadata: MoRIIOConnectorMetadata
+    ) -> None:
+        """Eagerly handshake EVERY remote prefill DP rank, identically across
+        all local TP workers, before any KV read enters the forward path.
+
+        Why: the decode forward issues per-layer TP collectives (e.g.
+        _ALLGATHER_BASE). A lazy/per-request/per-rank handshake on the read path
+        (see _ensure_remote_dp_handshaked) lets TP workers diverge — a rank
+        whose target was already cached races ahead into the forward collective
+        while another rank blocks on a handshake recv() → 600s NCCL timeout.
+
+        This fires ONCE per remote engine (first contact), gated by
+        self._eager_handshaked_engines. The engine set is derived purely from
+        scheduler-built metadata (identical on every TP worker), so all workers
+        run the same handshakes in the same order and reach the TP all-reduce
+        below together. After it returns, every dp rank is in _remote_agents /
+        layer_name_to_remote_kv_cache_metadata, so the existing read loop is a
+        pure cache hit and _ensure_remote_dp_handshaked is a no-op.
+
+        Failure: handshake exceptions are caught (never raised before the
+        collective — that would hang the other ranks). All workers reach the
+        all-reduce(MIN) vote; if ANY worker failed, ALL raise the same error
+        AFTER the collective, so the step fails fast and uniformly in ~seconds
+        instead of one rank hanging the TP forward for 600s.
+        """
+        import torch.distributed as dist
+
+        # Distinct remote engines referenced this step, in metadata (==
+        # scheduler) order so every TP worker iterates engines identically.
+        engines: dict[str, ReqMeta] = {}
+        for _req_id, meta in metadata.reqs_to_recv.items():
+            remote_engine_id = (
+                str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
+            )
+            engines.setdefault(remote_engine_id, meta)
+
+        for remote_engine_id, meta in engines.items():
+            if remote_engine_id in self._eager_handshaked_engines:
+                continue
+
+            remote_dp_size = int(meta.remote_dp_size)
+            port = int(meta.remote_handshake_port)
+            tp_size = int(meta.tp_size)
+
+            # Submit handshakes for every not-yet-known dp rank UNDER the lock;
+            # do NOT hold the lock across the join or the TP collective (a
+            # stalled recv must not block another thread's lock acquisition).
+            futures: list[tuple[str, Future[set[str]]]] = []
+            with self._handshake_lock:
+                for cur_dp_rank in range(remote_dp_size):
+                    dp_engine_id = self.get_engine_name_with_dp(
+                        remote_engine_id, cur_dp_rank
+                    )
+                    if dp_engine_id in self._remote_agents:
+                        continue
+                    host = self._pick_host_for_dp_rank(meta, cur_dp_rank)
+                    fut = self._handshake_initiation_executor.submit(
+                        self._moriio_handshake,
+                        host,
+                        port,
+                        tp_size,
+                        dp_engine_id,
+                        cur_dp_rank,
+                    )
+                    futures.append((dp_engine_id, fut))
+
+            # Join WITHOUT the lock. Each handshake is bounded by RCVTIMEO, so a
+            # dead prefill rank surfaces as a HandshakeError in seconds. Catch
+            # all errors here — never raise before the all-reduce.
+            all_ok = True
+            results: dict[str, set[str]] = {}
+            for dp_engine_id, fut in futures:
+                try:
+                    results[dp_engine_id] = fut.result()
+                except Exception:
+                    logger.exception(
+                        "Eager MoRIIO handshake failed for %s", dp_engine_id
+                    )
+                    all_ok = False
+
+            with self._handshake_lock:
+                for dp_engine_id, agents in results.items():
+                    self._remote_agents[dp_engine_id] = agents
+
+            # TP-uniform success vote AND lockstep barrier in one CPU
+            # all-reduce(MIN): blocks until all TP workers arrive, then every
+            # worker sees the same verdict. CPU group (gloo) — never enqueues on
+            # the model compute stream, so it cannot reorder against the forward
+            # NCCL collectives. All TP workers MUST reach this; guaranteed
+            # because `engines` comes from identical scheduler metadata. Logged
+            # per rank for cross-rank verification.
+            logger.info(
+                "Eager MoRIIO handshake: engine=%s dp_size=%d new_ranks=%d "
+                "ok=%s tp_rank=%d",
+                remote_engine_id,
+                remote_dp_size,
+                len(futures),
+                all_ok,
+                self.tp_rank,
+            )
+            vote = torch.tensor(
+                [1 if all_ok else 0], device="cpu", dtype=torch.int32
+            )
+            dist.all_reduce(
+                vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN
+            )
+            if int(vote.item()) == 0:
+                raise HandshakeError(
+                    f"Eager MoRIIO handshake failed for {remote_engine_id} on "
+                    f"at least one TP rank; failing this step fast to avoid a "
+                    f"TP collective hang"
+                )
+
+            self._eager_handshaked_engines.add(remote_engine_id)
+
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """
         Start loading by triggering non-blocking moriio_xfer.
@@ -1914,6 +2079,11 @@ class MoRIIOConnectorWorker:
             return
         if self.mode == MoRIIOMode.WRITE:
             return
+
+        # Eager all-rank handshake (TP-lockstep safe) before any read. Fires
+        # once per remote engine; no-op on warm steps. Replaces the per-request
+        # build-on-demand handshake that desynced the TP forward collective.
+        self._eager_handshake_all_dp_ranks(metadata)
 
         wait_handshake_readd_req = False
         remote_engine_id = None
@@ -1971,6 +2141,52 @@ class MoRIIOConnectorWorker:
 
         self._reqs_to_send.update(metadata.reqs_to_send)
 
+    def _ensure_remote_dp_handshaked(self, meta: ReqMeta) -> None:
+        """Build-on-demand handshake for the prefill DP rank THIS request reads
+        from.
+
+        With heterogeneous parallelism (e.g. DP-prefill <-> TP-decode) a request
+        can target any remote DP rank, but the first-contact all-to-all
+        handshake only fires once and has no retry: a rank whose prefill
+        handshake listener wasn't up yet (or that was simply never contacted) is
+        left with no entry in layer_name_to_remote_kv_cache_metadata. Reading
+        from it then KeyErrors in _get_built_session and kills the EngineCore.
+
+        Handshake the needed rank synchronously on first use here. Cost is one
+        MoRIIO metadata exchange (~1-4ms measured), one-time per rank — the
+        result is cached in layer_name_to_remote_kv_cache_metadata /
+        built_write_session and reused thereafter. No-op once handshaked, so
+        the symmetric / already-warmed path is unaffected.
+        """
+        base_engine_id = str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
+        dp_rank = int(meta.remote_dp_rank)
+        dp_engine_id = self.get_engine_name_with_dp(base_engine_id, dp_rank)
+        if dp_engine_id in self.layer_name_to_remote_kv_cache_metadata:
+            return
+        with self._handshake_lock:
+            # Re-check under the lock — another worker step may have just
+            # handshaked this rank.
+            if dp_engine_id in self.layer_name_to_remote_kv_cache_metadata:
+                return
+            host = self._pick_host_for_dp_rank(meta, dp_rank)
+            # Fallback only: the eager all-rank handshake in start_load_kv should
+            # have covered every rank already. Hitting this on the read path
+            # means a rank was missed — log loudly; it should NOT appear in a
+            # healthy run (it reintroduces the TP-desync risk for this one rank).
+            logger.warning(
+                "MoRIIO FALLBACK synchronous handshake for remote dp rank %d "
+                "(%s) on the read path — eager handshake should have covered "
+                "this; investigate if seen in a healthy run",
+                dp_rank,
+                dp_engine_id,
+            )
+            self._remote_agents[dp_engine_id] = self._moriio_handshake(
+                host,
+                int(meta.remote_handshake_port),
+                int(meta.tp_size),
+                dp_engine_id,
+                dp_rank,
+            )
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
             "Remote agent %s available, calling _read_blocks for req %s",
@@ -2164,9 +2380,16 @@ class MoRIIOConnectorWorker:
             first_layer, local_block_ids, remote_block_ids, remote_moriio_meta
         )
 
+        # Heterogeneous-TP: target the remote's TP index (tp0 for a TP1 prefill),
+        # else the read-completion notify lands on a phantom port and the
+        # producer never sees finished_sending -> KV leak. See _remote_tp_rank.
         notify_port = str(
             remote_notify_port
-            + get_port_offset(int(remote_dp_rank), self.tp_rank, int(remote_tp_size))
+            + get_port_offset(
+                int(remote_dp_rank),
+                self._remote_tp_rank(int(remote_tp_size)),
+                int(remote_tp_size),
+            )
         )
         with self.moriio_wrapper.lock:
             self._recving_transfer_local_block_ids[request_id] = set(local_block_ids)
