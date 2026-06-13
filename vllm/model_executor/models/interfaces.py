@@ -1644,7 +1644,7 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
-        path: str | None = None,
+        path: str = "default",
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1654,7 +1654,7 @@ class SupportsEncoderCudaGraph(Protocol):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
-        path: str | None = None,
+        path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
@@ -1662,7 +1662,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
-        path: str | None = None,
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 
@@ -1673,7 +1673,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
-        path: str | None = None,
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass without precomputed buffers.
 

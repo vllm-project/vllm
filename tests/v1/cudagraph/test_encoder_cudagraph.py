@@ -108,7 +108,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
-    mgr.budget_graphs = {}
+    mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -413,7 +413,7 @@ def _make_manager_for_gpu(
         max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2
     )
     mgr.use_dp = False
-    mgr.budget_graphs = {}
+    mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -479,15 +479,15 @@ class TestEncoderCudaGraphCaptureReplay:
     # --- capture ---
 
     def test_capture_creates_one_graph_per_budget(self):
-        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
-        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+        assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
 
     def test_capture_uses_supplied_graph_pool(self):
         assert self.mgr.graph_pool is self.graph_pool
 
     def test_clear_releases_graphs_and_pool(self):
         self.mgr.clear()
-        assert self.mgr.budget_graphs == {}
+        assert self.mgr.budget_graphs == {"default": {}}
         assert self.mgr.graph_pool is None
 
     # --- output shape ---
@@ -763,8 +763,8 @@ class TestEncoderCudaGraphVideoReplay:
     # --- capture ---
 
     def test_capture_creates_one_graph_per_budget(self):
-        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
-        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+        assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
 
     # --- output shape ---
 
