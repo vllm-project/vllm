@@ -12,13 +12,6 @@ from typing_extensions import TypeVar, assert_never
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
-from vllm.transformers_utils.gguf_utils import (
-    check_gguf_file,
-    get_gguf_file_path_from_hf,
-    is_gguf,
-    is_remote_gguf,
-    split_remote_gguf,
-)
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
@@ -123,21 +116,6 @@ def resolve_tokenizer_args(
                     ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
                 )
                 tokenizer_name = tokenizer_path
-
-    # Separate model folder from file path for GGUF models
-    if is_gguf(tokenizer_name):
-        if check_gguf_file(tokenizer_name):
-            kwargs["gguf_file"] = Path(tokenizer_name).name
-            tokenizer_name = Path(tokenizer_name).parent
-        elif is_remote_gguf(tokenizer_name):
-            tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
-            # Get the HuggingFace Hub path for the GGUF file
-            gguf_file = get_gguf_file_path_from_hf(
-                tokenizer_name,
-                quant_type,
-                revision=revision,
-            )
-            kwargs["gguf_file"] = gguf_file
 
     if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":
