@@ -4,8 +4,8 @@
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, overload
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 import regex as re
 import torch
@@ -19,9 +19,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -34,6 +31,9 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     direct_register_custom_op,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -64,6 +64,16 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        # Deprecation warnings
+        if key.endswith(".kv_scale"):
+            logger.warning_once(
+                "DEPRECATED. Found kv_scale in the checkpoint. "
+                "This format is deprecated in favor of separate k_scale and "
+                "v_scale tensors and will be removed in a future release. "
+                "Functionally, we will remap kv_scale to k_scale and duplicate "
+                "k_scale to v_scale"
+            )
+
         for renaming in self.orig_to_new_renamings:
             key, _ = renaming.rename_source_key(key)
 
@@ -119,6 +129,25 @@ class WeightsMapper:
             for name, value in values.items()
             if (out_name := self._map_name(name)) is not None
         }
+
+    def get_unfused_mapper(self) -> "WeightsMapper":
+        """Mapper variant that drops the QKV/MLP fusion substr maps, keeping
+        all genuine renames/prefixes.
+
+        Consumers that reference the checkpoint's *unfused* module names — LoRA
+        name parsing and the quantization config's layer lists
+        (`modules_in_block_to_quantize`, ignored layers) — need the constituent
+        names (e.g. `q_proj`) to survive rather than being rewritten to the
+        fused vLLM name (`qkv_proj.q`)."""
+        qkv_shards = {"q", "k", "v"}
+        substr = {}
+        for old, new in self.orig_to_new_substr.items():
+            if new is not None and "." in new:
+                shard_id = new.rpartition(".")[2]
+                if shard_id.isdigit() or shard_id in qkv_shards:
+                    continue
+            substr[old] = new
+        return replace(self, orig_to_new_substr=substr)
 
 
 class AutoWeightsLoader:
@@ -356,16 +385,15 @@ class AutoWeightsLoader:
         # We look at the causal model's direct children for this reason.
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
-        quant_config = next(iterator, None)
-        cache_scale_mapper = (
-            quant_config.get_cache_scale_mapper() if quant_config is not None else None
-        )
-        if cache_scale_mapper is not None:
-            mapper = (
-                mapper | cache_scale_mapper
-                if mapper is not None
-                else cache_scale_mapper
-            )
+        if quant_config := next(iterator, None):
+            # Skip loading extra bias for GPTQ models
+            if "gptq" in quant_config.get_name():
+                self.ignore_unexpected_suffixes.append(".bias")
+            # Get mappings and ignore prefixes for KV cache quantization scales
+            mapper = mapper or WeightsMapper()
+            mapper |= quant_config.get_cache_scale_mapper()
+            ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
@@ -734,9 +762,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(
-    vllm_config: VllmConfig,
-) -> QuantizationConfig | None:
+def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target

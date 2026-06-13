@@ -61,6 +61,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .utils import WeightsMapper
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -376,6 +377,14 @@ class EVA2CLIPModel(nn.Module):
 
 
 class GLM4VModel(ChatGLMModel):
+    hf_to_vllm_mapper = ChatGLMModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_substr={
+            # Vision GLU projections
+            "linear_proj.gate_proj": "linear_proj.merged_proj.0",
+            "linear_proj.dense_h_to_4h": "linear_proj.merged_proj.1",
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

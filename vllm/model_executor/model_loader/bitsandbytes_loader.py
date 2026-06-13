@@ -573,10 +573,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     "BitsAndBytes quantization yet. Ensure this model has "
                     "'get_expert_mapping' method."
                 )
-        # For some models like Molmo, we need to use hf_to_vllm_mapper
-        # to ensure correct loading of weights.
-        if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
-            self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+        # `hf_to_vllm_mapper` may belong to model or base model
+        for module in (model, *model.children()):
+            if hf_to_vllm_mapper := getattr(module, "hf_to_vllm_mapper", None):
+                self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+                break
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)

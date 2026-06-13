@@ -3,6 +3,7 @@
 
 import itertools
 from abc import abstractmethod
+from collections.abc import Iterable
 
 import torch
 from torch.nn.parameter import Parameter
@@ -910,6 +911,41 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             tp_rank=self.tp_rank,
         )
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            if "." in name:
+                # Checkpoint is sharded
+                shard_id_str, _, name = name.partition(".")
+                shard_id = int(shard_id_str)
+                logger.debug(
+                    "Loaded shard %s into %s for layer %s.%s",
+                    shard_id,
+                    name,
+                    self.prefix,
+                    name,
+                )
+            else:
+                shard_id = None
+                logger.debug(
+                    "Loaded weight %s.%s with shape %s",
+                    self.prefix,
+                    name,
+                    loaded_weight.shape,
+                )
+            # Load into self if name is not an attr of self
+            param: Parameter = getattr(self, name, self)
+            if (
+                param is None
+                and name == "bias"
+                and self.quant_config is not None
+                and "gptq" in self.quant_config.get_name()
+            ):
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)
+            yield name
+
 
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
@@ -1300,6 +1336,42 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            if "." in name:
+                # Checkpoint is sharded
+                shard_id, _, name = name.partition(".")
+                self.validate_shard_id(shard_id)
+                logger.debug(
+                    "Loaded shard %s into %s for layer %s.%s",
+                    shard_id,
+                    name,
+                    self.prefix,
+                    name,
+                )
+            else:
+                # Checkpoint is fused
+                shard_id = None
+                logger.debug(
+                    "Loaded weight %s.%s with shape %s",
+                    self.prefix,
+                    name,
+                    loaded_weight.shape,
+                )
+            # Load into self if name is not an attr of self
+            param: Parameter = getattr(self, name, self)
+            if (
+                param is None
+                and name == "bias"
+                and self.quant_config is not None
+                and "gptq" in self.quant_config.get_name()
+            ):
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)
+            yield name
 
 
 # --8<-- [start:row_parallel_linear]
