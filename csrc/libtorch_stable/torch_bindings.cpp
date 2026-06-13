@@ -545,6 +545,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
 
+#ifndef USE_ROCM
+  // TurboQuant FP8-key + 4-bit-value KV cache store.
+  ops.def(
+      "turboquant_store_fp8_v4(Tensor key, Tensor value, Tensor! kv_cache, "
+      "Tensor slot_mapping, int stride_block, int stride_pos, int stride_head, "
+      "int num_heads, int block_size, int key_packed_size, "
+      "int value_data_bytes) -> ()");
+#endif
+
   // Quantized GEMM for GPTQ.
   // Note: even though the C++ inferred schema is correct for this op, it seems
   // to prevent the meta function registry.
@@ -708,6 +717,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("dynamic_scaled_fp8_quant", TORCH_BOX(&dynamic_scaled_fp8_quant));
   ops.impl("dynamic_per_token_scaled_fp8_quant",
            TORCH_BOX(&dynamic_per_token_scaled_fp8_quant));
+#ifndef USE_ROCM
+  ops.impl("turboquant_store_fp8_v4", TORCH_BOX(&turboquant_store_fp8_v4));
+#endif
 
   // GPTQ kernels
   ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
