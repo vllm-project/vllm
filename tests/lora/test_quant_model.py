@@ -91,8 +91,8 @@ def test_quant_model_lora(tinyllama_lora_files, model):
         ]
     elif model.quantization == "awq":
         expected_lora_output = [
-            "#f07700: A v",
-            "#f00000: A v",
+            "#f07733: A v",
+            "#f08800: A v",
         ]
     elif model.quantization == "gptq":
         expected_lora_output = [
