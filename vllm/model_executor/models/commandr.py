@@ -353,7 +353,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
-
     # LoRA specific attributes
     embedding_modules = {"embed_tokens": "input_embeddings"}
     # ModelOpt NVFP4 checkpoints carry raw quantizer-module state

@@ -25,13 +25,13 @@ from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
+    is_pooling_model = True
+    pooler: Pooler
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
-
-    is_pooling_model = True
-    pooler: Pooler
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
