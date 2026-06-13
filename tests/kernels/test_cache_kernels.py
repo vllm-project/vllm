@@ -42,8 +42,10 @@ def test_gather_cache_oob():
     )
 
     dst = torch.empty((seq_len, entry_size), dtype=torch.float16, device="cuda")
+    dst.fill_(1)
 
     scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+    token_to_seq = torch.zeros(seq_len, dtype=torch.int32, device="cuda")
 
     # Calling the C++ function gather_and_maybe_dequant_cache
     ops.gather_and_maybe_dequant_cache(
@@ -51,14 +53,54 @@ def test_gather_cache_oob():
         dst,
         block_table,
         cu_seq_lens,
-        batch_size,
+        token_to_seq,
+        seq_len,
         "auto",  # kv_cache_dtype
         scale,
         seq_starts,
     )
 
     torch.accelerator.synchronize()
-    assert True
+    torch.testing.assert_close(dst, torch.zeros_like(dst))
+
+
+@pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
+def test_cp_gather_cache_oob():
+    """
+    Tests for OOB read in cp_gather_cache (Issue #45462).
+    This reproduces the case where seq_starts advances beyond the available
+    block_table entries for the row.
+    """
+
+    batch_size = 1
+    block_size = 64
+    entry_size = 128
+
+    block_table = torch.tensor([[1, 2]], dtype=torch.int32, device="cuda")
+    seq_starts = torch.tensor([128], dtype=torch.int32, device="cuda")
+
+    seq_len = 65
+    cu_seq_lens = torch.tensor([0, seq_len], dtype=torch.int32, device="cuda")
+
+    num_blocks = 5
+    src_cache = torch.randn(
+        (num_blocks, block_size, entry_size), dtype=torch.float16, device="cuda"
+    )
+
+    dst = torch.empty((seq_len, entry_size), dtype=torch.float16, device="cuda")
+    dst.fill_(1)
+
+    ops.cp_gather_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        batch_size,
+        seq_starts,
+    )
+
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(dst, torch.zeros_like(dst))
 
 
 if __name__ == "__main__":
