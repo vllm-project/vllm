@@ -790,7 +790,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
-    rate_gate_sends: bool = False,
+    strict_request_rate: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -961,14 +961,14 @@ async def benchmark(
     )
 
     # Optionally space the actual sends after the concurrency semaphore so
-    # batched slot releases don't burst above request_rate (see --rate-gate-sends).
+    # batched slot releases don't burst above request_rate (see --strict-request-rate).
     # send_next_ts holds the next allowed send time, advanced per reserved slot.
     send_next_ts = 0.0
 
     async def limited_request_func(request_func_input, session, pbar, send_rate):
         nonlocal send_next_ts
         async with semaphore:
-            if rate_gate_sends and 0.0 < send_rate < float("inf"):
+            if strict_request_rate and 0.0 < send_rate < float("inf"):
                 now = time.perf_counter()
                 # No await between reading and writing send_next_ts.
                 slot = max(send_next_ts, now)
@@ -1610,14 +1610,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "results in a more uniform arrival of requests.",
     )
     parser.add_argument(
-        "--rate-gate-sends",
+        "--strict-request-rate",
         action="store_true",
-        help="Space the actual request sends to at most --request-rate, applied "
-        "after the --max-concurrency semaphore is acquired. Without this, requests "
-        "pace into the semaphore wait but exit it in lumps (synchronized "
-        "completions free many slots at once), bursting the engine above the "
-        "target rate. Off by default; only takes effect when request_rate is "
-        "finite. Note: it evens out arrivals and so overrides --burstiness.",
+        help="Enforce --request-rate on the actual sends, not just on task "
+        "creation. After the --max-concurrency semaphore is acquired, space each "
+        "send so the engine arrival rate stays at --request-rate. Without this, "
+        "requests that queued on the semaphore exit in lumps when a batch of "
+        "completions frees many slots at once, bursting the engine above the "
+        "target rate. Off by default. Only takes effect when --request-rate is "
+        "finite, and it evens out arrivals so it overrides --burstiness.",
     )
     parser.add_argument(
         "--disable-tqdm",
@@ -2135,7 +2136,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
-        rate_gate_sends=args.rate_gate_sends,
+        strict_request_rate=args.strict_request_rate,
     )
 
     # Save config and results to json
