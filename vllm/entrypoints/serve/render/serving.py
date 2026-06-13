@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any, cast
@@ -11,6 +12,9 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.entrypoints.ace_req_registry import register as _ace_register_req
+from vllm.entrypoints.attention_capture import get_capture, start_capture, stop_capture
+from vllm.entrypoints.context_compression import apply_ace_eviction, get_tracker
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
@@ -56,6 +60,24 @@ from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+# conversation_id is a client-supplied registry key for ACE attention mode.
+# Constrain it to a bounded length and a safe charset so crafted/oversized keys
+# cannot pollute the process-global tracker registries.
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _validate_conversation_id(value: str | None) -> str | None:
+    """Return the conversation_id if well-formed, else None (no session)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _CONVERSATION_ID_RE.match(value):
+        logger.warning(
+            "Ignoring malformed conversation_id for ACE attention mode; "
+            "falling back to BM25 scoring."
+        )
+        return None
+    return value
 
 
 class OpenAIServingRender:
@@ -162,6 +184,16 @@ class OpenAIServingRender:
 
         request_id = f"chatcmpl-{random_uuid()}"
 
+        # ACE Phase 3: link this request_id to its conversation session so that
+        # model_runner can install attention hooks keyed by request_id. Validate
+        # the client-supplied conversation_id before it reaches the global
+        # registry, mirroring the check in render_chat().
+        _ace_session_id = _validate_conversation_id(
+            getattr(request, "conversation_id", None)
+        )
+        if getattr(request, "context_compression", None) == "ace" and _ace_session_id:
+            _ace_register_req(request_id, _ace_session_id)
+
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
@@ -229,6 +261,61 @@ class OpenAIServingRender:
         else:
             tool_dicts = [tool.model_dump() for tool in request.tools]
 
+        # ACE: compress old tool-result messages before tokenization.
+        # Applied before the harmony/non-harmony split so both paths benefit.
+        messages = list(request.messages)
+        if getattr(request, "context_compression", None) == "ace":
+            max_model_len = self.model_config.max_model_len
+            max_tokens = (
+                getattr(request, "max_completion_tokens", None)
+                or getattr(request, "max_tokens", None)
+                or max(256, max_model_len // 8)  # safe default: reserve 1/8 for output
+            )
+            # Use 3 chars/token (conservative; code/tool output is denser than prose)
+            budget_chars = max(0, max_model_len - max_tokens) * 3
+
+            # Phase 3: retrieve accumulated attention tracker from the previous
+            # generation turn, if the client provides a stable conversation_id.
+            # Falls back to BM25 (Phase 2) when no attention data is available.
+            #
+            # SECURITY NOTE: conversation_id is a client-supplied key into the
+            # process-global tracker/capture registries. We constrain it to a
+            # bounded charset/length to prevent abuse via crafted keys. This does
+            # NOT provide cross-tenant isolation: two clients that share a
+            # conversation_id share a tracker. In multi-tenant deployments the
+            # session_id must be namespaced with an authenticated tenant/API-key
+            # identity, which is not yet plumbed into this render path — until
+            # then, attention-mode (Mode 3) should be treated as single-tenant.
+            session_id: str | None = _validate_conversation_id(
+                getattr(request, "conversation_id", None)
+            )
+            tracker = get_tracker(session_id) if session_id else None
+
+            apply_ace_eviction(
+                messages,  # type: ignore[arg-type]
+                budget_chars=budget_chars,
+                keep_recent=getattr(
+                    request, "context_compression_keep_recent", 2
+                ),
+                target_ratio=getattr(
+                    request, "context_compression_ratio", 0.4
+                ),
+                use_query_relevance=True,
+                tracker=tracker,
+                recency_blend=getattr(
+                    request, "context_compression_recency_blend", 0.3
+                ),
+            )
+
+            # Register an attention capture for this generation turn so that
+            # the next request with the same conversation_id can use Mode 3.
+            # The capture is stopped by the response streaming teardown.
+            if session_id:
+                if tracker is None:
+                    # First turn: register a fresh tracker.
+                    start_capture(session_id, max_seq_len=max_model_len)
+                # else: tracker already registered; capture is already active.
+
         if not self.use_harmony:
             # Common case.
             error_check_ret = self.validate_chat_template(
@@ -241,7 +328,7 @@ class OpenAIServingRender:
 
             conversation, engine_inputs = await self.preprocess_chat(
                 request,
-                request.messages,
+                messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,
@@ -250,10 +337,10 @@ class OpenAIServingRender:
                 skip_mm_cache=skip_mm_cache,
             )
         else:
-            # For GPT-OSS.
+            # For GPT-OSS: pass the (potentially compressed) messages list.
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request, should_include_tools, compressed_messages=messages
             )
 
         return conversation, engine_inputs
@@ -389,6 +476,7 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        compressed_messages=None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
@@ -398,7 +486,11 @@ class OpenAIServingRender:
         # for more info: see comment in `maybe_serialize_tool_calls`
         _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
-        chat_messages = list(request.messages)
+        # Use the ACE-compressed messages when the caller provided them.
+        raw_messages = (
+            compressed_messages if compressed_messages is not None else request.messages
+        )
+        chat_messages = list(raw_messages)
         instructions, chat_messages = extract_instructions_from_messages(chat_messages)
 
         # Add system message.
@@ -418,7 +510,7 @@ class OpenAIServingRender:
             )
         )
 
-        # Add remaining conversation messages.
+        # Add remaining conversation messages (ACE-compressed when provided).
         messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.

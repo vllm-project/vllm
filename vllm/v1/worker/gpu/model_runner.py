@@ -734,6 +734,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
         for req_id in finished_req_ids:
             self._remove_request(req_id)
+            # ACE Phase 3: clean up the req_id → session_id registry entry.
+            # The AttentionImportanceTracker itself is kept alive under session_id
+            # so the next turn of the same conversation can use accumulated scores.
+            try:
+                from vllm.entrypoints import ace_req_registry
+                ace_req_registry.release(req_id)
+            except Exception:
+                pass
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.encoder_cache is not None:
@@ -1246,11 +1254,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
+        # ACE Phase 3: install attention capture hooks for any request that has
+        # context_compression="ace" and a conversation_id. Works with backends
+        # that return softmax weights (SDPA, CPU); gracefully falls back to
+        # BM25 (Mode 2) when hooks receive no weight data (FlashAttention).
+        _ace_sessions: list[str] = []
+        if not dummy_run:
+            try:
+                from vllm.entrypoints import ace_req_registry
+                from vllm.entrypoints.ace_model_hook import install_hook
+                for req_id in input_batch.req_ids:
+                    session_id = ace_req_registry.get(req_id)
+                    if session_id is not None:
+                        req_idx = self.req_states.req_id_to_index.get(req_id)
+                        new_tok_start = (
+                            int(self.req_states.num_computed_tokens_np[req_idx])
+                            if req_idx is not None else 0
+                        )
+                        install_hook(
+                            session_id,
+                            self.model,
+                            max_seq_len=self.model_config.max_model_len,
+                            new_token_start=new_tok_start,
+                        )
+                        _ace_sessions.append(session_id)
+            except Exception:
+                pass  # never block inference
+
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
+            # ACE hooks cannot be used with CUDA graph replay — skip them.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
@@ -1283,6 +1319,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+
+        # ACE Phase 3: flush captured attention weights into the tracker.
+        if _ace_sessions:
+            try:
+                from vllm.entrypoints.ace_model_hook import flush_hook
+                for session_id in _ace_sessions:
+                    flush_hook(session_id)
+            except Exception:
+                pass
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
