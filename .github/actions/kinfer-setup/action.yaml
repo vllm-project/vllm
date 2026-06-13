@@ -1,0 +1,110 @@
+name: "Kinfer Setup"
+description: >
+  Auth + tooling for running evals via the kinfer SDK on a Cohere K8s cluster.
+  Mirrors kinfer's .github/actions/integration-setup (WIF -> kubeconfig) and
+  installs the kinfer SDK from the cohere-py GAR index (same index used to
+  install bee). The WIF principal must be granted: (1) read on the
+  github-ci-kubeconfig-<cluster> secret in project cohere-cd, and (2) read on
+  the cohere-py Artifact Registry. See docs/cohere/code_notes/kinfer-integration.md.
+
+inputs:
+  cluster:
+    description: "kinfer cluster context (used for kubeconfig secret lookup)"
+    required: true
+  workload_identity_provider:
+    description: "GCP Workload Identity provider for cluster + GAR access"
+    required: false
+    default: "projects/751739702614/locations/global/workloadIdentityPools/e2e-testing/providers/e2e-testing"
+  service_account:
+    description: "GCP service account to impersonate"
+    required: false
+    default: "e2e-testing@cohere-artifacts.iam.gserviceaccount.com"
+  kinfer_install_spec:
+    description: >
+      uv pip install target for the kinfer SDK. Defaults to the published GAR
+      wheel. Override with a git URL (git+https://github.com/cohere-ai/kinfer.git@<ref>)
+      to test unreleased changes.
+    required: false
+    default: "kinfer==0.3.2"
+  oci_auth_token:
+    description: >
+      Oracle Container Registry auth token for iad.ocir.io. Required when
+      kinfer builds/checks runtime images stored in Oracle OCIR.
+    required: false
+    default: ""
+  python_version:
+    description: "Python version for the kinfer SDK"
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Depot CLI
+      uses: depot/setup-action@v1
+
+    - name: Authenticate to Google Cloud
+      id: gcloud-auth
+      uses: google-github-actions/auth@v2
+      with:
+        token_format: access_token
+        workload_identity_provider: ${{ inputs.workload_identity_provider }}
+        service_account: ${{ inputs.service_account }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker for Artifact Registry
+      shell: bash
+      run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+    - name: Configure Docker for Oracle Container Registry
+      if: ${{ inputs.oci_auth_token != '' }}
+      uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+      with:
+        registry: iad.ocir.io
+        username: ax8fanrz7l8n/inference-ci-service-user
+        password: ${{ inputs.oci_auth_token }}
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: "latest"
+
+    - name: Configure kubeconfig
+      shell: bash
+      run: |
+        set -eo pipefail
+        gcloud secrets versions access latest \
+          --secret="github-ci-kubeconfig-${{ inputs.cluster }}" \
+          --project="cohere-cd" \
+          | base64 -d > "${{ github.workspace }}/kubeconfig.raw"
+        # Normalise to YAML — secrets may be stored as JSON (valid kubeconfig
+        # but not parseable by the Kubernetes Python client's PyYAML safe_load).
+        kubectl config view \
+          --kubeconfig="${{ github.workspace }}/kubeconfig.raw" \
+          --raw > "${{ github.workspace }}/kubeconfig"
+        echo "KUBECONFIG=${{ github.workspace }}/kubeconfig" >> "$GITHUB_ENV"
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Install kinfer SDK
+      shell: bash
+      env:
+        ACCESS_TOKEN: ${{ steps.gcloud-auth.outputs.access_token }}
+      run: |
+        set -eo pipefail
+        SPEC="${{ inputs.kinfer_install_spec }}"
+        # Fall back to the action default when the caller passes an empty string.
+        [ -z "$SPEC" ] && SPEC="kinfer==0.3.2"
+        uv pip install --system \
+          --extra-index-url "https://oauth2accesstoken:${ACCESS_TOKEN}@us-central1-python.pkg.dev/cohere-artifacts/cohere-py/simple" \
+          --index-strategy unsafe-best-match \
+          "$SPEC" wandb
+        python -c "from kinfer.sdk import Kinfer; import kinfer; print('kinfer', getattr(kinfer, '__version__', 'unknown'))"

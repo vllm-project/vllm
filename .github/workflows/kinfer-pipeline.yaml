@@ -1,0 +1,161 @@
+# Kinfer-backed base model eval pipeline.
+# Deploys a model on a Cohere K8s cluster via the kinfer SDK, runs bee evals,
+# and lets bee log results directly to W&B. No result post-processing here.
+name: vLLM Kinfer Evals
+
+on:
+  workflow_call:
+    secrets:
+      CO_API_KEY_STAGING:
+        required: true
+      WANDB_API_KEY:
+        required: true
+      OCI_AUTH_TOKEN:
+        required: false
+    inputs:
+      git_ref:
+        description: 'Branch/commit to checkout'
+        required: true
+        type: string
+      models:
+        description: 'Model key (must match deploy_map.json / eval_suite_map.json)'
+        required: true
+        type: string
+      device:
+        description: 'CI device label (h100, b200, gb200, mi300x) — used to select nvidia/rocm image'
+        required: true
+        type: string
+      docker_tag:
+        description: 'Docker image tag to deploy (commit SHA, release tag, etc. — defaults to current commit SHA)'
+        required: false
+        type: string
+        default: ''
+      run_timestamp:
+        description: 'Shared UTC timestamp (YYYYMMDD-HHMM) for W&B x-axis alignment across GPU jobs'
+        required: false
+        type: string
+        default: ''
+      kinfer_install_spec:
+        description: 'uv install spec for kinfer (e.g. kinfer==0.3.0 or git+https://...@branch). Defaults to action default.'
+        required: false
+        type: string
+        default: ''
+
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Branch/commit to checkout'
+        required: false
+        type: string
+        default: ''
+      models:
+        description: 'Model key (e.g. mls-base-fp8-b200)'
+        required: true
+        type: string
+      device:
+        description: 'CI device label (b200, mi300x, …)'
+        required: true
+        type: choice
+        options:
+          - b200
+          - mi300x
+          - h100
+          - gb200
+      docker_tag:
+        description: 'Docker image tag (commit SHA, release tag, etc. — leave blank to use HEAD)'
+        required: false
+        type: string
+        default: ''
+      run_timestamp:
+        description: 'Shared UTC timestamp (YYYYMMDD-HHMM) for W&B x-axis alignment — leave blank to use current time'
+        required: false
+        type: string
+        default: ''
+      kinfer_install_spec:
+        description: 'uv install spec for kinfer — leave blank to use action default (kinfer==0.3.0)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  kinfer-eval:
+    # 2h per suite + headroom for deploy, queue wait, and multiple suites.
+    # depot-ubuntu-24.04 runner: Depot CLI auto-authenticates (no DEPOT_TOKEN needed),
+    # which is required for deploy_full_pipeline to build the kinfer runtime image.
+    timeout-minutes: 480
+    name: kinfer eval ${{ inputs.models }} on ${{ inputs.device }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: depot-ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref_name }}
+
+      - name: Set image ref
+        shell: bash
+        run: |
+          set -eo pipefail
+          TAG="${{ inputs.docker_tag }}"
+          [ -z "$TAG" ] && TAG="$(git rev-parse HEAD)"
+          case "${{ inputs.device }}" in
+            mi300x)          SUFFIX=rocm ;;
+            h100|b200|gb200) SUFFIX=nvidia ;;
+            *) echo "ERROR: unknown device '${{ inputs.device }}' — cannot select image suffix" >&2; exit 1 ;;
+          esac
+          REG=us-central1-docker.pkg.dev/cohere-artifacts/cohere
+          echo "DOCKER_IMAGE=${REG}/vllm-${SUFFIX}:${TAG}" >> "$GITHUB_ENV"
+
+      - name: Read cluster context from deploy spec
+        id: spec
+        shell: bash
+        run: |
+          set -eo pipefail
+          SPEC_FILE="tests/cohere/configs/kinfer_deploy/${{ inputs.models }}.yaml"
+          CLUSTER=$(grep 'cluster_context:' "$SPEC_FILE" | awk '{print $2}')
+          echo "cluster_context=$CLUSTER" >> "$GITHUB_OUTPUT"
+
+      - name: Kinfer setup
+        uses: ./.github/actions/kinfer-setup
+        with:
+          cluster: ${{ steps.spec.outputs.cluster_context }}
+          kinfer_install_spec: ${{ inputs.kinfer_install_spec }}
+          oci_auth_token: ${{ secrets.OCI_AUTH_TOKEN }}
+
+      - name: Install driver deps
+        shell: bash
+        run: uv pip install --system pyyaml regex
+
+      - name: Run kinfer eval
+        env:
+          CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_BASE_URL: https://cohere.wandb.io
+          # Override kinfer's bundled depot.json (which points at kinfer's own
+          # Depot project) so builds use vllm-cohere's project instead.
+          # DEPOT_PROJECT_ID takes priority over any depot.json on disk.
+          DEPOT_PROJECT_ID: rkhjmshqw9
+          RUN_TIMESTAMP: ${{ inputs.run_timestamp }}
+        run: |
+          set -eo pipefail
+          python tests/cohere/scripts/run_kinfer_eval.py eval \
+            --model        "${{ inputs.models }}" \
+            --docker-image "${DOCKER_IMAGE}" \
+            ${RUN_TIMESTAMP:+--run-timestamp "$RUN_TIMESTAMP"}
+
+      - name: Cleanup TrainJob (safety net)
+        # Runs even on timeout or cancellation. The Python finally block handles
+        # the normal path; this step covers runner kill before finally can run.
+        # Guard: skip silently if kinfer was never installed (setup failed before
+        # the SDK was available) or if no TrainJob was created yet — in both
+        # cases there is nothing to delete and the import would obscure the real
+        # failure.
+        if: always()
+        shell: bash
+        run: |
+          python -c "import kinfer" 2>/dev/null || exit 0
+          [ -n "$KINFER_TRAINJOB" ] || exit 0
+          python tests/cohere/scripts/run_kinfer_eval.py cleanup

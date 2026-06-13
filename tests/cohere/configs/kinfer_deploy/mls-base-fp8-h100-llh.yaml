@@ -1,0 +1,45 @@
+# kinfer deploy spec for the MLS base FP8 model on H100 (cw-us-east-04-prod) — likelihood evals.
+# Lower max-model-len and gpu_memory_utilization to avoid OOM during likelihood scoring.
+# Gen + LC + code evals are run separately via mls-base-fp8-h100-gen.yaml.
+#
+# ci.* fields are read by run_kinfer_eval.py and are not part of the kinfer VLLMSpec:
+#   cluster_context — kubectl context to switch to before deploying
+#   queue           — kinfer job queue (passed as --queue CLI arg)
+#   priority        — kinfer job priority (passed as --priority CLI arg)
+#
+# cluster.image is the only field overridden at runtime (injected nightly build SHA).
+ci:
+  cluster_context: cw-us-east-04-prod
+  queue: pre-training-queue
+  priority: dev-medium-eval-priority
+
+version: 1
+
+cluster:
+  image: us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-nvidia:placeholder
+  weights_uri: 's3://us-east-01a/foundations-big-runs/sylvie_cohere_ai/medium_lightspeed/8A133T_4e-4_with_lblfix_t8_800B_decay_v4.2_hammer_cooldown_at_20T_t1/ckpt-346499/hf_export/fp8'
+  total_gpus: 16
+  hardware: H100
+
+mode: standard
+
+model:
+  served_name: mls-base-fp8
+  vllm_args:
+    tensor-parallel-size: 8
+    max-model-len: 8192
+    enable-chunked-prefill: true
+    max-num-batched-tokens: 8192
+    max-num-seqs: 16
+    override-generation-config: '{"eos_token_id": 3}'
+
+routing:
+  load_balancing_scorers:
+    default:
+      scorers:
+        - type: round_robin
+
+standard:
+  replicas: 2
+  gpu_memory_utilization: 0.70
+  placement: PACK

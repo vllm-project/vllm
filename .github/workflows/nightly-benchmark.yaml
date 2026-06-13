@@ -3,7 +3,7 @@ name: nightly-benchmark
 on:
   schedule:
     - cron: '0 6 * * *'  # runs daily at 1:00 AM EST
-  workflow_dispatch:      # optional: allows manual trigger if needed
+  workflow_dispatch:
     inputs:
       git_ref:
         description: 'Branch to test (defaults to triggering branch)'
@@ -14,6 +14,28 @@ on:
         required: false
         type: string
         default: ci_dump
+      run_mode:
+        description: >
+          Which job groups to run (schedule always runs both).
+          tests = build + self-hosted dispatcher (tests + bee_eval, no bench).
+          bench = build + dispatcher perf benchmarks only.
+          evals = build + kinfer-backed MLS evals only (no self-hosted dispatcher tests or bench).
+        required: false
+        type: choice
+        default: both
+        options:
+          - both
+          - tests
+          - bench
+          - evals
+      docker_tag:
+        description: >
+          Docker image tag for kinfer evals. Leave blank to use the freshly built
+          image from the current run. Set to a specific tag (commit SHA, release
+          tag, etc.) to skip the build and target a pre-existing image instead.
+        required: false
+        type: string
+        default: ''
 
 jobs:
   # Resolve the branch to a pinned commit SHA before anything else runs.
@@ -30,8 +52,20 @@ jobs:
       - id: resolve
         run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  # use common build step
+  # Generate a single UTC timestamp shared by all kinfer eval jobs so that
+  # B200 and MI300X runs from the same nightly land at the same x position
+  # in the W&B trend charts.
+  generate-run-timestamp:
+    runs-on: ubuntu-latest
+    outputs:
+      run_timestamp: ${{ steps.ts.outputs.run_timestamp }}
+    steps:
+      - id: ts
+        run: echo "run_timestamp=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
   trigger-build-and-push:
+    # Skip when a pre-built docker_tag is supplied — no need to rebuild.
+    if: ${{ !inputs.docker_tag && (!inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' || inputs.run_mode == 'bench' || inputs.run_mode == 'evals') }}
     needs: resolve-commit
     uses: ./.github/workflows/build-and-push.yaml
     secrets: inherit
@@ -40,6 +74,7 @@ jobs:
       providers: '["nvidia","amd","cpu"]'
 
   trigger-dispatch-cpu:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -57,6 +92,7 @@ jobs:
 
   # Separate dispatch for bee eval and bench runs
   trigger-dispatch-h100:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -75,6 +111,7 @@ jobs:
       BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
 
   trigger-dispatch-gb200:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -93,6 +130,7 @@ jobs:
       BEE_DEPLOY_KEY: ${{ secrets.BEE_DEPLOY_KEY }}
 
   trigger-dispatch-mi300x:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -116,6 +154,7 @@ jobs:
   # and features: all no longer includes fast_check.
 
   trigger-dispatch-b200:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'tests' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -186,9 +225,72 @@ jobs:
   #     SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
   #     CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
 
+  # Kinfer-backed base model evals (separate flow from the self-hosted dispatcher).
+  # These deploy on Cohere K8s clusters via the kinfer SDK; bee logs to W&B directly.
+  # MLS base FP8 evals — run on every cluster that hosts the model.
+  # Both jobs use the same weights_uri and eval suite; hardware/image are patched at runtime.
+
+  # TODO: re-enable once CUDA drivers on the B200 cluster are updated.
+  # The cluster's driver version does not support the CUDA toolkit required by
+  # the latest vllm-nvidia image, causing the container to fail at startup.
+  # trigger-kinfer-base-eval-b200:
+  #   # always() forces evaluation when trigger-build-and-push is skipped (run_mode=evals).
+  #   # resolve-commit must succeed so we have a valid SHA to check out.
+  #   if: always() && needs['resolve-commit'].result == 'success' && needs['generate-run-timestamp'].result == 'success' && (!inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'evals') && (needs['trigger-build-and-push'].result == 'success' || needs['trigger-build-and-push'].result == 'skipped')
+  #   needs: [resolve-commit, trigger-build-and-push, generate-run-timestamp]
+  #   uses: ./.github/workflows/kinfer-pipeline.yaml
+  #   secrets: inherit
+  #   with:
+  #     git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+  #     models: 'mls-base-fp8-b200'
+  #     device: b200
+  #     run_timestamp: ${{ needs.generate-run-timestamp.outputs.run_timestamp }}
+  #     docker_tag: ${{ inputs.docker_tag || needs.resolve-commit.outputs.commit_sha }}
+
+  trigger-kinfer-base-eval-mi300x:
+    # always() forces evaluation when trigger-build-and-push is skipped (run_mode=evals).
+    # resolve-commit must succeed so we have a valid SHA to check out.
+    if: always() && needs['resolve-commit'].result == 'success' && needs['generate-run-timestamp'].result == 'success' && (!inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'evals') && (needs['trigger-build-and-push'].result == 'success' || needs['trigger-build-and-push'].result == 'skipped')
+    needs: [resolve-commit, trigger-build-and-push, generate-run-timestamp]
+    uses: ./.github/workflows/kinfer-pipeline.yaml
+    secrets: inherit
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      models: 'mls-base-fp8-mi300x'
+      device: mi300x
+      run_timestamp: ${{ needs.generate-run-timestamp.outputs.run_timestamp }}
+      docker_tag: ${{ inputs.docker_tag || needs.resolve-commit.outputs.commit_sha }}
+
+  trigger-kinfer-base-eval-h100-llh:
+    # Likelihood-only H100 eval (split from gen/lc/code to avoid OOM).
+    if: always() && needs['resolve-commit'].result == 'success' && needs['generate-run-timestamp'].result == 'success' && (!inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'evals') && (needs['trigger-build-and-push'].result == 'success' || needs['trigger-build-and-push'].result == 'skipped')
+    needs: [resolve-commit, trigger-build-and-push, generate-run-timestamp]
+    uses: ./.github/workflows/kinfer-pipeline.yaml
+    secrets: inherit
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      models: 'mls-base-fp8-h100-llh'
+      device: h100
+      run_timestamp: ${{ needs.generate-run-timestamp.outputs.run_timestamp }}
+      docker_tag: ${{ inputs.docker_tag || needs.resolve-commit.outputs.commit_sha }}
+
+  trigger-kinfer-base-eval-h100-gen:
+    # Gen + LC + code H100 eval (split from likelihood to avoid OOM).
+    if: always() && needs['resolve-commit'].result == 'success' && needs['generate-run-timestamp'].result == 'success' && (!inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'evals') && (needs['trigger-build-and-push'].result == 'success' || needs['trigger-build-and-push'].result == 'skipped')
+    needs: [resolve-commit, trigger-build-and-push, generate-run-timestamp]
+    uses: ./.github/workflows/kinfer-pipeline.yaml
+    secrets: inherit
+    with:
+      git_ref: ${{ needs.resolve-commit.outputs.commit_sha }}
+      models: 'mls-base-fp8-h100-gen'
+      device: h100
+      run_timestamp: ${{ needs.generate-run-timestamp.outputs.run_timestamp }}
+      docker_tag: ${{ inputs.docker_tag || needs.resolve-commit.outputs.commit_sha }}
+
   # bench runs
 
   trigger-dispatch-bench-h100:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'bench' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -206,6 +308,7 @@ jobs:
       CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
 
   trigger-dispatch-bench-gb200:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'bench' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -223,6 +326,7 @@ jobs:
       CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
 
   trigger-dispatch-bench-b200:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'bench' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:
@@ -240,6 +344,7 @@ jobs:
       CO_API_KEY_STAGING: ${{ secrets.CO_API_KEY_STAGING }}
 
   trigger-dispatch-bench-mi300x:
+    if: ${{ !inputs.run_mode || inputs.run_mode == 'both' || inputs.run_mode == 'bench' }}
     needs: [resolve-commit, trigger-build-and-push]
     uses: ./.github/workflows/dispatcher.yaml
     with:

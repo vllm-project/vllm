@@ -1,0 +1,29 @@
+# Base-model bee eval for MLS models.
+base_url: AUTO
+model: AUTO
+
+bee_version: 0.29.31
+estimator: vllmestimator
+raw_prompting: true
+
+timeout: 20000
+extra_body:
+  stop_token_ids: [3]
+max_retries: 3
+
+beedb: false
+enable_local_disk: true
+skip_completed_tasks: false
+log_samples_n: 1
+log_every_n_seconds: 1800
+
+wandb: true
+log_wandb_project: cohere-vllm-ci-nightly-evals
+# log_wandb_run_name injected at runtime by run_kinfer_eval.py
+
+includes:
+  - include/base_models/mls_bf16_settings.toml
+  - include/base_models/mls_bf16_generation.toml
+  - include/base_models/mls_bf16_likelihood.toml
+  - include/base_models/mls_bf16_lc.toml
+  - include/base_models/mls_bf16_code.toml

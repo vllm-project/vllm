@@ -1,0 +1,7 @@
+{
+  "_comment": "Maps a CI model name to the ordered list of kinfer eval YAML files to run sequentially against one deployment.",
+  "mls-base-fp8-b200": ["base.yaml"],
+  "mls-base-fp8-mi300x": ["base_mi300x.yaml"],
+  "mls-base-fp8-h100-llh": ["base_llh.yaml"],
+  "mls-base-fp8-h100-gen": ["base_gen.yaml"]
+}
