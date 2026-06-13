@@ -3,9 +3,9 @@
 vLLM uses the following environment variables to configure the system:
 
 !!! warning
-    Please note that `VLLM_PORT` and `VLLM_HOST_IP` set the port and ip for vLLM's **internal usage**. It is not the port and ip for the API server. If you use `--host $VLLM_HOST_IP` and `--port $VLLM_PORT` to start the API server, it will not work.
+    Please note that `VLLM_PORT` and `VLLM_HOST_IP` set the port and ip for vLLM's **internal usage**. `VLLM_PORT` seeds internal port allocation; if multiple internal ports are needed, vLLM scans upward from that value for additional open ports. It is not the port and ip for the API server. If you use `--host $VLLM_HOST_IP` and `--port $VLLM_PORT` to start the API server, it will not work.
 
-    All environment variables used by vLLM are prefixed with `VLLM_`. **Special care should be taken for Kubernetes users**: please do not name the service as `vllm`, otherwise environment variables set by Kubernetes might conflict with vLLM's environment variables, because [Kubernetes sets environment variables for each service with the capitalized service name as the prefix](https://kubernetes.io/docs/concepts/services-networking/service/#environment-variables).
+    Most vLLM-specific environment variables are prefixed with `VLLM_`, but vLLM also reads a small number of standard or compatibility variables without that prefix, such as build/runtime toolchain variables, `CUDA_VISIBLE_DEVICES`, `XDG_CACHE_HOME`, and `DO_NOT_TRACK`. **Special care should be taken for Kubernetes users**: please do not name the service as `vllm`, otherwise environment variables set by Kubernetes might conflict with vLLM's environment variables, because [Kubernetes sets environment variables for each service with the capitalized service name as the prefix](https://kubernetes.io/docs/concepts/services-networking/service/#environment-variables).
 
 ```python
 --8<-- "vllm/envs.py:env-vars-definition"
