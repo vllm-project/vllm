@@ -3,6 +3,7 @@
 
 import asyncio
 import io
+import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -161,13 +162,25 @@ class OpenAIServingChat(OpenAIServing):
         self.python_tool = None
 
     def warmup(self) -> None:
-        self.renderer.warmup(
-            ChatParams(
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                chat_template_kwargs=self.default_chat_template_kwargs,
-            )
+        # Run renderer warmup off the startup critical path. HF preprocessor
+        # priming is CPU-bound and overlaps with concurrent GPU-side cudagraph
+        # capture / torch.compile work in the engine. We do NOT join on this
+        # thread — first MM request blocks on `_process_multimodal_async`
+        # (already executor-offloaded) which serializes naturally against the
+        # renderer's thread pool, and the existing try/except inside
+        # BaseRenderer.warmup treats failures as best-effort.
+        chat_params = ChatParams(
+            chat_template=self.chat_template,
+            chat_template_content_format=self.chat_template_content_format,
+            chat_template_kwargs=self.default_chat_template_kwargs,
         )
+        self._warmup_thread = threading.Thread(
+            target=self.renderer.warmup,
+            args=(chat_params,),
+            name="renderer-warmup",
+            daemon=True,
+        )
+        self._warmup_thread.start()
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
