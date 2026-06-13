@@ -34,11 +34,7 @@ from vllm.lora.layers import (
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -214,7 +210,8 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     In vLLM, all linear layers support LoRA.
     """
 
-    supported_lora_modules: set[str] = set()
+    packed_modules_mapping = get_packed_modules_mapping(model)
+    supported_lora_modules: set[str] = set(sum(packed_modules_mapping.values(), []))
     for name, module in model.named_modules():
         # get the embedding modules if the module's embedding_modules
         # is not empty.
@@ -224,18 +221,10 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
                 supported_lora_modules.add(name)
 
         if (
-            isinstance(module, QKVParallelLinear)
-            and module.checkpoint_format == "sharded"
+            isinstance(module, (LinearBase, MoERunner))
+            and (supported_name := name.split(".")[-1]) not in packed_modules_mapping
         ):
-            supported_lora_modules.update(["q", "k", "v"])
-        elif (
-            isinstance(module, MergedColumnParallelLinear)
-            and module.checkpoint_format == "sharded"
-        ):
-            shard_ids = [str(i) for i in range(len(module.output_sizes))]
-            supported_lora_modules.update(shard_ids)
-        elif isinstance(module, (LinearBase, MoERunner)):
-            supported_lora_modules.add(name.split(".")[-1])
+            supported_lora_modules.add(supported_name)
 
     return list(supported_lora_modules)
 
