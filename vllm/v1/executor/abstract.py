@@ -315,14 +315,25 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, tags: tuple[str, ...] | None = None):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        # Thread per-call ``tags`` through to the worker so selective-offload
+        # backends (CuMemTagBackend, RFC #34303) actually receive the
+        # override. Backends that don't support selective offload accept and
+        # ignore the kwarg.
+        self.collective_rpc("sleep", kwargs=dict(level=level, tags=tags))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
+        # Record what the worker was told to suspend. When ``tags`` is given,
+        # the engine is in the selective-offload regime: track exactly what
+        # was offloaded so ``wake_up`` validation matches the worker's
+        # backend-side bookkeeping.
+        if tags is not None:
+            self.sleeping_tags = set(tags)
+        else:
+            self.sleeping_tags = {"weights", "kv_cache"}
         self.is_sleeping = True
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
