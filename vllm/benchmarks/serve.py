@@ -790,6 +790,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    rate_gate_sends: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -959,8 +960,26 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    async def limited_request_func(request_func_input, session, pbar):
+    # Optional rate-gating of the actual sends, applied AFTER the concurrency
+    # semaphore is acquired. Pacing only task creation (get_request) is not enough
+    # when max_concurrency is set: requests queue on the semaphore and exit it in
+    # lumps, since a batch of synchronized completions frees many slots at once,
+    # so the freed sends all fire together and burst the engine above the target
+    # rate. Reserving an evenly spaced slot per send caps instantaneous arrivals
+    # at the target rate. Off by default so it does not alter arrival patterns
+    # (or override burstiness) unless explicitly requested; a send_rate of 0
+    # (self-timed traces) or inf is never gated.
+    send_next_ts = [0.0]  # next allowed send time (perf_counter); mutable cell
+
+    async def limited_request_func(request_func_input, session, pbar, send_rate):
         async with semaphore:
+            if rate_gate_sends and 0.0 < send_rate < float("inf"):
+                now = time.perf_counter()
+                # Reserve this slot atomically: no await between read and write.
+                slot = max(send_next_ts[0], now)
+                send_next_ts[0] = slot + 1.0 / send_rate
+                if slot > now:
+                    await asyncio.sleep(slot - now)
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
@@ -1026,7 +1045,10 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input=request_func_input, session=session, pbar=pbar
+                    request_func_input=request_func_input,
+                    session=session,
+                    pbar=pbar,
+                    send_rate=current_request_rate,
                 )
             )
         )
@@ -1593,6 +1615,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "results in a more uniform arrival of requests.",
     )
     parser.add_argument(
+        "--rate-gate-sends",
+        action="store_true",
+        help="Space the actual request sends to at most --request-rate, applied "
+        "after the --max-concurrency semaphore is acquired. Without this, requests "
+        "pace into the semaphore wait but exit it in lumps (synchronized "
+        "completions free many slots at once), bursting the engine above the "
+        "target rate. Off by default; only takes effect when request_rate is "
+        "finite. Note: it evens out arrivals and so overrides --burstiness.",
+    )
+    parser.add_argument(
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
@@ -2108,6 +2140,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        rate_gate_sends=args.rate_gate_sends,
     )
 
     # Save config and results to json
