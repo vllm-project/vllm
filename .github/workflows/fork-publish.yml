@@ -1,0 +1,115 @@
+# UNIVERSAL fork-publish workflow — BYTE-IDENTICAL across every fork.
+#
+# Mirrors upstream's released versioned tags to ghcr.io/${{ github.repository }}
+# (auto-lowercased by docker/metadata-action). Same image namespace as
+# build-from-source.yml — ONE concept, no per-fork vanity names.
+#
+# :latest is owned by build-from-source.yml (built from intarweb-dev).
+# This workflow handles VERSIONED tags only (1.2.3, 1.2, 1, etc).
+#
+# Codified in oss-contributing:ghcr-fork-mirror skill honest-fact #57.
+
+name: Fork-publish (mirror upstream → GHCR)
+
+on:
+  schedule:
+    - cron: '17 6 * * *'    # daily 06:17 UTC — well before sync-upstream's :00 cron
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Per-fork override via repo Variable IMAGE_NAME — used when upstream's published
+  # image name differs from our repo name (e.g. docker-autoheal repo → autoheal image).
+  # Falls back to repo name. ONE image per fork, shared with build-from-source.yml.
+  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ vars.IMAGE_NAME || github.event.repository.name }}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 🔑 Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔍 Discover upstream tags
+        id: tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # GitHub repo (for `gh release list` to discover versioned tags)
+          UPSTREAM_REPO="vllm-project/vllm"
+          # Docker image source (where imagetools mirrors FROM). Defaults to
+          # GitHub repo path; override via repo Variable UPSTREAM_IMAGE for forks
+          # where Docker Hub path differs (e.g. acmesh-official/acme.sh on GitHub
+          # but neilpang/acme.sh on Docker Hub).
+          UPSTREAM_IMAGE="${{ vars.UPSTREAM_IMAGE || format('{0}/{1}', 'vllm-project', 'vllm') }}"
+          RELEASES=$(gh release list --repo "$UPSTREAM_REPO" --limit 3 --json tagName \
+            --jq '.[].tagName | sub("^v"; "")' 2>/dev/null | tr '\n' ' ' || echo "")
+          # Fallback: if upstream uses raw git tags without GH Release objects
+          # (e.g. neo4j/docker-neo4j), gh release list returns empty. Use the
+          # git tags API and filter for version-shaped tags (must contain at least
+          # one N.N component; skips purely descriptive words like
+          # community/latest/enterprise/nightly/dev/main). Honest-fact #86.
+          if [ -z "$(echo "$RELEASES" | tr -d ' ')" ]; then
+            RELEASES=$(gh api "repos/$UPSTREAM_REPO/tags?per_page=10" \
+              --jq '.[].name' 2>/dev/null \
+              | grep -E '[0-9]+\.[0-9]+' \
+              | sed 's/^v//' \
+              | head -3 \
+              | tr '\n' ' ' || echo "")
+            [ -n "$(echo "$RELEASES" | tr -d ' ')" ] && \
+              echo "  (release-list was empty; fell back to git tags API)"
+          fi
+          MAJORS=$(for r in $RELEASES; do echo "${r%%.*}"; done | sort -u | tr '\n' ' ')
+          TAGS="$RELEASES $MAJORS"
+          echo "upstream_image=$UPSTREAM_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "  will mirror: $TAGS"
+
+      - name: 🪞 Mirror tags to GHCR
+        run: |
+          set -euo pipefail
+          UPSTREAM="${{ steps.tags.outputs.upstream_image }}"
+          # Lowercase the image (Docker requires lowercase repo names; metadata-action
+          # does this automatically for build-push, we do it manually here for imagetools).
+          TARGET=$(echo "${IMAGE}" | tr '[:upper:]' '[:lower:]')
+          NEWEST_VERSIONED=""
+          for tag in ${{ steps.tags.outputs.tags }}; do
+            [ -z "$tag" ] && continue
+            echo "::group::Mirror $UPSTREAM:$tag → $TARGET:$tag"
+            if docker buildx imagetools inspect "$UPSTREAM:$tag" >/dev/null 2>&1; then
+              docker buildx imagetools create --tag "$TARGET:$tag" "$UPSTREAM:$tag"
+              echo "  ✓ mirrored $tag"
+              # Track the first (newest) versioned tag for :latest aliasing below
+              if [ -z "$NEWEST_VERSIONED" ]; then NEWEST_VERSIONED="$tag"; fi
+            else
+              echo "  - upstream tag $tag does not exist, skipping"
+            fi
+            echo "::endgroup::"
+          done
+
+          # Also publish :latest pointing to the newest successfully-mirrored version,
+          # ONLY if this fork is plain-mirror (i.e. has no source-build). Source-built
+          # forks (vars.IS_SOURCE_BUILT=true) own :latest via build-from-source.yml,
+          # which builds from intarweb-dev (= upstream + open PRs cherry-picked + ops
+          # overlay). Letting fork-publish stomp :latest on those forks would clobber
+          # our patch stack with upstream-pristine, breaking the contract.
+          # Plain-mirror forks (var unset) keep the historical behavior — fork-publish
+          # IS the :latest source. Honest-fact #72.
+          if [ -n "$NEWEST_VERSIONED" ] && [ "${{ vars.IS_SOURCE_BUILT }}" != "true" ]; then
+            echo "::group::Alias :latest → :$NEWEST_VERSIONED"
+            docker buildx imagetools create --tag "$TARGET:latest" "$UPSTREAM:$NEWEST_VERSIONED"
+            echo "  ✓ :latest → :$NEWEST_VERSIONED"
+            echo "::endgroup::"
+          elif [ "${{ vars.IS_SOURCE_BUILT }}" = "true" ]; then
+            echo "  - skipping :latest alias (IS_SOURCE_BUILT=true; build-from-source.yml owns :latest)"
+          fi

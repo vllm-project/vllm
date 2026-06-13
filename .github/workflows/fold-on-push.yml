@@ -1,0 +1,64 @@
+# UNIVERSAL fold-on-push trigger — byte-identical across every Model B fork.
+#
+# Purpose: when a push lands on ANY branch other than the default branch or
+# intarweb-dev, dispatch sync-upstream.yml to re-fold + re-publish. This is
+# the event-driven counterpart to the hourly schedule — covers "new commit
+# landed on a PR head branch" and "operator pushed a new branch they're
+# about to PR" instantly, without waiting up to 1 hour.
+#
+# Why every-branch-except-defaults: PR head branches use varied naming
+# (feat/*, fix/*, test/*, docs/*, etc). Enumerating patterns means missing
+# new ones (build-overlay.yml's pattern misses feat/* and docs/*, MEASURED
+# 2026-06-10). Wildcard with explicit exclusions for self-trigger paths is
+# the simplest correct shape.
+#
+# Loop prevention: branches-ignore covers EVERY ref this workflow's downstream
+# (sync-upstream.yml) pushes — main, master, intarweb-dev. Pushes from the
+# hard-reset/ops-overlay/intarweb-dev-regen logic therefore do NOT re-fire
+# this workflow.
+#
+# Cadence bypass: the dispatch into sync-upstream.yml fires it as a
+# workflow_dispatch event. sync-upstream's cadence gate explicitly bypasses
+# for non-schedule events (see its ⏱️ Cadence gate step). So a push triggers
+# an immediate fold regardless of vars.SYNC_CADENCE_HOURS.
+#
+# Codified in oss-contributing:ghcr-fork-mirror skill honest-fact #64.
+
+name: Fold on PR head-branch push
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - master
+      - intarweb-dev
+
+permissions:
+  actions: write   # required for `gh workflow run` dispatch into sync-upstream
+
+jobs:
+  dispatch-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: 🌿 Dispatch sync-upstream (full re-fold)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          echo "  push detected on branch: ${{ github.ref_name }}"
+          echo "  triggering full re-fold via sync-upstream.yml"
+          # The workflow_dispatch event is whitelisted by sync-upstream's
+          # cadence gate — runs immediately, bypassing SYNC_CADENCE_HOURS.
+          # --ref points at the workflow file location (default branch),
+          # NOT the branch that was pushed. sync-upstream itself always
+          # operates on default branch + folds open PRs regardless of
+          # which branch triggered this dispatch.
+          gh workflow run "Sync from upstream + auto-regen intarweb-dev" \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.event.repository.default_branch }}"

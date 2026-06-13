@@ -1,0 +1,641 @@
+name: Sync from upstream + auto-regen intarweb-dev
+
+on:
+  schedule:
+    - cron: '0 * * * *'    # hourly wakeup. ACTUAL sync work is gated by a runtime cadence
+                            # check (vars.SYNC_CADENCE_HOURS, default=1). GitHub does NOT
+                            # allow expression substitution in on.schedule.cron — confirmed
+                            # via docs + empirical: 22 fleet forks all use literal crons.
+                            # So cadence is a GATE inside the job, not a schedule swap.
+                            # Dead upstreams set SYNC_CADENCE_HOURS=168 (weekly) etc.
+  workflow_dispatch:
+  workflow_call:           # invoked by fold-on-push.yml when a PR head branch is pushed
+                            # (push event on intarweb-side feat/*, fix/*, test/*, docs/* etc).
+                            # workflow_call bypasses the cadence gate — pushes always rebuild.
+
+permissions:
+  actions: write          # REQUIRED — the workflow_dispatch publish-trigger step 403s without it (honest-fact #27)
+  contents: write
+  pull-requests: read
+
+# One sync at a time per fork. Without this, a workflow_dispatch and a schedule
+# tick can race — both fold cleanly, both attempt force-with-lease push, one
+# wins, the loser fails the push with "failed to push some refs" and emits a
+# false-failure alert. Concurrency group serializes them; cancel-in-progress
+# false keeps the earlier run going (don't waste the cherry-pick work).
+# Burned 2026-06-10 during fleet rollout on vllm-jukebox.
+concurrency:
+  group: sync-upstream-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+
+      - name: 📥 Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Org-wide GitHub App token (1h short-lived, auto-rotated).
+          # Has workflows:write so it CAN push under .github/workflows/ —
+          # GITHUB_TOKEN can't (honest-fact #26). Replaces per-repo
+          # SYNC_WORKFLOW_TOKEN PATs campaign-wide (honest-fact #53).
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: ⏱️  Cadence gate (skip schedule wakeup if too soon)
+        id: cadence
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Per-fork cadence config: vars.SYNC_CADENCE_HOURS (default 1, i.e. every hourly
+          # wakeup runs). Increase for dead/slow upstreams: 24=daily, 168=weekly.
+          # Gate only suppresses SCHEDULE events — workflow_dispatch and workflow_call
+          # always run regardless of cadence (those are explicit asks).
+          #
+          # last_sync is derived live from `gh run list` (no persisted state needed),
+          # filtered to successful runs of this workflow. The current run is in-progress,
+          # so it doesn't count toward "last success".
+          set -euo pipefail
+          CADENCE="${{ vars.SYNC_CADENCE_HOURS || '1' }}"
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" != "schedule" ]; then
+            echo "  cadence gate: event=$EVENT (non-schedule) → bypass gate, running"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST=$(gh run list --workflow sync-upstream.yml --status success --limit 1 \
+                   --json createdAt --jq '.[0].createdAt // ""')
+          if [ -z "$LAST" ]; then
+            echo "  cadence gate: no prior successful sync — running"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NOW=$(date -u +%s)
+          LAST_TS=$(date -u -d "$LAST" +%s)
+          AGE_H=$(( (NOW - LAST_TS) / 3600 ))
+          if [ "$AGE_H" -ge "$CADENCE" ]; then
+            echo "  cadence gate: last sync ${AGE_H}h ago ≥ cadence ${CADENCE}h → running"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "  cadence gate: last sync ${AGE_H}h ago < cadence ${CADENCE}h → skipping wakeup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⚙️  Configure git identity
+        if: steps.cadence.outputs.skip != 'true'
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "intarweb sync bot"
+
+      - name: 🔗 Add upstream remote
+        if: steps.cadence.outputs.skip != 'true'
+        run: git remote add upstream https://github.com/vllm-project/vllm.git
+
+      - name: 🔄 Fetch upstream + all fork branches
+        if: steps.cadence.outputs.skip != 'true'
+        run: |
+          git fetch upstream main --tags
+          git fetch origin --prune
+
+      - name: 🔁 Hard-reset default branch to upstream + re-apply ops overlay
+        if: steps.cadence.outputs.skip != 'true'
+        run: |
+          # Burned 2026-06-09 with intarweb/bifrost: `git rebase upstream/dev`
+          # PRESERVES commits on our default branch that aren't on upstream —
+          # so when upstream FORCE-PUSHED and dropped 23 commits (a half-baked
+          # modelcatalogresolver plugin with incomplete go.sum), those commits
+          # got TRAPPED on intarweb/bifrost/main forever. Build started failing
+          # because go.sum referenced packages upstream had since removed.
+          # Honest-fact #62 (and vllm-bot diagnosis in claude/forker-queue/).
+          #
+          # Fix: hard-reset to upstream. Accept upstream's history as authoritative.
+          # Then re-apply our 4 workflow files + FORK_INFO.md (which legitimately
+          # live on main so schedules can fire) from the pre-reset working tree.
+          # This means intarweb/main = upstream/<branch> + exactly N legit ops
+          # commits — no untracked drift, no force-push survivors.
+
+          git checkout main
+
+          # Save ops overlay BEFORE the reset
+          mkdir -p /tmp/ops-overlay/.github/workflows
+          for F in .github/workflows/sync-upstream.yml \
+                   .github/workflows/build-from-source.yml \
+                   .github/workflows/build-overlay.yml \
+                   .github/workflows/fork-publish.yml \
+                   .github/workflows/update-fork-info.yml \
+                   .github/workflows/fold-on-push.yml \
+                   FORK_INFO.md; do
+            if [ -f "$F" ]; then
+              mkdir -p "/tmp/ops-overlay/$(dirname $F)"
+              cp -p "$F" "/tmp/ops-overlay/$F"
+            fi
+          done
+
+          # Hard-reset — drops any trapped-from-force-push commits
+          git reset --hard upstream/main
+
+          # Restore ops overlay
+          for F in .github/workflows/sync-upstream.yml \
+                   .github/workflows/build-from-source.yml \
+                   .github/workflows/build-overlay.yml \
+                   .github/workflows/fork-publish.yml \
+                   .github/workflows/update-fork-info.yml \
+                   .github/workflows/fold-on-push.yml \
+                   FORK_INFO.md; do
+            if [ -f "/tmp/ops-overlay/$F" ]; then
+              mkdir -p "$(dirname $F)"
+              cp -p "/tmp/ops-overlay/$F" "$F"
+            fi
+          done
+
+          if ! git status --porcelain -- .github/workflows FORK_INFO.md | grep -q .; then
+            echo "  no ops overlay to re-apply (none existed pre-reset)"
+          else
+            git add -A .github/workflows
+            [ -f FORK_INFO.md ] && git add FORK_INFO.md
+            git commit -m "ci: re-apply ops overlay after hard-reset to upstream/main"
+          fi
+
+          git push --force-with-lease origin main
+
+      - name: 🔍 Discover open PRs from intarweb to upstream
+        id: prs
+        if: steps.cadence.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Use GitHub's search/issues API instead of paginating /pulls?state=open.
+          # The old approach paginated EVERY open PR on upstream then jq-filtered
+          # client-side: on NousResearch/hermes-agent (MEASURED 13,295 open PRs
+          # 2026-06-10), that's 133 API calls per sync just to find our 1-2.
+          # search/issues with `author:terafin` gives the answer in 1 call.
+          #
+          # Caveats verified MEASURED on intarweb/vllm 2026-06-10 (6/6 parity vs
+          # paginate):
+          #   - All intarweb-authored upstream PRs are by `terafin` today. If a
+          #     co-contributor opens one, broaden the author qualifier OR fall
+          #     back to a per-PR head.repo.owner.login == intarweb verification.
+          #   - search/issues doesn't return head.ref; we fetch it per result
+          #     (N small extra calls, where N = our PR count, typically 1-6).
+          #   - The result set is far below search API's 1000-result cap.
+          #
+          # Defensive: after the search, re-verify each PR's head.repo.owner.login
+          # before adding. Drops anything that shouldn't be cherry-picked even if
+          # search returns extras.
+          # SEMANTIC CONTRACT: this filter is `author:<user>` (PRs THAT user authored,
+          # from anywhere), NOT `head:<org>` (PRs from any author whose branch lives
+          # in that org). GitHub's search API has no head-org qualifier; only REST
+          # /pulls supports head=user:branch (literal, no wildcard). These two
+          # filters coincide TODAY because every intarweb PR is both terafin-authored
+          # AND from an intarweb branch, but they diverge the first time a
+          # co-contributor opens a PR from an intarweb branch under a different
+          # account — that PR would be silently MISSED by this discovery.
+          #
+          # Defense: the per-PR re-check below enforces head.repo.owner.login ==
+          # ${{ github.repository_owner }}, so the search can never accept a PR from
+          # the wrong head repo. It just can't see beyond the author qualifier.
+          #
+          # vars.SYNC_PR_AUTHOR override: defaults to `terafin` (current sole author).
+          # If a co-contributor joins, set this var to a space-separated list and the
+          # query expands. Empty value → fall back to defensive: full /pulls scan
+          # (slow, accurate). Honest-fact #65.
+          PR_AUTHORS="${{ vars.SYNC_PR_AUTHOR || 'terafin' }}"
+          : > /tmp/pr-nums.txt
+          if [ -z "$PR_AUTHORS" ]; then
+            # Fallback: paginate /pulls and filter client-side. Slow on big upstreams
+            # but provably complete.
+            gh api --paginate "repos/vllm-project/vllm/pulls?state=open&per_page=100" \
+              --jq '.[] | select(.head.repo.owner.login == "${{ github.repository_owner }}") | .number' \
+              >> /tmp/pr-nums.txt
+          else
+            for AUTH in $PR_AUTHORS; do
+              gh api "search/issues?q=repo:vllm-project/vllm+is:pr+is:open+author:${AUTH}&per_page=100" \
+                --jq '.items[].number' >> /tmp/pr-nums.txt
+            done
+            sort -u /tmp/pr-nums.txt -o /tmp/pr-nums.txt
+          fi
+          : > /tmp/prs.txt
+          while read -r num; do
+            [ -z "$num" ] && continue
+            META=$(gh api "repos/vllm-project/vllm/pulls/$num" \
+              --jq '"\(.head.repo.owner.login)|\(.head.ref)|\(.title)"' 2>/dev/null)
+            OWN="${META%%|*}"
+            REST="${META#*|}"
+            REF="${REST%%|*}"
+            TITLE="${REST#*|}"
+            if [ "$OWN" != "${{ github.repository_owner }}" ]; then
+              echo "  - skipping PR #$num — head.repo.owner=$OWN (expected ${{ github.repository_owner }})"
+              continue
+            fi
+            echo "$num $REF $TITLE" >> /tmp/prs.txt
+          done < /tmp/pr-nums.txt
+          sort -n -o /tmp/prs.txt /tmp/prs.txt
+
+          if [ ! -s /tmp/prs.txt ]; then
+            echo "  No open PRs from ${{ github.repository_owner }} to upstream — intarweb-dev will == main"
+          else
+            echo "  Open PRs to cherry-pick onto intarweb-dev:"
+            sed 's/^/    /' /tmp/prs.txt
+          fi
+
+      - name: 🚨 Warn on intarweb-dev workflow drift (about to be wiped)
+        # The regen step below does `git checkout -B intarweb-dev main`
+        # which OVERWRITES intarweb-dev with main's tree, then re-cherry-picks
+        # the open-PR set. Any workflow edits made directly to intarweb-dev that
+        # aren't in main AND aren't in an open PR's cherry-pick set get SILENTLY
+        # WIPED here.
+        #
+        # Live burn 2026-06-11 on intarweb/vllm: prior agent committed
+        # `f1bdf3e33` (TORCH_CUDA_ARCH_LIST trim + 720min timeout) to
+        # intarweb-dev directly. The next sync regen wiped it without alarm; six
+        # subsequent build attempts ran with the stale 3-arch list, all
+        # cancelled at the 360-min wall. Honest-fact #97.
+        #
+        # The wipe IS the feature (uniformity contract). The silence is the
+        # bug. This step makes it visible BEFORE the wipe runs: yellow
+        # ::warning:: in the Actions UI + diff in the run log. Operator sees
+        # "I edited intarweb-dev directly and the sync is about to undo it"
+        # and can re-edit on main (where it survives via the ops-overlay
+        # save/restore above).
+        if: steps.cadence.outputs.skip != 'true'
+        run: |
+          git fetch origin intarweb-dev 2>/dev/null || {
+            echo "  (no remote intarweb-dev yet — first sync, nothing to wipe)"
+            exit 0
+          }
+          ANY_DRIFT=0
+          for F in .github/workflows/sync-upstream.yml \
+                   .github/workflows/build-from-source.yml \
+                   .github/workflows/build-overlay.yml \
+                   .github/workflows/fork-publish.yml \
+                   .github/workflows/update-fork-info.yml \
+                   .github/workflows/fold-on-push.yml \
+                   FORK_INFO.md; do
+            # Get both sides; skip cleanly if either lacks the file.
+            MAIN_BLOB=$(git show "HEAD:$F" 2>/dev/null || echo "")
+            DEV_BLOB=$(git show "origin/intarweb-dev:$F" 2>/dev/null || echo "")
+            if [ -z "$MAIN_BLOB" ] && [ -z "$DEV_BLOB" ]; then
+              continue
+            fi
+            if [ "$MAIN_BLOB" = "$DEV_BLOB" ]; then
+              continue
+            fi
+            ANY_DRIFT=1
+            echo "::warning::ops-overlay restore will wipe intarweb-dev's $F — differs from main."
+            echo "  If you intended this drift to persist across syncs, commit it to MAIN."
+            echo "  Diff (intarweb-dev → main, head -20):"
+            diff <(echo "$DEV_BLOB") <(echo "$MAIN_BLOB") 2>/dev/null | head -20 | sed 's/^/    /'
+            echo ""
+          done
+          if [ "$ANY_DRIFT" = "0" ]; then
+            echo "  ✓ no intarweb-dev ops-overlay drift detected"
+          fi
+
+      - name: 🌿 Regenerate intarweb-dev = main + open-PR cherry-picks
+        id: regen
+        if: steps.cadence.outputs.skip != 'true'
+        # FORK_CARRIED_COMMITS step (below the PR loop) calls `gh api` to
+        # check carrier-PR / upstream-PR state. GITHUB_TOKEN read scope is
+        # sufficient — we only read PR state, never write here.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout -B intarweb-dev main
+          while read num branch title; do
+            [ -z "$num" ] && continue
+            echo "::group::PR #$num — $branch ($title)"
+            git fetch origin "$branch" || { echo "  ✗ failed to fetch origin/$branch"; exit 1; }
+            # Range "intarweb-dev..origin/$branch" = commits on branch not yet on intarweb-dev.
+            # As we apply more PRs, intarweb-dev grows; later branches only contribute their NEW commits.
+            # If a PR was merged upstream, its commits are now on main (and thus intarweb-dev), so this is empty.
+            COMMITS=$(git log --reverse --format=%H "intarweb-dev..origin/$branch")
+            if [ -z "$COMMITS" ]; then
+              echo "  - no unique commits — already on intarweb-dev (likely merged upstream); skipping"
+            else
+              for c in $COMMITS; do
+                # -X theirs: when a PR's content is a superset of an earlier PR's content
+                # (common when PRs are stacked), take the cherry-picked version. Honest-fact #54.
+                # -m 1: tolerate upstream-merge-commits (honest-fact #45).
+                # --allow-empty --keep-redundant-commits: tolerate the no-op case where the
+                # commit's changes are already present (e.g. via another PR's superset).
+                if ! git cherry-pick -X theirs -m 1 --allow-empty --keep-redundant-commits "$c" 2>/dev/null; then
+                  # FAIL-CLOSED (changed 2026-06-10, replacing Heal C silent-drop).
+                  # The previous behavior — `git cherry-pick --abort; break; continue with next PR`
+                  # silently dropped the conflicting PR and kept publishing :latest WITHOUT it.
+                  # Consumers pinning :latest had no signal that PR #N was being silently
+                  # excluded. New behavior: FAIL THE JOB. Subsequent steps (force-push,
+                  # build dispatch) do not run. The previous :latest stays in place, serving.
+                  # Operator notification: ::error:: annotation in the run, the run shows
+                  # red in the actions tab, and portfolio-audit's daily digest catches
+                  # sync_conclusion=="failure" (portfolio-audit.yml line 147 "FAILED_SYNC").
+                  # Operator must manually rebase the offending PR head branch and force-push
+                  # it before the next sync will succeed.
+                  echo "::error::FOLD FAILED — PR #$num cherry-pick conflict on $c survived -X theirs. intarweb-dev WILL NOT be advanced; :latest remains at last-good. Rebase $branch onto upstream/main + push to recover."
+                  git cherry-pick --abort || true
+                  exit 1
+                fi
+              done
+              echo "  ✓ applied $(echo "$COMMITS" | wc -w) commits from PR #$num"
+            fi
+            echo "::endgroup::"
+          done < /tmp/prs.txt
+
+          # FORK_CARRIED_COMMITS — re-apply long-lived fork-carried patches
+          # that aren't bound to an OPEN PR's lifecycle. Honest-fact #98.
+          #
+          # Why this exists: the open-PR cherry-pick loop above only re-applies
+          # commits that live on terafin-authored OPEN PRs. If the carrier PR
+          # closes (unmerged OR superseded), the cherry-pick stops happening
+          # next sync and the fork SILENTLY REGRESSES to upstream/main's
+          # behavior. That's catastrophic for patches we depend on at runtime
+          # (e.g. cumem accounting fix for KV-OOM-free wakes).
+          #
+          # Format (per-fork repo Variable FORK_CARRIED_COMMITS, multi-line,
+          # one record per line, pipe-separated):
+          #     <commit-sha>|<upstream-pr-to-watch>|<optional-carrier-pr>|<optional-disposition>
+          #
+          # Fields:
+          #   commit-sha            short or long SHA on the fork's working tree
+          #   upstream-pr-to-watch  PR # in upstream that, when MERGED, makes
+          #                         this patch redundant. Step emits a yellow
+          #                         WARNING when merged (operator should drop
+          #                         the entry); harmless empty cherry-pick if
+          #                         left in (upstream's version is already in
+          #                         the hard-reset main, so cherry-pick is no-op).
+          #   carrier-pr            optional. PR # under our fork that hosts
+          #                         this rebase. If carrier is CLOSED-UNMERGED,
+          #                         this step FAILS LOUDLY rather than silently
+          #                         dropping the patch — UNLESS disposition is
+          #                         skip-on-conflict (see below).
+          #   disposition           optional. Default `fail-closed` (current
+          #                         behavior — used for OUR PRs that we own and
+          #                         are responsible for rebasing). Set to
+          #                         `skip-on-conflict` for SPECULATIVE third-
+          #                         party carries (PRs from other authors that
+          #                         we ride for early bug coverage). Behavior on
+          #                         conflict OR carrier-closed-unmerged:
+          #                           - fail-closed: emit ::error::, abort sync,
+          #                             :latest stays at last-good. Operator
+          #                             must intervene.
+          #                           - skip-on-conflict: emit ::warning::, drop
+          #                             the carry this run, continue regen with
+          #                             remaining carries. Wheel-resolver still
+          #                             runs. Builds advance with reduced
+          #                             coverage. Re-attempts next sync if the
+          #                             upstream PR rebases. Honest-fact #100.
+          #
+          # When to use skip-on-conflict: a PR from a third-party author you
+          # don't have rebase-rights on. Silently dropping is the SAME outcome
+          # as "we never picked it up" — strictly safer than blocking the whole
+          # pipeline on a carry we don't own.
+          #
+          # Examples (intarweb/vllm at 2026-06-12):
+          #     # Our PRs — fail-closed (default, current behavior)
+          #     c9427de62|37111|45208     # cumem OOM fix; we own #45208
+          #     88af8e6b0|45097           # /health/decode; we own #45097
+          #
+          #     # Third-party speculative — skip-on-conflict
+          #     54a52c948|45268|45326|skip-on-conflict   # waynehacking8's hang fix
+          #     f61febf66|45268|45363|skip-on-conflict   # AlejandroParedesLT's drain fix
+          #
+          # Comments (lines starting with #) and blank lines are skipped.
+          if [ -n "${{ vars.FORK_CARRIED_COMMITS }}" ]; then
+            echo "::group::FORK_CARRIED_COMMITS — re-applying long-lived patches"
+            echo "${{ vars.FORK_CARRIED_COMMITS }}" > /tmp/fork-carried.txt
+            while IFS='|' read -r CSHA UPSTREAM_PR CARRIER_PR DISPOSITION; do
+              CSHA="$(echo "$CSHA" | xargs)"
+              UPSTREAM_PR="$(echo "$UPSTREAM_PR" | xargs)"
+              CARRIER_PR="$(echo "$CARRIER_PR" | xargs)"
+              DISPOSITION="$(echo "${DISPOSITION:-}" | xargs)"
+              # Skip blanks + comments
+              [ -z "$CSHA" ] && continue
+              case "$CSHA" in \#*) continue ;; esac
+              # Default disposition: fail-closed (preserves prior behavior for
+              # all existing 3-column entries). Only `skip-on-conflict` enables
+              # the new degraded-but-non-blocking path.
+              [ -z "$DISPOSITION" ] && DISPOSITION="fail-closed"
+
+              # Check carrier-PR state (if specified). On closed-unmerged:
+              #   - fail-closed → fail loudly (silent-regression class the
+              #     mechanism exists to prevent for OWNED carries).
+              #   - skip-on-conflict → warn + drop (third-party PRs we don't
+              #     own; same outcome as never picking it up; safer than
+              #     blocking the pipeline). Operator should remove the entry
+              #     when convenient.
+              if [ -n "$CARRIER_PR" ]; then
+                CARRIER_STATE=$(gh api "repos/vllm-project/vllm/pulls/$CARRIER_PR" \
+                  --jq '"\(.state)|\(.merged)"' 2>/dev/null || echo "unknown|")
+                C_STATE="${CARRIER_STATE%%|*}"
+                C_MERGED="${CARRIER_STATE#*|}"
+                if [ "$C_STATE" = "closed" ] && [ "$C_MERGED" != "true" ]; then
+                  if [ "$DISPOSITION" = "skip-on-conflict" ]; then
+                    echo "::warning::FORK_CARRIED_COMMITS: speculative carry $CSHA — carrier PR #$CARRIER_PR is CLOSED-UNMERGED. Skipping this run (disposition=skip-on-conflict). Remove the entry from FORK_CARRIED_COMMITS when convenient."
+                    continue
+                  fi
+                  echo "::error::FORK_CARRIED_COMMITS: carrier PR #$CARRIER_PR for commit $CSHA is CLOSED-UNMERGED. Without intervention this patch would silently drop from the next image. ABORTING sync to surface the regression."
+                  echo "::error::  Fix: (a) re-open #$CARRIER_PR and rebase, OR (b) file a new carrier PR and update FORK_CARRIED_COMMITS to point at it, OR (c) if the patch is genuinely no-longer-needed, remove the entire entry from FORK_CARRIED_COMMITS, OR (d) if this is a speculative third-party carry you don't own, change disposition to skip-on-conflict."
+                  exit 1
+                fi
+              fi
+
+              # Check upstream-PR state (always required) — warn on merged
+              # (operator should drop the entry; the cherry-pick will be an
+              # empty no-op below).
+              UPSTREAM_STATE=$(gh api "repos/vllm-project/vllm/pulls/$UPSTREAM_PR" \
+                --jq '"\(.state)|\(.merged)"' 2>/dev/null || echo "unknown|")
+              U_STATE="${UPSTREAM_STATE%%|*}"
+              U_MERGED="${UPSTREAM_STATE#*|}"
+              if [ "$U_MERGED" = "true" ]; then
+                echo "::warning::FORK_CARRIED_COMMITS: upstream PR #$UPSTREAM_PR has MERGED. Commit $CSHA is now redundant — please remove this entry from FORK_CARRIED_COMMITS. Cherry-pick below will no-op."
+              fi
+
+              # Apply (or empty no-op if already present from main or open-PR loop).
+              if git cherry-pick -X theirs -m 1 --allow-empty --keep-redundant-commits "$CSHA" 2>/dev/null; then
+                echo "  ✓ applied carried commit $CSHA (upstream-pr=$UPSTREAM_PR carrier=$CARRIER_PR disposition=$DISPOSITION)"
+              else
+                git cherry-pick --abort || true
+                if [ "$DISPOSITION" = "skip-on-conflict" ]; then
+                  # Speculative third-party carry rotted (e.g. another upstream
+                  # PR merged that touches the same files). Drop this run; sync
+                  # continues with remaining carries; wheel-resolver runs as
+                  # normal; :latest can still advance for unrelated reasons.
+                  # Re-attempts next sync (author may rebase upstream-side).
+                  echo "::warning::FORK_CARRIED_COMMITS: speculative carry $CSHA (upstream PR #$UPSTREAM_PR) conflicts with current main this cycle — skipping. Re-attempts on next sync after author rebases."
+                  continue
+                fi
+                # default: fail-closed. Same posture as the open-PR loop.
+                echo "::error::FORK_CARRIED_COMMITS: cherry-pick conflict on $CSHA survived -X theirs. intarweb-dev WILL NOT be advanced; :latest remains at last-good. Operator must rebase the carrier (#$CARRIER_PR) or update FORK_CARRIED_COMMITS to a current SHA. (For speculative third-party carries you don't own, set disposition=skip-on-conflict to degrade gracefully instead.)"
+                exit 1
+              fi
+            done < /tmp/fork-carried.txt
+            echo "::endgroup::"
+          fi
+
+          # Did intarweb-dev's TREE actually change vs the existing remote?
+          # Compare trees (content), not SHAs (which differ each run because
+          # cherry-pick rewrites committer timestamps).
+          if git rev-parse origin/intarweb-dev^{tree} >/dev/null 2>&1; then
+            OLD_TREE=$(git rev-parse origin/intarweb-dev^{tree})
+            NEW_TREE=$(git rev-parse intarweb-dev^{tree})
+            if [ "$OLD_TREE" = "$NEW_TREE" ]; then
+              echo "  - intarweb-dev tree unchanged; skipping push + publish trigger"
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "  - intarweb-dev tree changed; will push + trigger publish"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "  - intarweb-dev did not exist on origin; will push + trigger publish"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🛡️  Carry-drift guard (precompiled-wheel forks only)
+        # Forks that opt into the upstream-prebuilt-wheel build path (via
+        # PRECOMPILED_WHEEL_BASE_URL Variable) MUST keep their carry stack
+        # 100% non-compiled. If a cherry-pick or FORK_CARRIED_COMMIT introduces
+        # a compiled-code file, the fork's Python carries would be layering
+        # on stale upstream-compiled-`.so`s and produce wrong binaries silently.
+        # This guard fails the sync loud at the moment of regression rather
+        # than at runtime. No-op for forks without the master Variable set.
+        #
+        # Detected file extensions: .cu, .cuh, .cpp, .cxx, .cc, .c, .hpp, .hxx,
+        # .hh, .h, .pyx, .pxd, .s, .S (broadened from the initial .cu/.cpp/.h/.cuh
+        # after architect-review #1 flagged the gap). --diff-filter=AM excludes
+        # pure deletions and renames so an upstream `.cu` rename doesn't false-fire.
+        #
+        # build-system hint files (setup.py / CMakeLists.txt / pyproject.toml /
+        # *.cmake) emit a WARNING but don't fail — a Python-only carry that
+        # touches setup.py to register a `build_ext` hook IS a precompiled-path
+        # invalidator, but most setup.py edits are harmless.
+        #
+        # Escape valve: set CARRY_DRIFT_ALLOW=true on the fork to bypass with a
+        # loud warning (use for one-shot testing of a compiled-code cherry-pick
+        # under operator supervision; CLEAR THE VARIABLE after).
+        # Honest-fact #99.
+        if: steps.cadence.outputs.skip != 'true' && success() && vars.PRECOMPILED_WHEEL_BASE_URL != ''
+        run: |
+          set -euo pipefail
+          DRIFT=$(git diff --name-only --diff-filter=AM "upstream/main..intarweb-dev" \
+                    | grep -iE '\.(cu|cuh|cpp|cxx|cc|c|hpp|hxx|hh|h|pyx|pxd|s|S)$' || true)
+          BUILD_HINTS=$(git diff --name-only --diff-filter=AM "upstream/main..intarweb-dev" \
+                    | grep -E '(^|/)setup\.py$|(^|/)pyproject\.toml$|CMakeLists\.txt$|\.cmake$' || true)
+          if [ -n "$BUILD_HINTS" ]; then
+            echo "::warning::carry stack touches build-system files (setup.py / pyproject.toml / CMake) — review whether they re-enable C++/CUDA compilation:"
+            echo "$BUILD_HINTS" | sed 's/^/    /'
+          fi
+          if [ -n "$DRIFT" ]; then
+            if [ "${{ vars.CARRY_DRIFT_ALLOW || '' }}" = "true" ]; then
+              echo "::warning::CARRY-DRIFT detected but CARRY_DRIFT_ALLOW=true is set — proceeding under operator override. CLEAR the variable after this sync:"
+              echo "$DRIFT" | sed 's/^/    /'
+            else
+              echo "::error::CARRY-DRIFT: precompiled-wheel forks require 100% non-compiled carries — these compiled-code files appeared in intarweb-dev:"
+              echo "$DRIFT" | sed 's/^/    /'
+              echo "::error::Recovery options (pick one):"
+              echo "::error::  (a) revert the offending commit and rebase the carry"
+              echo "::error::  (b) clear PRECOMPILED_WHEEL_BASE_URL to fall back to source build (slow but correct)"
+              echo "::error::  (c) set CARRY_DRIFT_ALLOW=true on this fork to bypass once under operator override (clear after)"
+              echo "::error::  (d) test on a feature branch first by clearing PRECOMPILED_WHEEL_BASE_URL temporarily on a fork clone"
+              exit 1
+            fi
+          else
+            echo "  ✓ carry-drift guard clean — no compiled-code carries"
+          fi
+
+      - name: 🎯 Resolve precompiled wheel SHA + variant (precompiled-wheel forks only)
+        # Writes PRECOMPILED_WHEEL_COMMIT = current upstream HEAD SHA so the
+        # build workflow's bargs synth step picks it up. Does NOT pre-verify
+        # the wheel URL — wheels.vllm.ai (and presumably similar wheel CDNs)
+        # 403 on directory probes, making sync-time availability checks
+        # impossible without knowing the exact .whl filename convention. The
+        # real safety net is the fork-side Dockerfile carry's hard fail-loud
+        # contract (vllm-bot hardening req #3): when VLLM_USE_PRECOMPILED=1
+        # is set but the wheel fetch fails at build time, the build exits
+        # non-zero immediately rather than silently falling through to a
+        # multi-hour source compile. Honest-fact #99/#103.
+        #
+        # Updates the PRECOMPILED_WHEEL_VARIANT only if the operator's
+        # PRECOMPILED_WHEEL_VARIANT_CHAIN suggests a different first-choice
+        # (no — actually we just trust the operator's VARIANT setting).
+        # Variant fallback would require build-time re-attempt which the
+        # Dockerfile carry can implement; the resolver writes single VARIANT.
+        #
+        # Freeze mode: if PRECOMPILED_WHEEL_COMMIT_FROZEN=true, the resolver
+        # skips writes entirely (operator pinned for testing or rollback).
+        #
+        # gh variable set wrapped survivable: if the SYNC_APP token lacks
+        # `Variables: Write` permission, the call 403s but the sync continues
+        # with a warning rather than hard-failing the entire fork's sync.
+        # Operator grants the app permission, next sync succeeds.
+        #
+        # No-op for forks without the master Variable set. Honest-fact #99/#103.
+        if: steps.cadence.outputs.skip != 'true' && success() && vars.PRECOMPILED_WHEEL_BASE_URL != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail   # NOT -e — we handle variable-write failures survivably below
+          SHA=$(git rev-parse upstream/main)
+          CUR_COMMIT="${{ vars.PRECOMPILED_WHEEL_COMMIT }}"
+          FROZEN="${{ vars.PRECOMPILED_WHEEL_COMMIT_FROZEN || '' }}"
+          CUR_VARIANT="${{ vars.PRECOMPILED_WHEEL_VARIANT }}"
+
+          if [ "$FROZEN" = "true" ]; then
+            echo "::warning::PRECOMPILED_WHEEL_COMMIT_FROZEN=true — skipping wheel-SHA resolution. Pinned to commit=$CUR_COMMIT variant=$CUR_VARIANT."
+            exit 0
+          fi
+
+          # Helper: survivable variable-set. Echoes the run URL into the audit log.
+          set_var() {
+            local name="$1" value="$2"
+            if gh variable set "$name" -b "$value" 2>&1; then
+              echo "    ✓ set $name=$value (audit: $RUN_URL)"
+              return 0
+            else
+              echo "::warning::failed to write $name (likely SYNC_APP lacks 'Variables: Write' permission — grant via app settings to enable wheel-SHA auto-management). Continuing with prior value."
+              return 1
+            fi
+          }
+
+          echo "  setting PRECOMPILED_WHEEL_COMMIT=$SHA (variant=$CUR_VARIANT — build-time will fail-loud if wheel not actually published per fork-side Dockerfile carry contract)"
+          if [ "$CUR_COMMIT" != "$SHA" ]; then
+            set_var PRECOMPILED_WHEEL_COMMIT "$SHA" || true
+            echo "    → PRECOMPILED_WHEEL_COMMIT: $CUR_COMMIT → $SHA"
+          else
+            echo "    → PRECOMPILED_WHEEL_COMMIT already at $SHA, no change"
+          fi
+
+      - name: 📤 Force-push intarweb-dev
+        # Gated on (a) cadence-not-skipped, (b) regen succeeded (implicit via default
+        # `success()`), (c) tree actually changed. If the cherry-pick loop hit a
+        # conflict, regen exits 1 → this step does not run → prior intarweb-dev stays
+        # at last-good → :latest is not republished → fail-closed contract holds.
+        if: steps.cadence.outputs.skip != 'true' && success() && steps.regen.outputs.changed == 'true'
+        run: git push --force-with-lease origin intarweb-dev
+
+      - name: 🚀 Trigger publish on intarweb-dev
+        if: steps.cadence.outputs.skip != 'true' && success() && steps.regen.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Required because GitHub blocks the normal push→workflow cascade
+          # when the push is authored by GITHUB_TOKEN (anti-loop safety rule).
+          # workflow_dispatch IS allowed to fire from GITHUB_TOKEN, so we
+          # explicitly dispatch the publish workflow here. UNIVERSAL name
+          # — every Model B fork's build workflow is named exactly this
+          # via the build-from-source.yml template (honest-fact #52).
+          gh workflow run "Build from source → GHCR" --repo ${{ github.repository }} --ref intarweb-dev || true
+
+      - name: ✅ Show final state
+        if: steps.cadence.outputs.skip != 'true' && success()
+        run: |
+          echo "  main HEAD: $(git log main --oneline -1)"
+          echo "  intarweb-dev HEAD:  $(git log intarweb-dev --oneline -1)"
+          echo "  intarweb-dev commits ahead of upstream/main:"
+          git log --oneline upstream/main..intarweb-dev | sed 's/^/    /' || true

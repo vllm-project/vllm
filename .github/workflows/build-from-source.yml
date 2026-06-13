@@ -1,0 +1,316 @@
+# UNIVERSAL build-from-source workflow — BYTE-IDENTICAL across every Model B fork.
+#
+# DO NOT customize this file per-fork. If a fork needs different behavior, use
+# GitHub Actions repository Variables (Settings → Secrets and variables →
+# Actions → Variables):
+#
+#   DOCKERFILE      override auto-detected path (default: root Dockerfile, then shallowest)
+#   BUILD_CONTEXT   override docker build context (default: . — repo root)
+#   PLATFORMS       override platform list (default: linux/amd64,linux/arm64)
+#   BUILD_ARGS      multi-line KEY=VALUE pairs passed to docker build (default: none).
+#                   Used by forks whose upstream Dockerfile declares an ARG with no
+#                   default that the upstream's own CI passes externally (e.g.
+#                   tika-docker's TIKA_VERSION via republish-images.sh).
+#   IS_SOURCE_BUILT job-level gate: build runs only when set to 'true'. Plain-mirror
+#                   forks set 'false' so the workflow file stays installed (uniform
+#                   scaffolding) but the job no-ops; fork-publish.yml owns :latest.
+#   FREE_DISK_SPACE opt-in (set 'true') for forks whose images blow past the
+#                   14GB default disk on ubuntu-latest (vllm-class CUDA images).
+#                   Adds ~3 min per build; reclaims ~30GB by removing pre-installed
+#                   Android SDK / .NET / Haskell / large npm caches.
+#   RUNS_ON         per-fork runner-label override (default: "ubuntu-latest").
+#                   JSON-encoded — single string for one label, or JSON array for
+#                   multiple. Set to '["self-hosted","lan-docker","big-build"]'
+#                   for forks that exceed hosted-runner capacity (vllm).
+#   BUILD_TIMEOUT_MINUTES  per-fork job-timeout override (default 360, the
+#                   GitHub-hosted-runner ceiling). Raise as a ONE-SHOT bootstrap
+#                   on forks whose first cold-cache build exceeds 360min (vllm
+#                   single-arch CUDA: ~5-6h first run, ~30-45m once :buildcache
+#                   is populated). Revert to default after first green run.
+#                   Honest-fact #97.
+#   PRECOMPILED_WHEEL_BASE_URL  master switch for the upstream-prebuilt-wheel
+#                   build path. Set to e.g. `https://wheels.vllm.ai` on forks
+#                   whose upstream publishes per-commit prebuilt wheels AND
+#                   whose carry stack is 100% non-compiled (Python/MD only).
+#                   When set, the build passes ${PREFIX}_USE_PRECOMPILED=1 + the
+#                   resolved commit + variant as build-args, and the fork's
+#                   Dockerfile carry can early-out the local C++/CUDA compile.
+#                   When unset (default for all forks), build path is unchanged.
+#                   sync-upstream.yml writes PRECOMPILED_WHEEL_COMMIT after
+#                   curl-verifying the wheel exists; if no variant in
+#                   PRECOMPILED_WHEEL_VARIANT_CHAIN publishes, sync CLEARS
+#                   PRECOMPILED_WHEEL_COMMIT to empty so the build falls back
+#                   to source compile rather than serving stale-ABI binaries
+#                   (the only safe semantics — a wheel built against SHA-N-1
+#                   with Python carries against SHA-N's APIs segfaults at
+#                   runtime with no build-time signal). Honest-fact #99.
+#   PRECOMPILED_WHEEL_COMMIT    SHA of the upstream commit whose wheel to fetch.
+#                   Managed by sync-upstream — operator should NOT set this
+#                   directly UNLESS PRECOMPILED_WHEEL_COMMIT_FROZEN=true (then
+#                   sync respects the manual pin). Empty when no wheel is
+#                   currently available; build falls back to source compile.
+#   PRECOMPILED_WHEEL_VARIANT   wheel build variant (e.g. `cu130`, `cu128`).
+#                   Operator-set initial value; sync-upstream updates in-place
+#                   when the variant chain falls through to a different one
+#                   (unless PRECOMPILED_WHEEL_COMMIT_FROZEN=true).
+#   PRECOMPILED_WHEEL_VARIANT_CHAIN  optional. Space-separated fallback list
+#                   (e.g. `cu130 cu128`). Sync-upstream tries each in order;
+#                   first one whose wheel exists wins. Defaults to the single
+#                   PRECOMPILED_WHEEL_VARIANT value.
+#   PRECOMPILED_WHEEL_BUILD_ARG_PREFIX  prefix for the synthesized build-arg
+#                   env names. Default `VLLM` — synthesizes VLLM_USE_PRECOMPILED,
+#                   VLLM_PRECOMPILED_WHEEL_COMMIT, etc. For forks whose upstream
+#                   uses a different convention (MinerU, torchao, future), set
+#                   to that project's prefix (e.g. `MINERU`) → MINERU_USE_PRECOMPILED.
+#                   Keeps the template generic across vendor opt-ins.
+#   PRECOMPILED_WHEEL_COMMIT_FROZEN  set to `true` to pin
+#                   PRECOMPILED_WHEEL_COMMIT/_VARIANT manually — sync-upstream
+#                   will NOT overwrite them when set. Use for testing a specific
+#                   wheel SHA, or for rolling back from a bad upstream commit.
+#                   Default unset (sync auto-manages).
+#
+# If a fork's Dockerfile needs out-of-context pre-build steps, the right fix is
+# to cherry-pick a multi-stage self-contained Dockerfile from upstream into our
+# intarweb-dev — NOT to add pre-build logic here.
+#
+# Codified in oss-contributing:ghcr-fork-mirror skill honest-fact #52.
+
+name: Build from source → GHCR
+
+on:
+  push:
+    branches: [intarweb-dev]
+  workflow_dispatch:
+
+# Single-flight per repo: schedule-driven sync push + Heal K dispatch + manual
+# workflow_dispatch can all converge. cancel-in-progress: false because builds
+# are expensive (vllm 30-45 min, bifrost 45 min) — let the in-flight one finish,
+# queue the next behind it. Honest-fact #74.
+concurrency:
+  group: build-from-source-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    # IS_SOURCE_BUILT Variable is the authoritative source-vs-mirror switch
+    # for the fleet. Setting it to anything other than 'true' (or leaving it
+    # unset) skips the build entirely. This keeps the WORKFLOW FILE itself
+    # byte-identical across every fork (uniform infra scaffolding) while
+    # giving operators a per-fork Variable to control source-build vs
+    # plain-mirror behavior without removing files or disabling workflows.
+    # Plain-mirror forks (docker-neo4j etc) still have build-from-source.yml
+    # installed but the job no-ops; fork-publish.yml owns :latest for them.
+    if: vars.IS_SOURCE_BUILT == 'true'
+    # Per-fork override via repo Variable RUNS_ON (default: ubuntu-latest hosted).
+    # Set to '["self-hosted","lan-docker","big-build"]' (JSON array, single line)
+    # for forks whose builds exceed hosted-runner capacity (16GB RAM / 14GB disk
+    # — vllm's CUDA csrc-build is the canonical case). Honest-fact #89.
+    runs-on: ${{ fromJSON(vars.RUNS_ON || '"ubuntu-latest"') }}
+    # Per-fork override via repo Variable BUILD_TIMEOUT_MINUTES (default 360, the
+    # GitHub-hosted-runner hard ceiling). Raise to 720 as a ONE-SHOT bootstrap on
+    # forks whose first build needs to populate :buildcache from scratch (vllm
+    # at single-arch CUDA: ~5-6h cold-cache vs ~30-45m warm). Revert to 360 once
+    # warm. Codified after 27340784996 / 27373307060 cancelled at 360min on the
+    # vllm fork's first cold-cache run. Honest-fact #91.
+    timeout-minutes: ${{ fromJSON(vars.BUILD_TIMEOUT_MINUTES || '360') }}
+    # Read-once capture of precompiled-wheel Variables at job start. Subsequent
+    # steps reference $PRECOMPILED_* env vars (resolved once at job-init) rather
+    # than ${{ vars.* }} (re-resolved per-step expression). This makes an
+    # in-flight build immune to mid-job Variable mutations from a concurrent
+    # sync-upstream writing PRECOMPILED_WHEEL_COMMIT/_VARIANT. Eliminates the
+    # read/write race architect-review #1 flagged. Honest-fact #99.
+    env:
+      PRECOMPILED_BASE_URL: ${{ vars.PRECOMPILED_WHEEL_BASE_URL }}
+      PRECOMPILED_COMMIT: ${{ vars.PRECOMPILED_WHEEL_COMMIT }}
+      PRECOMPILED_VARIANT: ${{ vars.PRECOMPILED_WHEEL_VARIANT }}
+      PRECOMPILED_PREFIX: ${{ vars.PRECOMPILED_WHEEL_BUILD_ARG_PREFIX || 'VLLM' }}
+      OPERATOR_BUILD_ARGS: ${{ vars.BUILD_ARGS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Optional disk reclamation for forks whose images blow past the 14GB
+      # default disk on ubuntu-latest hosted runners (vllm being the canonical
+      # offender — its CUDA build artifacts + intermediate layers exceed 20GB
+      # easily). Frees ~30GB by removing pre-installed Android SDK, .NET,
+      # Haskell, large npm caches, and codeql databases. Costs ~3 min — gated
+      # behind FREE_DISK_SPACE Variable so non-vllm-class forks don't pay it.
+      - name: 🧹 Free disk space (opt-in via FREE_DISK_SPACE Variable)
+        if: vars.FREE_DISK_SPACE == 'true'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: false
+
+      - name: 🔍 Resolve Dockerfile
+        id: df
+        env:
+          DOCKERFILE_VAR: ${{ vars.DOCKERFILE }}
+        run: |
+          set -euo pipefail
+          # 1. Explicit override (repo Variable) always wins.
+          if [ -n "${DOCKERFILE_VAR}" ]; then
+            echo "  ✓ using DOCKERFILE override: ${DOCKERFILE_VAR}"
+            echo "path=${DOCKERFILE_VAR}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 2. Prefer a root Dockerfile.
+          if [ -f Dockerfile ]; then
+            echo "  ✓ found root Dockerfile"
+            echo "path=Dockerfile" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 3. Deterministic discovery: shallowest non-test Dockerfile.
+          cand="$(find . -maxdepth 4 -type f -name Dockerfile \
+                    -not -path './node_modules/*' \
+                    -not -path './.git/*' \
+                    -not -path '*/test/*' \
+                    -not -path '*/tests/*' \
+                    -not -path '*/example*/*' \
+                    -not -path './vendor/*' \
+                    -not -path './third_party/*' \
+                  | sed 's|^\./||' \
+                  | awk '{print gsub(/\//,"/"), $0}' \
+                  | sort -n | head -n1 | cut -d' ' -f2- || true)"
+          if [ -z "$cand" ]; then
+            echo "  ✗ no Dockerfile found → plain-mirror fallback (no image built)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "  ✓ auto-found: $cand"
+          echo "path=$cand" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: steps.df.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.df.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: steps.df.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔡 Compute image (lowercase — GHCR requires lowercase repo names)
+        id: imgname
+        run: |
+          # vars.IMAGE_NAME may already be lowercase (set as such manually), but
+          # the github.event.repository.name fallback can be CamelCase if the fork
+          # repo name has uppercase letters (e.g. RetroSaveManager). docker/build-push
+          # rejects ANY uppercase in the image path. fork-publish.yml does the same
+          # via tr; we do it here. Honest-fact #63.
+          NAME="${{ vars.IMAGE_NAME || github.event.repository.name }}"
+          NAME_LOWER=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${{ github.repository_owner }}/${NAME_LOWER}" >> "$GITHUB_OUTPUT"
+
+      - name: 🏷️ Docker metadata
+        id: meta
+        if: steps.df.outputs.skip != 'true'
+        uses: docker/metadata-action@v5
+        with:
+          # Per-fork override via repo Variable IMAGE_NAME — for forks where the
+          # published image name differs from the repo name (docker-autoheal repo →
+          # autoheal image). Falls back to repo name. Same as fork-publish.yml so
+          # ONE image per fork. Lowercased above (metadata-action's lowercase only
+          # applies to tags, not to the images input — uppercase repo names slip
+          # through and break build-push with "repository name must be lowercase").
+          images: ${{ steps.imgname.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/intarweb-dev' }}
+            type=sha,prefix=sha-,format=short
+
+      - name: 🧩 Synthesize build-args (BUILD_ARGS + optional precompiled-wheel envs)
+        # Combines operator-set BUILD_ARGS with auto-derived precompiled-wheel
+        # build-args when PRECOMPILED_WHEEL_BASE_URL is set on the fork. For
+        # forks WITHOUT that Variable (the default), output is byte-identical to
+        # the pre-existing `build-args: ${{ vars.BUILD_ARGS || '' }}` behavior.
+        # Uses $PRECOMPILED_* env vars captured at job start (job-level env
+        # block) — immune to mid-build Variable mutations. Synthesizes envs with
+        # the configured PREFIX (default `VLLM`), so non-vllm forks adopting this
+        # pattern (MinerU, torchao, future) just set
+        # PRECOMPILED_WHEEL_BUILD_ARG_PREFIX without template surgery.
+        # Honest-fact #99/#104.
+        id: bargs
+        if: steps.df.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          BARGS="${OPERATOR_BUILD_ARGS:-}"
+          if [ -n "${PRECOMPILED_BASE_URL:-}" ] && [ -n "${PRECOMPILED_COMMIT:-}" ]; then
+            # Build the precompiled-wheel envs via printf so the multi-line
+            # KEY=VALUE block doesn't dedent the surrounding YAML run block
+            # (honest-fact #104 — broken-yaml-from-bash-multiline-assignment
+            # 0-second-failed all 22 forks 2026-06-12).
+            #
+            # Emit BOTH ${PREFIX}_PRECOMPILED_WHEEL_COMMIT and
+            # ${PREFIX}_MERGE_BASE_COMMIT to the same SHA — different
+            # Dockerfile carries may key off either name (vllm-bot's carry
+            # uses MERGE_BASE_COMMIT; theoretical future carries may use
+            # the more-explicit PRECOMPILED_WHEEL_COMMIT). Both work.
+            # Honest-fact #105.
+            PREFIX="${PRECOMPILED_PREFIX:-VLLM}"
+            EXTRA=$(printf '%s_USE_PRECOMPILED=1\n%s_PRECOMPILED_WHEEL_COMMIT=%s\n%s_MERGE_BASE_COMMIT=%s\n%s_PRECOMPILED_WHEEL_VARIANT=%s\n%s_PRECOMPILED_WHEEL_BASE_URL=%s' "$PREFIX" "$PREFIX" "$PRECOMPILED_COMMIT" "$PREFIX" "$PRECOMPILED_COMMIT" "$PREFIX" "$PRECOMPILED_VARIANT" "$PREFIX" "$PRECOMPILED_BASE_URL")
+            if [ -n "$BARGS" ]; then
+              BARGS="${BARGS}"$'\n'"${EXTRA}"
+            else
+              BARGS="${EXTRA}"
+            fi
+            echo "  ✓ precompiled-wheel build-args appended (prefix=${PREFIX} commit=${PRECOMPILED_COMMIT} variant=${PRECOMPILED_VARIANT})"
+          elif [ -n "${PRECOMPILED_BASE_URL:-}" ] && [ -z "${PRECOMPILED_COMMIT:-}" ]; then
+            # Master switch on, but no resolved commit. Sync-upstream cleared it
+            # because no wheel published for the current upstream SHA. Build will
+            # fall back to source compile — degraded perf, but correct binaries
+            # (vs the silent-ABI-break risk of serving a stale wheel).
+            echo "::warning::PRECOMPILED_WHEEL_BASE_URL set but PRECOMPILED_WHEEL_COMMIT empty — sync-upstream couldn't find a wheel for current upstream SHA. Falling back to source compile."
+          fi
+          {
+            echo "build_args<<__EOB__"
+            echo "$BARGS"
+            echo "__EOB__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 🚀 Build & push
+        if: steps.df.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ vars.BUILD_CONTEXT || '.' }}
+          file: ${{ steps.df.outputs.path }}
+          platforms: ${{ vars.PLATFORMS || 'linux/amd64,linux/arm64' }}
+          # build-args synthesized above. Combines operator-set BUILD_ARGS with
+          # auto-derived precompiled-wheel envs when PRECOMPILED_WHEEL_BASE_URL
+          # is set. For forks without it, equivalent to BUILD_ARGS alone.
+          # Honest-facts #88, #99.
+          build-args: ${{ steps.bargs.outputs.build_args }}
+          # BuildKit registry-cache. Reuses prior build's intermediate layers
+          # across runs to dramatically cut wall time on warm builds (vllm:
+          # ~30min → ~10-12min target). cache-from is read-only — first run on
+          # a fresh fork misses everything (cold cache, no penalty). cache-to
+          # `mode=max` exports ALL intermediate stages (not just the final
+          # image), so the next run can resume mid-stage. `compression=zstd`
+          # for faster decompression on cache pulls.
+          # ignore-error=true on cache-to: if the push to :buildcache fails
+          # (perms, network), the build still succeeds; just warm cache misses
+          # on next run. Honest-fact #107.
+          cache-from: type=registry,ref=${{ steps.imgname.outputs.image }}:buildcache
+          cache-to: type=registry,ref=${{ steps.imgname.outputs.image }}:buildcache,mode=max,compression=zstd,ignore-error=true
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
