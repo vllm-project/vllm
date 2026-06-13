@@ -52,6 +52,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -433,12 +434,21 @@ class ResponsesRequest(OpenAIBaseModel):
             and "message.output_text.logprobs" in self.include
         )
 
+    @field_validator("store", mode="after")
+    @classmethod
+    def resolve_store_default(cls, value: bool | None) -> bool:
+        # An explicit `store: null` means "unspecified" and resolves to the
+        # documented default (true), the same as omitting the field.
+        return True if value is None else value
+
     @model_validator(mode="before")
     @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data
-        if not data.get("store", True):
+        # Only an explicit `store: false` conflicts with background mode;
+        # `store: null` resolves to the default (true).
+        if data.get("store", True) is False:
             raise VLLMValidationError(
                 "background can only be used when `store` is true",
                 parameter="background",
