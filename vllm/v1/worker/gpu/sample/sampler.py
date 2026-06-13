@@ -12,7 +12,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     flashinfer_sample,
     flashinfer_sampler_supported,
 )
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
@@ -44,6 +44,7 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
+        self.req_states = req_states
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
@@ -118,6 +119,17 @@ class Sampler:
         else:
             logprobs_tensors = None
 
+        # 1 sampled token per request, except chunked-prefill requests
+        # (seq_len < prefill_len) which aren't done prefilling and produce no
+        # output token. num_rejected is always 0 here (one logit per request).
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -126,7 +138,8 @@ class Sampler:
             sampled_token_ids=sampled.view(-1, 1),
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
-            num_sampled=input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
         )
         return sampler_output
 

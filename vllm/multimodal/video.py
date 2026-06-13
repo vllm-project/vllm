@@ -697,6 +697,132 @@ class DynamicVideoBackend(VideoBackend):
 
 
 @VIDEO_LOADER_REGISTRY.register(
+    "glm46v",
+    video_processor="Glm46VVideoProcessor",
+)
+class GLM46VVideoBackend(VideoBackend):
+    """GLM-4.6V dynamic FPS video backend.
+
+    Faithfully replicates the frame sampling logic from transformers'
+    ``Glm46VVideoProcessor.sample_frames``:
+
+    - Dynamic FPS thresholds based on effective video duration:
+      ``{≤30s: 3fps, ≤300s: 1fps, >300s: 0.5fps}``
+    - ``temporal_patch_size`` multiplier (default 2) applied to extract count
+    - Duration capped at 2400s, frame count capped at 640
+    - Even frame count enforced (append last frame if odd)
+    """
+
+    # Match transformers defaults
+    _DYNAMIC_FPS_THRESHOLDS: ClassVar[dict[int, float]] = {
+        30: 3.0,
+        300: 1.0,
+        2400: 0.5,
+    }
+    _MAX_FRAME_COUNT_DYNAMIC: ClassVar[int] = 640
+    _MAX_DURATION: ClassVar[int] = 2400
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/glm46v/video_processing_glm46v.py#L97-L102
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        duration = source.duration
+        temporal_patch_size = kwargs.get("temporal_patch_size", 2)
+
+        max_frame_idx = total_frames_num - 1
+
+        # Estimate duration from frame count and fps when not reported
+        if not duration and original_fps > 0:
+            duration = round(max_frame_idx / original_fps) + 1
+
+        effective_duration = min(duration, cls._MAX_DURATION)
+
+        # Select target_fps from dynamic thresholds
+        if effective_duration <= 30:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[30]
+        elif effective_duration <= 300:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[300]
+        else:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[2400]
+
+        extract_t = int(effective_duration * target_fps * temporal_patch_size)
+        extract_t = min(extract_t, cls._MAX_FRAME_COUNT_DYNAMIC)
+
+        duration_per_frame = 1 / original_fps if original_fps > 0 else 0
+        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
+        max_second = int(duration) if duration else 0
+
+        if total_frames_num < extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+        else:
+            frame_indices = []
+            current_second = 0.0
+            inv_fps = 1 / (temporal_patch_size * target_fps)
+            for frame_index in range(total_frames_num):
+                if timestamps[frame_index] >= current_second:
+                    current_second += inv_fps
+                    frame_indices.append(frame_index)
+                    if current_second >= max_second:
+                        break
+
+        if len(frame_indices) < extract_t:
+            if len(frame_indices) == 0:
+                start, end = 0, max(total_frames_num - 1, 0)
+            else:
+                start, end = frame_indices[0], frame_indices[-1]
+            frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+        elif len(frame_indices) > extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+
+        # Deduplicate
+        seen: set[int] = set()
+        uniq: list[int] = []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        # Ensure even frame count
+        if len(uniq) & 1:
+            uniq.append(uniq[-1])
+
+        return uniq
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
     "glmga",
     video_processor="GlmgaVideoProcessor",
 )
