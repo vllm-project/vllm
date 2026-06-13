@@ -64,6 +64,20 @@ void cutlass_moe_mm_sm100(torch::stable::Tensor& out_tensors,
                           bool per_act_token, bool per_out_ch);
 #endif
 
+#if defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120
+void cutlass_moe_mm_sm120(torch::stable::Tensor& out_tensors,
+                          torch::stable::Tensor const& a_tensors,
+                          torch::stable::Tensor const& b_tensors,
+                          torch::stable::Tensor const& a_scales,
+                          torch::stable::Tensor const& b_scales,
+                          torch::stable::Tensor const& expert_offsets,
+                          torch::stable::Tensor const& problem_sizes,
+                          torch::stable::Tensor const& a_strides,
+                          torch::stable::Tensor const& b_strides,
+                          torch::stable::Tensor const& c_strides,
+                          bool per_act_token, bool per_out_ch);
+#endif
+
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
 void cutlass_scaled_mm_sm120(torch::stable::Tensor& c,
                              torch::stable::Tensor const& a,
@@ -275,6 +289,14 @@ void cutlass_moe_mm(torch::stable::Tensor& out_tensors,
                     torch::stable::Tensor const& c_strides, bool per_act_token,
                     bool per_out_ch) {
   int32_t version_num = get_sm_version_num();
+#if defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120
+  if (version_num >= 120 && version_num < 130) {
+    cutlass_moe_mm_sm120(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
+                         expert_offsets, problem_sizes, a_strides, b_strides,
+                         c_strides, per_act_token, per_out_ch);
+    return;
+  }
+#endif
 #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
   if (version_num >= 100 && version_num < 110) {
     cutlass_moe_mm_sm100(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
