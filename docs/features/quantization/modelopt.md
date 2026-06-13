@@ -16,7 +16,9 @@ following `quantization.quant_algo` values:
 - `FP8`: per-tensor weight scale (+ optional static activation scale).
 - `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
 - `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
-- `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `NVFP4`: ModelOpt W4A4 NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `W4A16_NVFP4`: ModelOpt weight-only NVFP4 checkpoints with fp16/bf16 activations.
+- `MIXED_PRECISION`: per-layer ModelOpt checkpoints that combine the formats above, for example FP8 attention layers with W4A16 NVFP4 MoE experts.
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 
 ## Quantizing HuggingFace Models with PTQ
@@ -101,6 +103,34 @@ vllm serve <path_to_exported_checkpoint> \
   --quantization modelopt \
   --host 0.0.0.0 --port 8000
 ```
+
+## Serving W4A16 NVFP4 MoE checkpoints with Marlin
+
+Some ModelOpt NVFP4 MoE checkpoints are exported as
+`quantization.quant_algo = "MIXED_PRECISION"` and mark MoE expert layers (and
+sometimes `lm_head`) as `W4A16_NVFP4` in `hf_quant_config.json`. This is a
+weight-only NVFP4 format: weights are stored in 4-bit NVFP4, while activations
+remain fp16/bf16. It is served by the Marlin W4A16 path, not by W4A4 kernels
+that expect runtime activation quantization.
+
+For reproducible debugging and benchmarking of W4A16 NVFP4 checkpoints on
+CUDA GPUs where Marlin FP4 is available, you can explicitly pin the Marlin
+linear and MoE backends:
+
+```bash
+vllm serve nvidia/Qwen3.6-35B-A3B-NVFP4 \
+  --quantization modelopt \
+  --linear-backend marlin \
+  --moe-backend marlin \
+  --kv-cache-dtype fp8_e4m3 \
+  --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --host 0.0.0.0 --port 8000
+```
+
+When debugging startup, check the logs for the Marlin NVFP4 linear and MoE
+backend selections. Also run a short generation sanity check before comparing
+latency or throughput.
 
 ## Testing (local checkpoints)
 
