@@ -1295,6 +1295,37 @@ class StatLoggerManager:
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
+        # Forward-progress tracking for the /health/decode liveness endpoint.
+        # Updated on every record() call (i.e. on every engine step that
+        # produces an OutputProcessor result). State is tracked PER ENGINE
+        # INDEX so that data-parallel deployments can surface a stalled
+        # shard even when sibling shards are healthy and would otherwise
+        # overwrite scalar bookkeeping.
+        #
+        # _last_token_emit_time_by_engine[idx] is None until that engine
+        # has emitted at least one decoded token; once set, it
+        # monotonically advances. _last_num_running_reqs_by_engine[idx]
+        # is overwritten with each record() for that idx so the counter
+        # decays naturally as requests finish.
+        # _last_prefill_activity_time_by_engine[idx] is None until any
+        # prefill compute has been observed on that engine; once set,
+        # it advances on every step that does prefill work. This is the
+        # signal used by /health/decode to disambiguate "no decoded token
+        # in 60s because we are doing a long prefill" (200 prefilling)
+        # from "no decoded token in 60s because we are stalled" (503).
+        # All three intentionally live on the manager rather than per
+        # logger so the data is available even with 0 stat loggers
+        # attached and so it survives logger replacement.
+        self._last_token_emit_time_by_engine: dict[int, float] = {}
+        self._last_num_running_reqs_by_engine: dict[int, int] = {}
+        self._last_prefill_activity_time_by_engine: dict[int, float] = {}
+        # Backward-compatible scalar shims. These keep
+        # AsyncLLM.scale_elastic_ep() working unchanged for single-engine
+        # deployments and keep older direct callers reading the same
+        # "whichever engine spoke last" view they had before. They are
+        # synchronised with the dict state by record().
+        self._last_token_emit_time: float | None = None
+        self._last_num_running_reqs: int = 0
         stat_logger_factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
@@ -1344,6 +1375,39 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
+        # Update forward-progress tracking for /health/decode. Done BEFORE
+        # delegating to stat loggers so the data reflects the most recent
+        # step even if a downstream logger raises.
+        #
+        # We overwrite (not max-accumulate) num_running_reqs so the counter
+        # naturally decays as requests finish — otherwise an engine that
+        # peaked at N running and then drained would forever appear to
+        # have N in flight, and any future stall comparison would falsely
+        # trip a 503. With DP this means we report whichever engine spoke
+        # last; that's still useful because a stalled engine will keep
+        # reporting non-zero running, so its record() calls will dominate
+        # in any reasonable polling window.
+        now = time.monotonic()
+        if scheduler_stats is not None:
+            self._last_num_running_reqs_by_engine[engine_idx] = (
+                scheduler_stats.num_running_reqs
+            )
+            # Maintain the scalar shim with the most-recent observation
+            # for backwards compatibility with callers that read it
+            # directly (e.g. scale_elastic_ep carry-forward).
+            self._last_num_running_reqs = scheduler_stats.num_running_reqs
+        if iteration_stats is not None:
+            if iteration_stats.num_generation_tokens > 0:
+                self._last_token_emit_time_by_engine[engine_idx] = now
+                self._last_token_emit_time = now
+            # Distinguish prefill-in-flight (engine is busy computing
+            # a long prompt) from decode-stalled (engine is hung). A
+            # step with num_prompt_tokens > 0 means prefill compute
+            # ran this iteration; tracking that lets the route avoid
+            # false-positive 503s during long-prefill workloads after
+            # the engine has previously decoded a token.
+            if iteration_stats.num_prompt_tokens > 0:
+                self._last_prefill_activity_time_by_engine[engine_idx] = now
         for stat_logger in self.stat_loggers:
             stat_logger.record(
                 scheduler_stats,
@@ -1355,6 +1419,71 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def get_decode_liveness(
+        self,
+    ) -> tuple[int, float | None, float | None]:
+        """Return a snapshot of engine forward-progress liveness.
+
+        Returns ``(running, last_token_age_seconds,
+        last_prefill_age_seconds)`` aggregated across all engines:
+
+        * ``running`` is the **maximum** of ``num_running_reqs`` reported
+          by any engine. Using max (rather than sum or last-writer) means
+          that under data parallelism, a single stalled shard with
+          running > 0 cannot be masked by a healthy sibling shard whose
+          recent ``record()`` would otherwise drive the counter to 0.
+        * ``last_token_age_seconds`` is the **maximum** age across
+          engines (i.e. the worst / oldest), or ``None`` if no engine
+          has ever decoded a token. Reporting the worst engine ensures a
+          partial DP stall surfaces even when sibling engines are
+          decoding normally.
+        * ``last_prefill_age_seconds`` is the **maximum** age across
+          engines of the last observed prefill step, or ``None`` if no
+          engine has ever done prefill compute. The route uses this to
+          distinguish "no decoded token in N seconds because the engine
+          is busy on a long prefill" from "no decoded token in N seconds
+          because the engine is stalled".
+
+        Used by the ``GET /health/decode`` endpoint to detect engine
+        forward-progress stalls (e.g. NCCL P2P deadlocks where the
+        standard ``/health`` endpoint still returns 200 because the
+        engine task is alive but the GPU step is hung).
+        """
+        # Running: max across all observed engines. Sum would be more
+        # informative for capacity dashboards but max is the right
+        # signal for liveness: it is non-zero whenever ANY engine has
+        # work in flight, which is the only state where a stall is
+        # possible.
+        running_values = list(self._last_num_running_reqs_by_engine.values())
+        if running_values:
+            running = max(running_values)
+        else:
+            # Fall back to the scalar shim so single-engine deployments
+            # that bypass the dict (e.g. tests that __new__ the manager)
+            # still report sensibly.
+            running = self._last_num_running_reqs
+        now = time.monotonic()
+        token_times = list(self._last_token_emit_time_by_engine.values())
+        if token_times:
+            # Oldest emit time -> largest age across engines.
+            last_token_age: float | None = max(
+                0.0, now - min(token_times)
+            )
+        elif self._last_token_emit_time is not None:
+            last_token_age = max(0.0, now - self._last_token_emit_time)
+        else:
+            last_token_age = None
+        prefill_times = list(
+            self._last_prefill_activity_time_by_engine.values()
+        )
+        if prefill_times:
+            last_prefill_age: float | None = max(
+                0.0, now - min(prefill_times)
+            )
+        else:
+            last_prefill_age = None
+        return running, last_token_age, last_prefill_age
 
     def log(self):
         for logger in self.stat_loggers:
