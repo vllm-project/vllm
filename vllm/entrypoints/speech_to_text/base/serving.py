@@ -172,6 +172,8 @@ class OpenAISpeechToText(OpenAIServing):
                     sr=self.asr_config.sample_rate,
                     max_duration_s=self.max_audio_decode_duration_s,
                 )
+        except ValueError:
+            raise
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 
