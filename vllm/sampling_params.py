@@ -4,6 +4,7 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -503,10 +504,21 @@ class SamplingParams(
             raise ValueError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
+        if not math.isfinite(self.repetition_penalty):
+            raise ValueError(
+                "repetition_penalty must be a finite number, "
+                f"got {self.repetition_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        if not math.isfinite(self.temperature):
+            raise VLLMValidationError(
+                f"temperature must be a finite number, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
             )
         if self.temperature < 0.0:
             raise VLLMValidationError(
@@ -620,17 +632,32 @@ class SamplingParams(
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
+        # Cache tokenized bad_words on the tokenizer to avoid redundant
+        # tokenizer.encode() calls.  When many concurrent requests share the
+        # same bad_words list (a common RL workload pattern) the repeated
+        # encode calls race with prompt tokenization on the same HF fast
+        # tokenizer pool and can cause "RuntimeError: Already borrowed"
+        # despite the thread-safe pool wrapper (#41181, #45445).
+        cache = getattr(tokenizer, '_bad_words_token_cache', None)
+        if cache is None:
+            cache = {}
+            tokenizer._bad_words_token_cache = cache
         self._bad_words_token_ids = []
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
             # (related to add_prefix_space tokenizer parameter)
             for add_prefix_space in [False, True]:
-                prefix = " " if add_prefix_space else ""
-                prompt = prefix + bad_word.lstrip()
-                prompt_token_ids = tokenizer.encode(
-                    text=prompt, add_special_tokens=False
-                )
+                cache_key = (bad_word, add_prefix_space)
+                if cache_key in cache:
+                    prompt_token_ids = cache[cache_key]
+                else:
+                    prefix = " " if add_prefix_space else ""
+                    prompt = prefix + bad_word.lstrip()
+                    prompt_token_ids = tokenizer.encode(
+                        text=prompt, add_special_tokens=False
+                    )
+                    cache[cache_key] = prompt_token_ids
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
@@ -1036,3 +1063,4 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    structured_outputs: StructuredOutputsParams | None = None
