@@ -521,21 +521,34 @@ class TritonAttentionImpl(AttentionImpl):
             if self.kv_cache_dtype.startswith("fp8") and not (
                 current_platform.has_device_capability(89)
             ):
-                suggested = (
-                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
-                )
-                raise ValueError(
-                    f"FP8 KV cache is not supported by the Triton attention backend "
-                    f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
-                    f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
-                )
+                if current_platform.has_device_capability(80):
+                    # SM80/SM86: no native fp8e4nv cast, so the fp8 KV cache is
+                    # emulated in software (explicit fp8e4nv<->bf16 conversion on
+                    # the Triton path). Allowed, but warn about the trade-off.
+                    logger.warning(
+                        "FP8 KV cache on %s (compute capability %s) has no "
+                        "native fp8e4nv; it is emulated in software on the "
+                        "Triton attention path, which lowers throughput. fp8 KV "
+                        "halves the KV-cache footprint (longer supportable "
+                        "context); --kv-cache-dtype bfloat16 runs faster on this "
+                        "GPU but uses ~2x the KV cache (shorter max context).",
+                        dev,
+                        cap_str,
+                    )
+                else:
+                    raise ValueError(
+                        f"FP8 KV cache is not supported by the Triton attention "
+                        f"backend on {dev} (compute capability {cap_str}); native "
+                        f"FP8 (fp8e4nv) requires SM89+ and software emulation "
+                        f"requires SM80+. Re-run with --kv-cache-dtype float16."
+                    )
             if self.kv_cache_dtype == "bfloat16" and not (
                 current_platform.has_device_capability(80)
             ):
                 raise ValueError(
-                    f"bfloat16 KV cache is not supported on {dev} (compute capability "
-                    f"{cap_str}); bfloat16 requires SM80+. Re-run with "
-                    f"--kv-cache-dtype float16."
+                    f"bfloat16 KV cache is not supported on {dev} (compute "
+                    f"capability {cap_str}); bfloat16 requires SM80+. Re-run "
+                    f"with --kv-cache-dtype float16."
                 )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
