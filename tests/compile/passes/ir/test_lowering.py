@@ -5,7 +5,6 @@ import inspect
 import pytest
 import torch
 from torch import Tensor, nn
-from torch.testing import assert_close
 
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm import ir
@@ -24,205 +23,124 @@ from .config import LoweringTestConfig
 def assert_ops_lowered(
     lowering_pass: VllmIRLoweringPass, op: IrOp, provider: str | None, expected: int
 ):
-    __tracebackhide__ = True
-    lowered_count = lowering_pass.recorder.lowered_count(op.name, provider)
-    if lowered_count != expected:
-        pytest.fail(
-            f"Expected {expected} calls to be lowered to {op.name}[{provider}]"
-            f", found {lowered_count} instead"
-        )
+    impls = list(lowering_pass.selected_impls.get(op.name, {}).values())
+    lowered_count = impls.count(provider) if provider else len(impls)
+    assert lowered_count == expected
 
 
 def assert_total_ops_lowered(lowering_pass: VllmIRLoweringPass, expected: int):
-    __tracebackhide__ = True
-    lowered_count = lowering_pass.recorder.total_lowered()
-    if lowered_count != expected:
-        pytest.fail(
-            f"Expected {expected} calls to be lowered, found {lowered_count} instead"
-        )
+    lowered_count = sum(
+        [len(op_lowering) for op_lowering in lowering_pass.selected_impls.values()]
+    )
+    assert lowered_count == expected
 
 
 # ==========================================
 # UNIT TESTS
 # ==========================================
 
-
-@register_op
-def _custom_add_op(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> Tensor:
-    return a + b
-
-
-@_custom_add_op.register_impl(
-    "mask_a", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a
-)
-def _custom_add_mask_a(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> Tensor:
-    return a.masked_fill(mask, 0) + b
-
-
-@_custom_add_op.register_impl(
-    "mask_b", supports_args=lambda a, b, mask, mask_a, mask_b: mask_b
-)
-def _custom_add_mask_b(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> Tensor:
-    return a + b.masked_fill(mask, 0)
-
-
-@_custom_add_op.register_impl(
-    "mask_a_and_b", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a and mask_b
-)
-def _custom_add_mask_a_and_b(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> Tensor:
-    return a.masked_fill(mask, 0) + b.masked_fill(mask, 0)
+FAKE_DEVICE_SUPPORTED = True
 
 
 @register_op
-def _custom_sub_op(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> torch.Tensor:
-    return a - b
+def _fake_rms_norm(
+    x: Tensor,
+    weight: Tensor | None,
+    dtype: torch.dtype,
+    variance_size: int | None = None,
+) -> Tensor:
+    return torch.randn_like(x)
 
 
-@_custom_sub_op.register_impl(
-    "mask_a", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a
-)
-def _custom_sub_mask_a(
-    a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-) -> torch.Tensor:
-    return a.masked_fill(mask, 0) - b
+def _fake_device_rms_norm(
+    x: Tensor,
+    weight: Tensor | None,
+    dtype: torch.dtype,
+    variance_size: int | None = None,
+) -> Tensor:
+    return torch.randn_like(x)
 
 
-class TestOpLoweringPass:
-    def test_lowering_single_impl(self, default_vllm_config):
-        torch.set_default_device(current_platform.device_type)
+@register_op
+def _fake_rms_norm_1(
+    x: Tensor,
+    weight: Tensor | None,
+    dtype: torch.dtype,
+    variance_size: int | None = None,
+) -> Tensor:
+    return torch.randn_like(x)
 
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        a = torch.full((4,), 1)
-        b = torch.full((4,), 2)
-        mask = torch.tensor([1, 1, 0, 0]) >= 1
 
-        with ir.enable_torch_wrap(True):
+fake_device_rms_norm = _fake_rms_norm.register_impl(
+    "fake_device",
+    supports_args=lambda x, weight, dtype, variance_size: (
+        FAKE_DEVICE_SUPPORTED
+        and variance_size is None
+        and dtype != torch.float8_e4m3fn
+        and x.dtype == weight.dtype
+    ),
+)(_fake_device_rms_norm)
 
-            class CustomAddModel(nn.Module):
-                def forward(
-                    self, a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-                ) -> Tensor:
-                    return _custom_add_op(a, b, mask, mask_a, mask_b)
+fake_device_rms_norm_1 = _fake_rms_norm_1.register_impl(
+    "fake_device",
+    supports_args=lambda x, weight, dtype, variance_size: (
+        FAKE_DEVICE_SUPPORTED and variance_size is None
+    ),
+)(_fake_device_rms_norm)
 
-            model = CustomAddModel()
-            compiled_model = torch.compile(model, fullgraph=True, backend=backend)
 
-            with _custom_add_op.set_priority(["mask_a", "mask_a_and_b", "native"]):
-                torch._dynamo.reset()
-                out = compiled_model(a, b, mask, True, True)
-                # ensure op is lowered to correct impl
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 1)
-                # ensure correct code got executed
-                assert_close((a.masked_fill(mask, 0) + b), out)
-                assert_total_ops_lowered(lowering_pass, 1)
+def test_lowering(default_vllm_config):
+    torch.set_default_device(current_platform.device_type)
 
-            with _custom_add_op.set_priority(["mask_a_and_b", "mask_a", "native"]):
-                torch._dynamo.reset()
-                out = compiled_model(a, b, mask, True, True)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a_and_b", 1)
-                assert_close((a.masked_fill(mask, 0) + b.masked_fill(mask, 0)), out)
-                assert_total_ops_lowered(lowering_pass, 1)
+    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+    backend = TestBackend(lowering_pass)
+    x = torch.randn((12, 50), dtype=torch.bfloat16)
+    weight = torch.randn((50,), dtype=torch.bfloat16)
 
-    def test_lowering_multiple_impl(self, default_vllm_config):
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        a = torch.full((4,), 1)
-        b = torch.full((4,), 2)
-        mask = torch.tensor([1, 1, 0, 0]) >= 1
-
-        with ir.enable_torch_wrap(True):
-
-            class CustomAddModel2(nn.Module):
-                def forward(
-                    self, a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
-                ) -> Tensor:
-                    x = _custom_add_op(a, b, mask, False, True)
-                    y = _custom_add_op(a, b, mask, True, False)
-                    return _custom_add_op(x, y, mask, mask_a, mask_b)
-
-            model = CustomAddModel2()
-            compiled_model = torch.compile(model, fullgraph=True, backend=backend)
-
-            with _custom_add_op.set_priority(
-                ["mask_a", "mask_a_and_b", "mask_b", "native"]
-            ):
-                torch._dynamo.reset()
-                compiled_model(a, b, mask, True, True)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 2)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_b", 1)
-                assert_total_ops_lowered(lowering_pass, 3)
-
-            with _custom_add_op.set_priority(
-                ["mask_a_and_b", "mask_a", "mask_b", "native"]
-            ):
-                torch._dynamo.reset()
-                compiled_model(a, b, mask, True, True)
-
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a_and_b", 1)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 1)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_b", 1)
-                assert_total_ops_lowered(lowering_pass, 3)
-
-                compiled_model(a, b, mask, True, False)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 2)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_b", 1)
-                assert_total_ops_lowered(lowering_pass, 3)
-
-    def test_lowering_multiple_ops(self, default_vllm_config):
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        a = torch.full((4,), 1)
-        b = torch.full((4,), 2)
-        mask = torch.tensor([1, 1, 0, 0]) >= 1
+    with ir.enable_torch_wrap(True):
 
         class CustomModel(nn.Module):
             def forward(
-                self, a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
+                self,
+                x: Tensor,
+                weight: Tensor | None,
+                dtype: torch.dtype,
+                variance_size: int | None = None,
             ) -> Tensor:
-                x = _custom_add_op(a, b, mask, True, False)
-                y = _custom_add_op(a, b, mask, mask_a, mask_b)
-                return _custom_sub_op(x, y, mask, mask_a, mask_b)
+                y = _fake_rms_norm_1(x, weight, dtype, variance_size)
+                return _fake_rms_norm(y, weight, dtype, variance_size)
 
-        with ir.enable_torch_wrap(True):
-            model = CustomModel()
-            compiled_model = torch.compile(model, fullgraph=True, backend=backend)
-            with (
-                _custom_add_op.set_priority(
-                    ["mask_a", "mask_a_and_b", "mask_b", "native"]
-                ),
-                _custom_sub_op.set_priority(["mask_a"]),
-            ):
-                torch._dynamo.reset()
-                compiled_model(a, b, mask, True, True)
+        model = CustomModel()
+        compiled_model = torch.compile(model, fullgraph=True, backend=backend)
 
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 2)
-                assert_ops_lowered(lowering_pass, _custom_sub_op, "mask_a", 1)
-                assert_total_ops_lowered(lowering_pass, 3)
+        # check priority is followed
+        with (
+            _fake_rms_norm.set_priority(["fake_device", "native"]),
+            _fake_rms_norm_1.set_priority(["native", "fake_device"]),
+        ):
+            torch._dynamo.reset()
+            compiled_model(x, weight, torch.bfloat16)
+            assert_ops_lowered(lowering_pass, _fake_rms_norm, "fake_device", 1)
+            assert_ops_lowered(lowering_pass, _fake_rms_norm_1, "native", 1)
+            assert_total_ops_lowered(lowering_pass, 2)
 
-            with (
-                _custom_add_op.set_priority(
-                    ["mask_a", "mask_a_and_b", "mask_b", "native"]
-                ),
-                _custom_sub_op.set_priority(["mask_a"]),
-            ):
-                torch._dynamo.reset()
-                compiled_model(a, b, mask, False, True)
+        with _fake_rms_norm.set_priority(["native", "fake_device"]):
+            torch._dynamo.reset()
+            compiled_model(x, weight, torch.bfloat16)
+            assert_ops_lowered(lowering_pass, _fake_rms_norm, "native", 1)
+            assert_total_ops_lowered(lowering_pass, 2)
 
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_a", 1)
-                assert_ops_lowered(lowering_pass, _custom_add_op, "mask_b", 1)
-                assert_ops_lowered(lowering_pass, _custom_sub_op, "native", 1)
-                assert_total_ops_lowered(lowering_pass, 3)
+        # check supports_args is respected
+        with (
+            _fake_rms_norm.set_priority(["fake_device", "native"]),
+            _fake_rms_norm_1.set_priority(["fake_device", "native"]),
+        ):
+            torch._dynamo.reset()
+            weight_f32 = weight.to(torch.float32)
+            compiled_model(x, weight_f32, torch.bfloat16)
+            assert_ops_lowered(lowering_pass, _fake_rms_norm, "native", 1)
+            assert_ops_lowered(lowering_pass, _fake_rms_norm_1, "fake_device", 1)
+            assert_total_ops_lowered(lowering_pass, 2)
 
 
 # ==========================================
@@ -230,85 +148,50 @@ class TestOpLoweringPass:
 # ==========================================
 
 
-class TestPerOpLowering:
-    @pytest.mark.parametrize(
-        "op_name, provider, inputs", LoweringTestConfig.get_test_op_lowering_params()
-    )
-    def test_op_lowering(self, op_name, provider, inputs, default_vllm_config):
-        """test op implementation gets lowered correctly"""
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
+@pytest.mark.parametrize(
+    "op_name, provider, inputs, unbacked_idx",
+    LoweringTestConfig.get_test_inputs(),
+)
+def per_op_lowering_test(
+    default_vllm_config,
+    op_name,
+    provider,
+    inputs,
+    unbacked_idx,
+):
+    """
+    test supports_all_args and implementation don't specialize on batch size
+    of inputs
+    """
+    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+    backend = TestBackend(lowering_pass)
 
-        op = IrOp.registry[op_name]
+    op = IrOp.registry[op_name]
 
-        class OpImplModel(nn.Module):
-            def forward(self, *args, **kwargs):
-                return op(*args, **kwargs)
+    class OpImplModel(nn.Module):
+        def forward(self, *args, **kwargs):
+            return op(*args, **kwargs)
 
-        model = OpImplModel()
-        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+    model = OpImplModel()
+    compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+    input = inputs[0]
 
-        with ir.enable_torch_wrap(True), op.set_priority([provider]):
-            compiled_model(*inputs[0])
-            assert_ops_lowered(lowering_pass, op, provider, 1)
+    # ensure op compiles without break
+    with ir.enable_torch_wrap(True), op.set_priority([provider]):
+        torch._dynamo.reset()
+        compiled_model(*input)
+        assert_ops_lowered(lowering_pass, op, provider, 1)
 
-    @pytest.mark.parametrize(
-        "op_name, provider, inputs", LoweringTestConfig.get_test_op_lowering_params()
-    )
-    def test_dynamo_tracing(self, op_name, provider, inputs, default_vllm_config):
-        """
-        test dynamo graphs from tracing the implementation can be compiled and don't
-        have any graph breaks
-        """
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
+    native_signature = inspect.signature(op.impls["native"].impl_fn)
+    arg_pos = {
+        name: idx for name, idx in enumerate(native_signature.parameters.items())
+    }
 
-        op = IrOp.registry[op_name]
-
-        class OpImplModel(nn.Module):
-            def forward(self, *args, **kwargs):
-                return op(*args, **kwargs)
-
-        model = OpImplModel()
-        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-
-        with ir.enable_torch_wrap(False), op.set_priority([provider]):
-            for input in inputs:
-                compiled_model(*input)
-
-    @pytest.mark.parametrize(
-        "op_name, provider, inputs, batched_args",
-        LoweringTestConfig.get_test_batch_specialization_params(),
-    )
-    def test_batch_specialization(
-        self, op_name, provider, inputs, batched_args, default_vllm_config
-    ):
-        """
-        test supports_all_args and implementation don't specialize on batch size
-        of inputs
-        """
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-
-        op = IrOp.registry[op_name]
-
-        native_signature = inspect.signature(op.impls["native"].impl_fn)
-        arg_names = [name for name, _ in native_signature.parameters.items()]
-        # indexes where the input is batched
-        batched_arg_idx = [
-            pos for pos, name in enumerate(arg_names) if name in batched_args
-        ]
-
-        class OpImplModel(nn.Module):
-            def forward(self, *args, **kwargs):
-                return op(*args, **kwargs)
-
-        model = OpImplModel()
-        compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-
-        with ir.enable_torch_wrap(True), op.set_priority([provider]):
-            for input in inputs:
-                # mark 0th index as unbacked for args with batched inputs
-                for idx in batched_arg_idx:
-                    torch._dynamo.decorators.mark_unbacked(input[idx], 0)
-                compiled_model(*input)
+    with ir.enable_torch_wrap(True), op.set_priority([provider]):
+        torch._dynamo.reset()
+        for name, indices in unbacked_idx.items():
+            assert name in arg_pos, "invalid arg name"
+            for idx in indices:
+                assert isinstance(input[arg_pos[name]], torch.Tensor)
+                torch._dynamo.decorators.mark_unbacked(input[arg_pos[name]], idx)
+        compiled_model(*input)

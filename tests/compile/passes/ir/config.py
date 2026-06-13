@@ -3,17 +3,16 @@
 import torch
 
 from vllm.ir import ops
+from vllm.platforms import current_platform
 
 from .common import LoweringTestConfig
 
-from vllm.platforms import current_platform
-
 torch.set_default_device(current_platform.device_type)
 
-CONFIGS = {
+PER_OP_LOWERING_TEST_CONFIGS = {
     "rms_norm": LoweringTestConfig(
         op=ops.rms_norm,
-        inputs=[[torch.randn((2, 16)), torch.randn((1, 16)), 1e-5, None]],
-        batched_args=["x"],
+        inputs=[ops.rms_norm.generate_inputs(num_tokens=10, hidden_size=128)],
+        unbacked_idx={"num_tokens": [0]},
     )
 }

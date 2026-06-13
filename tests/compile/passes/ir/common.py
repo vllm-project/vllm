@@ -1,17 +1,18 @@
 import inspect
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 import pytest
 
 from vllm.ir.op import IrOp, IrOpImpl
 
 
-def _filter_supported_inputs(impl: IrOpImpl, inputs: list[list[Any]]):
+def _filter_supported_inputs(impl: IrOpImpl, inputs: Iterable[Iterable[Any]]):
     # filter only those inputs args that the impl supports
     supported_inputs = []
     for input in inputs:
+        input = list(input)
         if impl.supports_all_args or impl.supports_args(*input):
             supported_inputs.append(input)
     return supported_inputs
@@ -19,16 +20,15 @@ def _filter_supported_inputs(impl: IrOpImpl, inputs: list[list[Any]]):
 
 @dataclass
 class LoweringTestConfig:
-    # vllm ir op to run tests on
     op: IrOp
 
-    # example inputs to the op, inputs should contain atleast one valid input that
-    # passes supports_all_args for all tested implementations
-    inputs: list[list[Any]] = field(default_factory=list, repr=False)
+    # inputs to pass to op impl tests, only valid inputs are
+    # passed to corresponding op impl
+    inputs: Iterable[Iterable[Any]] | None = None
 
-    # set of args that have batched inputs, this input will be passed to torch.compile
-    # with the first dimension as an unbacked int
-    batched_args: list[str] = field(default_factory=list)
+    # set of indices to mark as unbacked when running relevant tests
+    # pass argument name and indices within that argument to mark unbacked
+    unbacked_idx: dict[str, Iterable[int]] | None = None
 
     config_registry: ClassVar[dict[str, "LoweringTestConfig"]] = {}
 
@@ -36,32 +36,35 @@ class LoweringTestConfig:
         # test config cannot be defined twice
         assert self.op.name not in LoweringTestConfig.config_registry
 
-        # ensure batched args exist in the function signature
+        # ensure params exist in the function signature
+        unbacked_idx = self.unbacked_idx or {}
         signature = inspect.signature(self.op.impls["native"].impl_fn)
         params = [name for name, _ in signature.parameters.items()]
-        missing_args = set(self.batched_args) - set(params)
+        missing_args = set(unbacked_idx) - set(params)
         assert not missing_args, (
             "Following args are missing in the native function signature: "
             f"{', '.join(missing_args)}\n"
-            f"Input params: {', '.join(self.batched_args)}\n"
+            f"Input params: {', '.join(unbacked_idx.keys())}\n"
             f"Native function params: {', '.join(params)}"
         )
 
         LoweringTestConfig.config_registry[self.op.name] = self
 
     @classmethod
-    def get_test_op_lowering_params(cls):
+    def get_test_inputs(cls):
         # get pytest parametrize params for the test_op_lowering test
         params = []
         for config in cls.config_registry.values():
             op = config.op
             for impl in op.impls.values():
-                inputs = _filter_supported_inputs(impl, config.inputs)
+                inputs = config.inputs or []
+                inputs = _filter_supported_inputs(impl, inputs)
                 params.append(
                     pytest.param(
                         op.name,
                         impl.provider,
                         inputs,
+                        config.unbacked_idx,
                         marks=[
                             pytest.mark.skipif(
                                 not inputs,
@@ -75,39 +78,3 @@ class LoweringTestConfig:
                     )
                 )
         return params
-
-    @classmethod
-    def get_test_batch_specialization_params(cls):
-        """
-        get pytest parametrize params for the test_batch_specialization test
-        """
-        params = []
-        for config in cls.config_registry.values():
-            op = config.op
-            for impl in op.impls.values():
-                inputs = _filter_supported_inputs(impl, config.inputs)
-                params.append(
-                    pytest.param(
-                        op.name,
-                        impl.provider,
-                        inputs,
-                        config.batched_args,
-                        marks=[
-                            pytest.mark.skipif(
-                                not inputs,
-                                reason="No valid inputs for the implementation",
-                            ),
-                            pytest.mark.skipif(
-                                not impl.supported,
-                                reason="Implementation is not supported",
-                            ),
-                        ],
-                    )
-                )
-        return params
-
-
-class ModelLoweringInfo(NamedTuple):
-    model_name: str
-    model_kwargs: dict[str, Any] = {}
-    hf_overrides: Callable[[int], dict] = lambda n: {"num_hidden_layers": n}
