@@ -357,7 +357,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel
-        num_experts = self.config.num_local_experts
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
@@ -430,8 +429,10 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # Handle MLP gate and up projection weights
                 # flat weight from (E, 2 * N, block_size, entry_per_block)
                 # to (E, 2 * N, -1), shouldn't trigger copy for contiguous
+                param = params_dict[name]
+                layer_num_experts = param.data.shape[0]
                 weight = weight.view(
-                    num_experts, 2 * intermediate_size, -1
+                    layer_num_experts, 2 * intermediate_size, -1
                 ).contiguous()
 
                 # Extract gate and up projection parts
@@ -440,8 +441,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end, ...]
-
-                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
@@ -456,15 +455,15 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # Handle MLP down projection weights
                 # same flatten here, but since 2 mx4 value are packed in 1
                 # uint8, divide by 2
+                param = params_dict[name]
+                layer_num_experts = param.data.shape[0]
                 weight = weight.view(
-                    num_experts, -1, intermediate_size // 2
+                    layer_num_experts, -1, intermediate_size // 2
                 ).contiguous()
                 if use_ep:
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[..., tp_rank_start // 2 : tp_rank_end // 2]
-
-                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
