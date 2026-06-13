@@ -10,6 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Router, serve};
+use futures::future::join_all;
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
@@ -427,6 +428,12 @@ async fn probe_children_loop(
         ))
         .build()
         .context("failed to build DP supervisor HTTP client")?;
+    let host = match args.host.as_str() {
+        "" | "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        other => other,
+    };
+    let retry_delay = Duration::from_secs(args.dp_supervisor_probe_interval_s.into());
 
     while !shutdown.is_cancelled() {
         let threshold = if health_state.is_ready() {
@@ -434,34 +441,16 @@ async fn probe_children_loop(
         } else {
             1
         };
-        let mut num_unhealthy = 0usize;
-        for child in &children {
-            let host = match args.host.as_str() {
-                "" | "0.0.0.0" => "127.0.0.1",
-                "::" => "::1",
-                other => other,
-            };
-            let url = format!("http://{host}:{}/health", child.port);
-            let retry_delay = Duration::from_secs(args.dp_supervisor_probe_interval_s.into());
-            let mut healthy = false;
-            for attempt in 0..threshold {
-                match client.get(&url).send().await {
-                    Ok(response) => {
-                        healthy = response.status() == StatusCode::OK;
-                        break;
-                    }
-                    Err(error) if error.is_connect() || error.is_timeout() => {
-                        if attempt + 1 < threshold && !retry_delay.is_zero() {
-                            sleep(retry_delay).await;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if !healthy {
-                num_unhealthy += 1;
-            }
-        }
+        let probe_results = join_all(children.iter().map(|child| {
+            probe_child_health(
+                &client,
+                format!("http://{host}:{}/health", child.port),
+                threshold,
+                retry_delay,
+            )
+        }))
+        .await;
+        let num_unhealthy = probe_results.into_iter().filter(|healthy| !healthy).count();
 
         if num_unhealthy == 0 {
             if !shutdown.is_cancelled() {
@@ -488,6 +477,27 @@ async fn probe_children_loop(
     }
 
     Ok(())
+}
+
+async fn probe_child_health(
+    client: &Client,
+    url: String,
+    threshold: usize,
+    retry_delay: Duration,
+) -> bool {
+    for attempt in 0..threshold {
+        match client.get(&url).send().await {
+            Ok(response) => return response.status() == StatusCode::OK,
+            Err(error) if error.is_connect() || error.is_timeout() => {
+                if attempt + 1 < threshold && !retry_delay.is_zero() {
+                    sleep(retry_delay).await;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+
+    false
 }
 
 async fn shutdown_children(args: &ServeArgs, children: &[ChildServer]) -> Result<()> {
