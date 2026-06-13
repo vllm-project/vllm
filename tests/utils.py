@@ -1481,6 +1481,9 @@ def wait_for_gpu_memory_to_clear(
     threshold_bytes: int | None = None,
     threshold_ratio: float | None = None,
     timeout_s: float = 120,
+    stable_duration_s: float = 0,
+    stable_tolerance_bytes: int = 512 * 1024**2,
+    poll_interval_s: float = 5,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
     if (
@@ -1499,20 +1502,25 @@ def wait_for_gpu_memory_to_clear(
     # context.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
+    stable_since: float | None = None
+    stable_used_bytes: dict[int, int] | None = None
     while True:
         output: dict[int, str] = {}
         output_raw: dict[int, tuple[float, float]] = {}
+        used_bytes_by_device: dict[int, int] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
                 gb_total = mem_info["vram_total"] / 2**10
+                used_bytes_by_device[device] = mem_info["vram_used"] * 1024**2
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
                 gb_used = mem_info.used / 2**30
                 gb_total = mem_info.total / 2**30
+                used_bytes_by_device[device] = mem_info.used
             output_raw[device] = (gb_used, gb_total)
             output[device] = f"{gb_used:.02f}/{gb_total:.02f}"
 
@@ -1541,11 +1549,37 @@ def wait_for_gpu_memory_to_clear(
 
         dur_s = time.time() - start_time
         if all_free:
-            print(
-                f"Done waiting for free GPU memory on devices {devices=} "
-                f"({threshold=}) {dur_s=:.02f}"
-            )
-            break
+            if stable_duration_s <= 0:
+                print(
+                    f"Done waiting for free GPU memory on devices {devices=} "
+                    f"({threshold=}) {dur_s=:.02f}"
+                )
+                break
+
+            now = time.time()
+            if stable_used_bytes is None:
+                stable_since = now
+                stable_used_bytes = used_bytes_by_device
+            else:
+                memory_changed = any(
+                    abs(used_bytes_by_device[device] - stable_used_bytes[device])
+                    > stable_tolerance_bytes
+                    for device in devices
+                )
+                if memory_changed:
+                    stable_since = now
+                    stable_used_bytes = used_bytes_by_device
+                elif (
+                    stable_since is not None and now - stable_since >= stable_duration_s
+                ):
+                    print(
+                        f"Done waiting for stable free GPU memory on devices "
+                        f"{devices=} ({threshold=}) {dur_s=:.02f}"
+                    )
+                    break
+        else:
+            stable_since = None
+            stable_used_bytes = None
 
         if dur_s >= timeout_s:
             raise ValueError(
@@ -1553,7 +1587,7 @@ def wait_for_gpu_memory_to_clear(
                 f"{dur_s=:.02f} ({threshold=})"
             )
 
-        time.sleep(5)
+        time.sleep(poll_interval_s)
 
 
 def wait_for_rocm_memory_to_settle(
@@ -1579,6 +1613,8 @@ def wait_for_rocm_memory_to_settle(
         devices=list(range(num_gpus)),
         threshold_ratio=threshold_ratio,
         timeout_s=timeout_s,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
     )
 
 
