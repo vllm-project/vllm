@@ -656,6 +656,7 @@ class GPUModelRunner(
         )
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
+        self._init_requires_slot_mapping = [True]
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             # We need to use the encoder length for encoder-decoder
@@ -6916,12 +6917,16 @@ class GPUModelRunner(
         """
         block_sizes = []
         max_num_blocks = []
+        requires_slot_mapping = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
             block_sizes.append(block_size)
+            requires_slot_mapping.append(
+                kv_cache_group.kv_cache_spec.requires_slot_mapping
+            )
             max_num_blocks_per_req = cdiv(
                 max_model_len, block_size * get_total_cp_world_size()
             )
@@ -6936,9 +6941,11 @@ class GPUModelRunner(
         if (
             block_sizes != self._init_block_sizes
             or kernel_block_sizes != self._init_kernel_block_sizes
+            or requires_slot_mapping != self._init_requires_slot_mapping
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
+            self._init_requires_slot_mapping = requires_slot_mapping
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
@@ -6954,6 +6961,7 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 reasoning_config=self.vllm_config.reasoning_config,
+                requires_slot_mapping=requires_slot_mapping,
             )
 
         assert self._init_block_sizes == block_sizes, (
@@ -6963,6 +6971,11 @@ class GPUModelRunner(
         assert self._init_kernel_block_sizes == kernel_block_sizes, (
             f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
             f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
+        )
+        assert self._init_requires_slot_mapping == requires_slot_mapping, (
+            "InputBatch requires_slot_mapping "
+            f"{self._init_requires_slot_mapping} != "
+            f"kv_cache requires_slot_mapping {requires_slot_mapping}"
         )
 
     def _allocate_kv_cache_tensors(

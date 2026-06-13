@@ -26,6 +26,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
+        requires_slot_mapping: bool = True,
     ):
         """
         Args:
@@ -38,11 +39,14 @@ class BlockTable:
             kernel_block_size: The block_size of underlying attention kernel.
                 Will be the same as `block_size` if `block_size` is supported
                 by the attention kernel.
+            requires_slot_mapping: Whether this KV cache group needs per-token
+                slot mapping.
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
+        self.requires_slot_mapping = requires_slot_mapping
 
         if kernel_block_size == block_size:
             # Standard case: allocation and computation use same block size
@@ -234,12 +238,21 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         max_num_blocks: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
+        requires_slot_mapping: list[bool] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
+        if requires_slot_mapping is None:
+            requires_slot_mapping = [True] * len(block_sizes)
+        elif len(requires_slot_mapping) != len(block_sizes):
+            raise ValueError(
+                f"requires_slot_mapping length ({len(requires_slot_mapping)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
+
         if max_num_blocks is None:
             # Note(hc): each dcp rank only store
             # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -274,9 +287,18 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
+                requires_slot_mapping_i,
             )
-            for block_size, kernel_block_size, max_num_blocks_per_req in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks
+            for (
+                block_size,
+                kernel_block_size,
+                max_num_blocks_per_req,
+                requires_slot_mapping_i,
+            ) in zip(
+                block_sizes,
+                kernel_block_sizes,
+                max_num_blocks,
+                requires_slot_mapping,
             )
         ]
 
@@ -307,6 +329,10 @@ class MultiGroupBlockTable:
         positions: torch.Tensor,
     ) -> None:
         for block_table in self.block_tables:
+            if not block_table.requires_slot_mapping:
+                # State-cache groups such as Mamba/GDN do not consume token-level
+                # slot mappings; their metadata is derived from block tables.
+                continue
             block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
