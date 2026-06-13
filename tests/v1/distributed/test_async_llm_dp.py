@@ -21,6 +21,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
+from vllm.v1.notifications import EngineNotification
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
@@ -107,6 +108,7 @@ async def test_load(
             scheduler_stats: SchedulerStats | None,
             iteration_stats: IterationStats | None,
             mm_cache_stats: MultiModalCacheStats | None = None,
+            engine_notifications: list[EngineNotification] | None = None,
             engine_idx: int = 0,
         ):
             if iteration_stats:

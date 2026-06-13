@@ -4,6 +4,7 @@ use enum_as_inner::EnumAsInner;
 
 use super::utility::UtilityOutput;
 use super::{EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::notifications::EngineNotification;
 use crate::protocol::stats::SchedulerStats;
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -20,6 +21,7 @@ pub struct RequestBatchOutputs {
     pub scheduler_stats: Option<Box<SchedulerStats>>,
     pub timestamp: f64,
     pub finished_requests: Option<BTreeSet<String>>,
+    pub engine_notifications: Option<Vec<EngineNotification>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +55,8 @@ impl EngineCoreOutputs {
     pub fn classify(self) -> ClassifiedEngineCoreOutputs {
         let has_request_payload = !self.outputs.is_empty()
             || self.scheduler_stats.is_some()
-            || self.finished_requests.is_some();
+            || self.finished_requests.is_some()
+            || self.engine_notifications.is_some();
 
         match (
             has_request_payload,
@@ -68,6 +71,7 @@ impl EngineCoreOutputs {
                     scheduler_stats: self.scheduler_stats,
                     timestamp: self.timestamp,
                     finished_requests: self.finished_requests,
+                    engine_notifications: self.engine_notifications,
                 })
             }
             (false, Some(_), None, None) => {
@@ -98,6 +102,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::EngineCoreOutput;
+    use crate::protocol::notifications::LoraLoadEvent;
 
     #[test]
     fn engine_core_outputs_classify_request_batch() {
@@ -140,6 +145,41 @@ mod tests {
                         {
                             "req-1",
                         },
+                    ),
+                    engine_notifications: None,
+                },
+            )
+        "#]]
+        .assert_debug_eq(&outputs.classify());
+    }
+
+    #[test]
+    fn engine_core_outputs_classify_event_only_as_request_batch() {
+        let outputs = EngineCoreOutputs {
+            engine_notifications: Some(vec![EngineNotification::LoraLoadEvent(
+                LoraLoadEvent::default(),
+            )]),
+            ..Default::default()
+        };
+
+        expect_test::expect![[r#"
+            RequestBatch(
+                RequestBatchOutputs {
+                    engine_index: 0,
+                    outputs: [],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    finished_requests: None,
+                    engine_notifications: Some(
+                        [
+                            LoraLoadEvent(
+                                LoraLoadEvent {
+                                    gpu_adapters: [],
+                                    cpu_adapters: [],
+                                    pinned_adapters: [],
+                                },
+                            ),
+                        ],
                     ),
                 },
             )
@@ -244,6 +284,7 @@ mod tests {
                     finished_requests: None,
                     wave_complete: None,
                     start_wave: None,
+                    engine_notifications: None,
                 },
             )
         "#]]

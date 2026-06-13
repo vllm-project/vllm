@@ -119,8 +119,7 @@ fn engine_outputs_for_request(
         timestamp: 0.0,
         utility_output: None,
         finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
 }
 

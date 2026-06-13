@@ -699,6 +699,7 @@ class AsyncLLM(EngineClient):
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
+                            engine_notifications=outputs.engine_notifications,
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")

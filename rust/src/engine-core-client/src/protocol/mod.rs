@@ -50,6 +50,7 @@ pub mod handshake;
 pub mod logprobs;
 pub mod lora;
 pub mod multimodal;
+pub mod notifications;
 pub mod stats;
 pub mod tensor;
 pub mod utility;
@@ -506,6 +507,9 @@ pub struct EngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     pub start_wave: Option<u32>,
+    /// Rare engine-level event notifications (see `notifications.rs`).
+    #[serde(default)]
+    pub engine_notifications: Option<Vec<notifications::EngineNotification>>,
 }
 
 /// Encode a Rust value into msgpack using the protocol crate's serde model.

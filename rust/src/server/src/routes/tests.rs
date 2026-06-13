@@ -237,8 +237,7 @@ fn engine_outputs_for_request(
         timestamp: 0.0,
         utility_output: None,
         finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
 }
 
@@ -1878,8 +1877,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -2589,8 +2587,7 @@ async fn non_stream_completions_include_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -2694,8 +2691,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3017,8 +3013,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3136,8 +3131,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3750,8 +3744,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3917,8 +3910,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3940,8 +3932,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -3965,8 +3956,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                         timestamp: 0.0,
                         utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;

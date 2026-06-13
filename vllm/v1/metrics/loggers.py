@@ -27,7 +27,8 @@ from vllm.v1.metrics.stats import (
     PromptTokenStats,
     SchedulerStats,
 )
-from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.metrics.utils import PromMetric, create_metric_per_engine
+from vllm.v1.notifications import EngineNotification, LoRALoadEvent
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -58,6 +59,7 @@ class StatLoggerBase(ABC):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int = 0,
     ): ...
 
@@ -165,6 +167,7 @@ class LoggingStatLogger(StatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int = 0,
     ):
         """Log Stats to standard output."""
@@ -318,6 +321,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.engine_indexes:
@@ -328,6 +332,7 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             scheduler_stats,
             iteration_stats,
             mm_cache_stats=mm_cache_stats,
+            engine_notifications=engine_notifications,
             engine_idx=engine_idx,
         )
         if scheduler_stats is not None:
@@ -382,6 +387,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.per_engine_stat_loggers:
@@ -391,6 +397,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
             scheduler_stats,
             iteration_stats,
             mm_cache_stats=mm_cache_stats,
+            engine_notifications=engine_notifications,
             engine_idx=engine_idx,
         )
 
@@ -1015,6 +1022,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Gauge | None = None
+        self.gauge_lora_adapter_loaded: Gauge | None = None
+        self.gauge_lora_gpu_adapters: dict[int, PromMetric] = {}
+        self.gauge_lora_cpu_adapters: dict[int, PromMetric] = {}
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
                 logger.warning(
@@ -1027,7 +1037,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.max_lora = vllm_config.lora_config.max_loras
             self.gauge_lora_info = self._gauge_cls(
                 name="vllm:lora_requests_info",
-                documentation="Running stats on lora requests.",
+                documentation=(
+                    "Running stats on lora requests. "
+                    "DEPRECATED: encodes adapter names into comma-separated "
+                    "label values; superseded by vllm:lora_adapter_loaded, "
+                    "vllm:num_gpu_loaded_lora_adapters and "
+                    "vllm:num_cpu_loaded_lora_adapters."
+                ),
                 multiprocess_mode="sum",
                 labelnames=[
                     self.labelname_max_lora,
@@ -1035,6 +1051,83 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_running_lora_adapters,
                 ],
             )
+
+            gauge_lora_gpu_adapters = self._gauge_cls(
+                name="vllm:num_gpu_loaded_lora_adapters",
+                documentation=(
+                    "Number of LoRA adapters currently loaded into GPU slots."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_lora_gpu_adapters = create_metric_per_engine(
+                gauge_lora_gpu_adapters, per_engine_labelvalues
+            )
+
+            gauge_lora_cpu_adapters = self._gauge_cls(
+                name="vllm:num_cpu_loaded_lora_adapters",
+                documentation=(
+                    "Number of LoRA adapters currently resident in the "
+                    "worker's CPU cache (superset of the GPU-loaded set)."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauge_lora_cpu_adapters = create_metric_per_engine(
+                gauge_lora_cpu_adapters, per_engine_labelvalues
+            )
+
+            self.gauge_lora_adapter_loaded = self._gauge_cls(
+                name="vllm:lora_adapter_loaded",
+                documentation=(
+                    "Whether an individual LoRA adapter is loaded in the worker's "
+                    "adapter caches. The series exists (value 1) while the "
+                    "adapter is resident; 'level' is 'gpu' when the adapter "
+                    "is active in a GPU slot and 'cpu' when it is only in "
+                    "the host cache."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["adapter_name", "level", "pinned"],
+            )
+            # Label tuples emitted for the last load event, per engine,
+            # so stale series can be removed when the loaded set changes.
+            self._lora_loaded_series: dict[
+                int, set[tuple[str, str, str, str, str]]
+            ] = {}
+
+    def _record_lora_load_event(self, event: LoRALoadEvent, engine_idx: int):
+        if self.gauge_lora_adapter_loaded is None:
+            return
+        self.gauge_lora_gpu_adapters[engine_idx].set(len(event.gpu_adapters))
+        self.gauge_lora_cpu_adapters[engine_idx].set(len(event.cpu_adapters))
+
+        # Each event carries the complete state: emit one series per
+        # resident adapter and drop series for evicted ones.
+        model_name, engine_label = self.per_engine_labelvalues[engine_idx]
+        gpu_adapters = set(event.gpu_adapters)
+        pinned_adapters = set(event.pinned_adapters)
+        new_series = {
+            (
+                str(model_name),
+                str(engine_label),
+                adapter_name,
+                "gpu" if adapter_name in gpu_adapters else "cpu",
+                str(adapter_name in pinned_adapters).lower(),
+            )
+            for adapter_name in event.cpu_adapters
+        }
+        prev_series = self._lora_loaded_series.get(engine_idx, set())
+        for labels in prev_series - new_series:
+            # Zero before removing: under prometheus multiprocess mode
+            # remove() only deletes the in-process child while the
+            # mmap-backed sample keeps its last value, and the Ray backend
+            # cannot delete series at all. The explicit 0 ensures evicted
+            # adapters never keep reading as resident.
+            self.gauge_lora_adapter_loaded.labels(*labels).set(0)
+            self.gauge_lora_adapter_loaded.remove(*labels)
+        for labels in new_series:
+            self.gauge_lora_adapter_loaded.labels(*labels).set(1)
+        self._lora_loaded_series[engine_idx] = new_series
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
@@ -1065,9 +1158,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int = 0,
     ):
         """Log to prometheus."""
+        for notification in engine_notifications or ():
+            if isinstance(notification, LoRALoadEvent):
+                self._record_lora_load_event(notification, engine_idx)
+
         if scheduler_stats is not None:
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
@@ -1340,6 +1438,7 @@ class StatLoggerManager:
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_notifications: list[EngineNotification] | None = None,
         engine_idx: int | None = None,
     ):
         if engine_idx is None:
@@ -1349,6 +1448,7 @@ class StatLoggerManager:
                 scheduler_stats,
                 iteration_stats,
                 mm_cache_stats=mm_cache_stats,
+                engine_notifications=engine_notifications,
                 engine_idx=engine_idx,
             )
 

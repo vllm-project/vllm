@@ -356,12 +356,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                 Some(serde_json::json!({"connector": "x"})),
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
+                        ..Default::default()
                     },
                 )
                 .await;
