@@ -47,7 +47,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // See the following document for more info on custom types and ops that use
   // custom types:
   // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
-  
+
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
   ops.def(
       "machete_supported_schedules("
