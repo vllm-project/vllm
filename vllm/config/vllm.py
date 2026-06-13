@@ -31,6 +31,7 @@ from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .diffusion import DiffusionConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -66,9 +67,11 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
+        "Qwen3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Qwen2MoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
-        "Qwen3ForCausalLM",
     }
 )
 
@@ -323,6 +326,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    diffusion_config: DiffusionConfig | None = None
+    """Diffusion LLM (dLLM) configuration."""
+
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
@@ -511,6 +517,11 @@ class VllmConfig:
             and self.speculative_config.num_speculative_tokens is not None
         ):
             return self.speculative_config.num_speculative_tokens
+        if (
+            self.diffusion_config is not None
+            and self.diffusion_config.canvas_length is not None
+        ):
+            return self.diffusion_config.canvas_length
         return 0
 
     @property
@@ -518,6 +529,9 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
+
+        if self.model_config is not None and self.model_config.is_diffusion:
+            return True
 
         if not self._is_default_v2_model_runner_model():
             return False
@@ -547,13 +561,13 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        architectures = getattr(model_config, "architectures", [])
-        if not any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
-        ):
+        if model_config.is_quantized:
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        architectures = getattr(model_config, "architectures", [])
+        return any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1654,12 +1668,7 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1
-                if (
-                    self.speculative_config
-                    and self.speculative_config.num_speculative_tokens
-                ):
-                    decode_query_len += self.speculative_config.num_speculative_tokens
+                decode_query_len = 1 + self.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )
@@ -2012,6 +2021,9 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
+
+        if self.parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
 
         if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
