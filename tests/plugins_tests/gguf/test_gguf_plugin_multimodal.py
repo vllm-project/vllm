@@ -12,13 +12,12 @@ from huggingface_hub import hf_hub_download
 from pytest import MarkDecorator
 from transformers import AutoModelForImageTextToText
 
-from tests.quantization.utils import is_quant_method_supported
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
-from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner
-from ...utils import check_logprobs_close
+from ...conftest import IMAGE_ASSETS, HfRunner, VllmRunner
+from ...models.utils import check_logprobs_close
 
 
 class GGUFMMTestConfig(NamedTuple):
@@ -66,20 +65,18 @@ GEMMA3_CONFIG = GGUFMMTestConfig(
     prompt=_GEMMA3_PROMPTS,
     image_names=_GEMMA3_IMAGE_NAMES,
     max_model_len=4096,
-    marks=[pytest.mark.core_model],
     mm_processor_kwargs={},
 )
 
 # Pan-and-scan multimodal - uses unquantized BF16 GGUF
 GEMMA3_CONFIG_PAN_AND_SCAN = GGUFMMTestConfig(
     original_model="google/gemma-3-4b-it",
-    gguf_repo="unsloth/gemma-3-4b-it-GGUF",
-    gguf_backbone="gemma-3-4b-it-BF16.gguf",
-    gguf_mmproj="mmproj-BF16.gguf",
+    gguf_repo="google/gemma-3-4b-it-qat-q4_0-gguf",
+    gguf_backbone="gemma-3-4b-it-q4_0.gguf",
+    gguf_mmproj="mmproj-model-f16-4B.gguf",
     prompt=_GEMMA3_PROMPTS,
     image_names=_GEMMA3_IMAGE_NAMES,
     max_model_len=4096,
-    marks=[pytest.mark.core_model],
     mm_processor_kwargs={"do_pan_and_scan": True},
 )
 
@@ -153,17 +150,7 @@ def run_multimodal_gguf_test(
         )
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("gguf"),
-    reason="gguf is not supported on this GPU type.",
-)
-@pytest.mark.parametrize(
-    "model",
-    [
-        pytest.param(test_config, marks=test_config.marks)
-        for test_config in MODELS_TO_TEST
-    ],
-)
+@pytest.mark.parametrize("model", MODELS_TO_TEST)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
