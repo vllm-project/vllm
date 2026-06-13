@@ -480,6 +480,17 @@ class TritonAttentionImpl(AttentionImpl):
                 f"native FP8 (fp8e4nv) requires SM89+. Re-run with "
                 f"--kv-cache-dtype {suggested}."
             )
+        # bfloat16 has no native hardware support before SM80 (Turing).
+        if self.kv_cache_dtype == "bfloat16" and not (
+            current_platform.has_device_capability(80)
+        ):
+            cap = current_platform.get_device_capability()
+            raise ValueError(
+                f"bfloat16 KV cache is not supported on "
+                f"{current_platform.get_device_name()} (compute capability "
+                f"{cap.as_version_str() if cap is not None else 'unknown'}); "
+                f"bfloat16 requires SM80+. Re-run with --kv-cache-dtype float16."
+            )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
