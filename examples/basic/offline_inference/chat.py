@@ -24,12 +24,12 @@ def create_parser():
 
 
 def main(args: dict):
-    # Pop arguments not used by LLM
-    max_tokens = args.pop("max_tokens")
-    temperature = args.pop("temperature")
-    top_p = args.pop("top_p")
-    top_k = args.pop("top_k")
-    chat_template_path = args.pop("chat_template_path")
+    # Pop arguments not used by LLM (use None as default if not provided)
+    max_tokens = args.pop("max_tokens", None)
+    temperature = args.pop("temperature", None)
+    top_p = args.pop("top_p", None)
+    top_k = args.pop("top_k", None)
+    chat_template_path = args.pop("chat_template_path", None)
 
     # Create an LLM
     llm = LLM(**args)
