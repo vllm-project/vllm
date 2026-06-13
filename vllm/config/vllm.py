@@ -14,10 +14,12 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
+from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
@@ -709,8 +711,10 @@ class VllmConfig:
         # Therefore, the presence of tie_word_embeddings in SomeVLTextConfig cannot
         # be used as a signal for whether tie_word_embeddings should be copied from
         # hf_config to the language_model config.
-        if model_config.is_multimodal_model and hasattr(
-            model_config.hf_config, "tie_word_embeddings"
+        if (
+            Version(version("transformers")) >= Version("5.0.0")
+            and model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
         ):
             tie_word_embeddings = model_config.hf_config.tie_word_embeddings
             hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings

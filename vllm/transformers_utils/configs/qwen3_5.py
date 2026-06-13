@@ -94,11 +94,18 @@ class Qwen3_5TextConfig(PretrainedConfig):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        kwargs["ignore_keys_at_rope_validation"] = {
-            "mrope_section",
-            "mrope_interleaved",
-        }
-        self.validate_layer_type()
+        if hasattr(self, "validate_layer_type"):
+            # Transformers v5
+            kwargs["ignore_keys_at_rope_validation"] = {
+                "mrope_section",
+                "mrope_interleaved",
+            }
+            self.validate_layer_type()
+        else:
+            # Transformers v4
+            from transformers.configuration_utils import layer_type_validation
+
+            layer_type_validation(self.layer_types, self.num_hidden_layers)
 
         # linear attention part
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
