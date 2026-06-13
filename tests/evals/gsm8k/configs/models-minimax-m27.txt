@@ -1,0 +1,2 @@
+MiniMax-M2.7-Baseline-TP4.yaml
+MiniMax-M2.7-AITER-TP4.yaml

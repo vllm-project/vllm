@@ -1,0 +1,13 @@
+model_name: "MiniMaxAI/MiniMax-M2.7"
+accuracy_threshold: 0.915
+tolerance: 0.1
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+rocm_request_timeout_seconds: 3600
+server_args: >-
+  --max-model-len 4096
+  --tensor-parallel-size 4
+  --moe-backend aiter
+env:
+  VLLM_ROCM_USE_AITER: "1"
