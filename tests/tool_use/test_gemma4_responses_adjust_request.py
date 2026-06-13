@@ -30,7 +30,9 @@ from openai.types.responses.tool_param import FunctionToolParam
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.tool_parsers.gemma4_tool_parser import Gemma4ToolParser
+from vllm.tool_parsers.gemma4_engine_tool_parser import (
+    Gemma4EngineToolParser as Gemma4ToolParser,
+)
 
 
 def _get_weather_tool() -> FunctionToolParam:
@@ -74,15 +76,14 @@ def test_gemma4_adjust_request_sets_skip_special_tokens_on_responses() -> None:
     path, causing raw ``call:fn{...}`` text to leak via
     ``response.output_text.delta``.
     """
-    parser = Gemma4ToolParser.__new__(Gemma4ToolParser)
-    parser.model_tokenizer = _StubTokenizer()
+    parser = Gemma4ToolParser(_StubTokenizer())
 
     request = _build_responses_request(tool_choice="auto")
     assert request.skip_special_tokens is True, (
         "Precondition: ResponsesRequest.skip_special_tokens default is True"
     )
 
-    Gemma4ToolParser.adjust_request(parser, request)
+    parser.adjust_request(request)
 
     assert request.skip_special_tokens is False
 

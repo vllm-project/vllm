@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.engine.registered_adapters import (
+    Gemma4Parser,
     Qwen3Parser,
 )
 
@@ -289,7 +290,7 @@ def _make_sample(
     )
 
 
-# ── Qwen3 / NemotronV3 (XML tool format, starts in REASONING) ───────
+# ── Qwen3 (XML tool format, starts in REASONING) ────────────────────
 
 _QWEN3_VOCAB: dict[str, int] = {
     "<think>": 50,
@@ -376,10 +377,101 @@ def _build_qwen3(
     return sample
 
 
+# ── Gemma4 (channel reasoning, custom arg format) ────────────────────
+
+_GEMMA4_VOCAB: dict[str, int] = {
+    "<|channel>": 50,
+    "<channel|>": 51,
+    "<|tool_call>": 48,
+    "<tool_call|>": 49,
+    '<|"|>': 52,
+    "<|turn>": 53,
+    "<|tool_response>": 54,
+}
+_GEMMA4_THOUGHT_PREFIX = "thought\n"
+_GEMMA4_QUOTE = '<|"|>'
+
+
+def _gemma4_value_segments(value: Any) -> list[tuple[str, bool]]:
+    """Render a value in Gemma4 arg format as segments."""
+    if isinstance(value, str):
+        return [(_GEMMA4_QUOTE, True), (value, False), (_GEMMA4_QUOTE, True)]
+    if isinstance(value, bool):
+        return [("true" if value else "false", False)]
+    if isinstance(value, (int, float)):
+        return [(str(value), False)]
+    if isinstance(value, dict):
+        segs: list[tuple[str, bool]] = [("{", False)]
+        for i, (k, v) in enumerate(value.items()):
+            if i > 0:
+                segs.append((",", False))
+            segs.append((f"{k}:", False))
+            segs.extend(_gemma4_value_segments(v))
+        segs.append(("}", False))
+        return segs
+    if isinstance(value, list):
+        segs = [("[", False)]
+        for i, item in enumerate(value):
+            if i > 0:
+                segs.append((",", False))
+            segs.extend(_gemma4_value_segments(item))
+        segs.append(("]", False))
+        return segs
+    return [(json.dumps(value, ensure_ascii=False), False)]
+
+
+def _gemma4_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        ("<|tool_call>", True),
+        (f"call:{tc.name}", False),
+        ("{", False),
+    ]
+    for i, (key, value) in enumerate(tc.arguments.items()):
+        if i > 0:
+            segs.append((",", False))
+        segs.append((f"{key}:", False))
+        segs.extend(_gemma4_value_segments(value))
+    segs.append(("}", False))
+    segs.append(("<tool_call|>", True))
+    return segs
+
+
+def _gemma4_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append(("<|channel>", True))
+        segs.append((_GEMMA4_THOUGHT_PREFIX, False))
+        segs.append((scenario.reasoning, False))
+        segs.append(("<channel|>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            segs.extend(_gemma4_tool_segments(tc))
+    return segs
+
+
+def _build_gemma4(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"gemma4-{scenario.id}",
+        description=scenario.description,
+        vocab=_GEMMA4_VOCAB,
+        segments=_gemma4_segments(scenario),
+        expected_reasoning=scenario.reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Gemma4Parser)
+    return sample
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
     "qwen3": _build_qwen3,
+    "gemma4": _build_gemma4,
 }
 
 
