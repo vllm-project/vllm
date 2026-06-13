@@ -775,9 +775,9 @@ class DeepseekOCRForCausalLM(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
-        path: str | None = None,
+        path: str = "default",
     ):
-        assert path is not None and path in ("global", "local")
+        assert path in ("global", "local")
 
         if path == "global":
             max_num_images = token_budget // self.global_image_output_token
@@ -810,9 +810,9 @@ class DeepseekOCRForCausalLM(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
-        path: str | None = None,
+        path: str = "default",
     ):
-        assert path is not None and path in ("global", "local")
+        assert path in ("global", "local")
 
         if path == "global":
             values = {"pixel_values": mm_kwargs["pixel_values"]}
@@ -871,9 +871,9 @@ class DeepseekOCRForCausalLM(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
-        path: str | None = None,
+        path: str = "default",
     ) -> torch.Tensor:
-        assert path is not None and path in ("global", "local")
+        assert path in ("global", "local")
 
         if path == "global":
             pixel_values = values["pixel_values"]
@@ -885,33 +885,33 @@ class DeepseekOCRForCausalLM(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
-        path: str | None = None,
+        path: str = "default",
     ) -> torch.Tensor:
         """Eager encoder forward with optional per-path execution.
 
-        ``path=None``: full forward (global + local + assembly).
+        ``path="default"``: full forward (global + local + assembly).
         ``path="global"``: global-only batched forward with newlines.
         ``path="local"``: local-only batched forward without newlines.
         """
-        if path is not None:
-            assert path in ("global", "local")
-            if path == "global":
-                pixel_values = mm_kwargs["pixel_values"]
-                return self._batched_encoder_forward_global_path(pixel_values)
-            else:
-                images_crop = mm_kwargs["images_crop"]
-                return self._batched_encoder_forward_local_path(images_crop)
+        if path == "default":
+            # Original eager implementation: process each image one by one
+            # (with both global and local paths) and concatenate results.
+            image_input = DeepseekOCRImagePixelInputs(
+                type="pixel_values",
+                data=mm_kwargs["pixel_values"],
+                images_crop=mm_kwargs["images_crop"],
+                images_spatial_crop=mm_kwargs["images_spatial_crop"],
+            )
+            vision_embeddings = self._process_image_input(image_input)
+            return torch.cat(vision_embeddings, dim=0)
 
-        # Original eager implementation: process each image one by one
-        # (with both global and local paths) and concatenate results.
-        image_input = DeepseekOCRImagePixelInputs(
-            type="pixel_values",
-            data=mm_kwargs["pixel_values"],
-            images_crop=mm_kwargs["images_crop"],
-            images_spatial_crop=mm_kwargs["images_spatial_crop"],
-        )
-        vision_embeddings = self._process_image_input(image_input)
-        return torch.cat(vision_embeddings, dim=0)
+        assert path in ("global", "local")
+        if path == "global":
+            pixel_values = mm_kwargs["pixel_values"]
+            return self._batched_encoder_forward_global_path(pixel_values)
+        else:
+            images_crop = mm_kwargs["images_crop"]
+            return self._batched_encoder_forward_local_path(images_crop)
 
     def postprocess_encoder_output(
         self,

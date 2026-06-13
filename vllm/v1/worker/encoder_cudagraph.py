@@ -152,7 +152,7 @@ class EncoderCudaGraphManager:
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
-        self.budget_graphs: dict[int, BudgetGraphMetadata] = {}
+        self.budget_graphs: dict[str, dict[int, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
         self.graph_hits = 0
         self.graph_misses = 0
@@ -171,8 +171,6 @@ class EncoderCudaGraphManager:
             # When `image_width <= 640 and image_height <= 640`, the mm inputs
             # will only contain global image, without generating local patches.
             self.local_token_budgets.insert(0, 0)
-            self.global_budget_graphs: dict[int, BudgetGraphMetadata] = {}
-            self.local_budget_graphs: dict[int, BudgetGraphMetadata] = {}
             logger.info(
                 "EncoderCudaGraphManager dual-path mode: "
                 "global_budgets=%s, local_budgets=%s",
@@ -208,11 +206,8 @@ class EncoderCudaGraphManager:
 
     def clear(self) -> None:
         """Release captured encoder CUDA graphs and the manager-local pool."""
-        if self.config.enable_dual_path_graph:
-            self.global_budget_graphs.clear()
-            self.local_budget_graphs.clear()
-        else:
-            self.budget_graphs.clear()
+        for graph_set in self.budget_graphs.values():
+            graph_set.clear()
         self.graph_pool = None
 
     def capture(self, graph_pool: Any):
@@ -229,8 +224,8 @@ class EncoderCudaGraphManager:
             logger.info(
                 "Encoder CUDA graph capture complete. "
                 "Captured %d global + %d local budget graphs.",
-                len(self.global_budget_graphs),
-                len(self.local_budget_graphs),
+                len(self.budget_graphs["global"]),
+                len(self.budget_graphs["local"]),
             )
             return
 
@@ -239,7 +234,7 @@ class EncoderCudaGraphManager:
 
         logger.info(
             "Encoder CUDA graph capture complete. Captured %d budget graphs.",
-            len(self.budget_graphs),
+            len(self.budget_graphs["default"]),
         )
 
     def get_num_graphs_to_capture(self) -> int:
@@ -247,19 +242,14 @@ class EncoderCudaGraphManager:
             return len(self.global_token_budgets) + len(self.local_token_budgets)
         return len(self.token_budgets)
 
-    def _get_graph_set(self, path: str | None = None) -> dict[int, BudgetGraphMetadata]:
-        if path is not None:
-            assert self.config.enable_dual_path_graph
-            assert path in ("global", "local")
-            return (
-                self.global_budget_graphs
-                if path == "global"
-                else self.local_budget_graphs
-            )
-        else:
-            return self.budget_graphs
+    def _get_graph_set(self, path: str = "default") -> dict[int, BudgetGraphMetadata]:
+        # Lazy init global/local graph sets for dual-path models, or default graph
+        # set for single-path models.
+        if path not in self.budget_graphs:
+            self.budget_graphs[path] = {}
+        return self.budget_graphs[path]
 
-    def _capture_budget_graph(self, token_budget: int, path: str | None = None):
+    def _capture_budget_graph(self, token_budget: int, path: str = "default"):
         """Capture CUDA graph for a single token budget."""
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
@@ -334,14 +324,14 @@ class EncoderCudaGraphManager:
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
-        path: str | None = None,
+        path: str = "default",
     ) -> torch.Tensor | None:
         """Execute budget graph.
 
         Args:
             mm_kwargs: Multimodal inputs for the batch.
             token_budget: Token budget to use.
-            path: Path for the graph. Should be "global" or "local".
+            path: Path for the graph. Should be one of ["default", "global", "local"].
         Returns:
             Encoder outputs, or None if graph not captured.
         """
@@ -617,10 +607,7 @@ class EncoderCudaGraphManager:
                 )
                 self.graph_misses += len(batch_orig_indices)
                 with torch.inference_mode():
-                    raw = self.model.encoder_eager_forward(
-                        batch_mm_kwargs,
-                        path=None,
-                    )
+                    raw = self.model.encoder_eager_forward(batch_mm_kwargs)
                 per_item_total = [
                     per_item_global_tokens[i] + per_item_local_tokens[i] + 1
                     for i in batch_orig_indices
@@ -867,10 +854,7 @@ class EncoderCudaGraphManager:
         total_requests = self.graph_hits + self.graph_misses
         hit_rate = self.graph_hits / total_requests if total_requests > 0 else 0.0
 
-        if self.config.enable_dual_path_graph:
-            num_budgets = len(self.global_budget_graphs) + len(self.local_budget_graphs)
-        else:
-            num_budgets = len(self.budget_graphs)
+        num_budgets = sum(len(g) for g in self.budget_graphs.values())
 
         return {
             "graph_hits": self.graph_hits,
