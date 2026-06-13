@@ -873,7 +873,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
     ),
     # Use dedicated multiprocess context for workers.
-    # Both spawn and fork work
+    # spawn, fork, and forkserver are all supported. forkserver is used
+    # by `vllm serve` as the default to cut cold-start time (see
+    # cli_env_setup in vllm/entrypoints/serve/utils/api_utils.py and the
+    # forkserver setup at vllm/entrypoints/openai/api_server.py).
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
         "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork", "forkserver"]
     ),

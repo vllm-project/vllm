@@ -86,6 +86,21 @@ async def build_async_engine_client(
         logger.debug("Setup forkserver with pre-imports")
         multiprocessing.set_start_method("forkserver")
         multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        # Defensive guard: forkserver-after-CUDA-init duplicates the CUDA
+        # context into every child and corrupts state. _maybe_force_spawn
+        # in vllm/utils/system_utils.py is supposed to override
+        # forkserver->spawn in this case, but if something in the import
+        # chain between cli_env_setup and here touches CUDA (regression
+        # risk), fail loud rather than silent.
+        import torch
+
+        assert not torch.cuda.is_initialized(), (
+            "CUDA was initialized in the parent process before forkserver "
+            "setup. Forkserver-from-CUDA-parent would duplicate the CUDA "
+            "context into every child and is not safe. Set "
+            "VLLM_WORKER_MULTIPROC_METHOD=spawn to fall back, or fix the "
+            "import chain that initialized CUDA early."
+        )
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")
 

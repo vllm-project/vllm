@@ -147,15 +147,20 @@ def load_aware_call(func):
 
 
 def cli_env_setup():
-    # The safest multiprocessing method is `spawn`, as the default `fork` method
-    # is not compatible with some accelerators. The default method will be
-    # changing in future versions of Python, so we should use it explicitly when
-    # possible.
+    # Default `vllm serve` to forkserver. The forkserver process is itself
+    # a clean spawn (no CUDA-init concerns) which then forks each EngineCore
+    # from a warm intermediate that has pre-imported torch+vllm modules.
+    # Saves ~3-7s per cold-load vs spawn (the per-engine torch import).
+    # Library users / non-`vllm serve` paths set the env explicitly and are
+    # unaffected. _maybe_force_spawn() in vllm/utils/system_utils.py overrides
+    # this default when CUDA is already initialized in the parent, when in
+    # a Ray actor, with --numa-bind, or in WSL — so the cases where
+    # forkserver isn't safe still fall back to spawn automatically.
     #
-    # We only set it here in the CLI entrypoint, because changing to `spawn`
-    # could break some existing code using vLLM as a library. `spawn` will cause
-    # unexpected behavior if the code is not protected by
-    # `if __name__ == "__main__":`.
+    # `spawn` remains valid via VLLM_WORKER_MULTIPROC_METHOD=spawn for any
+    # deployment that prefers the prior behavior. `spawn` is also the safest
+    # default for library users not protected by `if __name__ == "__main__":`,
+    # which is why we only set this in the CLI entrypoint.
     #
     # References:
     # - https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods
@@ -163,8 +168,8 @@ def cli_env_setup():
     # - https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
     # - https://docs.habana.ai/en/latest/PyTorch/Getting_Started_with_PyTorch_and_Gaudi/Getting_Started_with_PyTorch.html?highlight=multiprocessing#torch-multiprocessing-for-dataloaders
     if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
-        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'forkserver'")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "forkserver"
 
 
 def get_max_tokens(
