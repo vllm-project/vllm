@@ -25,12 +25,13 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error};
+use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
 };
 use crate::routes::openai::utils::types::LogProbs;
+use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
@@ -46,6 +47,13 @@ pub async fn completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
+    if let Err(err) = validate::validate_token_id_ranges(
+        &body,
+        state.tokenizer_vocab_size(),
+        state.model_vocab_size(),
+    ) {
+        return err.into_response();
+    }
     let prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
@@ -67,11 +75,7 @@ pub async fn completions(
     {
         Ok(stream) => stream,
         Err(error) => {
-            return server_error!(
-                "failed to submit completion request: {}",
-                error.to_report_string()
-            )
-            .into_response();
+            return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
@@ -120,6 +124,8 @@ async fn collect_completion(
     ResponseOptions {
         // Ignored: non-streaming responses always include usage.
         include_usage: _,
+        // Ignored: non-streaming responses are collected before usage is attached.
+        include_continuous_usage: _,
         echo,
         requested_logprobs,
         include_prompt_logprobs,
@@ -211,6 +217,7 @@ async fn completion_chunk_stream(
     }: ApiServerOptions,
     ResponseOptions {
         include_usage,
+        include_continuous_usage,
         echo,
         requested_logprobs,
         // Ignored: streaming prompt logprobs are rejected for Python parity.
@@ -223,6 +230,18 @@ async fn completion_chunk_stream(
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
+    let mut continuous_usage = ContinuousUsage::default();
+
+    /// Yield a chunk with optional continuous usage attached.
+    macro_rules! yield_chunk {
+        ($chunk:expr) => {{
+            let mut chunk = $chunk;
+            if include_continuous_usage {
+                chunk.usage = Some(continuous_usage.to_usage());
+            }
+            y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+        }};
+    }
 
     while let Some(next) = stream.next().await {
         match next {
@@ -230,6 +249,7 @@ async fn completion_chunk_stream(
                 prompt_token_ids, ..
             }) => {
                 debug!("completion stream started");
+                continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let mut chunk =
@@ -240,7 +260,7 @@ async fn completion_chunk_stream(
                         }
                         first_chunk = false;
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                    yield_chunk!(chunk);
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
                     let mut chunk =
@@ -249,7 +269,7 @@ async fn completion_chunk_stream(
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
-                    y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                    yield_chunk!(chunk);
                 }
             }
             Ok(DecodedTextEvent::TextDelta {
@@ -274,10 +294,12 @@ async fn completion_chunk_stream(
                     None
                 };
                 let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
+                let delta_token_count = token_ids.len();
+                continuous_usage.add_output_tokens(delta_token_count);
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
-                y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
+                yield_chunk!(chunk);
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
@@ -291,13 +313,17 @@ async fn completion_chunk_stream(
                             "completion finished"
                         );
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(final_chunk(
+                    continuous_usage.set_final_counts(
+                        finished.usage.prompt_token_count,
+                        finished.usage.output_token_count,
+                    );
+                    let final_chunk = final_chunk(
                         &request_id,
                         &response_model,
                         created,
                         finished.finish_reason,
-                    )?))
-                    .await;
+                    )?;
+                    yield_chunk!(final_chunk);
 
                     if include_usage {
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(

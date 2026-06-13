@@ -114,6 +114,16 @@ impl AppState {
         &self.served_model_names
     }
 
+    /// Tokenizer vocabulary size.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.chat.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size, else `None`.
+    pub fn model_vocab_size(&self) -> Option<usize> {
+        self.chat.model_vocab_size()
+    }
+
     /// Return base served model names plus dynamically loaded LoRA adapter
     /// names.
     pub async fn served_model_names_with_loras(&self) -> Vec<String> {

@@ -140,8 +140,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
