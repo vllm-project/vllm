@@ -429,7 +429,9 @@ class MultiprocExecutor(Executor):
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
         )
-        if wait_for_termination(active_procs(), 4):
+        if wait_for_termination(
+            active_procs(), timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+        ):
             logger.info_once("[shutdown] Executor: all workers exited gracefully")
             return
 
