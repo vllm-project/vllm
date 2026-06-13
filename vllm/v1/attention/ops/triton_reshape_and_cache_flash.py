@@ -17,23 +17,16 @@ _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "fl
 
 
 def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
-    """Whether the Triton reshape-and-cache path can store this kv_cache_dtype
-    on the current device.
-
-    An fp8 KV cache stores via ``current_platform.fp8_dtype()``
-    (``float8_e4m3fn`` == ``fp8e4nv``), which has no Triton lowering before SM89;
-    bfloat16 has no native hardware support before SM80 (Turing). On older GPUs
-    these fail to compile/run, so report them as unsupported here rather than
-    crash deep in inductor autotuning. Other quantized dtypes (int8, nvfp4) do
-    not use fp8e4nv.
-    """
+    if not (
+        kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES
+        or is_quantized_kv_cache(kv_cache_dtype)
+    ):
+        return False
     if kv_cache_dtype.startswith("fp8"):
         return current_platform.has_device_capability(89)
     if kv_cache_dtype == "bfloat16":
         return current_platform.has_device_capability(80)
-    return kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES or is_quantized_kv_cache(
-        kv_cache_dtype
-    )
+    return True
 
 
 @triton.jit
