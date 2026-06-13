@@ -200,33 +200,43 @@ class Internlm2ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         text = model_output
-        tools = self.tools
         if "<|action_start|><|plugin|>" in text:
-            text, action = text.split("<|action_start|><|plugin|>", 1)
-            action = action.split("<|action_end|>".strip())[0]
-            action = action[action.find("{") :]
-            action_dict = json.loads(action)
-            name, parameters = (
-                action_dict["name"],
-                json.dumps(
-                    action_dict.get("parameters", action_dict.get("arguments", {})),
-                    ensure_ascii=False,
-                ),
-            )
+            # The model may emit more than one
+            # `<|action_start|><|plugin|>...<|action_end|>` block in a single
+            # output. Splitting on the first marker only and unpacking into two
+            # variables raised `ValueError: too many values to unpack` and, once
+            # guarded with `maxsplit=1`, silently dropped every call after the
+            # first. Iterate over all markers so each tool call is extracted.
+            segments = text.split("<|action_start|><|plugin|>")
+            # Text before the first marker is the assistant's natural-language
+            # content; everything after a marker is a tool-call block.
+            content = segments[0]
 
-            if not tools or name not in [t.function.name for t in tools]:
-                ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=text
+            tool_calls: list[ToolCall] = []
+            for action in segments[1:]:
+                action = action.split("<|action_end|>".strip())[0]
+                action = action[action.find("{") :]
+                action_dict = json.loads(action)
+                name, parameters = (
+                    action_dict["name"],
+                    json.dumps(
+                        action_dict.get(
+                            "parameters", action_dict.get("arguments", {})
+                        ),
+                        ensure_ascii=False,
+                    ),
                 )
 
-            tool_calls = [
-                ToolCall(function=FunctionCall(name=name, arguments=parameters))
-            ]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=text if len(text) > 0 else None,
-            )
+                tool_calls.append(
+                    ToolCall(function=FunctionCall(name=name, arguments=parameters))
+                )
+
+            if tool_calls:
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=tool_calls,
+                    content=content if len(content) > 0 else None,
+                )
 
         return ExtractedToolCallInformation(
             tools_called=False, tool_calls=[], content=text

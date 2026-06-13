@@ -9,7 +9,10 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.tool_parsers.utils import run_tool_extraction_nonstreaming
+from tests.tool_parsers.utils import (
+    run_tool_extraction_nonstreaming,
+    run_tool_extraction_streaming,
+)
 from vllm.tool_parsers import ToolParserManager
 from vllm.tokenizers import TokenizerLike
 
@@ -123,18 +126,55 @@ class TestInternLM2ToolParser(ToolParserTests):
             },
         )
 
-    def test_multiple_action_start_markers_no_valueerror(self, tokenizer):
-        """Regression: output with two <|action_start|><|plugin|> markers must not
-        raise ValueError (too many values to unpack) — fixed by split(..., 1)."""
+    def test_multiple_action_start_markers_extracts_all(self, tokenizer):
+        """Regression for #44139.
+
+        Output with two <|action_start|><|plugin|> blocks must not raise
+        ValueError (too many values to unpack), and — unlike a bare
+        split(..., 1) guard — must extract *both* tool calls instead of
+        silently dropping the second one.
+        """
         model_output = (
-            "Some text"
+            "Let me check both for you. "
             "<|action_start|><|plugin|>"
             '{"name": "get_weather", "parameters": {"city": "Tokyo"}}'
             "<|action_end|>"
             "<|action_start|><|plugin|>"
-            '{"name": "get_time", "parameters": {}}'
+            '{"name": "get_time", "parameters": {"tz": "Asia/Tokyo"}}'
             "<|action_end|>"
         )
         parser = ToolParserManager.get_tool_parser("internlm")(tokenizer)
         result = run_tool_extraction_nonstreaming(parser, model_output)
+
         assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.tool_calls[0].function.arguments == '{"city": "Tokyo"}'
+        assert result.tool_calls[1].function.name == "get_time"
+        assert result.tool_calls[1].function.arguments == '{"tz": "Asia/Tokyo"}'
+        # Leading natural-language text is preserved as content.
+        assert result.content == "Let me check both for you. "
+
+    def test_multiple_action_start_markers_streaming_no_valueerror(self, tokenizer):
+        """Regression for #44139 (streaming path).
+
+        The second <|action_start|><|plugin|> marker arrives in a later chunk,
+        so this exercises the streaming split that originally raised
+        ValueError. Streaming consumption must complete without crashing and
+        surface the first tool call (the streaming path is single-tool by
+        design — see the xfail markers in test_config).
+        """
+        model_output = (
+            "<|action_start|><|plugin|>"
+            '{"name": "get_weather", "parameters": {"city": "Tokyo"}}'
+            "<|action_end|>"
+            "<|action_start|><|plugin|>"
+            '{"name": "get_time", "parameters": {"tz": "Asia/Tokyo"}}'
+            "<|action_end|>"
+        )
+        parser = ToolParserManager.get_tool_parser("internlm")(tokenizer)
+        # Must not raise ValueError as the second marker streams in.
+        reconstructor = run_tool_extraction_streaming(
+            parser, model_output, assert_one_tool_per_delta=False
+        )
+        assert reconstructor.tool_calls[0].function.name == "get_weather"
