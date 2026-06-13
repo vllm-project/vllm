@@ -51,6 +51,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    maybe_remap_moe_expert_param_name,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -237,9 +238,6 @@ class Llama4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "llama":
-            is_neox_style = False
 
         self.rotary_emb = (
             get_rope(
@@ -662,6 +660,7 @@ class Llama4Model(LlamaModel):
                 if "experts." in name and any(
                     scale_name in name for scale_name in scale_names
                 ):
+                    name = maybe_remap_moe_expert_param_name(name, params_dict)
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
