@@ -934,7 +934,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     name,
                     loaded_weight.shape,
                 )
-            # If name is "bias" get it from self, otherwise load into self
+            # Load into self if name is not an attr of self
             param: Parameter = getattr(self, name, self)
             if (
                 param is None
@@ -1361,7 +1361,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     name,
                     loaded_weight.shape,
                 )
-            # If name is "bias" get it from self, otherwise load into self
+            # Load into self if name is not an attr of self
             param: Parameter = getattr(self, name, self)
             if (
                 param is None
