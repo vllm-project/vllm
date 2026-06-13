@@ -129,32 +129,20 @@ class WeightsMapper:
         }
 
     def get_packed_modules_mapping(self) -> dict[str, list[str]]:
-        """Derive a `packed_modules_mapping` from this mapper's fusion entries."""
-        qkv_order = {"q": 0, "k": 1, "v": 2}
-        packed: dict[str, list[tuple[int, str]]] = {}
-        mappings = (
-            self.orig_to_new_substr,
-            self.orig_to_new_prefix,
-            self.orig_to_new_suffix,
-        )
-        for mapping in mappings:
-            for new in mapping.values():
-                if new is None or "." not in new:
-                    continue
-                param_path, _, shard_id = new.rpartition(".")
-                if shard_id.isdigit():
-                    order = int(shard_id)
-                elif shard_id in qkv_order:
-                    order = qkv_order[shard_id]
-                else:
-                    continue
-                param_name = param_path.lstrip(".").rpartition(".")[2]
-                shards = packed.setdefault(param_name, [])
-                shards.append((order, f"{param_name}.{shard_id}"))
-        return {
-            name: [shard for _, shard in sorted(shards)]
-            for name, shards in packed.items()
-        }
+        """Derive a `packed_modules_mapping` from `self.orig_to_new_substr`."""
+        qkv_shards = {"q", "k", "v"}
+        packed_modules_mapping: dict[str, list[str]] = {}
+        for old, new in self.orig_to_new_substr.items():
+            if new is None or "." not in new:
+                continue
+            param_path, _, shard_id = new.rpartition(".")
+            # Is shard_id actually a shard ID?
+            if not (shard_id.isdigit() or shard_id in qkv_shards):
+                continue
+            _, _, weight_name = old.rpartition(".")
+            _, _, param_name = param_path.rpartition(".")
+            packed_modules_mapping.setdefault(param_name, []).append(weight_name)
+        return packed_modules_mapping
 
 
 class AutoWeightsLoader:
@@ -396,12 +384,11 @@ class AutoWeightsLoader:
             # Skip loading extra bias for GPTQ models
             if "gptq" in quant_config.get_name():
                 self.ignore_unexpected_suffixes.append(".bias")
-            # Get mappings for KV cache quantization scales
+            # Get mappings and ignore prefixes for KV cache quantization scales
             mapper = mapper or WeightsMapper()
             mapper |= quant_config.get_cache_scale_mapper()
-            self.ignore_unexpected_suffixes.extend(
-                quant_config._ignore_unexpected_suffixes
-            )
+            ignore_unexpected_prefixes = quant_config._ignore_unexpected_prefixes
+            self.ignore_unexpected_suffixes.extend(ignore_unexpected_prefixes)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
