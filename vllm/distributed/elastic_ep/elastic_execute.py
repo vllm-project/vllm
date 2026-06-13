@@ -470,6 +470,9 @@ class ElasticEPScalingExecutor:
         eplb_model_state.expert_buffer = [
             torch.empty_like(w) for w in model.expert_weights[0]
         ]
+        assert parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,

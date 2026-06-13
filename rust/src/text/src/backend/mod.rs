@@ -41,6 +41,18 @@ pub trait TextBackend: Send + Sync {
     fn sampling_hints(&self) -> Result<SamplingHints> {
         Ok(SamplingHints::default())
     }
+
+    /// Return the model vocabulary size from the model config, if known. Used to
+    /// range-check request token ids against the engine embedding table.
+    fn model_vocab_size(&self) -> Option<usize> {
+        None
+    }
+
+    /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
+    /// Used to range-check `allowed_token_ids` and token-id prompts.
+    fn tokenizer_vocab_size(&self) -> usize {
+        self.tokenizer().vocab_size()
+    }
 }
 
 /// Shared trait-object form of [`TextBackend`].

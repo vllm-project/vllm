@@ -144,12 +144,12 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^examples/.*mistral.*\.py
-      - files~=^tests/.*mistral.*\.py
-      - files~=^vllm/model_executor/models/.*mistral.*\.py
+      - files~=^tests/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
+      - files~=^vllm/model_executor/models/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
       - files~=^vllm/reasoning/.*mistral.*\.py
       - files~=^vllm/tool_parsers/.*mistral.*\.py
-      - files~=^vllm/transformers_utils/.*mistral.*\.py
-      - title~=(?i)Mistral
+      - files~=^vllm/transformers_utils/.*(?:mistral|voxtral|pixtral).*\.py
+      - title~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
   actions:
     label:
       add:
