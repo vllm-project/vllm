@@ -21,7 +21,6 @@ import itertools
 import json
 import logging
 import os
-import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
@@ -248,6 +247,22 @@ class Proxy:
         }
         return status
 
+    def _remove_instance_on_upstream_error(
+        self,
+        instance_type: str,
+        instance: str,
+        http_exc: HTTPException,
+    ) -> None:
+        if http_exc.status_code < 500:
+            return
+        if instance_type == "prefill":
+            instances = self.prefill_instances
+        else:
+            instances = self.decode_instances
+        if len(instances) <= 1:
+            return
+        self.remove_instance_endpoint(instance_type, instance)
+
     @staticmethod
     def _prefill_kv_transfer_params() -> dict[str, Any]:
         return {
@@ -311,6 +326,7 @@ class Proxy:
         if "max_completion_tokens" in kv_prepare_request:
             kv_prepare_request["max_completion_tokens"] = 1
         kv_prepare_request["stream"] = False
+        kv_prepare_request.pop("stream_options", None)
         kv_prepare_request["kv_transfer_params"] = self._prefill_kv_transfer_params()
 
         chunks = []
@@ -358,7 +374,9 @@ class Proxy:
                     prefill_instance, "/v1/completions", request
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                self._remove_instance_on_upstream_error(
+                    "prefill", prefill_instance, http_exc
+                )
                 raise http_exc
 
             # Perform kv recv and decoding stage
@@ -371,16 +389,17 @@ class Proxy:
                     f"http://{decode_instance}/v1/completions", decode_request
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
+                self._remove_instance_on_upstream_error(
+                    "decode", decode_instance, http_exc
+                )
                 raise http_exc
             response = StreamingResponse(generator)
             return response
-        except Exception:
-            import sys
-
-            exc_info = sys.exc_info()
-            print("Error occurred in disagg proxy server")
-            print(exc_info)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server")
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     async def create_chat_completion(self, raw_request: Request):
         try:
@@ -393,7 +412,9 @@ class Proxy:
                     prefill_instance, "/v1/chat/completions", request
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                self._remove_instance_on_upstream_error(
+                    "prefill", prefill_instance, http_exc
+                )
                 raise http_exc
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
@@ -406,18 +427,17 @@ class Proxy:
                     decode_request,
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
+                self._remove_instance_on_upstream_error(
+                    "decode", decode_instance, http_exc
+                )
                 raise http_exc
             response = StreamingResponse(content=generator)
             return response
-        except Exception:
-            exc_info = sys.exc_info()
-            error_messages = [str(e) for e in exc_info if e]
-            print("Error occurred in disagg proxy server")
-            print(error_messages)
-            return StreamingResponse(
-                content=iter(error_messages), media_type="text/event-stream"
-            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server")
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     def remove_instance_endpoint(self, instance_type, instance):
         if instance_type == "decode" and instance in self.decode_instances:
