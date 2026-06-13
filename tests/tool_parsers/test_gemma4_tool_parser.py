@@ -27,6 +27,14 @@ def mock_tokenizer():
     tokenizer.encode.return_value = [1, 2, 3]
     # Include the tool call start token in the vocab for the parser
     tokenizer.get_vocab.return_value = {TOOL_CALL_START: 48, TOOL_CALL_END: 49}
+
+    def _mock_decode(ids, **kwargs):
+        from vllm.tool_parsers.gemma4_tool_parser import STRING_DELIM
+
+        token_map = {48: TOOL_CALL_START, 49: TOOL_CALL_END, 52: STRING_DELIM}
+        return "".join(token_map.get(tid, "?") for tid in ids)
+
+    tokenizer.decode.side_effect = _mock_decode
     return tokenizer
 
 

@@ -59,7 +59,16 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Disable special-token stripping to preserve boundary tokens."""
+        """Disable special-token stripping to preserve boundary tokens.
+
+        When thinking is explicitly disabled, there are no reasoning
+        channel tokens to preserve, so skip_special_tokens stays True
+        (preventing tool-call delimiter tokens from leaking into content
+        when tool_choice="none").
+        """
+        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        if not chat_template_kwargs.get("enable_thinking", True):
+            return request
         request.skip_special_tokens = False
         return request
 
@@ -94,7 +103,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                 return False
             if input_ids[i] == end_token_id:
                 return True
-        return False
+        # No reasoning tokens found — thinking was never started,
+        # so treat as already ended (enables structured output).
+        return True
 
     # ------------------------------------------------------------------
     # Non-streaming path
