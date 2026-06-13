@@ -269,6 +269,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -1854,6 +1855,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
+    ),
+    # If set to 1, allow memory profiling to continue when free GPU memory
+    # increases during profiling. This can happen in shared-GPU test setups
+    # where another process releases memory while vLLM is initializing.
+    "VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE": lambda: bool(
+        int(os.getenv("VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE", "0"))
     ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(

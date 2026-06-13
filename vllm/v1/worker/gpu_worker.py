@@ -82,6 +82,40 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+def _validate_free_memory_did_not_increase_during_profiling(
+    init_free_memory: int,
+    free_gpu_memory: int,
+) -> None:
+    if init_free_memory >= free_gpu_memory:
+        return
+
+    msg = (
+        "Error in memory profiling. "
+        f"Initial free memory {format_gib(init_free_memory)} GiB, "
+        f"current free memory {format_gib(free_gpu_memory)} GiB. "
+        "This happens when other processes sharing the same container "
+        "release GPU memory while vLLM is profiling during initialization. "
+        "To fix this, ensure consistent GPU memory allocation or "
+        "isolate vLLM in its own container."
+    )
+
+    if envs.VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE:
+        logger.warning(
+            "%s Continuing because "
+            "VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE=1. "
+            "This may overestimate available KV cache memory; use only when "
+            "GPU memory fluctuations are expected and the workload has enough "
+            "headroom.",
+            msg,
+        )
+        return
+
+    raise AssertionError(
+        f"{msg} Set VLLM_MEMORY_PROFILER_ALLOW_FREE_MEMORY_INCREASE=1 "
+        "to bypass this check when GPU memory is expected to fluctuate."
+    )
+
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -448,15 +482,12 @@ class Worker(WorkerBase):
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {format_gib(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
+        # GPU did not change their memory usage during the profiling. Some test
+        # setups intentionally share GPUs across processes, so this validation
+        # can be disabled with an explicit opt-in environment variable.
+        _validate_free_memory_did_not_increase_during_profiling(
+            self.init_snapshot.free_memory,
+            free_gpu_memory,
         )
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
