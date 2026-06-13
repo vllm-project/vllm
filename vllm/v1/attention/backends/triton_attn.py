@@ -574,6 +574,14 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        # SM80/86: no native fp8e4nv cast -> emulate fp8 KV in software (explicit
+        # fp8e4nv<->bf16 conversion in the reshape store + unified_attention read).
+        self._fp8_software_conv = (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and current_platform.is_cuda()
+            and current_platform.has_device_capability(80)
+            and not current_platform.has_device_capability(89)
+        )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel XPU).  The dead branch
@@ -667,7 +675,11 @@ class TritonAttentionImpl(AttentionImpl):
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype
+                and not self._fp8_software_conv
             ):
+                # Native fp8 path: reinterpret the uint8 cache as fp8. On the
+                # software-emulation path we keep it uint8 and decode explicitly
+                # inside unified_attention (no native fp8 cvt on SM80/86).
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             descale_shape = (
@@ -731,6 +743,7 @@ class TritonAttentionImpl(AttentionImpl):
             rswa_prefix_lens=attn_metadata.rswa_prefix_lens,
             rswa_window=attn_metadata.rswa_window,
             kv_quant_mode=self._kv_quant_mode,
+            fp8_software_conv=self._fp8_software_conv,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
