@@ -24,9 +24,11 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     ):
         return False
     if kv_cache_dtype.startswith("fp8"):
-        return current_platform.has_device_capability(89) or current_platform.is_xpu()
+        # SM89+ native fp8e4nv; SM80/86 supported via software emulation
+        # (explicit fp8e4nv<->bf16 conversion on the Triton path).
+        return current_platform.has_device_capability(80)
     if kv_cache_dtype == "bfloat16":
-        return current_platform.has_device_capability(80) or current_platform.is_xpu()
+        return current_platform.has_device_capability(80)
     return True
 
 
