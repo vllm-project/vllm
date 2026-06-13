@@ -4,15 +4,8 @@
 import fnmatch
 from typing import TYPE_CHECKING
 
-from vllm.utils.import_utils import PlaceholderModule
-
 if TYPE_CHECKING:
     from botocore.client import BaseClient
-
-try:
-    import boto3
-except ImportError:
-    boto3 = PlaceholderModule("boto3")  # type: ignore[assignment]
 
 
 def _filter_allow(paths: list[str], patterns: list[str]) -> list[str]:
@@ -48,6 +41,18 @@ def glob(
         list[str]: List of full S3 paths allowed by the pattern
     """
     if s3 is None:
+        # Lazy import: boto3 + botocore + s3transfer + jmespath collectively
+        # add ~hundreds of ms (and 100+ modules) to every cold-start. For the
+        # local-disk / HuggingFace Hub case this S3 client is never
+        # constructed, so deferring the import keeps that cost off the
+        # critical path.
+        try:
+            import boto3
+        except ImportError as e:
+            raise ImportError(
+                "boto3 is required to load model weights from S3. "
+                "Install it with `pip install boto3`."
+            ) from e
         s3 = boto3.client("s3")
     if not path.endswith("/"):
         path = path + "/"
