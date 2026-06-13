@@ -373,3 +373,201 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+SPLITTING_DELTAS_AND_EXPECTED = [
+    pytest.param(
+        ["This is reasoning text", "</", "think>", "This is content"],
+        "This is reasoning text",
+        "This is content",
+        id="end_tag_split_across_two_chunks",
+    ),
+    pytest.param(
+        ["This is reasoning text<", "/think", ">", "This is content"],
+        "This is reasoning text",
+        "This is content",
+        id="end_tag_split_three_ways",
+    ),
+    pytest.param(
+        # Splitting into "</t" + "hi" to circumvent typo linting rules
+        ["First reasoning", " Second reasoning", " </t" + "hi", "nk>", "content"],
+        "First reasoning Second reasoning",
+        "content",
+        id="multiple_reasoning_chunks_before_split_tag",
+    ),
+    pytest.param(
+        ["This is reasoning", "This is content without end tag"],
+        "This is reasoningThis is content without end tag",
+        None,
+        id="missing_end_tag_everything_is_reasoning",
+    ),
+    pytest.param(
+        # Splitting into "</t" + "hi" to circumvent typo linting rules
+        ["This is reasoning</t" + "hi", "nkThis is content"],
+        "This is reasoning</thinkThis is content",
+        None,
+        id="partial_tag_not_recognized",
+    ),
+    pytest.param(
+        ["This is reasoning</th", "ink>This is content"],
+        "This is reasoning",
+        "This is content",
+        id="case_3a_tag_split_reasoning_then_content",
+    ),
+    pytest.param(
+        ["This is reasoning", "</think>This is content"],
+        "This is reasoning",
+        "This is content",
+        id="case_3b_complete_tag_in_content_chunk",
+    ),
+    pytest.param(
+        ["This is", " reasoning", "</think>This is content"],
+        "This is reasoning",
+        "This is content",
+        id="case_3c_tag_with_content_after_reasoning",
+    ),
+    pytest.param(
+        ["This is reasoning", "</th", "i", "nk>", "content"],
+        "This is reasoning",
+        "content",
+        id="case_3d_tag_split_multiple_ways",
+    ),
+    pytest.param(
+        [
+            "I'll check the weather",
+            "</think><tool_call>",
+            "<function=get_weather>",
+            "<parameter=ci",
+            "ty>Tokyo</parameter>",
+            "</function></tool_call>",
+        ],
+        "I'll check the weather",
+        "<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>",
+        id="tool_call_parameter_tag_split",
+    ),
+    pytest.param(
+        [
+            "Let me search",
+            "</think>",
+            "<tool_call><function=search>",
+            "<parameter=query>how",
+            " to cook pasta</parameter>",
+            "</function></tool_call>",
+        ],
+        "Let me search",
+        "<tool_call><function=search><parameter=query>how to cook pasta</parameter></function></tool_call>",  # noqa: E501
+        id="tool_call_parameter_value_split",
+    ),
+    pytest.param(
+        [
+            "Getting data",
+            "</think>",
+            "<tool_call>",
+            "<function=api_call>",
+            "<parameter=url>http",
+            "s://api.example.com</parameter>",
+            "<parameter=method>G",
+            "ET</parameter>",
+            "</function></tool_call>",
+        ],
+        "Getting data",
+        "<tool_call><function=api_call><parameter=url>https://api.example.com</parameter><parameter=method>GET</parameter></function></tool_call>",  # noqa: E501
+        id="multiple_parameters_split",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "deltas, expected_reasoning, expected_content", SPLITTING_DELTAS_AND_EXPECTED
+)
+def test_splitting_reasoning_tokens(
+    deltas: list[str],
+    expected_reasoning: str | None,
+    expected_content: str | None,
+    qwen3_tokenizer,
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    reconstructor: StreamingReasoningReconstructor = run_reasoning_extraction_streaming(
+        parser, deltas
+    )
+
+    assert reconstructor.reasoning == expected_reasoning, (
+        f"Expected reasoning '{expected_reasoning}' but got '{reconstructor.reasoning}'"
+    )
+    assert (reconstructor.other_content or None) == expected_content, (
+        f"Expected content '{expected_content}' but got '{reconstructor.other_content}'"
+    )
+
+
+@pytest.mark.parametrize(
+    "stream_interval",
+    [2, 3, 5, 10],
+    ids=["interval_2", "interval_3", "interval_5", "interval_10"],
+)
+def test_with_stream_interval(stream_interval: int, qwen3_tokenizer):
+    """
+    Test that simulates real-world MTP or large stream-interval scenarios.
+
+    This test batches tokens according to stream_interval and verifies that
+    the parser correctly handles all edge cases when tags are split across
+    batch boundaries.
+    """
+    full_output = (
+        "I need to analyze this carefully. "
+        "First, let me think about the approach. "
+        "The solution requires checking multiple factors."
+        "</think>"
+        "Based on my analysis, I'll proceed with the following action: "
+        "<tool_call>"
+        "<function=execute_query>"
+        "<parameter=database>production</parameter>"
+        "<parameter=query>SELECT * FROM users WHERE status='active'</parameter>"
+        "</function>"
+        "</tool_call>"
+    )
+
+    # Tokenize the full output
+    tokens = qwen3_tokenizer.tokenize(full_output)
+    token_strings = [
+        qwen3_tokenizer.convert_tokens_to_string([token]) for token in tokens
+    ]
+
+    # Batch tokens according to stream_interval
+    batched_deltas = []
+    for i in range(0, len(token_strings), stream_interval):
+        batch = "".join(token_strings[i : i + stream_interval])
+        batched_deltas.append(batch)
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    reconstructor: StreamingReasoningReconstructor = run_reasoning_extraction_streaming(
+        parser, batched_deltas
+    )
+
+    # Expected results
+    expected_reasoning = (
+        "I need to analyze this carefully. "
+        "First, let me think about the approach. "
+        "The solution requires checking multiple factors."
+    )
+    expected_content = (
+        "Based on my analysis, I'll proceed with the following action: "
+        "<tool_call>"
+        "<function=execute_query>"
+        "<parameter=database>production</parameter>"
+        "<parameter=query>SELECT * FROM users WHERE status='active'</parameter>"
+        "</function>"
+        "</tool_call>"
+    )
+
+    assert reconstructor.reasoning == expected_reasoning, (
+        f"With interval {stream_interval}, reasoning was incorrect"
+    )
+    assert reconstructor.other_content == expected_content, (
+        f"With interval {stream_interval}, content was incorrect"
+    )
