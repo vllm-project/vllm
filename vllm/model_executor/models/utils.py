@@ -5,7 +5,7 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 import regex as re
 import torch
@@ -19,7 +19,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -32,6 +31,9 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     direct_register_custom_op,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -390,6 +392,9 @@ class AutoWeightsLoader:
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
+            # If mapper contains packed_modules_mapping, update them in quant_config
+            if packed_modules_mapping := mapper.get_packed_modules_mapping():
+                quant_config.packed_modules_mapping.update(packed_modules_mapping)
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
@@ -758,9 +763,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(
-    vllm_config: VllmConfig,
-) -> QuantizationConfig | None:
+def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
