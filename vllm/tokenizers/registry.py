@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl", "step3p7"}
 
 _VLLM_TOKENIZERS = {
+    "batch_split_message": ("batch_split_message", "BatchSplitMessageTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
@@ -247,6 +248,12 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+
+    # Forward --tokenizer-mode-config to the tokenizer's from_pretrained.
+    # Values must be hashable (these flow through lru_cache); explicit
+    # kwargs win.
+    if model_config.tokenizer_mode_config:
+        kwargs = {**model_config.tokenizer_mode_config, **kwargs}
 
     return cached_get_tokenizer(
         model_config.tokenizer,
