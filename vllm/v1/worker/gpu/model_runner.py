@@ -367,8 +367,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
         GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
-        self.reset_encoder_cache()
-        self.reset_mm_cache()
 
     def apply_sparse_weight_patches(self, *args, **kwargs) -> None:
         # TODO: Use full version instead of import when fully migrated to v2
