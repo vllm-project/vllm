@@ -516,6 +516,66 @@ class TestStreamingExtraction:
         for index, expected_args in expected_args_by_index.items():
             assert json.loads(args_by_index[index]) == expected_args
 
+    @pytest.mark.parametrize(
+        ("chunks", "expected_args_by_index"),
+        [
+            (
+                [
+                    "<|tool_call>",
+                    "call:first{x:1",
+                    "}<tool_call|><|tool_call>call:second{y:2}<tool_call|>",
+                ],
+                {0: {"x": 1}, 1: {"y": 2}},
+            ),
+            (
+                [
+                    "<|tool_call>",
+                    "call:first{x:1",
+                    "}<",
+                    "tool_call|><|tool_call>call:second{y:2}<",
+                    "tool_call|>",
+                ],
+                {0: {"x": 1}, 1: {"y": 2}},
+            ),
+        ],
+    )
+    def test_streaming_mtp_replay_segments_have_at_most_one_tool_tag(
+        self, parser, mock_request, monkeypatch, chunks, expected_args_by_index
+    ):
+        """Segment replay should pass at most one tool tag per parser step."""
+        observed_delta_texts: list[str] = []
+        original_extract_streaming = parser._extract_streaming
+
+        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+            observed_delta_texts.append(delta_text)
+            return original_extract_streaming(previous_text, current_text, delta_text)
+
+        monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        observed_tool_tags: list[str] = []
+        for delta_text in observed_delta_texts:
+            start_count = delta_text.count(TOOL_CALL_START)
+            end_count = delta_text.count(TOOL_CALL_END)
+            assert start_count + end_count <= 1
+            if start_count:
+                observed_tool_tags.append(TOOL_CALL_START)
+            if end_count:
+                observed_tool_tags.append(TOOL_CALL_END)
+
+        assert observed_tool_tags == [
+            TOOL_CALL_START,
+            TOOL_CALL_END,
+            TOOL_CALL_START,
+            TOOL_CALL_END,
+        ]
+
+        args_by_index = self._collect_arguments_by_index(results)
+        assert set(args_by_index) == set(expected_args_by_index)
+        for index, expected_args in expected_args_by_index.items():
+            assert json.loads(args_by_index[index]) == expected_args
+
     def test_streaming_mtp_chunk_merges_same_index_argument_segments(
         self, parser, mock_request
     ):
