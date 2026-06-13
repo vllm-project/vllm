@@ -98,9 +98,26 @@ def replace_parameter(
     setattr(layer, param_name, new_param)
 
 
+def _get_packed_modules_mapping(module: torch.nn.Module) -> dict[str, list[str]]:
+    """Get the packed modules mapping from a module.
+
+    It could come from one of two places:
+
+    1. The module has a `packed_modules_mapping` attribute.
+    2. The module has a `hf_to_vllm_mapper` attribute, which can generate the mapping.
+
+    No module should have both attributes, and if it does,
+    the `packed_modules_mapping` attribute takes precedence."""
+    if packed_modules_mapping := getattr(module, "packed_modules_mapping", None):
+        return copy.deepcopy(packed_modules_mapping)
+    elif hf_to_vllm_mapper := getattr(module, "hf_to_vllm_mapper", None):
+        return hf_to_vllm_mapper.get_packed_modules_mapping()
+    else:
+        return {}
+
+
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
-    parent_map = getattr(model, "packed_modules_mapping", None)
-    parent_map = copy.deepcopy(parent_map) if parent_map is not None else {}
+    parent_map = _get_packed_modules_mapping(model)
 
     # don't infer mapping if the model has defined it explicitly.
     if parent_map:
@@ -108,8 +125,7 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
 
     # We only check main components instead of whole model submodules
     for child in model.children():
-        child_map = getattr(child, "packed_modules_mapping", None)
-        child_map = copy.deepcopy(child_map) if child_map is not None else {}
+        child_map = _get_packed_modules_mapping(child)
 
         if any((k in parent_map and parent_map[k] != v) for k, v in child_map.items()):
             raise ValueError(
