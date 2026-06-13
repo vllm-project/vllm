@@ -563,6 +563,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         configuration.
         """
         self.is_pool_model = is_pooling_model(model)
+        self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
@@ -572,18 +573,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     "BitsAndBytes quantization yet. Ensure this model has "
                     "'get_expert_mapping' method."
                 )
-        packed_modules_mapping = get_packed_modules_mapping(model)
         # `hf_to_vllm_mapper` may belong to model or base model
         for module in (model, *model.children()):
             if hf_to_vllm_mapper := getattr(module, "hf_to_vllm_mapper", None):
                 self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
-                # If model had no `packed_modules_mapping`, try to get it from mapper
-                if not packed_modules_mapping:
-                    packed_modules_mapping = (
-                        hf_to_vllm_mapper.get_packed_modules_mapping()
-                    )
                 break
-        self.modules_mapping = ParamMapping(packed_modules_mapping)
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)
