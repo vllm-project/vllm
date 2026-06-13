@@ -250,7 +250,7 @@ def benchmark_config(
                     num_experts=num_experts,
                     experts_per_token=topk,
                     hidden_dim=hidden_size,
-                    intermediate_size_per_partition=shard_intermediate_size,
+                    intermediate_size=shard_intermediate_size,
                     num_local_experts=num_experts,
                     num_logical_experts=num_experts,
                     activation=MoEActivation.SILU,
@@ -790,6 +790,12 @@ def get_model_params(config):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture == "DiffusionGemmaForBlockDiffusion":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.top_k_experts
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
     elif architecture == "HunYuanMoEV1ForCausalLM":

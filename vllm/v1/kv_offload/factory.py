@@ -30,11 +30,7 @@ class OffloadingSpecFactory:
         cls._registry[name] = loader
 
     @classmethod
-    def create_spec(
-        cls,
-        config: "VllmConfig",
-        kv_cache_config: "KVCacheConfig",
-    ) -> OffloadingSpec:
+    def get_spec_cls(cls, config: "VllmConfig") -> type[OffloadingSpec]:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
@@ -48,6 +44,20 @@ class OffloadingSpecFactory:
             spec_module = importlib.import_module(spec_module_path)
             spec_cls = getattr(spec_module, spec_name)
         assert issubclass(spec_cls, OffloadingSpec)
+        return spec_cls
+
+    @classmethod
+    def create_spec(
+        cls,
+        config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+    ) -> OffloadingSpec:
+        kv_transfer_config = config.kv_transfer_config
+        assert kv_transfer_config is not None
+        spec_name = kv_transfer_config.kv_connector_extra_config.get(
+            "spec_name", "CPUOffloadingSpec"
+        )
+        spec_cls = cls.get_spec_cls(config)
         logger.info("Creating offloading spec with name: %s", spec_name)
         return spec_cls(config, kv_cache_config)
 
