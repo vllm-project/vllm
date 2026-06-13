@@ -996,3 +996,39 @@ class TestMessageStreamConverterToolUseContentBuffering:
         assert "text" in block_starts
 
         assert events[-1][0] == "message_stop"
+
+
+class TestMessageStartIncludesTypeAndRole:
+    """Regression test for issue #45367: the streaming message_start event is
+    serialized with exclude_unset=True, which silently dropped the
+    default-valued ``type``/``role`` fields of the nested message object.
+    Strict Anthropic SDK clients (e.g. Claude Code) validate
+    ``message_start.message.type``/``role`` and reject the whole stream when
+    they are missing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_start_contains_message_type_and_role(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="Hello"),
+                usage=UsageInfo(
+                    prompt_tokens=20,
+                    total_tokens=20,
+                    completion_tokens=0,
+                ),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+
+        assert events[0][0] == "message_start"
+        message = events[0][1]["message"]
+        assert message["type"] == "message"
+        assert message["role"] == "assistant"
