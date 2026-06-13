@@ -91,6 +91,40 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     assert isinstance(tag, StructuralTag)
 
 
+def test_deepseek_v4_chat_structural_tag_allows_stray_think_end(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    dumped = tag.model_dump()
+    excludes = dumped["format"]["excludes"]
+    assert "<think>" in excludes
+    assert "</think>" not in excludes
+
+
+def test_deepseek_v4_reasoning_structural_tag_is_unchanged(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=True,
+    )
+
+    dumped = tag.model_dump()
+    assert dumped["format"]["type"] == "sequence"
+    assert dumped["format"]["elements"][1]["excludes"] == [
+        "<think>",
+        "</think>",
+    ]
+
+
 def test_get_model_structural_tag_supports_vllm_hermes(
     sample_tools: list[ChatCompletionToolsParam],
 ):
