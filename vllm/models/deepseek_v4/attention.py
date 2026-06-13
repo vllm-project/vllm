@@ -101,7 +101,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ``get_padded_num_q_heads`` / ``_o_proj`` / ``backend_cls``) is provided by a
     subclass — ``DeepseekV4FlashMLAAttention`` /
     ``DeepseekV4FlashInferSM120Attention`` /
-    ``DeepseekV4FlashInferTRTLLMAttention`` (CUDA) or
+    ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
     ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
     deepseek_v4 model module. The base is never instantiated directly.
     """

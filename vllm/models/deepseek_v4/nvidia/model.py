@@ -59,6 +59,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
+    DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
@@ -744,7 +745,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "sparse MLA."
         )
     if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4:
-        return DeepseekV4FlashInferSM120Attention
+        if device_capability is not None and device_capability.major == 12:
+            return DeepseekV4FlashInferSM120Attention
+        return DeepseekV4FlashInferMLAAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,

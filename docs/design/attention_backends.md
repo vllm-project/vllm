@@ -226,10 +226,11 @@ DeepSeek V4 sparse MLA uses its own decode backends, selected via
 `--attention-backend=<BACKEND>` (e.g., `FLASHMLA_SPARSE_DSV4`,
 `FLASHINFER_MLA_SPARSE_DSV4`). They share the V4 sparse-index
 pipeline (compressor + SWA + indexer, 256-token blocks, head 512);
-default on NVIDIA is `FLASHMLA_SPARSE_DSV4`.
+default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
+`FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 | Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes | Sink | Non-Causal | Sparse | MM Prefix | DCP | Attention Types | Compute Cap. |
 | ------- | ------ | --------- | ----------- | ---------- | ---- | ---------- | ------ | --------- | --- | --------------- | ------------ |
-| `FLASHINFER_MLA_SPARSE_DSV4` | fp16, bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_ds_mla` | Any | Any | ❌ | ❌ | ❌ | ❌ | ❌ | Decoder | 12.x |
-| `FLASHMLA_SPARSE_DSV4` | bf16 | `auto`, `bfloat16`, `fp8_ds_mla`, `fp8` | 256 | 512 | ❌ | ❌ | ✅ | ❌ | ❌ | Decoder | 9.x-10.x |
+| `FLASHINFER_MLA_SPARSE_DSV4` | bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_ds_mla` | 256 | 512 | ✅ | ❌ | ✅ | ❌ | ❌ | Decoder | 10.x, 12.x |
+| `FLASHMLA_SPARSE_DSV4` | bf16 | `auto`, `bfloat16`, `fp8_ds_mla`, `fp8` | 256 | 512 | ✅ | ❌ | ✅ | ❌ | ❌ | Decoder | 9.x-10.x |
 | `ROCM_FLASHMLA_SPARSE_DSV4` | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | ❌ | ❌ | Decoder | N/A |
