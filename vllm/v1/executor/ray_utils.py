@@ -523,6 +523,40 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         time.sleep(wait_interval)
 
 
+def _check_dp_backend_supports_cluster(
+    parallel_config: ParallelConfig,
+    driver_node_device_count: int,
+    device_str: str,
+) -> None:
+    """Fail fast for the unsupported mp DP backend + Ray executor case.
+
+    The mp data-parallel backend launches every local DP engine on the
+    driver node and slices CUDA_VISIBLE_DEVICES assuming all DP groups'
+    devices are local and contiguously indexed on that node. The cross-DP
+    rendezvous address and rank-0 placement rely on the same assumption.
+    When the Ray executor must spread workers beyond the driver node these
+    assumptions break and startup hangs or crashes. Multi-node data
+    parallelism must use the Ray data-parallel backend instead.
+    """
+    if (
+        parallel_config.data_parallel_size <= 1
+        or parallel_config.data_parallel_backend != "mp"
+    ):
+        return
+    total_devices = parallel_config.world_size * parallel_config.data_parallel_size
+    if total_devices > driver_node_device_count:
+        raise ValueError(
+            "Multi-node data parallelism (data_parallel_size="
+            f"{parallel_config.data_parallel_size}) with the Ray distributed "
+            "executor requires --data-parallel-backend=ray. The 'mp' "
+            "data-parallel backend assumes all DP engines and their devices "
+            f"are on the driver node, which has only "
+            f"{driver_node_device_count} {device_str}(s) but "
+            f"{total_devices} are required; startup would hang or crash. "
+            "Re-run with --data-parallel-backend=ray."
+        )
+
+
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
@@ -620,6 +654,18 @@ def initialize_ray_cluster(
             )
     else:
         logger.info("No current placement group found. Creating a new placement group.")
+        current_node_id = ray.get_runtime_context().get_node_id()
+        driver_node_device_count = next(
+            (
+                int(node.get("Resources", {}).get(device_str, 0))
+                for node in ray.nodes()
+                if node.get("Alive") and node.get("NodeID") == current_node_id
+            ),
+            0,
+        )
+        _check_dp_backend_supports_cluster(
+            parallel_config, driver_node_device_count, device_str
+        )
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
