@@ -1314,6 +1314,21 @@ class TestServingChatWithHarmony:
             else serving_chat.chat_completion_full_generator
         )
 
+        chat_template_kwargs = serving_chat._effective_chat_template_kwargs(req)
+        if stream:
+            extra_kwargs: dict[str, Any] = {
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+        else:
+            parser = None
+            if serving_chat.parser_cls is not None:
+                parser = serving_chat.parser_cls(
+                    tokenizer,
+                    req.tools,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            extra_kwargs = {"parser": parser}
+
         result = generator_func(
             request=req,
             result_generator=result_generator(),
@@ -1325,7 +1340,7 @@ class TestServingChatWithHarmony:
                 request_id=req.request_id,
                 model_name=req.model,
             ),
-            chat_template_kwargs=serving_chat._effective_chat_template_kwargs(req),
+            **extra_kwargs,
         )
 
         if stream:

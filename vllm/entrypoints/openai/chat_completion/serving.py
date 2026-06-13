@@ -60,7 +60,6 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -112,17 +111,7 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
-        # set up reasoning parser
-        self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
-        )
-        # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        self.tool_parser = ParserManager.get_tool_parser(
-            tool_parser_name=tool_parser,
-            enable_auto_tools=enable_auto_tools,
-            model_name=self.model_config.model,
-        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -131,8 +120,9 @@ class OpenAIServingChat(OpenAIServing):
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         if (
-            is_mistral_tool_parser(self.tool_parser)
-            and self.reasoning_parser_cls is not None
+            self.parser_cls is not None
+            and is_mistral_tool_parser(self.parser_cls.tool_parser_cls)
+            and self.parser_cls.reasoning_parser_cls is not None
         ):
             from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
@@ -234,11 +224,12 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        reasoning_parser: ReasoningParser | None = None
-        if self.reasoning_parser_cls:
-            reasoning_parser = self.reasoning_parser_cls(
+        parser: Parser | None = None
+        if self.parser_cls is not None:
+            parser = self.parser_cls(
                 tokenizer,
-                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -324,10 +315,8 @@ class OpenAIServingChat(OpenAIServing):
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
                     reasoning_ended = True
-                elif reasoning_parser:
-                    reasoning_ended = reasoning_parser.is_reasoning_end(
-                        prompt_token_ids or []
-                    )
+                elif parser is not None and parser.reasoning_parser is not None:
+                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
                 else:
                     reasoning_ended = None
 
@@ -343,7 +332,7 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
                     }
-                    if reasoning_parser
+                    if parser is not None and parser.reasoning_parser is not None
                     else None,
                 )
 
@@ -372,7 +361,7 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            chat_template_kwargs=chat_template_kwargs,
+            parser=parser,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -796,7 +785,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        chat_template_kwargs: dict[str, Any] | None = None,
+        parser: Parser | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -821,6 +810,9 @@ class OpenAIServingChat(OpenAIServing):
             history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
+        tool_parser_cls = (
+            self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
+        )
         for output in final_res.outputs:
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
@@ -840,14 +832,6 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            parser: Parser | None = None
-            if self.parser_cls is not None:
-                parser = self.parser_cls(
-                    tokenizer,
-                    request.tools,
-                    chat_template_kwargs=chat_template_kwargs,
-                )
-
             if parser is not None:
                 reasoning, content, tool_calls = parser.parse(
                     output.text,
@@ -864,7 +848,7 @@ class OpenAIServingChat(OpenAIServing):
 
             auto_tools_called = False
 
-            if (not self.enable_auto_tools or not self.tool_parser) and (
+            if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
@@ -923,7 +907,7 @@ class OpenAIServingChat(OpenAIServing):
                 request.tools
                 and (request.tool_choice == "auto" or request.tool_choice is None)
                 and self.enable_auto_tools
-                and self.tool_parser
+                and tool_parser_cls
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
