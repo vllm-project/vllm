@@ -153,7 +153,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         return f"data:{media_type};base64,{data}"
 
     @classmethod
-    def _convert_anthropic_to_openai_request(
+    def to_chat_completion_request(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         *,
@@ -558,7 +558,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        chat_req = self._convert_anthropic_to_openai_request(
+        chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
         )
@@ -969,7 +969,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        chat_req = self._convert_anthropic_to_openai_request(
+        chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
         )

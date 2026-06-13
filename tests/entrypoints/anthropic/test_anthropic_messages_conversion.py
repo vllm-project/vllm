@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
