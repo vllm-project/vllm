@@ -1040,7 +1040,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@cade7e4306aa30a292aa15c0354a24fd3918fae1
+transformers @ git+https://github.com/huggingface/transformers.git@9f3feb97ac1c18b47d4df52463998edd15836b2c
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in
