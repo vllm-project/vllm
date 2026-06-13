@@ -22,23 +22,21 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Supports two modes controlled by the `use_cudagraph` constructor arg:
+    Constructor args control two independent axes:
 
-    **Decode mode (use_cudagraph=True):**
-      - do_expand=False, do_cpu_sync=False
-      - Tokens returned in original order with recv_topk_idx (global IDs)
-      - Worst-case tensor allocation; padding rows zeroed via
-        handle.psum_num_recv_tokens_per_scaleup_rank
-      - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta=None)
+      - do_expand: output layout from dispatch.
+          False: tokens in original order with recv_topk_idx (global IDs).
+          True: per-expert-contiguous layout; routing via
+                expert_tokens_meta. topk_ids not returned.
+      - use_cudagraph: CPU synchronization.
+          True: do_cpu_sync=False, worst-case tensor allocation.
+                Fully cudagraph-capturable.
+          False: do_cpu_sync=True, exact memory allocation.
+                 Not cudagraph-capturable (CPU polling), but prefill
+                 doesn't use cudagraphs anyway.
 
-    **Prefill mode (use_cudagraph=False):**
-      - do_expand=True, do_cpu_sync=True
-      - Per-expert-contiguous layout; exact memory allocation
-      - Saves GPU memory (no worst-case allocation)
-      - Not cudagraph-capturable (CPU polling), but prefill doesn't
-        use cudagraphs anyway
-      - Provides expert_tokens_meta for efficient batched expert kernels
+    These are independent: do_expand=True + use_cudagraph=True gives
+    cudagraph-safe per-expert-contiguous layout.
 
     Both modes use async_with_compute_stream=False (synchronous from
     caller's perspective). The ElasticBuffer handles comm internally.
@@ -64,6 +62,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
+        do_expand: bool | None = None,
     ):
         super().__init__()
         self.buffer = buffer
@@ -74,6 +73,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+        self.do_expand = do_expand if do_expand is not None else not use_cudagraph
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -111,9 +111,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
-        # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
-        do_expand = not self.use_cudagraph
+        do_expand = self.do_expand
         do_cpu_sync = not self.use_cudagraph
 
         (
@@ -144,6 +142,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             handle.num_recv_tokens_per_expert_list,
             recv_topk_weights,
             handle.psum_num_recv_tokens_per_scaleup_rank,
+            handle.psum_num_recv_tokens_per_expert,
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
@@ -159,6 +158,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         recv_expert_num_tokens: list[int],
         recv_topk_weights: torch.Tensor | None,
         psum_recv_per_rank: torch.Tensor,
+        psum_recv_per_expert: torch.Tensor,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
@@ -171,30 +171,35 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        if recv_topk_idx is None:
-            # do_expand=True (prefill mode): build topk_ids from
-            # per-expert token counts.
-            total_tokens = sum(recv_expert_num_tokens)
-            if total_tokens > 0:
-                recv_topk_idx = torch.empty(
-                    total_tokens,
-                    dtype=torch.int64,
-                    device=expert_x.device,
-                )
-                offset = 0
-                for i, count in enumerate(recv_expert_num_tokens):
-                    if count > 0:
-                        recv_topk_idx[offset : offset + count].fill_(
-                            i + self.rank_expert_offset
-                        )
-                        offset += count
+        if self.do_expand:
+            if self.use_cudagraph:
+                # Cudagraph-safe: routing via expert_tokens_meta,
+                # no topk_ids needed.
+                recv_topk_idx = None
+                recv_topk_weights = None
             else:
-                recv_topk_idx = torch.empty(
-                    0,
-                    dtype=torch.int64,
-                    device=expert_x.device,
-                )
-            recv_topk_idx = recv_topk_idx.unsqueeze(1)
+                # Prefill: build topk_ids from per-expert token counts.
+                total_tokens = sum(recv_expert_num_tokens)
+                if total_tokens > 0:
+                    recv_topk_idx = torch.empty(
+                        total_tokens,
+                        dtype=torch.int64,
+                        device=expert_x.device,
+                    )
+                    offset = 0
+                    for i, count in enumerate(recv_expert_num_tokens):
+                        if count > 0:
+                            recv_topk_idx[offset : offset + count].fill_(
+                                i + self.rank_expert_offset
+                            )
+                            offset += count
+                else:
+                    recv_topk_idx = torch.empty(
+                        0,
+                        dtype=torch.int64,
+                        device=expert_x.device,
+                    )
+                recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
             # do_expand=False (decode/cudagraph mode): recv_topk_idx has
             # LOCAL expert IDs (-1 for non-local and padding rows).
@@ -213,10 +218,21 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
+        if self.do_expand and self.use_cudagraph:
+            # Derive per-expert counts from GPU psum (no CPU sync needed).
+            expert_num_tokens = torch.diff(
+                psum_recv_per_expert,
+                prepend=psum_recv_per_expert.new_zeros(1),
+            ).to(torch.int32)
+            expert_tokens_meta = mk.ExpertTokensMetadata(
+                expert_num_tokens=expert_num_tokens,
+                expert_num_tokens_cpu=None,
+            )
+        else:
+            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
@@ -327,7 +343,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         handle = self.handles[a2a_idx]
         assert handle is not None
 
-        if fused_expert_output.numel() != 0:
+        if fused_expert_output.numel() != 0 and topk_ids is not None:
             if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
             fused_expert_output = weight_and_reduce_impl.apply(
