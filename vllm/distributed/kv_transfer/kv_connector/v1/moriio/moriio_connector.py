@@ -1771,6 +1771,23 @@ class MoRIIOConnectorWorker:
         self._recving_transfers_callback_addr.pop(req_id, None)
         self._recving_transfer_local_block_ids.pop(req_id, None)
 
+    @staticmethod
+    def _is_sq_full_status(status) -> bool:
+        """True if a MoRIIO transfer status is a transient RDMA send-queue-full
+        rejection (retryable backpressure), not a terminal failure.
+
+        The mori RDMA backend posts synchronously (the executor joins its worker
+        before returning — executor.cpp:174-183 — and marks the status on the
+        calling thread, backend_impl.cpp:1007), so an SQ-full rejection is a
+        Failed() status the moment batch_read() returns. mori surfaces it as a
+        generic ERR_RDMA_OP carrying "SQ full" in the message (no distinct code),
+        so we match the message. Only meaningful once status.Failed() is True.
+        """
+        try:
+            return bool(status.Failed()) and "SQ full" in (status.Message() or "")
+        except Exception:
+            return False
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if self.is_producer or self.mode != MoRIIOMode.READ:
             return
@@ -1794,6 +1811,24 @@ class MoRIIOConnectorWorker:
                 if status.Failed():
                     with self.moriio_wrapper.lock:
                         self._handle_failed_read_transfer_locked(req_id, status)
+                    if self._is_sq_full_status(status):
+                        # SQ-full that survived the post-site backoff (sustained
+                        # saturation past transfer_timeout). Fail only THIS
+                        # request — blocks already marked invalid + prefill
+                        # notified above — instead of raising and killing the
+                        # worker/EngineCore. A multi-decode/MTP RDMA overload
+                        # must NOT take down the engine. The request was popped
+                        # from _recving_transfers, so re-evaluate pending.
+                        logger.warning(
+                            "MoRIIO READ send queue still full for req %s "
+                            "layer %s after transfer_timeout; failed this "
+                            "request (worker stays alive). Raise "
+                            "VLLM_MORIIO_QP_PER_TRANSFER and/or "
+                            "MORI_IO_SQ_BACKOFF_TIMEOUT_US if frequent.",
+                            req_id,
+                            layer_name,
+                        )
+                        continue
                     raise RuntimeError(
                         "MoRIIO READ transfer failed for "
                         f"request {req_id}, layer {layer_name}: "
@@ -2399,23 +2434,55 @@ class MoRIIOConnectorWorker:
                 transfer_id,
             )
 
+        # SQ-full backpressure deadline (shared across this request's layers).
+        _sq_deadline = time.monotonic() + self.moriio_config.transfer_timeout
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
                 layer_name
             )
             # TODO : apply multi-session batch-read when moriio support it
-            try:
-                transfer_status = self.moriio_wrapper.read_remote_data(
-                    offs[2], offs[0], offs[1], sessions[sess_idx]
-                )
-            except Exception as e:
-                with self.moriio_wrapper.lock:
-                    has_partial_status = bool(self._recving_transfers.get(request_id))
-                    self._handle_failed_read_transfer_locked(
-                        request_id,
-                        error=e,
-                        record_invalid_blocks=has_partial_status,
+            # SQ-full backpressure. read_remote_data posts the RDMA READ
+            # SYNCHRONOUSLY (the mori executor joins its worker before returning
+            # — executor.cpp:174-183 — and marks the status on this thread,
+            # backend_impl.cpp:1007), so a send-queue-full rejection is a
+            # Failed() status right here (ERR_RDMA_OP, msg "SQ full"). The SQ is
+            # per-QP and HW-capped (bnxt max_qp_wr=4351); a SEPARATE CQ-poll
+            # thread (NotifManager) drains completions and frees SQ depth, so we
+            # back off and RE-POST instead of letting the failure reach
+            # wait_for_layer_load and kill the worker. No self-deadlock (drain is
+            # off-thread); the reserve is all-or-nothing so nothing was posted on
+            # a rejected attempt. Bounded by transfer_timeout.
+            _backoff = 0.001
+            while True:
+                try:
+                    transfer_status = self.moriio_wrapper.read_remote_data(
+                        offs[2], offs[0], offs[1], sessions[sess_idx]
                     )
-                raise
+                except Exception as e:
+                    with self.moriio_wrapper.lock:
+                        has_partial_status = bool(
+                            self._recving_transfers.get(request_id)
+                        )
+                        self._handle_failed_read_transfer_locked(
+                            request_id,
+                            error=e,
+                            record_invalid_blocks=has_partial_status,
+                        )
+                    raise
+                if not self._is_sq_full_status(transfer_status):
+                    break
+                if time.monotonic() > _sq_deadline:
+                    logger.warning(
+                        "MoRIIO READ send queue stayed full past "
+                        "transfer_timeout for req %s layer %s; storing failed "
+                        "status (handled non-fatally in wait_for_layer_load). "
+                        "Raise VLLM_MORIIO_QP_PER_TRANSFER and/or "
+                        "MORI_IO_SQ_BACKOFF_TIMEOUT_US if frequent.",
+                        request_id,
+                        layer_name,
+                    )
+                    break
+                time.sleep(_backoff)
+                _backoff = min(_backoff * 2, 0.05)
             with self.moriio_wrapper.lock:
                 self._recving_transfers[request_id][layer_name] = transfer_status
