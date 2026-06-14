@@ -94,6 +94,7 @@ def _fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
     clamp_limit: float | None = None,
+    batched_experts: bool = False,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -177,7 +178,9 @@ def _fused_marlin_moe(
     if output is None:
         output = intermediate_cache3
 
-    if expert_map is not None:
+    # BatchedExperts writes into pre-grouped expert output slices directly,
+    # so the extra zero-fill is only needed on the standard routed path.
+    if expert_map is not None and not batched_experts:
         output.zero_()
 
     a_scales2 = None
@@ -373,6 +376,7 @@ def fused_marlin_moe(
         input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
+        batched_experts=False,
     ).view(-1, topk, K)
 
     if output is None:
@@ -544,6 +548,7 @@ def batched_fused_marlin_moe(
         input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
+        batched_experts=True,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
