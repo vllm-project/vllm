@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
+    SupportsVmmSafeTransfers,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -42,8 +43,17 @@ logger = init_logger(__name__)
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
 
 
-class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
-    """CPU KV cache offloading with custom kernel transfers and BlockPool LRU."""
+class SimpleCPUOffloadConnector(
+    KVConnectorBase_V1, SupportsHMA, SupportsVmmSafeTransfers
+):
+    """CPU KV cache offloading with custom kernel transfers and BlockPool LRU.
+
+    Transfers KV data between GPU and CPU using DMA memcpy operations
+    (cuMemcpy / cudaMemcpy).  The connector never registers GPU memory with
+    RDMA / InfiniBand frameworks, so it is safe to use with PyTorch's
+    ``expandable_segments`` CUDA allocator, which may remap virtual addresses
+    to different physical pages via CUDA Virtual Memory Management (VMM).
+    """
 
     def __init__(
         self,
