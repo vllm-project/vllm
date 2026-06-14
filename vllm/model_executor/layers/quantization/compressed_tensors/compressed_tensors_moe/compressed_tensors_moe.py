@@ -7,6 +7,7 @@ from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
     ActivationOrdering,
     QuantizationStrategy,
+    QuantizationType,
 )
 
 from vllm.logger import init_logger
@@ -78,6 +79,25 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
+
+            # Pack-quantized INT bit widths Marlin/WNA16 can't run dispatch to the
+            # humming MoE kernel.
+            if (
+                format == CompressionFormat.pack_quantized.value
+                and weight_quant.type == QuantizationType.INT.value
+                and weight_quant.num_bits not in WNA16_SUPPORTED_BITS
+                and 1 <= weight_quant.num_bits <= 8
+            ):
+                from .compressed_tensors_moe_humming import (
+                    CompressedTensorsHummingMoEMethod,
+                )
+
+                logger.info_once("Using CompressedTensorsHummingMoEMethod")
+                return CompressedTensorsHummingMoEMethod(
+                    weight_quant=weight_quant,
+                    format_=format,
+                    moe=layer.moe_config,
+                )
 
             valid_format_and_bits = (
                 weight_quant.num_bits in WNA16_SUPPORTED_BITS
