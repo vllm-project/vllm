@@ -790,6 +790,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    strict_request_rate: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -959,8 +960,21 @@ async def benchmark(
         else contextlib.nullcontext()
     )
 
-    async def limited_request_func(request_func_input, session, pbar):
+    # Optionally space the actual sends after the concurrency semaphore so
+    # batched slot releases don't burst above request_rate (see --strict-request-rate).
+    # send_next_ts holds the next allowed send time, advanced per reserved slot.
+    send_next_ts = 0.0
+
+    async def limited_request_func(request_func_input, session, pbar, send_rate):
+        nonlocal send_next_ts
         async with semaphore:
+            if strict_request_rate and 0.0 < send_rate < float("inf"):
+                now = time.perf_counter()
+                # No await between reading and writing send_next_ts.
+                slot = max(send_next_ts, now)
+                send_next_ts = slot + 1.0 / send_rate
+                if slot > now:
+                    await asyncio.sleep(slot - now)
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
@@ -1026,7 +1040,10 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(
-                    request_func_input=request_func_input, session=session, pbar=pbar
+                    request_func_input=request_func_input,
+                    session=session,
+                    pbar=pbar,
+                    send_rate=current_request_rate,
                 )
             )
         )
@@ -1593,6 +1610,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "results in a more uniform arrival of requests.",
     )
     parser.add_argument(
+        "--strict-request-rate",
+        action="store_true",
+        help="Enforce --request-rate on the actual sends, not just on task "
+        "creation. After the --max-concurrency semaphore is acquired, space each "
+        "send so the engine arrival rate stays at --request-rate. Without this, "
+        "requests that queued on the semaphore exit in lumps when a batch of "
+        "completions frees many slots at once, bursting the engine above the "
+        "target rate. Off by default. Only takes effect when --request-rate is "
+        "finite, and it evens out arrivals so it overrides --burstiness.",
+    )
+    parser.add_argument(
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
@@ -2108,6 +2136,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        strict_request_rate=args.strict_request_rate,
     )
 
     # Save config and results to json
