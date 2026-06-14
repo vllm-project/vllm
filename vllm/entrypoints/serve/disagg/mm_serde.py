@@ -5,13 +5,19 @@ over JSON/HTTP, used by the disaggregated generate endpoint."""
 
 from __future__ import annotations
 
+from functools import cache
+
 import pybase64
 
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 _encoder = MsgpackEncoder(size_threshold=2**62)  # force all tensors inline
-_decoder = MsgpackDecoder(t=MultiModalKwargsItem)
+
+
+@cache
+def _get_decoder() -> MsgpackDecoder:
+    return MsgpackDecoder(t=MultiModalKwargsItem)
 
 
 def encode_mm_kwargs_item(item: MultiModalKwargsItem) -> str:
@@ -24,4 +30,4 @@ def encode_mm_kwargs_item(item: MultiModalKwargsItem) -> str:
 def decode_mm_kwargs_item(data: str) -> MultiModalKwargsItem:
     """Deserialize a base64 string back to a MultiModalKwargsItem."""
     raw = pybase64.b64decode(data)
-    return _decoder.decode(raw)
+    return _get_decoder().decode(raw)

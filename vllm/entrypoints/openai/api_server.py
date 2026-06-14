@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -122,35 +122,36 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    from vllm.v1.engine.async_llm import AsyncLLM
+    with set_current_vllm_config(vllm_config):
+        from vllm.v1.engine.async_llm import AsyncLLM
 
-    async_llm: AsyncLLM | None = None
+        async_llm: AsyncLLM | None = None
 
-    # Don't mutate the input client_config
-    client_config = dict(client_config) if client_config else {}
-    client_count = client_config.pop("client_count", 1)
-    client_index = client_config.pop("client_index", 0)
+        # Don't mutate the input client_config
+        client_config = dict(client_config) if client_config else {}
+        client_count = client_config.pop("client_count", 1)
+        client_index = client_config.pop("client_index", 0)
 
-    try:
-        async_llm = AsyncLLM.from_vllm_config(
-            vllm_config=vllm_config,
-            usage_context=usage_context,
-            enable_log_requests=engine_args.enable_log_requests,
-            aggregate_engine_logging=engine_args.aggregate_engine_logging,
-            disable_log_stats=engine_args.disable_log_stats,
-            client_addresses=client_config,
-            client_count=client_count,
-            client_index=client_index,
-        )
+        try:
+            async_llm = AsyncLLM.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                enable_log_requests=engine_args.enable_log_requests,
+                aggregate_engine_logging=engine_args.aggregate_engine_logging,
+                disable_log_stats=engine_args.disable_log_stats,
+                client_addresses=client_config,
+                client_count=client_count,
+                client_index=client_index,
+            )
 
-        # Don't keep the dummy data in memory
-        assert async_llm is not None
-        await async_llm.reset_mm_cache()
+            # Don't keep the dummy data in memory
+            assert async_llm is not None
+            await async_llm.reset_mm_cache()
 
-        yield async_llm
-    finally:
-        if async_llm:
-            async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
+            yield async_llm
+        finally:
+            if async_llm:
+                async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
 def build_app(

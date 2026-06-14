@@ -41,6 +41,15 @@ def cuda_get_device_properties(
 
 @cache
 def is_pin_memory_available() -> bool:
+    # For WSL, pinned memory availability depends on the vLLM config. Never
+    # call this function before vLLM config is initialized for all platforms.
+    from vllm.config import get_current_vllm_config_or_none
+
+    if get_current_vllm_config_or_none() is None:
+        raise RuntimeError(
+            "vLLM config is not available. Please avoid calling this "
+            "function before vLLM config is initialized."
+        )
     from vllm.platforms import current_platform
 
     return current_platform.is_pin_memory_available()
