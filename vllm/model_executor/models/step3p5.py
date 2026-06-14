@@ -397,18 +397,7 @@ class FusedMoEBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        if self.experts.is_internal_router:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # TODO(bnell): this gate could be moved into the FusedMoE?
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
-
+        final_hidden_states = self.experts(hidden_states)
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 

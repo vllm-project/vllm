@@ -157,11 +157,7 @@ class ExaoneMoe(nn.Module):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
-        )
-
+        final_hidden_states = self.experts(hidden_states)
         return final_hidden_states.view(orig_shape)
 
 

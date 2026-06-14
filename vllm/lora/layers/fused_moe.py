@@ -421,10 +421,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def runner(self) -> MoERunner:
         return self.base_layer
 
-    @property
-    def is_internal_router(self) -> bool:
-        return self.base_layer.is_internal_router
-
     @classmethod
     def can_replace_layer(
         cls,
