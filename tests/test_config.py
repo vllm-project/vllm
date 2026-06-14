@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -307,6 +308,72 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def _relaxed_thinking_spec_config() -> SpeculativeConfig:
+    return SpeculativeConfig(
+        method="ngram_gpu",
+        num_speculative_tokens=1,
+        relaxed_thinking=True,
+        relax_ratio=0.7,
+        relax_top_k=3,
+        reasoning_parser="deepseek_r1",
+    )
+
+
+def test_relaxed_thinking_rejects_async_scheduling():
+    with pytest.raises(ValueError, match="one-window-stale.*</think>"):
+        VllmConfig(
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                is_encoder_decoder=False,
+                async_scheduling=True,
+            ),
+            # Explicit device avoids platform auto-detection so the test is
+            # deterministic on device-less runners; the async-scheduling gate
+            # fires regardless of device type.
+            device_config=DeviceConfig(device="cuda"),
+            speculative_config=_relaxed_thinking_spec_config(),
+        )
+
+
+def test_relaxed_thinking_rejects_cpu_workers():
+    with pytest.raises(ValueError, match="CPUModelRunner"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                is_encoder_decoder=False,
+                async_scheduling=False,
+            ),
+            speculative_config=_relaxed_thinking_spec_config(),
+        )
+
+
+def test_relaxed_thinking_marks_v2_model_runner_unsupported():
+    cfg = SimpleNamespace(
+        model_config=None,
+        speculative_config=_relaxed_thinking_spec_config(),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="auto",
+            kv_sharing_fast_prefill=False,
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_dbo=False,
+        ),
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.NONE,
+            pass_config=SimpleNamespace(enable_sp=False),
+        ),
+        ec_transfer_config=None,
+    )
+
+    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(cfg)
+
+    assert "relaxed thinking speculative decoding" in unsupported
 
 
 @dataclass
