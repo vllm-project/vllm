@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -1184,19 +1185,59 @@ def launch_core_engines(
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses, tensor_queue
+        try:
+            yield local_engine_manager, coordinator, addresses, tensor_queue
 
-        # Now wait for engines to start.
-        wait_for_engine_startup(
-            handshake_socket,
-            addresses,
-            engines_to_handshake,
-            parallel_config,
-            dp_size > 1 and vllm_config.model_config.is_moe,
-            vllm_config.cache_config,
-            local_engine_manager,
-            coordinator.proc if coordinator else None,
-        )
+            # Now wait for engines to start.
+            wait_for_engine_startup(
+                handshake_socket,
+                addresses,
+                engines_to_handshake,
+                parallel_config,
+                dp_size > 1 and vllm_config.model_config.is_moe,
+                vllm_config.cache_config,
+                local_engine_manager,
+                coordinator.proc if coordinator else None,
+            )
+        except BaseException:
+            # Explicit cleanup on any failure path so the layer that
+            # created the engine cores is the one that tears them down.
+            # This covers: TimeoutError from wait_for_engine_startup,
+            # SystemExit from SIGINT/SIGTERM during startup, RuntimeError
+            # from an engine dying mid-handshake, and any exception raised
+            # inside the `with` block by the caller.
+            # Without this, cleanup falls to a weakref.finalize safety net
+            # with a hardcoded 5 s grace and no log output.
+            logger.info(
+                "Engine core startup failed; shutting down engine "
+                "processes to release GPU memory."
+            )
+            # Generous upper bound, not a precise budget.
+            #
+            # ``shutdown(procs, timeout)`` internally calls ``proc.terminate()``
+            # followed by ``proc.join(remaining)`` and finally
+            # ``kill_process_tree()`` for any survivor. The ``join`` short-
+            # circuits the instant the engine core process actually exits, so
+            # in the common case this returns in seconds; the timeout only
+            # fires if an engine core is genuinely hung.
+            #
+            # We intentionally do NOT match this to MultiprocExecutor's
+            # current escalating-teardown durations (4 s + SIGTERM + 4 s ~=
+            # 8 s). Picking a tight margin like 15 s would silently break if
+            # those internal waits ever changed. 60 s comfortably exceeds
+            # any plausible teardown while still bounding pathological hangs.
+            STARTUP_SHUTDOWN_GRACE_S = 60.0
+            if local_engine_manager is not None:
+                try:
+                    local_engine_manager.shutdown(timeout=STARTUP_SHUTDOWN_GRACE_S)
+                except Exception:
+                    logger.exception("Error while shutting down engine cores")
+            if coordinator is not None:
+                try:
+                    coordinator.shutdown(timeout=STARTUP_SHUTDOWN_GRACE_S)
+                except Exception:
+                    logger.exception("Error while shutting down DP coordinator")
+            raise
 
 
 def wait_for_engine_startup(
@@ -1227,9 +1268,23 @@ def wait_for_engine_startup(
             poller.register(sentinel, zmq.POLLIN)
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+
+    deadline = time.monotonic() + envs.VLLM_ENGINE_READY_TIMEOUT_S
     while any(conn_pending) or any(start_pending):
-        events = poller.poll(STARTUP_POLL_PERIOD_MS)
+        # Cap poll timeout to remaining budget so the deadline fires
+        # promptly rather than after a full STARTUP_POLL_PERIOD_MS lag.
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        events = poller.poll(min(STARTUP_POLL_PERIOD_MS, max(remaining_ms, 0)))
         if not events:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Engine core(s) did not complete startup within "
+                    f"{envs.VLLM_ENGINE_READY_TIMEOUT_S}s "
+                    f"(VLLM_ENGINE_READY_TIMEOUT_S). This is often caused "
+                    f"by slow model weight loading or long warmup steps "
+                    f"(e.g. deep_gemm). To allow a longer startup window "
+                    f"set VLLM_ENGINE_READY_TIMEOUT_S=<seconds>."
+                )
             if any(conn_pending):
                 logger.debug(
                     "Waiting for %d local, %d remote core engine proc(s) to connect.",
