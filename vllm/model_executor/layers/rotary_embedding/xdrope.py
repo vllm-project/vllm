@@ -53,8 +53,9 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         assert positions.ndim == 2
         assert key is not None
 
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = torch.cat(
             [m[i] for i, m in enumerate(cos.split(self.xdrope_section, dim=-1))], dim=-1
@@ -104,8 +105,9 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
         assert positions.ndim == 2
         assert key is not None
 
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
-        cos_sin = self.cos_sin_cache[positions]
+        cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         cos = torch.cat(
             [m[i] for i, m in enumerate(cos.split(self.xdrope_section, dim=-1))], dim=-1
