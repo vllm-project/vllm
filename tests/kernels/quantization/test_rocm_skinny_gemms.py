@@ -9,7 +9,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx12x, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
 # Global per-test cleanup costs more than the tests themselves.
@@ -52,6 +52,7 @@ OPTIONS_WVSPLITK_FP8 = [
 ]
 
 DTYPES = [torch.bfloat16, torch.float16]
+BIAS_MODES = [0, 1, 2]
 
 # kWvSlots in csrc/rocm/skinny_gemms.cu; beyond it streams take overflow
 # workspaces.
@@ -140,6 +141,50 @@ NKM_FACTORS_WVSPLITKRC_LARGE_K = [
     # Keep 24 K-shards (batched readback) within the DPX budget of 128 CUs.
     (128, 12288, 64),
     (32, 12288, 128),
+]
+
+NKM_FACTORS_SWMMAC = [
+    #  Small aligned cases
+    (5, 64, 32),
+    (6, 96, 48),
+    (7, 128, 64),
+    (8, 160, 80),
+    (5, 256, 112),
+    (6, 288, 128),
+    (7, 320, 144),
+    (8, 352, 160),
+    # Large K aligned cases
+    (5, 4032, 80),
+    (6, 4064, 112),
+    (7, 4096, 144),
+    (8, 4128, 176),
+    (5, 4000, 256),
+    (6, 4032, 256),
+    (7, 4064, 256),
+    (8, 4096, 256),
+    # Large M aligned cases
+    (5, 64, 1040),
+    (6, 64, 1552),
+    (7, 128, 2064),
+    (8, 128, 2576),
+    (5, 256, 1296),
+    (6, 256, 1808),
+    (7, 256, 2320),
+    (8, 256, 3088),
+    # Large M unaligned cases
+    (5, 64, 1043),
+    (6, 64, 1551),
+    (7, 128, 2065),
+    (8, 128, 2577),
+    (5, 256, 1295),
+    (6, 256, 1807),
+    (7, 256, 2321),
+    (8, 256, 3089),
+    # Large aligned cases
+    (5, 8192, 16384),
+    (6, 12288, 24576),
+    (7, 16384, 32768),
+    (8, 24576, 49152),
 ]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
@@ -378,7 +423,44 @@ def test_rocm_wvsplitk_kernel(
     atol = torch.finfo(dtype).eps * math.sqrt(k)
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_SWMMAC)
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_gfx12x()),
+    reason="only supported on gfx12",
+)
+@torch.inference_mode()
+def test_rocm_swmmac_gemm_kernel(n, k, m, bias_mode, dtype, seed):
+    torch.manual_seed(seed)
+    cu_count = num_compute_units()
 
+    # Normalize both inputs so the BF16 tolerance remains meaningful even for
+    # the large-K Split-K cases.
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+
+    ref_out = torch.nn.functional.linear(A, B, BIAS)
+    out = ops.swmmac_gemm(
+        A.view(-1, A.size(-1)),
+        B,
+        B.shape[0],
+        cu_count,
+        BIAS,
+    )
+
+    torch.testing.assert_close(out, ref_out, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize(
     "dtype,padded_a,padded_b,biased,xnorm",
