@@ -88,6 +88,12 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
 def backend_to_kernel_cls(
     backend: UnquantizedMoeBackend,
 ) -> type[mk.FusedMoEExperts]:
+    from vllm.model_executor.layers.fused_moe.utils import (
+        warn_if_moe_use_td_ineffective,
+    )
+
+    warn_if_moe_use_td_ineffective(backend.value, is_quantized=False)
+
     if backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
             TrtLlmBf16Experts,

@@ -5,6 +5,7 @@ from math import prod
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -439,3 +440,54 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+def resolve_moe_use_td() -> bool:
+    """Tri-state resolver for ``VLLM_TRITON_USE_TD`` (auto-on for XPU)."""
+    override = envs.VLLM_TRITON_USE_TD
+    if override is None:
+        return current_platform.is_xpu()
+    return override
+
+
+_warned_moe_use_td_ineffective = False
+
+
+def warn_if_moe_use_td_ineffective(
+    active_backend: str, is_quantized: bool = False
+) -> None:
+    """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
+
+    Fires when the user set the env explicitly and either (a) the active
+    MoE backend is not Triton-family, or (b) the model is quantized (the
+    TD path falls back to the pointer path under any quantization).
+    """
+    global _warned_moe_use_td_ineffective
+    if _warned_moe_use_td_ineffective:
+        return
+    if envs.VLLM_TRITON_USE_TD is None:
+        return
+    is_triton = "TRITON" in active_backend.upper()
+    if is_triton and not is_quantized:
+        return
+    import logging
+
+    logger = logging.getLogger("vllm")
+    if not is_triton:
+        reason = (
+            f"the active MoE backend is {active_backend!r}; pass "
+            "`--moe-backend triton` (or `triton_unfused` / `batched_triton`) "
+            "to enable the tensor-descriptor path"
+        )
+    else:
+        reason = (
+            "the model uses quantized MoE weights; the TD path is "
+            "currently restricted to non-quantized weights and falls "
+            "back to the pointer path"
+        )
+    logger.warning(
+        "VLLM_TRITON_USE_TD is set to %s but %s.",
+        envs.VLLM_TRITON_USE_TD,
+        reason,
+    )
+    _warned_moe_use_td_ineffective = True

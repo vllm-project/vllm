@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+    VLLM_TRITON_USE_TD: bool | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -577,6 +578,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    ),
+    # Use tensor descriptors for A/B loads and C stores in the Triton
+    # fused-MoE and batched-MoE kernels.  Tri-state: unset auto-selects
+    # per platform (default-on for XPU); ``1`` / ``0`` force.  Only
+    # takes effect when the active MoE backend is Triton-family and the
+    # weights are not quantized; otherwise ignored with a one-shot log.
+    "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs

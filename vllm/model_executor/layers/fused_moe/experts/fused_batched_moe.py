@@ -19,7 +19,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
+    resolve_moe_use_td,
     swiglu_limit_func,
+    warn_if_moe_use_td_ineffective,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -292,6 +294,9 @@ def batched_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    # Tensor-descriptor path for A/B loads and C store; falls back to the
+    # pointer path when quantization is on.
+    USE_TD: tl.constexpr = False,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -310,6 +315,40 @@ def batched_triton_kernel(
     cta_n_start = pid_n * BLOCK_N
     if cta_m_start >= e_num_tokens:
         # Early exit
+        return
+
+    td_active: tl.constexpr = USE_TD and not use_fp8_w8a8 and not use_int8_w8a16
+
+    if td_active:
+        a_desc = tl.make_tensor_descriptor(
+            base=a_ptr + expert_id * stride_ae,
+            shape=(e_num_tokens, K),
+            strides=(stride_am, stride_ak),
+            block_shape=(BLOCK_M, BLOCK_K),
+        )
+        b_desc = tl.make_tensor_descriptor(
+            base=b_ptr + expert_id * stride_be,
+            shape=(N, K),
+            strides=(stride_bn, stride_bk),
+            block_shape=(BLOCK_N, BLOCK_K),
+        )
+        c_desc = tl.make_tensor_descriptor(
+            base=c_ptr + expert_id * stride_ce,
+            shape=(e_num_tokens, N),
+            strides=(stride_cm, stride_cn),
+            block_shape=(BLOCK_M, BLOCK_N),
+        )
+
+        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(0, tl.cdiv(K, BLOCK_K)):
+            a_tile = a_desc.load([pid_m * BLOCK_M, k * BLOCK_K])
+            b_tile = b_desc.load([pid_n * BLOCK_N, k * BLOCK_K]).T
+            accumulator += tl.dot(a_tile, b_tile)
+
+        c_desc.store(
+            [pid_m * BLOCK_M, pid_n * BLOCK_N],
+            accumulator.to(compute_type),
+        )
         return
 
     cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
@@ -394,6 +433,9 @@ def invoke_moe_batched_triton_kernel(
     block_shape: list[int] | None = None,
 ):
     assert not use_int4_w4a16
+    warn_if_moe_use_td_ineffective(
+        "BATCHED_TRITON", is_quantized=use_fp8_w8a8 or use_int8_w8a16
+    )
     max_num_tokens = A.size(1)
     K = A.size(2)
     N = C.size(2)
@@ -485,6 +527,7 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        USE_TD=resolve_moe_use_td(),
     )
 
 
