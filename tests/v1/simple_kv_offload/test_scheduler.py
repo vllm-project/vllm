@@ -1354,3 +1354,42 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     )
     assert len(meta_b.load_gpu_blocks) == 2
     assert len(meta_b.load_cpu_blocks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Sliding-window block reuse must not double-store
+# ---------------------------------------------------------------------------
+def test_eager_store_dedups_sliding_window_block_reuse() -> None:
+    """Regression test for issue #42571.
+
+    Sliding-window attention can re-add the same gpu_block_id to
+    StoreRequestState.block_ids; the eager store path must dedup so a
+    duplicate isn't paired with an extra CPU block (and freed twice).
+    """
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_blocks = 3
+    req = make_request(num_blocks=num_blocks)
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    # Splice a duplicate into state.block_ids to mimic sliding-window reuse:
+    # [b0, b1, b2] -> [b0, b1, b2, b0]
+    state = sched._reqs_to_store[req.request_id]
+    original_ids = list(kv_blocks.get_block_ids()[0])
+    assert len(original_ids) == num_blocks
+    state.block_ids[0].clear()
+    state.block_ids[0].extend([*original_ids, original_ids[0]])
+    req.num_computed_tokens = (num_blocks + 1) * BLOCK_SIZE
+
+    cpu_free_before = get_cpu_free_blocks(sched)
+    sched_out = make_scheduler_output({req.request_id: BLOCK_SIZE})
+    meta = sched.build_connector_meta(sched_out)
+
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == num_blocks
+    assert len(set(meta.store_gpu_blocks)) == len(meta.store_gpu_blocks)
+    assert len(meta.store_cpu_blocks) == num_blocks
+    assert get_cpu_free_blocks(sched) == cpu_free_before - num_blocks

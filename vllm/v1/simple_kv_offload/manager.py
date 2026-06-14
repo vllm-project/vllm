@@ -564,6 +564,8 @@ class SimpleCPUOffloadScheduler:
 
             # --- Phase 1: Scan blocks, classify as cached vs to-store ---
             gpu_block_ids: list[int] = []
+            # Dedup gpu_block_ids reused within a request by sliding-window
+            seen_gpu_block_ids: set[int] = set()
             block_hashes_to_store: list[bytes] = []
             advanced_per_group: list[int] = [0] * num_groups
             out_of_space = False
@@ -600,6 +602,7 @@ class SimpleCPUOffloadScheduler:
                     # Skip if already scheduled for store or already cached in CPU.
                     if (
                         gpu_block_id in in_flight
+                        or gpu_block_id in seen_gpu_block_ids
                         or cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
@@ -614,6 +617,7 @@ class SimpleCPUOffloadScheduler:
                     num_free -= 1
 
                     gpu_block_ids.append(gpu_block_id)
+                    seen_gpu_block_ids.add(gpu_block_id)
                     block_hashes_to_store.append(bhash_with_group)
                     advanced_per_group[g] += 1
 
