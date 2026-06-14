@@ -31,6 +31,18 @@ _INFLIGHT_REQUEST_POLL_INTERVAL = 0.1
 _ABORT_CLIENT_TIMEOUT = 3
 
 
+async def _wait_for_process_exit(
+    proc: subprocess.Popen,
+    timeout: float,
+) -> bool:
+    """Wait for a subprocess without blocking the test event loop."""
+    try:
+        await asyncio.to_thread(proc.wait, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
 def _get_child_pids(parent_pid: int) -> list[int]:
     try:
         parent = psutil.Process(parent_pid)
@@ -126,6 +138,17 @@ async def _concurrent_request_loop(
         for t in tasks:
             if not t.done():
                 t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _stop_request_loop(
+    request_task: asyncio.Task,
+    state: ShutdownState,
+) -> None:
+    state.stop_requesting = True
+    if not request_task.done():
+        request_task.cancel()
+    await asyncio.gather(request_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -250,10 +273,7 @@ async def test_wait_timeout_completes_requests():
         except asyncio.TimeoutError:
             pass
         finally:
-            state.stop_requesting = True
-            if not request_task.done():
-                request_task.cancel()
-            await asyncio.gather(request_task, return_exceptions=True)
+            await _stop_request_loop(request_task, state)
 
         # wait timeout should complete in-flight requests
         assert state.requests_after_sigterm > 0, (
@@ -303,18 +323,17 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
             # Wait for engine to become idle
             await asyncio.sleep(wait_for_engine_idle)
 
-        start_time = time.time()
+        start_time = time.monotonic()
         proc.send_signal(signal.SIGTERM)
 
         # abort timeout (0) should stop the server promptly.
-        try:
-            proc.wait(timeout=4.0)
-        except subprocess.TimeoutExpired:
+        exited = await _wait_for_process_exit(proc, timeout=4.0)
+        if not exited:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("Process did not exit after SIGTERM with abort timeout")
 
-        exit_time = time.time() - start_time
+        exit_time = time.monotonic() - start_time
         assert exit_time < 4.1, f"Default shutdown took too long: {exit_time:.1f}s"
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
@@ -349,26 +368,24 @@ async def test_wait_timeout_with_short_duration():
             _concurrent_request_loop(client, state, concurrency=3)
         )
 
-        await asyncio.sleep(0.5)
+        deadline = time.monotonic() + _INFLIGHT_REQUEST_START_TIMEOUT
+        while state.inflight_requests == 0 and time.monotonic() < deadline:
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+        assert state.inflight_requests > 0, (
+            "No inflight requests within startup timeout"
+        )
 
-        start_time = time.time()
+        start_time = time.monotonic()
         proc.send_signal(signal.SIGTERM)
+        await _stop_request_loop(request_task, state)
 
         # server should exit within wait_timeout + buffer
         max_wait = wait_timeout + 15
-        for _ in range(int(max_wait * 10)):
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
+        remaining_wait = max_wait - (time.monotonic() - start_time)
+        exited = await _wait_for_process_exit(proc, timeout=max(remaining_wait, 0.0))
+        exit_time = time.monotonic() - start_time
 
-        exit_time = time.time() - start_time
-
-        state.stop_requesting = True
-        if not request_task.done():
-            request_task.cancel()
-        await asyncio.gather(request_task, return_exceptions=True)
-
-        if proc.poll() is None:
+        if not exited:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail(f"Process did not exit within {max_wait}s after SIGTERM")
@@ -413,7 +430,9 @@ async def test_abort_timeout_fails_inflight_requests():
         deadline = time.time() + _INFLIGHT_REQUEST_START_TIMEOUT
         while state.inflight_requests == 0 and time.time() < deadline:
             await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
-        assert state.inflight_requests > 0
+        assert state.inflight_requests > 0, (
+            "No inflight requests within startup timeout"
+        )
 
         proc.send_signal(signal.SIGTERM)
         sigterm_sent.set()
@@ -423,10 +442,7 @@ async def test_abort_timeout_fails_inflight_requests():
         except asyncio.TimeoutError:
             pass
         finally:
-            state.stop_requesting = True
-            if not request_task.done():
-                request_task.cancel()
-            await asyncio.gather(request_task, return_exceptions=True)
+            await _stop_request_loop(request_task, state)
 
         # With abort timeout (0), requests should be aborted (finish_reason='abort')
         # or rejected (connection errors or API errors)
@@ -444,13 +460,10 @@ async def test_abort_timeout_fails_inflight_requests():
         )
 
         # Verify fast shutdown
-        start_time = time.time()
-        for _ in range(100):
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-
-        exit_time = time.time() - start_time
+        start_time = time.monotonic()
+        exited = await _wait_for_process_exit(proc, timeout=10)
+        exit_time = time.monotonic() - start_time
+        assert exited, "Process did not exit after SIGTERM"
         assert exit_time < 10, f"Abort timeout shutdown took too long: {exit_time:.1f}s"
 
         await _assert_children_cleaned_up(child_pids)
@@ -552,17 +565,11 @@ async def test_multi_api_server_shutdown():
         except asyncio.TimeoutError:
             pass
         finally:
-            state.stop_requesting = True
-            if not request_task.done():
-                request_task.cancel()
-            await asyncio.gather(request_task, return_exceptions=True)
+            await _stop_request_loop(request_task, state)
 
-        for _ in range(300):  # up to 30 seconds
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
+        exited = await _wait_for_process_exit(proc, timeout=30)
 
-        if proc.poll() is None:
+        if not exited:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("Process did not exit after SIGTERM")
