@@ -24,6 +24,7 @@ from vllm.v1.sample.logits_processor import (
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
     LogitsProcessor,
 )
+from vllm.v1.sample.logits_processor import _load_logitsprocs_by_fqcns
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
@@ -286,3 +287,9 @@ def test_rejects_custom_logitsprocs(
         # Require that loading a model alongside the logitproc raises
         # the appropriate exception.
         LLM(**llm_kwargs)
+
+
+def test_load_logitsprocs_by_fqcns_missing_colon():
+    """FQCN string without ':' should raise a user-friendly ValueError."""
+    with pytest.raises(ValueError, match="missing the required ':' separator"):
+        _load_logitsprocs_by_fqcns(["mymodule.MyCustomLogitsProcessor"])
