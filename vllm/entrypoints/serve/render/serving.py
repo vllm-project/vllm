@@ -3,9 +3,12 @@
 import time
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from openai_harmony import Message as OpenAIMessage
+
+if TYPE_CHECKING:
+    import torch
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -473,18 +476,33 @@ class OpenAIServingRender:
 
         # Serialize tensor data per modality.
         kwargs_data: dict[str, list[str | None]] | None = None
+        image_grid_thw: dict[str, list[list[int] | None]] | None = None
         if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
             kwargs_data = {}
+            image_grid_thw = {}
             for modality, items in raw_mm_kwargs.items():
                 kwargs_data[modality] = [
                     encode_mm_kwargs_item(item) if item is not None else None
                     for item in items
                 ]
+                thw_key = f"{modality}_grid_thw"
+                grids: list[list[int] | None] = []
+                for item in items:
+                    if item is not None and thw_key in item:
+                        thw_tensor = cast("torch.Tensor", item[thw_key].data)
+                        grids.append(thw_tensor.tolist())
+                    else:
+                        grids.append(None)
+                if any(g is not None for g in grids):
+                    image_grid_thw[modality] = grids
+            if not image_grid_thw:
+                image_grid_thw = None
 
         return MultiModalFeatures(
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
             kwargs_data=kwargs_data,
+            image_grid_thw=image_grid_thw,
         )
 
     def _make_request_with_harmony(
