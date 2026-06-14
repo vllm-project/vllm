@@ -13,7 +13,6 @@ from vllm.config import (
 )
 from vllm.model_executor.custom_op import CustomOp, op_registry
 from vllm.model_executor.layers.activation import (
-    GeluAndMul,
     ReLUSquaredActivation,
     SiluAndMul,
 )
@@ -27,6 +26,20 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 RMS_NORM_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
+
+
+# Registered subclass for testing GELU
+@CustomOp.register("gelu_and_mul_test")
+class TestGeluAndMul(CustomOp):
+    def __init__(self, approximate: str = "none"):
+        super().__init__()
+        self.approximate = approximate
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import torch.nn.functional as F
+
+        d = x.shape[-1] // 2
+        return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
 
 
 # Registered subclass for test
@@ -100,8 +113,8 @@ def test_enabled_ops(
         assert SiluAndMul().enabled() == ops_enabled[1]
         assert op_registry["silu_and_mul"].enabled() == ops_enabled[1]
 
-        assert GeluAndMul().enabled() == ops_enabled[2]
-        assert op_registry["gelu_and_mul"].enabled() == ops_enabled[2]
+        assert TestGeluAndMul().enabled() == ops_enabled[2]
+        assert op_registry["gelu_and_mul_test"].enabled() == ops_enabled[2]
 
         # If registered, subclasses should follow their own name
         assert Relu3().enabled() == ops_enabled[3]

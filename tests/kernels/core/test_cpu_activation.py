@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# NOTE: This file will be removed once SiluAndMul is migrated away from CustomOp.
+
 import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
+from vllm.ir.op import IrOp
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -25,6 +29,25 @@ DTYPES = [torch.bfloat16, torch.float32]
 NUM_TOKENS = [7, 83]
 D = [512, 2048]
 SEEDS = [0]
+
+
+def get_native_output(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """
+    Get reference output from the native implementation.
+
+    For CustomOp subclasses, calls layer.forward_native(x).
+    For PluggableLayer subclasses, uses IrOp.registry with priority=["native"].
+    """
+    if isinstance(layer, CustomOp):
+        return layer.forward_native(x)
+    elif isinstance(layer, PluggableLayer):
+        op_name = getattr(layer.__class__, "name", None)
+        assert op_name is not None, f"Layer {layer.__class__} has no 'name' attribute"
+        ir_op = IrOp.registry[op_name]
+        with ir_op.set_priority(["native"]):
+            return layer(x)
+    else:
+        raise TypeError(f"Unknown layer type: {type(layer)}")
 
 
 @pytest.mark.parametrize(
@@ -54,7 +77,7 @@ def test_cpu_act_and_mul(
 
     layer = activation_cls()
     out = layer(x)
-    ref_out = layer.forward_native(x)
+    ref_out = get_native_output(layer, x)
 
     torch.testing.assert_close(
         out, ref_out, atol=get_default_atol(out), rtol=get_default_rtol(out)
@@ -101,7 +124,7 @@ def test_cpu_unary_activation(
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation_cls()
     out = layer(x)
-    ref_out = layer.forward_native(x)
+    ref_out = get_native_output(layer, x)
     torch.testing.assert_close(
         out, ref_out, atol=get_default_atol(out), rtol=get_default_rtol(out)
     )

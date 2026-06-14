@@ -6,9 +6,11 @@ import random
 import pytest
 import torch
 
-from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+from tests.kernels.allclose_default import get_default_atol
 from tests.kernels.utils import opcheck
+from vllm import ir
 from vllm.model_executor.layers.activation import (
+    GELU,
     FastGELU,
     FatreluAndMul,
     GeluAndMul,
@@ -21,6 +23,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
     swiglustep_and_mul_triton,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -32,13 +35,18 @@ CUDA_DEVICES = [
 ]
 
 
+# TODO: This test validates kernel output correctness, which overlaps with
+# the ir.ops routing tests. As custom ops are migrated to PluggableLayer,
+# remove cases from here and add them to ACTIVATION_LAYER_CONFIGS.
+# Eventually, test_activation_ir_op_routing will be the single source of truth.
+@pytest.mark.skipif(
+    current_platform.is_cpu(), reason="CUDA activation tests require GPU platform"
+)
 @pytest.mark.parametrize(
     "activation",
     [
         "silu_and_mul",
         "mul_and_silu",
-        "gelu",
-        "gelu_tanh",
         "fatrelu",
         "swigluoai_and_mul",
         "swiglustep_and_mul",
@@ -68,12 +76,6 @@ def test_act_and_mul(
     if activation == "mul_and_silu":
         layer = MulAndSilu()
         fn = torch.ops._C.mul_and_silu
-    elif activation == "gelu":
-        layer = GeluAndMul(approximate="none")
-        fn = torch.ops._C.gelu_and_mul
-    elif activation == "gelu_tanh":
-        layer = GeluAndMul(approximate="tanh")
-        fn = torch.ops._C.gelu_tanh_and_mul
     elif activation == "fatrelu":
         threshold = random.uniform(0, 1)
         layer = FatreluAndMul(threshold)

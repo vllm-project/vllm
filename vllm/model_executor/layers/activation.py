@@ -13,8 +13,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm import ir
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import tl, triton
@@ -290,36 +291,20 @@ class GeluAndMulSparse(CustomOp):
 
 
 # --8<-- [start:gelu]
-@CustomOp.register("gelu")
-class GELU(CustomOp):
+@PluggableLayer.register("gelu")
+class GELU(PluggableLayer):
     # --8<-- [end:gelu]
 
     def __init__(self):
         super().__init__()
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and hasattr(
-            torch.ops._C, "activation_lut_bf16"
-        ):
-            self.op = torch.ops._C.activation_lut_bf16
-        else:
-            self.op = None
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        return F.gelu(x, approximate="none")
-
-    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if self.op and x.dtype == torch.bfloat16 and x.is_contiguous():
-            out = torch.empty_like(x)
-            self.op(out, x, "gelu")
-            return out
-        return self.forward_native(x)
-
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.gelu(x)
 
 
 # --8<-- [start:gelu_and_mul]
-@CustomOp.register("gelu_and_mul")
-class GeluAndMul(CustomOp):
+@PluggableLayer.register("gelu_and_mul")
+class GeluAndMul(PluggableLayer):
     """An activation function for GeGLU.
 
     The function computes x -> GELU(x[:d]) * x[d:] where d = x.shape[-1] // 2.
@@ -336,15 +321,6 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            if approximate == "none":
-                self.op = torch.ops._C.gelu_and_mul
-            elif approximate == "tanh":
-                self.op = torch.ops._C.gelu_tanh_and_mul
         if current_platform.is_rocm() and approximate == "tanh":
             logger.warning_once(
                 "[ROCm] PyTorch's native GELU with tanh approximation is unstable "
@@ -352,24 +328,8 @@ class GeluAndMul(CustomOp):
                 "approximation. The custom kernel implementation is unaffected."
             )
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward()."""
-        # TODO: [ROCm] PyTorch's native GELU with tanh is unstable with torch.compile
-        approximate = self.approximate
-        if current_platform.is_rocm() and approximate == "tanh":
-            approximate = "none"
-        d = x.shape[-1] // 2
-        return F.gelu(x[..., :d], approximate=approximate) * x[..., d:]
-
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
-        return out
-
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.gelu_and_mul(x, approximate=self.approximate)
 
     def extra_repr(self) -> str:
         return f"approximate={repr(self.approximate)}"
@@ -446,86 +406,40 @@ class SwigluStepAndMul(CustomOp):
 
 
 # --8<-- [start:gelu_new]
-@CustomOp.register("gelu_new")
-class NewGELU(CustomOp):
+@PluggableLayer.register("gelu_new")
+class NewGELU(PluggableLayer):
     # --8<-- [end:gelu_new]
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            self.op = torch.ops._C.gelu_new
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward()."""
-        c = math.sqrt(2.0 / math.pi)
-        return 0.5 * x * (1.0 + torch.tanh(c * (x + 0.044715 * torch.pow(x, 3.0))))
-
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty_like(x)
-        self.op(out, x)
-        return out
-
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.gelu_new(x)
 
 
 # --8<-- [start:gelu_fast]
-@CustomOp.register("gelu_fast")
-class FastGELU(CustomOp):
+@PluggableLayer.register("gelu_fast")
+class FastGELU(PluggableLayer):
     # --8<-- [end:gelu_fast]
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            self.op = torch.ops._C.gelu_fast
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward()."""
-        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
-
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty_like(x)
-        self.op(out, x)
-        return out
-
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.gelu_fast(x)
 
 
 # --8<-- [start:quick_gelu]
-@CustomOp.register("quick_gelu")
-class QuickGELU(CustomOp):
+@PluggableLayer.register("quick_gelu")
+class QuickGELU(PluggableLayer):
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
     # --8<-- [end:quick_gelu]
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
-            self.op = torch.ops._C.gelu_quick
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward()."""
-        return x * torch.sigmoid(1.702 * x)
-
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.empty_like(x)
-        self.op(out, x)
-        return out
-
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.quick_gelu(x)
 
 
 # --8<-- [start:relu2]

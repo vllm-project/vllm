@@ -34,6 +34,21 @@ class IrOpPriorityConfig:
     fused_add_rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
+    gelu: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu"""
+
+    gelu_and_mul: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_and_mul"""
+
+    gelu_new: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_new"""
+
+    gelu_fast: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_fast"""
+
+    quick_gelu: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.quick_gelu"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
