@@ -365,6 +365,39 @@ class TestLloydMax:
         assert centroids.dtype == torch.float32
         assert boundaries.dtype == torch.float32
 
+    # ---- Pre-baked centroid tables ----
+
+    @pytest.mark.parametrize(
+        "d,bits",
+        [(d, b) for d in (64, 128, 256) for b in (3, 4, 8)],
+    )
+    def test_prebaked_matches_solver(self, d, bits):
+        """Pre-baked centroid tables must equal the runtime solver output.
+
+        get_centroids() short-circuits to a pre-baked table for the
+        (d, bits) pairs the TQ+ presets use. Lloyd-Max is fully
+        deterministic given d and bits, so the pre-baked values must be
+        bit-precise equal to what the solver produces.
+        """
+        prebaked = get_centroids(d, bits)
+        solver, _ = solve_lloyd_max(d, bits)
+        assert prebaked.shape == solver.shape
+        assert prebaked.dtype == solver.dtype
+        # Bit-precise equality: the pre-baked table was emitted from this
+        # same solver, so any drift indicates a stale paste.
+        max_abs_diff = (prebaked - solver).abs().max().item()
+        assert max_abs_diff == 0.0, (
+            f"Pre-baked (d={d}, bits={bits}) differs from solver: "
+            f"max|Δ|={max_abs_diff:.3e}"
+        )
+
+    def test_get_centroids_falls_back_for_unbaked_shape(self):
+        """Shapes outside the pre-baked table fall back to the solver."""
+        # d=192 is non-standard and intentionally outside the pre-baked table
+        centroids = get_centroids(192, 3)
+        solver, _ = solve_lloyd_max(192, 3)
+        assert torch.equal(centroids, solver)
+
     @pytest.mark.parametrize("bits", [3, 4])
     def test_centroids_match_scipy_reference(self, bits):
         """Verify _trapz(n=200) centroids match scipy.integrate.quad reference.
