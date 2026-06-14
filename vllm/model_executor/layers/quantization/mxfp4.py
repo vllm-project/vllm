@@ -6,6 +6,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoEParallelConfig,
@@ -814,3 +815,169 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+
+class MiMoV2Mxfp4Config(Mxfp4Config):
+    """MXFP4 config for MiMo-V2's experts.
+
+    MiMo stores its MoE experts in mxfp4 (while attention stays fp8). The stock
+    ``Mxfp4MoEMethod`` prepares the TRT-LLM weights with a layout that doesn't
+    match this checkpoint (interleaved w1/w3 + nvfp4 scale interleave), so
+    dispatch ``MiMoV2Mxfp4MoEMethod``, which ports SGLang's working recipe
+    (w3w1 concat + shuffle_matrix_a/sf_a + SiLU with swiglu_limit clamp).
+    """
+
+    # SGLang's mxfp4 path asserts swiglu_limit == 10 for these FP4 experts, and
+    # MiMo's config carries no field, so it's a fixed convention.
+    SWIGLU_LIMIT = 10.0
+
+    def get_quant_method(self, layer, prefix):
+        if isinstance(layer, FusedMoE):
+            return MiMoV2Mxfp4MoEMethod(
+                layer.moe_config, swiglu_limit=self.SWIGLU_LIMIT
+            )
+        return super().get_quant_method(layer, prefix)
+
+
+class MiMoV2Mxfp4MoEMethod(Mxfp4MoEMethod):
+    """MXFP4 MoE for MiMo: TRT-LLM kernel with SGLang's weight prep + SiLU.
+
+    Reuses the base ``create_weights`` (uint8 packed w13/w2 + uint8 E8M0
+    scales) and the base ``apply`` (which dispatches to the TRT-LLM experts /
+    ``trtllm_fp4_block_scale_moe``). Only the kernel-format conversion and the
+    SwiGLU clamp are overridden to match MiMo's checkpoint.
+    """
+
+    def __init__(self, moe, swiglu_limit: float | None = None):
+        super().__init__(moe)
+        # swiglu_limit comes from the model config (see MiMoV2MoE wiring). The
+        # TRT-LLM mxfp4 kernel always applies a clamped gated activation; for
+        # plain SiLU SwiGLU we pass alpha/beta=None and only the clamp limit.
+        self._swiglu_limit = swiglu_limit
+
+        # Force the MODULAR (routed) experts. select_deepseek_v4 prefers the
+        # Monolithic variant, which re-routes INTERNALLY with
+        # routing_bias=None/n_group=None -- discarding MiMo's grouped sigmoid +
+        # noaux_tc correction-bias routing -> wrong experts -> degenerate
+        # output. The Modular variant consumes vLLM's externally computed top-k
+        # (the correct MiMo routing) via trtllm_fp4_block_scale_routed_moe,
+        # matching SGLang.
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+            TrtLlmMxfp4ExpertsModular,
+        )
+
+        self.experts_cls = TrtLlmMxfp4ExpertsModular
+
+    def process_weights_after_loading(self, layer) -> None:
+        from flashinfer.fp4_quantization import block_scale_interleave
+        from flashinfer.fused_moe.core import (
+            _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
+        )
+
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            reorder_w1w3_to_w3w1,
+        )
+
+        # 1) Reorder fused [w1=gate, w3=up] -> [w3, w1] by CONCATENATION.
+        #    (Base/DeepSeek-V4 path interleaves instead -> wrong for MiMo.)
+        w13_w, w13_s = reorder_w1w3_to_w3w1(
+            layer.w13_weight.data, layer.w13_weight_scale.data, dim=-2
+        )
+
+        w2_w = layer.w2_weight.data
+        w2_s = layer.w2_weight_scale.data
+        num_experts = w13_w.shape[0]
+        epilogue_tile_m = 128
+
+        # 2) Official TRT-LLM shuffle (SGLang's default path): permute indices
+        #    + block_scale_interleave. w13 uses the w3w1 permute, w2 the w2
+        #    permute; scales use num_elts_per_sf=16.
+        cache: dict = {}
+        g1_w, g1_s, g2_w, g2_s = [], [], [], []
+        for i in range(num_experts):
+            w13_u8 = w13_w[i].view(torch.uint8)
+            w13_s_u8 = w13_s[i].view(torch.uint8)
+            w2_u8 = w2_w[i].view(torch.uint8)
+            w2_s_u8 = w2_s[i].view(torch.uint8)
+
+            perm = _maybe_get_cached_w3_w1_permute_indices(
+                cache, w13_u8, epilogue_tile_m
+            )
+            g1_w.append(w13_u8[perm.to(w13_u8.device)].contiguous())
+            perm_sf = _maybe_get_cached_w3_w1_permute_indices(
+                cache, w13_s_u8, epilogue_tile_m, num_elts_per_sf=16
+            )
+            g1_s.append(
+                block_scale_interleave(
+                    w13_s_u8[perm_sf.to(w13_s_u8.device)].contiguous()
+                )
+            )
+
+            perm = get_w2_permute_indices_with_cache(cache, w2_u8, epilogue_tile_m)
+            g2_w.append(w2_u8[perm.to(w2_u8.device)].contiguous())
+            perm_sf = get_w2_permute_indices_with_cache(
+                cache, w2_s_u8, epilogue_tile_m, num_elts_per_sf=16
+            )
+            g2_s.append(
+                block_scale_interleave(
+                    w2_s_u8[perm_sf.to(w2_s_u8.device)].contiguous()
+                )
+            )
+
+        replace_parameter(layer, "w13_weight", torch.stack(g1_w))
+        replace_parameter(layer, "w2_weight", torch.stack(g2_w))
+        # Scales are consumed as float8_e4m3fn block-scale factors by the kernel.
+        replace_parameter(
+            layer,
+            "w13_weight_scale",
+            torch.stack(g1_s).view(torch.float8_e4m3fn).reshape(
+                num_experts, w13_w.shape[1], -1
+            ),
+        )
+        replace_parameter(
+            layer,
+            "w2_weight_scale",
+            torch.stack(g2_s).view(torch.float8_e4m3fn).reshape(
+                num_experts, w2_w.shape[1], -1
+            ),
+        )
+
+        # 3) Build the TRT-LLM kernel. The base _setup_kernel re-runs the
+        #    DeepSeek-V4 converter, so DON'T call it here -- instead construct
+        #    the moe_quant_config + kernel directly with the SiLU clamp.
+        #    TODO(gpu): confirm make_mxfp4_moe_kernel picks up gemm1_clamp_limit
+        #    and that gemm1_alpha/beta default to None (plain SiLU).
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self._build_trtllm_kernel(layer)
+
+    def get_fused_moe_quant_config(self, layer):
+        cfg = super().get_fused_moe_quant_config(layer)
+        # Inject the SwiGLU clamp limit (alpha/beta stay None -> plain SiLU).
+        if cfg is not None and self._swiglu_limit is not None:
+            cfg.gemm1_clamp_limit = self._swiglu_limit  # TODO: verify field name
+        return cfg
+
+    def _build_trtllm_kernel(self, layer) -> None:
+        # TODO(gpu): mirror Mxfp4MoEMethod._setup_kernel's tail
+        # (make_mxfp4_moe_kernel(...)) without the weight conversion, since we
+        # already shuffled above. Left as an integration point.
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            make_mxfp4_moe_kernel,
+        )
+
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+            logger.warning(
+                "[mimo-mxfp4] experts_cls=%s  kernel.is_monolithic=%s "
+                "(want Modular / False so MiMo's external top-k routing is used)",
+                self.experts_cls.__name__,
+                getattr(self.moe_kernel, "is_monolithic", "?"),
+            )
