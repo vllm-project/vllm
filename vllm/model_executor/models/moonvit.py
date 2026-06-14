@@ -700,11 +700,10 @@ class MoonVitPretrainedModel(PreTrainedModel):
     ) -> dict[str, Any]:
         """Precompute every grid-dependent input the encoder needs.
 
-        Shared by the eager forward path and the CUDA graph
-        capture/replay path. Everything here is computed outside the
-        captured graph, so per-grid Python iteration and ``.tolist()``
-        round-trips are fine; the values are then copied into fixed-shape
-        buffers for replay.
+        Used by the CUDA graph capture and replay paths to precompute
+        every grid-dependent input outside the captured graph, so per-grid
+        Python iteration and ``.tolist()`` round-trips are fine; the
+        values are then copied into fixed-shape buffers for replay.
 
         Args:
             grid_hws_list: List of ``(h, w)`` patch-grid sizes per image.
@@ -727,28 +726,24 @@ class MoonVitPretrainedModel(PreTrainedModel):
 
         # Normalize to a list of plain Python int pairs so the helpers
         # below never need ``.tolist()`` on a tensor.
-        normalized: list[tuple[int, int]] = [(int(h), int(w)) for h, w in grid_hws_list]
+        grid_pairs: list[tuple[int, int]] = [(int(h), int(w)) for h, w in grid_hws_list]
 
         metadata: dict[str, Any] = {}
 
-        pos_embeds = self.patch_embed.pos_emb.get_pos_embeds(normalized)
+        pos_embeds = self.patch_embed.pos_emb.get_pos_embeds(grid_pairs)
         metadata["pos_embeds"] = pos_embeds.to(device=device)
 
-        rope_freqs_cis = self.encoder.get_rope_freqs_cis(normalized)
+        rope_freqs_cis = self.encoder.get_rope_freqs_cis(grid_pairs)
         metadata["rope_freqs_cis"] = rope_freqs_cis.to(device=device)
 
-        if normalized:
-            grid_arr = np.array(normalized, dtype=np.int64)
-            seq_lens = (grid_arr[:, 0] * grid_arr[:, 1]).astype(np.int32)
-            cu_seqlens_np = np.concatenate(
-                [
-                    np.zeros(1, dtype=np.int32),
-                    seq_lens.cumsum(dtype=np.int32),
-                ]
-            )
-        else:
-            seq_lens = np.zeros(0, dtype=np.int32)
-            cu_seqlens_np = np.zeros(1, dtype=np.int32)
+        grid_arr = np.array(grid_pairs, dtype=np.int64)
+        seq_lens = (grid_arr[:, 0] * grid_arr[:, 1]).astype(np.int32)
+        cu_seqlens_np = np.concatenate(
+            [
+                np.zeros(1, dtype=np.int32),
+                seq_lens.cumsum(dtype=np.int32),
+            ]
+        )
 
         if max_batch_size is not None:
             num_seqs = len(cu_seqlens_np) - 1
@@ -774,7 +769,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
         # graph (the value is constant per capture anyway).
         metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
 
-        gather_idx_np = _build_merge_gather_idx(normalized, self.merge_kernel_size)
+        gather_idx_np = _build_merge_gather_idx(grid_pairs, self.merge_kernel_size)
         metadata["merge_gather_idx"] = torch.from_numpy(gather_idx_np).to(device)
 
         return metadata

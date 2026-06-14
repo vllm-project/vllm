@@ -369,12 +369,6 @@ class KimiVLForConditionalGeneration(
             out_hidden_size=self.hidden_size,
         )
 
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config,
@@ -458,7 +452,10 @@ class KimiVLForConditionalGeneration(
         )
 
         kh, kw = self.config.vision_config.merge_kernel_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget. Floor under-allocates when budget is not a multiple of
+        # max_batch_size.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         # Build a worst-case grid_hws that yields ``per_mm_item_output``
         # merged tokens per item (h=kh, w=kw*per_mm_item_output).
