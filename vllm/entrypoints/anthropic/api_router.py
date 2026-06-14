@@ -23,6 +23,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     validate_json_request,
     with_cancellation,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -69,6 +70,17 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
     try:
         generator = await handler.create_messages(request, raw_request)
+    except VLLMValidationError as e:
+        logger.exception("Error in create_messages: %s", e)
+        return JSONResponse(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="invalid_request_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
     except Exception as e:
         logger.exception("Error in create_messages: %s", e)
         return JSONResponse(
@@ -115,6 +127,17 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
 
     try:
         response = await handler.count_tokens(request, raw_request)
+    except VLLMValidationError as e:
+        logger.exception("Error in count_tokens: %s", e)
+        return JSONResponse(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="invalid_request_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
     except Exception as e:
         logger.exception("Error in count_tokens: %s", e)
         return JSONResponse(
