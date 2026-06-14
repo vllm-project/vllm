@@ -181,6 +181,17 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # Listeners invoked inside _maybe_evict_cached_block, just before
+        # block.reset_hash(), with (block_id, BlockHash). Allows callers
+        # (e.g. an offloading connector) to capture the hash and schedule
+        # work against the still-intact KV data.
+        self._eviction_listeners: list = []
+
+    def register_eviction_listener(self, fn) -> None:
+        """Register fn(block_id: int, block_hash: BlockHash) to be called
+        on every prefix-cache eviction."""
+        self._eviction_listeners.append(fn)
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -386,6 +397,11 @@ class BlockPool:
             # block not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
+
+        if self._eviction_listeners:
+            bh = get_block_hash(block_hash)
+            for fn in self._eviction_listeners:
+                fn(block.block_id, bh)
 
         block.reset_hash()
 
