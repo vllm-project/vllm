@@ -154,6 +154,63 @@ def test_standard_attention_backend_selection(
 
 
 @pytest.mark.parametrize(
+    "aiter_available, selected_backend, expected_backend_path",
+    [
+        (
+            True,
+            None,
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+        ),
+        (
+            False,
+            None,
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+        (
+            True,
+            "ROCM_ATTN",
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+    ],
+)
+def test_sink_attention_backend_selection(
+    aiter_available,
+    selected_backend,
+    expected_backend_path,
+    mock_vllm_config,
+    mock_on_gfx9,
+    mock_on_mi3xx,
+):
+    """Prefer AITER unified for sinks when present, but keep ROCM_ATTN valid."""
+    backend_enum = None
+    if selected_backend:
+        backend_enum = getattr(AttentionBackendEnum, selected_backend)
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=True,
+        use_sparse=False,
+    )
+
+    with patch(
+        "vllm._aiter_ops.is_aiter_found_and_supported",
+        return_value=aiter_available,
+    ):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=backend_enum,
+            attn_selector_config=attn_selector_config,
+        )
+
+    assert backend_path == expected_backend_path
+
+
+@pytest.mark.parametrize(
     "env_vars, selected_backend, block_size, expected_backend_path, should_raise",
     [
         # Test Case 1: TRITON_MLA with block_size != 1
