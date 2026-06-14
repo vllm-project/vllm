@@ -18,19 +18,11 @@ from vllm.platforms import current_platform
 class ReluToAbsPattern(VllmPatternReplacement):
     """Replaces relu(x) with abs(x) — a minimal test fixture."""
 
-    @property
-    def pattern(self):
-        def _pattern(x: torch.Tensor) -> torch.Tensor:
-            return torch.ops.aten.relu.default(x)
+    def pattern(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.aten.relu.default(x)
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(x: torch.Tensor) -> torch.Tensor:
-            return torch.ops.aten.abs.default(x)
-
-        return _replacement
+    def replacement(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.aten.abs.default(x)
 
     def get_inputs(self) -> list[torch.Tensor]:
         return [self.empty_fp32(4)]
@@ -39,19 +31,11 @@ class ReluToAbsPattern(VllmPatternReplacement):
 class ExpToSqrtPattern(VllmPatternReplacement):
     """A second distinct pattern type — used to test uuid differentiation."""
 
-    @property
-    def pattern(self):
-        def _pattern(x: torch.Tensor) -> torch.Tensor:
-            return torch.ops.aten.exp.default(x)
+    def pattern(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.aten.exp.default(x)
 
-        return _pattern
-
-    @property
-    def replacement(self):
-        def _replacement(x: torch.Tensor) -> torch.Tensor:
-            return torch.ops.aten.sqrt.default(x)
-
-        return _replacement
+    def replacement(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.aten.sqrt.default(x)
 
     def get_inputs(self) -> list[torch.Tensor]:
         return [self.empty_fp32(4)]
