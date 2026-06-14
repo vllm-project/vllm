@@ -418,7 +418,8 @@ class Worker(WorkerBase):
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+                and current_platform.is_cuda()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
@@ -432,14 +433,6 @@ class Worker(WorkerBase):
             profile_result.non_torch_increase
             + profile_result.torch_peak_increase
             + profile_result.weights_memory
-        )
-
-        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
-        # On CUDA, respect the opt-in flag as originally designed.
-        cudagraph_memory_estimate_applied = (
-            cudagraph_memory_estimate
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-            else 0
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
@@ -461,7 +454,7 @@ class Worker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -486,40 +479,23 @@ class Worker(WorkerBase):
             total_mem = self.init_snapshot.total_memory
             current_util = self.cache_config.gpu_memory_utilization
             cg_util_delta = cudagraph_memory_estimate / total_mem
-            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
-                equiv_util = round(current_util - cg_util_delta, 4)
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.info(
-                    "CUDA graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
-                    "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To maintain the same "
-                    "effective KV cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f. To disable, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
-                    current_util,
-                    equiv_util,
-                    suggested_util,
-                )
-            else:
-                suggested_util = min(
-                    round(current_util + cg_util_delta, 4),
-                    1.0,
-                )
-                logger.warning(
-                    "CUDA graph memory profiling is disabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
-                    "Without it, CUDA graph memory is not accounted for "
-                    "during KV cache allocation, which may require lowering "
-                    "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
-                    "--gpu-memory-utilization from %.4f to %.4f.",
-                    current_util,
-                    suggested_util,
-                )
+            equiv_util = round(current_util - cg_util_delta, 4)
+            suggested_util = min(
+                round(current_util + cg_util_delta, 4),
+                1.0,
+            )
+            logger.info(
+                "CUDA graph memory profiling is enabled (default since "
+                "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                "equivalent to --gpu-memory-utilization=%.4f without "
+                "CUDA graph memory profiling. To maintain the same "
+                "effective KV cache size as before, increase "
+                "--gpu-memory-utilization to %.4f. To disable, set "
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                current_util,
+                equiv_util,
+                suggested_util,
+            )
 
         return int(self.available_kv_cache_memory_bytes)
 
