@@ -1,0 +1,151 @@
+{#-
+  TranslateGemma expects translation metadata as structured request fields.
+  vLLM's OpenAI-compatible API does not pass arbitrary custom content fields to
+  the chat template, so this template encodes the metadata in the user text:
+
+  Text translation:
+    <<<source>>><lang_code><<<target>>><lang_code><<<text>>><text_to_translate>
+
+  Image translation:
+    <<<source>>><lang_code><<<target>>><lang_code><<<image>>>
+
+  Custom prompt:
+    <<<custom>>><prompt>
+
+  Use `--chat-template-content-format openai` when serving multimodal requests
+  so image content arrays are preserved for this template.
+-#}
+
+{%- macro language_name(lang_code) -%}
+    {{- {
+        "cs": "Czech",
+        "cs-CZ": "Czech",
+        "de": "German",
+        "de-DE": "German",
+        "en": "English",
+        "en-US": "English",
+        "en-GB": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "hi": "Hindi",
+        "it": "Italian",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "zh": "Chinese",
+        "zh-Hans": "Chinese",
+        "zh-Hant": "Chinese",
+    }.get(lang_code, lang_code) -}}
+{%- endmacro -%}
+
+{%- macro render_text_translation(content_str) -%}
+    {%- set source_start = content_str.find('<<<source>>>') + 12 -%}
+    {%- set source_end = content_str.find('<<<target>>>') -%}
+    {%- set target_start = source_end + 12 -%}
+    {%- set target_end = content_str.find('<<<text>>>') -%}
+    {%- set text_start = target_end + 10 -%}
+    {%- set source_lang_code = content_str[source_start:source_end] | trim | replace("_", "-") -%}
+    {%- set target_lang_code = content_str[target_start:target_end] | trim | replace("_", "-") -%}
+    {%- set text_content = content_str[text_start:] | trim -%}
+    {%- set source_lang = language_name(source_lang_code) | trim -%}
+    {%- set target_lang = language_name(target_lang_code) | trim -%}
+    {{- '<start_of_turn>user\nYou are a professional ' + source_lang + ' (' + source_lang_code + ') to ' +
+        target_lang + ' (' + target_lang_code + ') translator. Your goal is to accurately convey the meaning and '
+        'nuances of the original ' + source_lang + ' text while adhering to ' + target_lang + ' grammar, '
+        'vocabulary, and cultural sensitivities.\n' +
+        'Produce only the ' + target_lang + ' translation, without any additional explanations or ' +
+        'commentary. Please translate the following ' + source_lang + ' text into ' + target_lang + ':\n\n\n' +
+        text_content -}}
+{%- endmacro -%}
+
+{%- macro render_image_translation(content_str) -%}
+    {%- set source_start = content_str.find('<<<source>>>') + 12 -%}
+    {%- set source_end = content_str.find('<<<target>>>') -%}
+    {%- set target_start = source_end + 12 -%}
+    {%- set target_end = content_str.find('<<<image>>>') -%}
+    {%- set source_lang_code = content_str[source_start:source_end] | trim | replace("_", "-") -%}
+    {%- set target_lang_code = content_str[target_start:target_end] | trim | replace("_", "-") -%}
+    {%- set source_lang = language_name(source_lang_code) | trim -%}
+    {%- set target_lang = language_name(target_lang_code) | trim -%}
+    {{- '<start_of_turn>user\nYou are a professional ' + source_lang + ' (' + source_lang_code + ') to ' +
+        target_lang + ' (' + target_lang_code + ') translator. Your goal is to accurately convey the meaning and '
+        'nuances of the original ' + source_lang + ' text while adhering to ' + target_lang + ' grammar, '
+        'vocabulary, and cultural sensitivities.\n' +
+        'Please translate the ' + source_lang + ' text in the provided image into ' + target_lang + '. ' +
+        'Produce only the ' + target_lang + ' translation, without any additional explanations, ' +
+        'alternatives or commentary. Focus only on the text, do not output where the text is located, ' +
+        'surrounding objects or any other explanation about the picture. Ignore symbols, pictogram, and ' +
+        'arrows!\n\n\n<start_of_image>' -}}
+{%- endmacro -%}
+
+{%- macro render_user_content(content) -%}
+    {%- set ns = namespace(content_str='', image_count=0) -%}
+    {%- if content is string -%}
+        {%- set ns.content_str = content -%}
+    {%- elif content is iterable and content | length >= 1 -%}
+        {%- for part in content -%}
+            {%- if part['type'] == 'text' -%}
+                {%- if ns.content_str -%}
+                    {%- set ns.content_str = ns.content_str + '\n' + part['text'] -%}
+                {%- else -%}
+                    {%- set ns.content_str = part['text'] -%}
+                {%- endif -%}
+            {%- elif part['type'] in ['image', 'image_url'] -%}
+                {%- set ns.image_count = ns.image_count + 1 -%}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{ raise_exception(
+            "User role must provide `content` as a translation string or "
+            "OpenAI-style content array."
+        ) }}
+    {%- endif -%}
+    {%- set content_str = ns.content_str -%}
+
+    {%- if content_str == 'warmup' -%}
+        {{- '<start_of_turn>user\nwarmup' -}}
+    {%- elif '<<<custom>>>' in content_str -%}
+        {%- set text_content = content_str.split('<<<custom>>>') | last | trim -%}
+        {{- '<start_of_turn>user\n' + text_content -}}
+        {%- for _ in range(ns.image_count) -%}
+            {{- '\n\n<start_of_image>' -}}
+        {%- endfor -%}
+    {%- elif '<<<source>>>' in content_str and '<<<target>>>' in content_str and '<<<text>>>' in content_str -%}
+        {{- render_text_translation(content_str) -}}
+    {%- elif '<<<source>>>' in content_str and '<<<target>>>' in content_str and '<<<image>>>' in content_str -%}
+        {{- render_image_translation(content_str) -}}
+    {%- else -%}
+        {{ raise_exception(
+            "User role must provide content in one of these formats: " +
+            "'<<<source>>><lang_code><<<target>>><lang_code><<<text>>><text_to_translate>'" +
+            "\nOr:'<<<source>>><lang_code><<<target>>><lang_code><<<image>>>'" +
+            "\nOr:'<<<custom>>><your custom prompt>'"
+        ) }}
+    {%- endif -%}
+{%- endmacro -%}
+
+{{ bos_token }}
+{%- if messages[0]['role'] != 'user' -%}
+    {{ raise_exception("Conversations must start with a user prompt.") }}
+{%- endif -%}
+{%- for message in messages -%}
+    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
+        {{ raise_exception("Conversation roles must alternate user/assistant/user/assistant/...") }}
+    {%- endif -%}
+    {%- if message['role'] == 'assistant' -%}
+        {%- if message['content'] is none or message['content'] is not string -%}
+            {{ raise_exception("Assistant role must provide content as a string") }}
+        {%- endif -%}
+        {{- '<start_of_turn>model\n' -}}
+        {{- message['content'] | trim -}}
+    {%- elif message['role'] == 'user' -%}
+        {{- render_user_content(message['content']) -}}
+    {%- else -%}
+        {{ raise_exception("Conversations must only contain user or assistant roles.") }}
+    {%- endif -%}
+    {{- '<end_of_turn>\n' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<start_of_turn>model\n' -}}
+{%- endif -%}
