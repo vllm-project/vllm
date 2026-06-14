@@ -290,6 +290,61 @@ async def test_completion_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+@pytest.mark.asyncio
+async def test_completion_error_stream_first_empty_output():
+    """First streaming output with finish_reason='error' must not be skipped."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=True,
+    )
+
+    response = await serving_completion.create_completion(request)
+
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert "Internal server error" in chunks[0]
+    assert "text_completion" not in chunks[0]
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
