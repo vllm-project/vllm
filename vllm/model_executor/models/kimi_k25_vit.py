@@ -10,7 +10,7 @@ temporal pooling for video chunks.
 
 from collections.abc import Sequence
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -100,7 +100,7 @@ def apply_rope(
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     """Generate 1D sincos positional embedding from grid positions."""
     assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float32)
+    omega: np.ndarray = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.0
     omega = 1.0 / 10000**omega  # (D/2,)
 
@@ -125,6 +125,8 @@ def get_1d_sincos_pos_embed(embed_dim, t_size, cls_token=False):
 
 class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     """2D learnable position embedding with temporal extension."""
+
+    time_weight: torch.Tensor
 
     def __init__(
         self,
@@ -232,6 +234,8 @@ class MoonVision3dPatchEmbed(nn.Module):
 
 class Rope2DPosEmbRepeated(nn.Module):
     """2D rotary position embedding with multi-resolution support."""
+
+    freqs_cis: torch.Tensor
 
     def __init__(self, dim: int, max_height: int, max_width: int, theta_base=10000):
         super().__init__()
@@ -427,6 +431,7 @@ class MoonViTEncoderLayer(nn.Module):
         xqkv = xqkv.view(*qkv_shape)
         xq, xk, xv = torch.unbind(xqkv, dim=-3)
 
+        assert rope_freqs_cis is not None
         xq, xk = apply_rope(xq, xk, rope_freqs_cis)
 
         if max_seqlen is None:
@@ -525,7 +530,8 @@ class MoonViT3dEncoder(nn.Module):
             [np.zeros(1, dtype=np.int32), lengths.cumsum(dtype=np.int32)]
         )
 
-        attn_backend = self.blocks[0].attn.attn_backend
+        first_block = cast(MoonViTEncoderLayer, self.blocks[0])
+        attn_backend = first_block.attn.attn_backend
         metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
             attn_backend, cu_seqlens, device
         )
@@ -536,8 +542,8 @@ class MoonViT3dEncoder(nn.Module):
         metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
             attn_backend,
             cu_seqlens,
-            self.blocks[0].hidden_dim,
-            self.blocks[0].tp_size,
+            first_block.hidden_dim,
+            first_block.tp_size,
             device,
         )
         return metadata
@@ -691,7 +697,8 @@ def mm_projector_forward(mm_projector: torch.nn.Module, vt_output: list[torch.Te
     """Apply MM projector to vision tower outputs."""
     num_embedding_list = [x.shape[0] for x in vt_output]
     batched = torch.cat(vt_output, dim=0)
-    projector_dtype = mm_projector.pre_norm.weight.dtype
+    pre_norm = cast(torch.nn.LayerNorm, mm_projector.pre_norm)
+    projector_dtype = pre_norm.weight.dtype
     if batched.dtype != projector_dtype:
         batched = batched.to(projector_dtype)
     proj_out = mm_projector(batched)
