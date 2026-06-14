@@ -2444,6 +2444,19 @@ class Scheduler(SchedulerInterface):
                     blocks_to_evict.update(req_block_ids[idx:])
 
             if is_affected:
+                if request.num_output_placeholders > 0:
+                    # The scheduled output for this step is skipped below when
+                    # the request is returned in failed_kv_load_req_ids. Any
+                    # older in-flight async outputs still need to be ignored.
+                    skipped_current_output = req_id in num_scheduled_tokens
+                    request.async_tokens_to_discard += max(
+                        request.num_output_placeholders - int(skipped_current_output),
+                        0,
+                    )
+                    request.num_output_placeholders = 0
+                    if request.spec_token_ids:
+                        request.spec_token_ids = []
+
                 if not marked_invalid_block:
                     # All invalid blocks of this request are shared with
                     # previous requests and will be recomputed by them.
