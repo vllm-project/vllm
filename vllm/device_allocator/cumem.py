@@ -53,6 +53,38 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
 
 
+class WakeUpPartialFailure(RuntimeError):
+    """
+    Raised by ``CuMemAllocator.wake_up`` when one or more per-allocation
+    ``create_and_map`` calls fail. Unlike a bare ``RuntimeError`` propagated
+    from the C extension, this exception type carries structured information
+    about which allocations failed so that callers (worker / executor /
+    engine-core liveness probes) can distinguish a partial wake from a clean
+    one and recover deterministically rather than returning HTTP 200 while
+    background workers are wedged.
+
+    Attributes:
+        failed_pointers: device-pointer addresses (``ptr``) of the
+            allocations whose wake-time mapping failed.
+        first_exception: the first underlying exception raised by the C
+            extension, preserved so the original CUDA error string remains
+            visible in tracebacks.
+    """
+
+    def __init__(
+        self,
+        failed_pointers: list[int],
+        first_exception: BaseException,
+    ) -> None:
+        self.failed_pointers = list(failed_pointers)
+        self.first_exception = first_exception
+        super().__init__(
+            f"CuMemAllocator.wake_up failed for "
+            f"{len(self.failed_pointers)} allocation(s); "
+            f"first error: {first_exception!r}"
+        )
+
+
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[HandleType], None],
     python_free_func: Callable[[int], HandleType],
@@ -225,11 +257,42 @@ class CuMemAllocator:
             tags: The tags of the memory allocation that will be loaded
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
+
+        Raises:
+            WakeUpPartialFailure: if one or more per-allocation
+                ``create_and_map`` calls fail. The exception carries the list
+                of failed device pointers and the first underlying exception
+                so callers can decide how to recover (e.g. mark the worker
+                as needing a cold restart). Iteration continues through all
+                allocations even after a failure so the post-wake state is
+                deterministic — every allocation has either been remapped or
+                recorded as failed.
         """
+        failed_pointers: list[int] = []
+        first_exception: BaseException | None = None
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
-                create_and_map(handle)
+                try:
+                    create_and_map(handle)
+                except Exception as exc:  # noqa: BLE001 — preserve and re-raise
+                    failed_pointers.append(ptr)
+                    if first_exception is None:
+                        first_exception = exc
+                    logger.error(
+                        "CuMemAllocator.wake_up: create_and_map failed for "
+                        "ptr=0x%x tag=%s size=%s: %r",
+                        ptr,
+                        data.tag,
+                        handle[1],
+                        exc,
+                    )
+                    # Skip the cudaMemcpy restore for this allocation; the
+                    # backing tensor is still pinned in `data.cpu_backup_tensor`
+                    # and will be retried on a subsequent wake_up or freed on
+                    # a cold restart, but copying into an unmapped VA would
+                    # crash the process.
+                    continue
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -239,6 +302,10 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+
+        if failed_pointers:
+            assert first_exception is not None
+            raise WakeUpPartialFailure(failed_pointers, first_exception)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

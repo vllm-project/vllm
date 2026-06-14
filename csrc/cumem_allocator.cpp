@@ -123,6 +123,14 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
                     CUmemGenericAllocationHandle** p_memHandle,
                     unsigned long long* chunk_sizes, size_t num_chunks) {
 #endif
+  // Reset the global error_code at entry so a sticky error left over from a
+  // prior cumem call (e.g. a silently-failed unmap on a previous sleep cycle)
+  // does not cause the early-return guards below to short-circuit a fresh
+  // mapping attempt. Without this reset, a wake_up that follows a failed
+  // sleep cycle can return CUDA_SUCCESS-equivalent behaviour from cuMemCreate
+  // but then bail out at the first `if (error_code != 0) return;` check
+  // before cuMemMap is ever attempted, leaving a half-initialised allocation.
+  error_code = no_error;
   ensure_context(device);
   // Define memory allocation properties
   CUmemAllocationProp prop = {};
@@ -166,8 +174,33 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   if (error_code != 0) {
     return;
   }
-  CUDA_CHECK(cuMemMap(d_mem, size, 0, *p_memHandle, 0));
+  // Recovery path for wake-time cuMemMap failures (most commonly
+  // CUDA_ERROR_INVALID_VALUE / "invalid argument" at this line). The
+  // failure mode this guards against:
+  //   - A prior sleep cycle's cuMemUnmap silently failed (sticky error_code
+  //     was masked) leaving `d_mem` with an existing mapping; cuMemCreate
+  //     then succeeded for the wake (it just allocates a fresh handle) but
+  //     cuMemMap fails because `d_mem` already maps to the previous handle.
+  //   - A late free callback ran during sleep and the VA was reused by an
+  //     overlapping reservation in the meantime.
+  // Either way, an idempotent cuMemUnmap of the target VA range followed by
+  // a single cuMemMap retry is safe: if no overlapping mapping exists,
+  // cuMemUnmap returns CUDA_ERROR_INVALID_VALUE which we ignore; if one
+  // exists, the unmap clears it and the retry succeeds.
+  CUresult map_status = cuMemMap(d_mem, size, 0, *p_memHandle, 0);
+  if (map_status == CUDA_ERROR_INVALID_VALUE) {
+    // Best-effort unmap of any pre-existing mapping at this VA. Ignore the
+    // return value: if nothing is mapped, this fails harmlessly.
+    (void)cuMemUnmap(d_mem, size);
+    map_status = cuMemMap(d_mem, size, 0, *p_memHandle, 0);
+  }
+  CUDA_CHECK(map_status);
   if (error_code != 0) {
+    // Map ultimately failed. Release the handle we created above so we
+    // don't leak a CUmemGenericAllocationHandle on the recovery path; the
+    // caller's error path (my_malloc / python_create_and_map) frees the
+    // outer slot and VA reservation as usual.
+    (void)cuMemRelease(*p_memHandle);
     return;
   }
 #else
