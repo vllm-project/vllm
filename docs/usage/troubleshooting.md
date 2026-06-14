@@ -22,6 +22,64 @@ It'd be better to store the model in a local disk. Additionally, have a look at 
 
 If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](../configuration/conserving_memory.md) to reduce the memory consumption.
 
+## Running on WSL (Windows Subsystem for Linux)
+
+vLLM is supported on WSL2 but there are several known issues to be aware of:
+
+### OOM during source builds
+
+WSL2 only [assigns 50% of the total memory by default](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings). This is often insufficient for compiling vLLM from source. Create or edit `C:\Users\<your_username>\.wslconfig` to increase the memory limit (adjust the values based on your system's available RAM):
+```ini
+[wsl2]
+memory=12GB
+swap=8GB
+```
+
+Then restart WSL with `wsl --shutdown` from PowerShell. You can also limit compiler parallelism with `MAX_JOBS=1` or `MAX_JOBS=2` to reduce peak memory usage during builds.
+
+### OOM at runtime on small GPUs
+
+On WSL, the Windows desktop compositor reserves a portion of GPU memory, so the actual available VRAM is less than what `nvidia-smi` reports. The default `gpu_memory_utilization` of `0.9` may cause OOM on GPUs with 8GB or less. This parameter is a float between `0.0` and `1.0` representing the fraction of GPU memory to use for the KV cache. Try lowering it:
+```python
+llm = LLM(model="...", gpu_memory_utilization=0.7)
+```
+
+Or with the API server:
+```bash
+vllm serve <model> --gpu-memory-utilization 0.7
+```
+
+Similarly, some models have a large default `max_model_len` (e.g., 32768) that requires more KV cache memory than available. If you see an error about insufficient KV cache memory, set a smaller `max_model_len`:
+```python
+llm = LLM(model="...", gpu_memory_utilization=0.7, max_model_len=4096)
+```
+
+### Multiprocessing errors
+
+On WSL, vLLM overrides the multiprocessing start method to `spawn` because NVML is not compatible with `fork`. This means that any script using vLLM must wrap its code in a `if __name__ == '__main__'` guard:
+```python
+from vllm import LLM, SamplingParams
+
+# Wrap vLLM code in main() to avoid multiprocessing issues with spawn
+def main():
+    llm = LLM(model="...")
+    outputs = llm.generate(["Hello!"], SamplingParams(max_tokens=50))
+    print(outputs[0].outputs[0].text)
+
+if __name__ == '__main__':
+    main()
+```
+
+Without this guard, you will see an error like:
+```text
+RuntimeError: An attempt has been made to start a new process before the
+current process has finished its bootstrapping phase.
+```
+
+### ModuleNotFoundError: No module named 'vllm._C'
+
+If you installed vLLM via `pip` but are running scripts from within the vLLM source directory, Python may import the local (uncompiled) source tree instead of the installed package. Run your scripts from a different directory, or remove the source directory from your working path.
+
 ## Generation quality changed
 
 In v0.8.0, the source of default sampling parameters was changed in <https://github.com/vllm-project/vllm/pull/12622>. Prior to v0.8.0, the default sampling parameters came from vLLM's set of neutral defaults. From v0.8.0 onwards, the default sampling parameters come from the `generation_config.json` provided by the model creator.
