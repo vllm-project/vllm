@@ -818,7 +818,7 @@ def replay_selective_state_update(
             HEADS_PER_BLOCK=heads_per_block,
             LAUNCH_WITH_PDL=launch_with_pdl,
             LAUNCH_DEPENDENT_KERNELS=use_internal_pdl,
-            launch_pdl=launch_with_pdl or use_internal_pdl,
+            launch_pdl=launch_with_pdl,
             num_warps=precompute_num_warps,
         )
 

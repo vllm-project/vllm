@@ -189,6 +189,8 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_MAMBA_MTP_REPLAY: bool = False
     VLLM_MAMBA_MTP_REPLAY_PDL: bool = False
+    VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL: bool = False
+    VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL: bool = False
     VLLM_MAMBA_SKIP_SSD_WARMUP: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
@@ -1532,6 +1534,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # correctness is being validated separately from kernel overlap.
     "VLLM_MAMBA_MTP_REPLAY_PDL": lambda: _getenv_bool(
         "VLLM_MAMBA_MTP_REPLAY_PDL", False
+    ),
+    # Split PDL controls used to isolate the conv1d->precompute and
+    # precompute->state-update pieces of the Mamba MTP replay chain.
+    "VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL": lambda: _getenv_bool(
+        "VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL",
+        _getenv_bool("VLLM_MAMBA_MTP_REPLAY_PDL", False),
+    ),
+    "VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL": lambda: _getenv_bool(
+        "VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL",
+        _getenv_bool("VLLM_MAMBA_MTP_REPLAY_PDL", False),
     ),
     # Skip the profile-run Mamba2 SSD Triton warmup.
     "VLLM_MAMBA_SKIP_SSD_WARMUP": lambda: _getenv_bool(

@@ -581,8 +581,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
     def _ensure_mtp_replay_cache(
         self,
         ssm_state: torch.Tensor,
-        x: torch.Tensor,
-        B: torch.Tensor,
+        x_dtype: torch.dtype,
+        B_dtype: torch.dtype,
     ) -> None:
         cache_size = ssm_state.shape[0]
         num_heads = self.num_heads // self.tp_size
@@ -595,8 +595,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.head_dim,
             num_groups,
             self.ssm_state_size,
-            x.dtype,
-            B.dtype,
+            x_dtype,
+            B_dtype,
             ssm_state.dtype,
             ssm_state.device,
         )
@@ -614,7 +614,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             num_steps,
             num_heads,
             self.head_dim,
-            dtype=x.dtype,
+            dtype=x_dtype,
             device=ssm_state.device,
         )
         self._mtp_replay_old_B = torch.zeros(
@@ -623,7 +623,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             num_steps,
             num_groups,
             self.ssm_state_size,
-            dtype=B.dtype,
+            dtype=B_dtype,
             device=ssm_state.device,
         )
         self._mtp_replay_old_dt = torch.zeros(
@@ -1252,7 +1252,39 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 and state_indices_tensor_d.dim() == 2
                 and state_indices_tensor_d.size(1) == 1 + self.num_spec
             )
-            use_mtp_replay_pdl = use_mtp_replay and envs.VLLM_MAMBA_MTP_REPLAY_PDL
+            full_mtp_decode_rows = (
+                use_mtp_replay
+                and num_decode_tokens == num_decodes * (1 + self.num_spec)
+            )
+            use_mtp_replay_external_pdl = (
+                full_mtp_decode_rows and envs.VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL
+            )
+            use_mtp_replay_internal_pdl = (
+                use_mtp_replay and envs.VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL
+            )
+            replay_num_accepted_tokens = None
+            replay_state_indices = None
+            if use_mtp_replay:
+                num_steps = 1 + self.num_spec
+                num_heads = self.num_heads // self.tp_size
+                self._ensure_mtp_replay_cache(
+                    ssm_state,
+                    hidden_states_B_C_d.dtype,
+                    hidden_states_B_C_d.dtype,
+                )
+                self._ensure_mtp_replay_workspace(
+                    num_decodes,
+                    num_heads,
+                    num_steps,
+                    hidden_states_B_C_d.device,
+                )
+                replay_num_accepted_tokens = num_accepted_tokens[:num_decodes]
+                # Keep the defensive contiguous copy out of the external PDL
+                # chain. TRTLLM's replay path also requires the conv1d ->
+                # precompute gap to contain only view/no-op work.
+                replay_state_indices = state_indices_tensor_d[
+                    :num_decodes, 0
+                ].contiguous()
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
@@ -1267,7 +1299,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
-                launch_dependent_kernels=use_mtp_replay_pdl,
+                launch_dependent_kernels=use_mtp_replay_external_pdl,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -1299,15 +1331,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert num_accepted_tokens is not None
                 assert state_indices_tensor_d is not None
                 assert query_start_loc_d is not None
+                assert replay_num_accepted_tokens is not None
+                assert replay_state_indices is not None
                 num_steps = 1 + self.num_spec
                 num_heads = self.num_heads // self.tp_size
-                self._ensure_mtp_replay_cache(ssm_state, hidden_states_d, B_d)
-                self._ensure_mtp_replay_workspace(
-                    num_decodes,
-                    num_heads,
-                    num_steps,
-                    hidden_states_d.device,
-                )
                 assert self._mtp_replay_old_x is not None
                 assert self._mtp_replay_old_B is not None
                 assert self._mtp_replay_old_dt is not None
@@ -1316,10 +1343,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert self._mtp_replay_valid is not None
                 assert self._mtp_replay_cb_scaled is not None
                 assert self._mtp_replay_decay_vec is not None
-                replay_num_accepted_tokens = num_accepted_tokens[:num_decodes]
-                replay_state_indices = state_indices_tensor_d[
-                    :num_decodes, 0
-                ].contiguous()
                 replay_kernel_num_accepted_tokens = replay_num_accepted_tokens
                 if num_decode_tokens == num_decodes * num_steps:
                     replay_hidden_states = hidden_states_d.view(
@@ -1417,8 +1440,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     enable_stochastic_rounding=False,
                     cb_scaled=self._mtp_replay_cb_scaled,
                     decay_vec=self._mtp_replay_decay_vec,
-                    launch_with_pdl=use_mtp_replay_pdl,
-                    use_internal_pdl=use_mtp_replay_pdl,
+                    launch_with_pdl=use_mtp_replay_external_pdl,
+                    use_internal_pdl=use_mtp_replay_internal_pdl,
                 )
                 if num_decode_tokens != num_decodes * num_steps:
                     for decode_idx in range(num_decodes):
