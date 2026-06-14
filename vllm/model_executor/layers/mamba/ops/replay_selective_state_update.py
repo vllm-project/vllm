@@ -626,7 +626,7 @@ def replay_selective_state_update(
     cb_scaled: torch.Tensor | None = None,
     decay_vec: torch.Tensor | None = None,
     launch_with_pdl: bool = False,
-    use_internal_pdl: bool = True,
+    use_internal_pdl: bool = False,
 ) -> None:
     """Replay-based MTP SSM update.
 
@@ -674,6 +674,7 @@ def replay_selective_state_update(
     assert out.shape == x.shape
     if state_batch_indices is not None:
         assert state_batch_indices.shape == (batch,)
+        state_batch_indices = state_batch_indices.contiguous()
     if D is not None:
         assert D.shape == (nheads, dim)
     if dt_bias is not None:

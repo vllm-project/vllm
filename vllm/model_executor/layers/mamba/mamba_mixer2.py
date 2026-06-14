@@ -715,6 +715,70 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self._mtp_replay_valid.index_fill_(0, valid_indices, 0)
 
+    def preserve_mtp_replay_accepted_state(
+        self,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor,
+    ) -> None:
+        if (
+            not self._use_mtp_replay
+            or self._mtp_replay_old_x is None
+            or self._mtp_replay_old_B is None
+            or self._mtp_replay_old_dt is None
+            or self._mtp_replay_old_dA_cumsum is None
+            or self._mtp_replay_cache_buf_idx is None
+            or self._mtp_replay_valid is None
+            or state_indices.dim() != 2
+        ):
+            return
+
+        num_steps = min(1 + self.num_spec, state_indices.size(1))
+        if num_steps <= 1:
+            return
+
+        # The no-cache Mamba block table can promote an accepted draft slot to
+        # the next step's base slot. Keep replay's base state and compact trace
+        # available under that accepted physical block.
+        batch = min(state_indices.size(0), num_accepted_tokens.size(0))
+        state_indices = state_indices[:batch, :num_steps]
+        num_accepted_tokens = num_accepted_tokens[:batch].to(
+            device=state_indices.device
+        )
+        accepted_idx = torch.clamp(
+            num_accepted_tokens.to(torch.long), min=1, max=num_steps
+        ) - 1
+
+        src_indices = state_indices[:, 0].to(torch.long)
+        dst_indices = state_indices.gather(
+            1, accepted_idx.unsqueeze(1)
+        ).squeeze(1).to(torch.long)
+        cache_size = self._mtp_replay_valid.shape[0]
+        valid_mask = (
+            (src_indices != NULL_BLOCK_ID)
+            & (dst_indices != NULL_BLOCK_ID)
+            & (src_indices != dst_indices)
+            & (src_indices >= 0)
+            & (dst_indices >= 0)
+            & (src_indices < cache_size)
+            & (dst_indices < cache_size)
+        )
+        zero_indices = torch.zeros_like(src_indices)
+        src_indices = torch.where(valid_mask, src_indices, zero_indices)
+        dst_indices = torch.where(valid_mask, dst_indices, src_indices)
+        ssm_state = self.kv_cache[1]
+
+        ssm_state[dst_indices] = ssm_state[src_indices]
+        self._mtp_replay_old_x[dst_indices] = self._mtp_replay_old_x[src_indices]
+        self._mtp_replay_old_B[dst_indices] = self._mtp_replay_old_B[src_indices]
+        self._mtp_replay_old_dt[dst_indices] = self._mtp_replay_old_dt[src_indices]
+        self._mtp_replay_old_dA_cumsum[dst_indices] = (
+            self._mtp_replay_old_dA_cumsum[src_indices]
+        )
+        self._mtp_replay_cache_buf_idx[dst_indices] = (
+            self._mtp_replay_cache_buf_idx[src_indices]
+        )
+        self._mtp_replay_valid[dst_indices] = self._mtp_replay_valid[src_indices]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1188,6 +1252,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 and state_indices_tensor_d.dim() == 2
                 and state_indices_tensor_d.size(1) == 1 + self.num_spec
             )
+            use_mtp_replay_pdl = use_mtp_replay and envs.VLLM_MAMBA_MTP_REPLAY_PDL
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
@@ -1202,7 +1267,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
-                launch_dependent_kernels=use_mtp_replay,
+                launch_dependent_kernels=use_mtp_replay_pdl,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -1252,7 +1317,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert self._mtp_replay_cb_scaled is not None
                 assert self._mtp_replay_decay_vec is not None
                 replay_num_accepted_tokens = num_accepted_tokens[:num_decodes]
-                replay_state_indices = state_indices_tensor_d[:num_decodes, 0]
+                replay_state_indices = state_indices_tensor_d[
+                    :num_decodes, 0
+                ].contiguous()
                 replay_kernel_num_accepted_tokens = replay_num_accepted_tokens
                 if num_decode_tokens == num_decodes * num_steps:
                     replay_hidden_states = hidden_states_d.view(
@@ -1350,7 +1417,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     enable_stochastic_rounding=False,
                     cb_scaled=self._mtp_replay_cb_scaled,
                     decay_vec=self._mtp_replay_decay_vec,
-                    launch_with_pdl=True,
+                    launch_with_pdl=use_mtp_replay_pdl,
+                    use_internal_pdl=use_mtp_replay_pdl,
                 )
                 if num_decode_tokens != num_decodes * num_steps:
                     for decode_idx in range(num_decodes):

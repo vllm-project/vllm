@@ -247,3 +247,128 @@ def test_replay_selective_state_update_two_steps(itype, state_dtype):
             atol=atol,
         )
     assert torch.equal(cache_buf_idx[replay_indices], torch.zeros_like(state_indices))
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16, torch.float16])
+def test_replay_selective_state_update_multiple_groups(itype):
+    set_random_seed(0)
+    device = DEVICE
+    batch = 3
+    cache_size = 16
+    num_steps = 6
+    nheads = 4
+    ngroups = 2
+    head_dim = 8
+    dstate = 16
+    rtol, atol = (6e-2, 2e-1)
+
+    state_indices_table = torch.tensor(
+        [
+            [1, 2, 3, 4, 5, 6],
+            [7, 8, 9, 10, 11, 12],
+            [13, 14, 15, 0, 0, 0],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    state_indices = state_indices_table[:, 0]
+    assert not state_indices.is_contiguous()
+    state = torch.randn(
+        cache_size,
+        nheads,
+        head_dim,
+        dstate,
+        dtype=torch.float16,
+        device=device,
+    )
+    state_initial = state.clone()
+
+    old_x = torch.zeros(
+        cache_size,
+        num_steps,
+        nheads,
+        head_dim,
+        dtype=itype,
+        device=device,
+    )
+    old_B = torch.zeros(
+        cache_size,
+        2,
+        num_steps,
+        ngroups,
+        dstate,
+        dtype=itype,
+        device=device,
+    )
+    old_dt = torch.zeros(
+        cache_size,
+        2,
+        nheads,
+        num_steps,
+        dtype=torch.float32,
+        device=device,
+    )
+    old_dA_cumsum = torch.zeros_like(old_dt)
+    cache_buf_idx = torch.zeros(cache_size, dtype=torch.int32, device=device)
+    replay_valid = torch.zeros(cache_size, dtype=torch.int32, device=device)
+
+    A_scalar = -torch.rand(nheads, dtype=torch.float32, device=device) - 1.0
+    A = A_scalar[:, None, None].expand(nheads, head_dim, dstate)
+    D = torch.randn(nheads, head_dim, dtype=itype, device=device)
+    dt_bias_scalar = torch.rand(nheads, dtype=torch.float32, device=device) - 4.0
+    dt_bias = dt_bias_scalar[:, None].expand(nheads, head_dim)
+
+    x = torch.randn(
+        batch,
+        num_steps,
+        nheads,
+        head_dim,
+        dtype=itype,
+        device=device,
+    )
+    dt_scalar = torch.randn(
+        batch,
+        num_steps,
+        nheads,
+        dtype=itype,
+        device=device,
+    )
+    dt = dt_scalar[..., None].expand(batch, num_steps, nheads, head_dim)
+    B = torch.randn(batch, num_steps, ngroups, dstate, dtype=itype, device=device)
+    C = torch.randn(batch, num_steps, ngroups, dstate, dtype=itype, device=device)
+    out = torch.empty_like(x)
+    accepted = torch.ones(batch, dtype=torch.int32, device=device)
+
+    replay_selective_state_update(
+        state,
+        old_x,
+        old_B,
+        old_dt,
+        old_dA_cumsum,
+        cache_buf_idx,
+        replay_valid,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        out,
+        accepted,
+        D=D,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+        state_batch_indices=state_indices,
+    )
+
+    for batch_idx, state_idx in enumerate(state_indices.tolist()):
+        out_ref, _ = _run_tokens(
+            state_initial[state_idx : state_idx + 1],
+            x[batch_idx],
+            dt[batch_idx],
+            A,
+            B[batch_idx],
+            C[batch_idx],
+            D,
+            dt_bias,
+        )
+        torch.testing.assert_close(out[batch_idx], out_ref, rtol=rtol, atol=atol)
