@@ -36,6 +36,7 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
+    think_end_detect_token_ids: list[int]
 
     def __init__(
         self,
@@ -56,11 +57,24 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.think_end_detect_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            # The parser's intrinsic end marker is what determines when the
+            # reasoning parser will consider reasoning finished. When the
+            # user configures a longer custom `reasoning_end_str` (a steering
+            # phrase that suffixes the natural marker), the model can emit
+            # just the natural marker and end reasoning before the full
+            # phrase appears. Detect via the parser marker; still *force*
+            # the full configured phrase. Fall back to the full sequence
+            # when no parser marker is available.
+            parser_end = reasoning_config.parser_reasoning_end_token_ids
+            self.think_end_detect_token_ids = (
+                parser_end if parser_end else self.think_end_token_ids
+            )
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -195,7 +209,7 @@ class ThinkingBudgetStateHolder:
                 prompt_tok_ids, self.think_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
+                prompt_tok_ids, self.think_end_detect_token_ids
             )
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
@@ -248,7 +262,7 @@ class ThinkingBudgetStateHolder:
             state["start_thinking"] = start_thinking
         if state["end_thinking"] == -1:
             end_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_end_token_ids
+                state.get("output_tok_ids", []), self.think_end_detect_token_ids
             )
             state["end_thinking"] = end_thinking
 
