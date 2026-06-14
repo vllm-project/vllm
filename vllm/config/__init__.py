@@ -12,6 +12,7 @@ from vllm.config.compilation import (
 from vllm.config.device import DeviceConfig
 from vllm.config.diffusion import DiffusionConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
@@ -121,6 +122,8 @@ __all__ = [
     "StructuredOutputsConfig",
     # From vllm.config.profiler
     "ProfilerConfig",
+    # From vllm.config.fault_tolerance
+    "FaultToleranceConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",
