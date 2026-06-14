@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -432,7 +433,23 @@ class TritonAttentionImpl(AttentionImpl):
         self._v_scale_cache.fill_(1.0)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
-        return quant_key == kFp8StaticTensorSym
+        if quant_key == kFp8StaticTensorSym:
+            return True
+        # Per-group dynamic FP8 quant is supported when the output dtype is
+        # FP8, the scale is dynamic per-group, and the group size evenly
+        # divides head_size (groups must align with head boundaries).
+        # Quantization happens in the attention kernel epilogue, in both the
+        # 2D (prefill) and 3D (reduce_segments / decode) paths, so it composes
+        # with the normal 2D/3D launch selection.
+        if (
+            quant_key.dtype == self.fp8_dtype
+            and quant_key.scale.group_shape.is_per_group()
+            and not quant_key.scale.static
+            and quant_key.symmetric
+        ):
+            group_size = quant_key.scale.group_shape[1]
+            return self.head_size % group_size == 0
+        return False
 
     def __init__(
         self,
@@ -528,11 +545,27 @@ class TritonAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if output_block_scale is not None:
+        # ``output_block_scale`` is the carrier the attention+quant fusion
+        # pass uses to request fused dynamic per-group FP8 output quant: the
+        # per-group scale tensor is produced by the kernel epilogue instead of
+        # a separate quant op.  Only layers that returned True from
+        # ``fused_output_quant_supported`` for a per-group FP8 key reach this
+        # path (NVFP4 block-scale returns False here), so a non-None value is
+        # always the per-group FP8 scale; route it to ``output_group_scale``.
+        output_group_scale = output_block_scale
+        if output_group_scale is not None and output_scale is not None:
             raise NotImplementedError(
-                "fused block_scale output quantization is not yet supported"
-                " for TritonAttentionImpl"
+                "TritonAttentionImpl cannot fuse both per-tensor and "
+                "per-group FP8 output quantization in the same call"
             )
+        # The fusion pass registers the per-group pattern only for the
+        # platform-default UE8M0 mode (``is_deep_gemm_e8m0_used()``), which is
+        # also the default ``per_token_group_quant_fp8`` would use — so derive
+        # the rounding mode here rather than threading a flag through the
+        # shared attention custom op / forward contract.  ``group_size`` and
+        # the row/column-major layout are recovered from the scale tensor's
+        # shape and strides inside ``unified_attention``.
+        output_group_ue8m0 = output_group_scale is not None and is_deep_gemm_e8m0_used()
 
         if attn_metadata is None:
             # Profiling run.
@@ -642,6 +675,8 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
+            output_group_scale=output_group_scale,
+            output_group_ue8m0=output_group_ue8m0,
             mm_prefix_range=mm_prefix_range_tensor,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,

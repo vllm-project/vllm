@@ -470,6 +470,151 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     )
 
 
+# Group sizes for the fused per-group FP8 output epilogue.  128 == head_size
+# is the single-group-per-head case; 64 exercises 2 groups per head.  The
+# head_size=256 multi-group case is a known follow-up (see issue #37162) and
+# is intentionally excluded here.
+GROUP_SIZES = [128, 64]
+
+
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(129, 463), (5, 18)],
+        [(256, 256), (128, 300)],
+        [(1, 523), (1, 37), (1, 2011)],
+    ],
+)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@torch.inference_mode()
+def test_triton_unified_attn_fp16_input_fp8_group_output(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    group_size: int,
+    block_size: int,
+    num_blocks: int,
+    seq_threshold_3D: int,
+) -> None:
+    """Fused dynamic per-group FP8 output quantization.
+
+    Runs ``unified_attention`` with ``output_group_scale`` set so the kernel
+    epilogue quantizes the attention output to FP8 and emits one scale per
+    ``group_size`` slice of ``head_size``.  The dequantized result
+    (``out_fp8 * group_scale``) is compared against the dense reference.
+    ``seq_threshold_3D`` exercises both the 2D epilogue and the 3D decode
+    path (``reduce_segments``); the decode-only ``seq_lens`` case routes
+    through 3D when the threshold allows.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    assert head_size % group_size == 0
+    num_groups_per_head = head_size // group_size
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    dtype = torch.float16
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+
+    num_tokens = sum(query_lens)
+    output = torch.empty(num_tokens, num_query_heads, head_size, dtype=FP8_DTYPE)
+    # Scale layout: (num_tokens, num_query_heads * num_groups_per_head),
+    # row-major, indexed by [token, head * num_groups_per_head + group].
+    output_group_scale = torch.empty(
+        num_tokens, num_query_heads * num_groups_per_head, dtype=torch.float32
+    )
+
+    # 3D scratch buffers (unused when the 2D path is selected).
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        output_group_scale=output_group_scale,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+    )
+
+    # Dequantize: out_fp8[t, h, g*gs:(g+1)*gs] * scale[t, h*ng + g].
+    deq = output.to(torch.float32).view(
+        num_tokens, num_query_heads, num_groups_per_head, group_size
+    )
+    gs = output_group_scale.view(num_tokens, num_query_heads, num_groups_per_head, 1)
+    deq = (deq * gs).view(num_tokens, num_query_heads, head_size).to(torch.float16)
+
+    assert torch.isfinite(output_group_scale).all()
+    assert (output_group_scale > 0).all()
+
+    atol, rtol = 2e-1, 2e-1
+    torch.testing.assert_close(deq, ref_output, atol=atol, rtol=rtol)
+
+
 # USE_TD path covers two head-size regimes:
 # - pow2 (HEAD_SIZE == HEAD_SIZE_PADDED): full TD path including Q/O.
 # - non-pow2 (96, HEAD_SIZE_PADDED=128): gates USE_TD_QO off — Q load
@@ -647,3 +792,170 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@torch.inference_mode()
+def test_triton_unified_attn_fp8_group_all_zero_group_ue8m0(
+    group_size: int,
+    seq_threshold_3D: int,
+) -> None:
+    """Degenerate all-zeros group with UE8M0 rounding (both 2D and 3D paths).
+
+    A group whose attention output is exactly zero has ``group_max == 0``,
+    which hits the ``FP8_QUANT_EPS`` floor; with UE8M0 the scale is rounded to
+    a tiny power of two (~2^-42). This guards that:
+      1. the kernel produces no NaN/inf scales and the EPS floor keeps every
+         scale strictly positive (no divide-by-zero),
+      2. the zeroed group quantizes to exactly 0,
+      3. the result matches ``per_token_group_quant_fp8(use_ue8m0=True)`` even
+         in this degenerate case, so the fusion places no new assumption on the
+         downstream scale consumer (the extreme 2^-42 scale is exactly what the
+         standalone quant op already emits).
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_query_heads, num_kv_heads = 8, 2
+    head_size = 128
+    block_size = 16
+    num_blocks = 2048
+    assert head_size % group_size == 0
+    num_groups_per_head = head_size // group_size
+
+    # Decode-only shape so both seq_threshold_3D values route through one path
+    # (0 -> 2D epilogue, 8 -> 3D reduce_segments epilogue).
+    seq_lens = [(1, 200), (1, 132), (1, 64)]
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    dtype = torch.float16
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    # Zero the first group's value dims -> attention output group 0 is exactly
+    # zero for every (token, head), driving group_max == 0.
+    value_cache[..., :group_size] = 0.0
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(
+        0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
+
+    num_tokens = sum(query_lens)
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+
+    def _segm_buffers():
+        return (
+            torch.empty(
+                (
+                    seq_threshold_3D,
+                    num_query_heads,
+                    num_par_softmax_segments,
+                    head_size_padded,
+                ),
+                dtype=torch.float32,
+            ),
+            torch.empty(
+                (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+                dtype=torch.float32,
+            ),
+            torch.empty(
+                (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+                dtype=torch.float32,
+            ),
+        )
+
+    common = dict(
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_tensor,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+    )
+
+    # Unquantized fp16 reference output to feed the production quant op.
+    out_ref = torch.empty(num_tokens, num_query_heads, head_size, dtype=dtype)
+    so, sm, se = _segm_buffers()
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=out_ref,
+        softmax_segm_output=so,
+        softmax_segm_max=sm,
+        softmax_segm_expsum=se,
+        **common,
+    )
+    # Precondition: the zeroed group really is exactly zero pre-quant.
+    out_ref_g = out_ref.view(
+        num_tokens, num_query_heads, num_groups_per_head, group_size
+    )
+    assert (out_ref_g[:, :, 0, :] == 0).all()
+
+    # Fused per-group FP8 with UE8M0 enabled.
+    output = torch.empty(num_tokens, num_query_heads, head_size, dtype=FP8_DTYPE)
+    output_group_scale = torch.empty(
+        num_tokens, num_query_heads * num_groups_per_head, dtype=torch.float32
+    )
+    so, sm, se = _segm_buffers()
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        output_group_scale=output_group_scale,
+        output_group_ue8m0=True,
+        softmax_segm_output=so,
+        softmax_segm_max=sm,
+        softmax_segm_expsum=se,
+        **common,
+    )
+
+    # 1) EPS floor held: every scale finite and strictly positive (no NaN/inf,
+    #    no divide-by-zero from the all-zeros group).
+    assert torch.isfinite(output_group_scale).all()
+    assert (output_group_scale > 0).all()
+
+    # 2) UE8M0 invariant: every scale is an exact power of two, including the
+    #    EPS-floored zeroed group.
+    log2_scale = torch.log2(output_group_scale)
+    torch.testing.assert_close(log2_scale, log2_scale.round(), atol=0.0, rtol=0.0)
+
+    # 3) The zeroed group quantizes to exactly 0, so its dequantized value is 0
+    #    regardless of the (tiny power-of-two) scale. This is what the
+    #    downstream GEMM consumes, so the degenerate scale is functionally
+    #    inert. NOTE: we deliberately do NOT assert the raw scale equals the
+    #    CUDA `_C` quant op here. For an all-zeros group under UE8M0 the `_C`
+    #    kernel emits exp2(ceil(log2(eps))) (~2^-33) while this epilogue (and
+    #    vLLM's own Triton `_per_token_group_quant_fp8` reference) emit
+    #    exp2(ceil(log2(eps / FP8_MAX))) (~2^-42) -- the two reference quant
+    #    ops themselves disagree in this corner. The dequantized output (0) is
+    #    identical either way.
+    out_g = output.to(torch.float32).view(
+        num_tokens, num_query_heads, num_groups_per_head, group_size
+    )
+    scale_g = output_group_scale.view(num_tokens, num_query_heads, num_groups_per_head)
+    dequant_zero_group = out_g[:, :, 0, :] * scale_g[:, :, 0:1]
+    assert (dequant_zero_group == 0).all()

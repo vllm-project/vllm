@@ -30,12 +30,18 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -219,8 +225,51 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
+class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
+    """Test model for AttnFp8GroupQuantPattern fusion (dynamic per-group FP8).
+
+    The forward does attention -> per_token_group_quant_fp8 -> dequant, which
+    is the pattern the fusion folds into attention(output_block_scale=scale).
+    The dequant (instead of a real block GEMM) keeps the test free of extra
+    weights while still using both quant outputs so they appear in the graph.
+    """
+
+    quant_key = kFp8Dynamic128Sym
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.group_size = self.quant_key.scale.group_shape[1]
+        # Resolve the rounding mode outside the compiled region: the wrapper
+        # would otherwise call the lru_cache'd is_deep_gemm_e8m0_used() inside
+        # forward and graph-break. This matches what real callers do.
+        self.use_ue8m0 = is_deep_gemm_e8m0_used()
+        self.w = kwargs.get("w", {})
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        attn_output = self.attn(q, k, v)
+        q_fp8, scale = per_token_group_quant_fp8(
+            attn_output, self.group_size, use_ue8m0=self.use_ue8m0
+        )
+        # Dequantize so both quant outputs are consumed by the graph.
+        num_tokens = q_fp8.shape[0]
+        deq = q_fp8.to(torch.float32).view(num_tokens, -1, self.group_size)
+        deq = (deq * scale.unsqueeze(-1)).view(q_fp8.shape)
+        return deq.to(self.dtype)
+
+
+class TestAttentionFp8Group64QuantPatternModel(TestAttentionFp8GroupQuantPatternModel):
+    """gs=64 variant (2 groups per head_size=128) of the per-group model.
+
+    Covers ``NUM_GROUPS_PER_HEAD > 1`` end-to-end so the multi-group epilogue
+    path is exercised through the fusion, not just the kernel unit tests.
+    """
+
+    quant_key = kFp8Dynamic64Sym
+
+
 PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
 PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP8_GROUP: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
 BACKENDS_FP8: list[AttentionBackendEnum] = []
@@ -239,6 +288,16 @@ if current_platform.is_cuda():
             "nvidia/Llama-3.1-8B-Instruct-NVFP4",
             TestAttentionNvfp4QuantPatternModel,
         )
+    ]
+    PATTERN_TEST_MODELS_FP8_GROUP = [
+        (
+            "RedHatAI/Meta-Llama-3.1-8B-FP8",
+            TestAttentionFp8GroupQuantPatternModel,  # gs=128, 1 group/head
+        ),
+        (
+            "RedHatAI/Meta-Llama-3.1-8B-FP8",
+            TestAttentionFp8Group64QuantPatternModel,  # gs=64, 2 groups/head
+        ),
     ]
     BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
@@ -479,4 +538,140 @@ def test_attention_quant_pattern(
         )
 
     # Check that results are close
+    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("batch_size", [7, 256, 533])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "backend, model_name, model_class",
+    list(
+        flat_product([AttentionBackendEnum.TRITON_ATTN], PATTERN_TEST_MODELS_FP8_GROUP)
+    ),
+)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton per-group attn fusion is CUDA-only"
+)
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
+def test_attention_fp8_group_quant_pattern(
+    num_qo_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    batch_size: int,
+    dtype: torch.dtype,
+    model_name: str,
+    model_class: type[AttentionQuantPatternModel],
+    backend: AttentionBackendEnum,
+    dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
+):
+    """Fuse attention + dynamic per-group FP8 quant (AttnFp8GroupQuantPattern).
+
+    Unlike the per-tensor / NVFP4 cases, the per-group scale is carried on
+    ``output_block_scale``; the standalone ``per_token_group_fp8_quant`` op
+    must be fully removed from the graph and the result must match the
+    unfused path.
+    """
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    backend_cls = backend.get_class()
+    block_size = backend_cls.get_preferred_block_size(16)
+
+    model_config = ModelConfig(model=model_name, max_model_len=2048, dtype=dtype)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=[]
+        ),
+        cache_config=CacheConfig(cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend=backend),
+    )
+
+    q = torch.randn(batch_size, num_qo_heads * head_size, dtype=dtype, device=device)
+    k = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
+    v = torch.randn(batch_size, num_kv_heads * head_size, dtype=dtype, device=device)
+    torch._dynamo.mark_dynamic(q, 0)
+    torch._dynamo.mark_dynamic(k, 0)
+    torch._dynamo.mark_dynamic(v, 0)
+
+    # Unfused reference (compiled for closer numerics, no fusion pass).
+    vllm_config_unfused = copy.deepcopy(vllm_config)
+    with (
+        set_current_vllm_config(vllm_config_unfused),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
+    ):
+        model_unfused = model_class(
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            device=device,
+            vllm_config=vllm_config_unfused,
+            block_size=block_size,
+        ).to(device)
+        get_forward_context().attn_metadata = model_unfused.build_attn_metadata(
+            batch_size
+        )
+        result_unfused = torch.compile(model_unfused, fullgraph=True)(q, k, v)
+
+    # Fused path.
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_attn_quant=True, eliminate_noops=True
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
+    ):
+        model_fused = model_class(
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            device=device,
+            vllm_config=vllm_config,
+            block_size=block_size,
+        ).to(device)
+        get_forward_context().attn_metadata = model_fused.build_attn_metadata(
+            batch_size
+        )
+
+        noop_pass = NoOpEliminationPass(vllm_config)
+        attn_pass = LazyInitPass(AttnQuantFusionPass, vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
+
+        _ = model_fused(q, k, v)  # HACK: prime, see issue #31044
+        result_fused = torch.compile(model_fused, backend=test_backend, fullgraph=True)(
+            q, k, v
+        )
+
+    quant_key = model_class.quant_key
+    attn_fusion_supported = [
+        layer.impl.fused_output_quant_supported(quant_key)
+        for layer in vllm_config.compilation_config.static_forward_context.values()
+    ]
+    assert sum(attn_fusion_supported) == len(attn_fusion_supported)
+
+    # The standalone per-group quant op must be fully fused into attention.
+    quant_op = QUANT_OPS[quant_key]
+    test_backend.check_before_ops([quant_op], fully_replaced=True)
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+
+    # Attention should carry the per-group scale on output_block_scale.
+    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(ATTN_OP, test_backend.graph_post_pass))
+    assert len(attn_nodes_pre) == len(attn_nodes_post) > 0
+    assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None
+    assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None
+
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)

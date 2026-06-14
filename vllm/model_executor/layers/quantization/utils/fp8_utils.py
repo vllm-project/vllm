@@ -37,6 +37,12 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+# Minimum scale epsilon for per-group FP8 quantization, used to avoid
+# division by zero when a group is all-zeros. Shared by the per-token-group
+# quant kernels here and the fused per-group epilogue in the Triton attention
+# kernel (vllm/v1/attention/ops/triton_unified_attention.py).
+FP8_QUANT_EPS: float = 1e-10
+
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
