@@ -1756,7 +1756,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
-    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
