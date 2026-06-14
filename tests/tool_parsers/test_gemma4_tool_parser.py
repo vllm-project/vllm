@@ -108,6 +108,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('nested:{inner:<|"|>value<|"|>}')
         assert result == {"nested": {"inner": "value"}}
 
+    def test_string_delimited_dict_key(self):
+        result = _parse_gemma4_args('record_map:{<|"|>3<|"|>:<|"|>new text<|"|>}')
+        assert result == {"record_map": {"3": "new text"}}
+
+    def test_nested_string_delimited_dict_key(self):
+        result = _parse_gemma4_args('outer:{inner:{<|"|>quoted<|"|>:<|"|>value<|"|>}}')
+        assert result == {"outer": {"inner": {"quoted": "value"}}}
+
     def test_array_of_strings(self):
         result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
         assert result == {"items": ["a", "b"]}
