@@ -7,7 +7,7 @@ import inspect
 import os
 import pickle
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from unittest.mock import patch
 
 import torch
@@ -562,23 +562,26 @@ def reconstruct_serializable_fn_from_mega_artifact(
     return fn
 
 
-def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
-    factors = []
+class AotCompileHashFactors(NamedTuple):
+    hashes: list[str]
+    env_factors: dict
+
+
+def aot_compile_hash_factors(vllm_config: VllmConfig) -> AotCompileHashFactors:
+    raw_env = envs.compile_factors()
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
-    factors.append(env_hash)
+    factors: list[str] = [hash_factors(raw_env)]
 
     # 1. factors come from the vllm_config (it mainly summarizes how the
     #    model is created)
-    config_hash = vllm_config.compute_hash()
-    factors.append(config_hash)
+    factors.append(vllm_config.compute_hash())
 
     # 2. inductor factors if applicable
     if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
         factors.extend(get_inductor_factors())
 
-    return factors
+    return AotCompileHashFactors(hashes=factors, env_factors=raw_env)
 
 
 def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
