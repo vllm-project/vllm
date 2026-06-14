@@ -38,6 +38,24 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     head_size_v: int = 128
 
     @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+    ) -> str | None:
+        return (
+            "FLASH_ATTN_DIFFKV is only supported when selected explicitly by "
+            "model implementations; it cannot be selected as a global "
+            "attention backend."
+        )
+
+    @classmethod
     def set_head_size_v(cls, head_size_v: int) -> None:
         cls.head_size_v = head_size_v
 

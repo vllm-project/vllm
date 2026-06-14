@@ -405,6 +405,29 @@ def test_attention_config():
     assert engine_args.attention_config.use_trtllm_attention is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
 
+
+def test_attention_backend_diffkv_shorthand_flows_into_vllm_config():
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "FLASH_ATTN_DIFFKV",
+        ]
+    )
+    assert args is not None
+
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert (
+        vllm_config.attention_config.backend
+        == AttentionBackendEnum.FLASH_ATTN_DIFFKV
+    )
+
     # test --attention-backend flows into VllmConfig.attention_config
     args = parser.parse_args(
         [
