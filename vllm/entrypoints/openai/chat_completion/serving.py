@@ -573,7 +573,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_message: DeltaMessage | None
 
-                    if parser is not None:
+                    if parser is not None and request.tool_choice != "none":
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
                             delta_token_ids=as_list(output.token_ids),
@@ -595,7 +595,8 @@ class OpenAIServingChat(OpenAIServing):
                                 ):
                                     delta_message = None
 
-                    # handle streaming just a content delta (no parsers)
+                    # handle streaming just a content delta (no parsers, or
+                    # tool_choice="none" which suppresses tool call parsing)
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
