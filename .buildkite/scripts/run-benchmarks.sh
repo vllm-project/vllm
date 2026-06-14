@@ -11,11 +11,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
 # run python-based benchmarks and upload the result to buildkite
-vllm bench latency --output-json latency_results.json 2>&1 | tee benchmark_latency.txt
-bench_latency_exit_code=$?
+bench_latency_exit_code=0
+vllm bench latency --output-json latency_results.json 2>&1 | tee benchmark_latency.txt || bench_latency_exit_code=${PIPESTATUS[0]}
 
-vllm bench throughput --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
-bench_throughput_exit_code=$?
+bench_throughput_exit_code=0
+vllm bench throughput --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt || bench_throughput_exit_code=${PIPESTATUS[0]}
 
 # run server-based benchmarks and upload the result to buildkite
 vllm serve meta-llama/Llama-2-7b-chat-hf &
@@ -24,6 +24,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+bench_serving_exit_code=0
 vllm bench serve \
     --backend vllm \
     --dataset-name sharegpt \
@@ -33,8 +34,7 @@ vllm bench serve \
     --endpoint /v1/completions \
     --tokenizer meta-llama/Llama-2-7b-chat-hf \
     --save-result \
-    2>&1 | tee benchmark_serving.txt
-bench_serving_exit_code=$?
+    2>&1 | tee benchmark_serving.txt || bench_serving_exit_code=${PIPESTATUS[0]}
 kill $server_pid
 
 # write the results into a markdown file
