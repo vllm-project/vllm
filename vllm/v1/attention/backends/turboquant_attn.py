@@ -295,6 +295,46 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
+        # Pre-reserve decode scratch buffers so `lock_workspace()` (called
+        # at end of warmup) snapshots a workspace large enough for the
+        # steady-state decode shape. Without this, models whose warmup
+        # path never lands a decode forward through the TQ backend (e.g.
+        # dense + hybrid attention) leave the workspace locked at 0 MB
+        # and the first decode request would fall back to torch.empty
+        # for every layer/forward.
+        self._reserve_decode_workspace(vllm_config)
+
+    def _reserve_decode_workspace(self, vllm_config) -> None:
+        if not is_workspace_manager_initialized():
+            return
+        manager = current_workspace_manager()
+        if manager.is_locked():
+            return
+        scheduler_config = vllm_config.scheduler_config
+        speculative_config = vllm_config.speculative_config
+        extra_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+        max_batch_tokens = scheduler_config.max_num_seqs * (1 + extra_spec_tokens)
+        query_dtype = vllm_config.model_config.dtype
+        # Reserve across every ubatch slot so DBO setups don't get caught
+        # with sibling ubatches locked at 0 bytes.
+        manager.reserve(
+            (
+                (
+                    max_batch_tokens,
+                    self.num_heads,
+                    self.max_num_kv_splits,
+                    self.head_size + 1,
+                ),
+                torch.float32,
+            ),
+            ((max_batch_tokens, self.num_heads, self.head_size), query_dtype),
+            ((max_batch_tokens, self.num_heads), torch.float32),
+        )
+
     def _flash_attn_varlen(
         self,
         q: torch.Tensor,
@@ -867,21 +907,29 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     ) -> torch.Tensor:
         # Acquire shared decode scratch buffers from WorkspaceManager.
         # Layers execute sequentially so one set of buffers is sufficient.
-        # Falls back to kernel-internal allocation if workspace unavailable.
+        # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
         B = query.shape[0]
         D = self.head_size
         S = self.max_num_kv_splits
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
         if is_workspace_manager_initialized():
-            # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
-            mid_o_buf, output_buf, lse_buf = (
-                current_workspace_manager().get_simultaneous(
-                    ((B, Hq, S, D + 1), torch.float32),
-                    ((B, Hq, D), query.dtype),
-                    ((B, Hq), torch.float32),
-                )
+            bufs = current_workspace_manager().try_get_simultaneous(
+                ((B, Hq, S, D + 1), torch.float32),
+                ((B, Hq, D), query.dtype),
+                ((B, Hq), torch.float32),
             )
+            if bufs is not None:
+                mid_o_buf, output_buf, lse_buf = bufs
+            # else: workspace is locked at a size that cannot fit this decode
+            # shape (e.g. warmup never landed a decode pass on a TQ layer).
+            # Fall through to kernel-internal allocation via torch.empty.
+        if mid_o_buf is None:
+            mid_o_buf = torch.empty(
+                (B, Hq, S, D + 1), dtype=torch.float32, device=query.device
+            )
+            output_buf = torch.empty((B, Hq, D), dtype=query.dtype, device=query.device)
+            lse_buf = torch.empty((B, Hq), dtype=torch.float32, device=query.device)
 
         result = triton_turboquant_decode_attention(
             query=query,
