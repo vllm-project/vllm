@@ -1009,7 +1009,11 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            # For multimodal models, drain the freed-hash buffer to keep
+            # bookkeeping in sync but don't forward to workers — the model
+            # runner owns GPU-side eviction based on actual GPU progress.
+            # For encoder-decoder models (e.g. Whisper), forward as before.
+            free_encoder_mm_hashes=self._get_freed_encoder_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
@@ -1788,6 +1792,24 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _get_freed_encoder_hashes(self) -> list[str]:
+        """Return freed encoder hashes for the current step.
+
+        For encoder-decoder models (e.g. Whisper), the hashes are
+        forwarded to workers so they can free GPU-side encoder outputs.
+        For multimodal models, the buffer is drained to keep bookkeeping
+        in sync but an empty list is returned — entries are retained in
+        the GPU-side encoder cache to survive preemption (which resets
+        num_computed_tokens to 0) and hash reuse across sequential
+        requests sharing the same image.
+
+        https://github.com/vllm-project/vllm/issues/38551
+        """
+        freed = self.encoder_cache_manager.get_freed_mm_hashes()
+        if self.is_encoder_decoder:
+            return freed
+        return []
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(

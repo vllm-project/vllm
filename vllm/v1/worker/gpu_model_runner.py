@@ -1153,7 +1153,14 @@ class GPUModelRunner(
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
-        # Free the cached encoder outputs.
+        # NOTE: For multimodal models, encoder cache eviction is suppressed
+        # at the scheduler level: _get_freed_encoder_hashes() returns []
+        # so free_encoder_mm_hashes is always empty. Entries remain in the
+        # GPU-side encoder_cache, preventing misses from preemption or hash
+        # reuse across sequential requests. For encoder-decoder models
+        # (e.g. Whisper), the scheduler forwards hashes and eviction
+        # proceeds as before.
+        # https://github.com/vllm-project/vllm/issues/38551
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
 
