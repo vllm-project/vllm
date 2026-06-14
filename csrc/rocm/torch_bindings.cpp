@@ -61,6 +61,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+  rocm_ops.def(
+      "swmmacGEMM(Tensor in_a, Tensor in_b, "
+      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
+  rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
