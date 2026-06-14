@@ -4,6 +4,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 import vllm._custom_ops as ops
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
@@ -18,7 +19,7 @@ from vllm.utils.torch_utils import (
 )
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
-from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryEmbedding
+from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -92,24 +93,15 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
         self.qk_rope_head_dim = layer.qk_rope_head_dim
         self.is_neox = is_neox
         self.use_flashinfer = use_flashinfer
+        self.use_deepseek_scaling = use_deepseek_scaling
         self._ln = _encode_layer_name(self.layer_name)
-
-        if use_deepseek_scaling:
-            self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
-                is_neox=self.is_neox,
-                head_size=self.qk_rope_head_dim,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                use_flashinfer=self.use_flashinfer,
-            )
-        else:
-            self.rope_matcher = MatcherRotaryEmbedding(  # type: ignore
-                is_neox=self.is_neox,
-                head_size=self.qk_rope_head_dim,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                use_flashinfer=self.use_flashinfer,
-            )
+        self.ds_rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.qk_rope_head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            use_flashinfer=self.use_flashinfer,
+        )
 
     def get_inputs(self) -> list[torch.Tensor]:
         T = 5
@@ -148,9 +140,20 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 layer_name: LayerNameType,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 k_pe_unsqueezed = k_pe.unsqueeze(1)
-                q_pe, k_pe = self.rope_matcher(
-                    positions, q_pe, k_pe_unsqueezed, cos_sin_cache
-                )
+                if self.use_deepseek_scaling:
+                    q_pe, k_pe = self.ds_rope_matcher(
+                        positions, q_pe, k_pe_unsqueezed, cos_sin_cache
+                    )
+                else:
+                    q_pe, k_pe = vllm.ir.ops.rotary_embedding(
+                        positions,
+                        q_pe,
+                        k_pe_unsqueezed,
+                        self.qk_rope_head_dim,
+                        self.qk_rope_head_dim,
+                        cos_sin_cache,
+                        self.is_neox,
+                    )
                 dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                     kv_c_normed, k_pe, layer_name, self.kv_cache_dtype, k_scale
                 )
@@ -167,9 +170,20 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            q_pe, k_pe = self.rope_matcher(
-                positions, q_pe, k_pe_unsqueezed, cos_sin_cache
-            )
+            if self.use_deepseek_scaling:
+                q_pe, k_pe = self.ds_rope_matcher(
+                    positions, q_pe, k_pe_unsqueezed, cos_sin_cache
+                )
+            else:
+                q_pe, k_pe = vllm.ir.ops.rotary_embedding(
+                    positions,
+                    q_pe,
+                    k_pe_unsqueezed,
+                    self.qk_rope_head_dim,
+                    self.qk_rope_head_dim,
+                    cos_sin_cache,
+                    self.is_neox,
+                )
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, k_pe, _ln, self.kv_cache_dtype, k_scale
             )

@@ -89,3 +89,28 @@ def fused_add_rms_norm(
 
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "vllm_c",
+    inplace=True,
+    supported=CUDA_ALIKE,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+) -> tuple[Tensor, Tensor]:
+    torch.ops._C.rotary_embedding(
+        positions,
+        query,
+        key,
+        head_size,
+        cos_sin_cache,
+        is_neox_style,
+    )
+    return query, key
