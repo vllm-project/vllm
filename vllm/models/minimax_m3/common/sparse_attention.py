@@ -292,7 +292,9 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.use_fp8_kv = is_quantized_kv_cache(kv_cache_dtype)
         self.kv_cache_fp8_dtype = (
-            torch.float8_e5m2 if "e5m2" in kv_cache_dtype else torch.float8_e4m3fn
+            torch.float8_e5m2
+            if "e5m2" in kv_cache_dtype
+            else current_platform.fp8_dtype()
         )
         # Sparse selection parameters (block_size == page size == SPARSE_BLOCK_SIZE).
         self.topk_blocks = topk_blocks

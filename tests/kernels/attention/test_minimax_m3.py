@@ -15,11 +15,13 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_topk,
 )
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
+    _FP8_DTYPES,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
+    MiniMaxM3SparseTritonImpl,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
@@ -77,6 +79,42 @@ BLOCK_SIZE = 128
 DTYPE = torch.bfloat16
 SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "expected_dtype"),
+    [
+        ("fp8", current_platform.fp8_dtype()),
+        ("fp8_e4m3", current_platform.fp8_dtype()),
+        ("fp8_e5m2", torch.float8_e5m2),
+    ],
+)
+def test_sparse_impl_uses_platform_fp8_dtype(
+    kv_cache_dtype: str,
+    expected_dtype: torch.dtype,
+):
+    impl = MiniMaxM3SparseTritonImpl(
+        num_heads=NUM_Q_HEADS,
+        head_size=HEAD_DIM,
+        scale=SM_SCALE,
+        num_kv_heads=NUM_KV_HEADS,
+        kv_cache_dtype=kv_cache_dtype,
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+    )
+    assert impl.kv_cache_fp8_dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+    ],
+)
+def test_sparse_kernels_recognize_fp8_dtypes(dtype: torch.dtype):
+    assert dtype in _FP8_DTYPES
 
 
 # Index top-k kernels.
