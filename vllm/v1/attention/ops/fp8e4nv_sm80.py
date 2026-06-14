@@ -257,6 +257,12 @@ _BF16_TO_FP8E4NV_ASM = "\n".join(
 )
 
 
+# Triton @jit functions may only reference globals that are constexpr, so wrap
+# the PTX strings (instantiation form, not annotation -- see Triton's NameError).
+_FP8E4NV_TO_BF16_ASM = tl.constexpr(_FP8E4NV_TO_BF16_ASM)
+_BF16_TO_FP8E4NV_ASM = tl.constexpr(_BF16_TO_FP8E4NV_ASM)
+
+
 @triton.jit
 def fp8e4nv_bits_to_bf16(x):
     """4 packed uint8 fp8e4nv bytes -> 4 bf16 (pack-4)."""
