@@ -74,7 +74,9 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 return has_eot_token
             elif id == self.end_token_id:
                 has_eot_token = True
-        return False
+        # No reasoning tokens found — thinking was never started,
+        # treat as already ended so structured output is applied.
+        return True
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]

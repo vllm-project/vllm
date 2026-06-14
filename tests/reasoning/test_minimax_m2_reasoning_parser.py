@@ -48,7 +48,7 @@ NO_END_TOKEN = {
     "output": "This is reasoning in progress",
     "reasoning": "This is reasoning in progress",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 
 # Case: multiple lines of reasoning
@@ -80,7 +80,7 @@ EMPTY = {
     "output": "",
     "reasoning": "",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 
 # Case: empty streaming
@@ -88,7 +88,7 @@ EMPTY_STREAMING = {
     "output": "",
     "reasoning": None,
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 
 # Case: long reasoning with special characters

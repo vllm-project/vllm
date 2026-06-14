@@ -83,7 +83,9 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                 ):
                     continue
                 return True
-        return False
+        # No reasoning tokens found — thinking was never started,
+        # treat as already ended so structured output is applied.
+        return True
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
