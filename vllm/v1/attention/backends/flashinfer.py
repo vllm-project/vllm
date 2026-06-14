@@ -405,7 +405,9 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+        # FlashInfer attention is supported on SM80 and newer; set the lower
+        # bound to 8.0 so it is not auto-selected on pre-SM80 GPUs.
+        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
             12, 1
         )
 
