@@ -143,14 +143,18 @@ class TokenizeParams:
     """
     Number of tokens to pad to:
     - `None` means no padding.
-    - `-1` maps to `max_input_tokens`.
+    - `-1` maps to ``max_total_tokens - max_output_tokens`` (the largest
+      input that still leaves room for the requested generation budget).
     """
 
     truncate_prompt_tokens: int | None = None
     """
     Number of tokens to keep:
     - `None` means no truncation.
-    - `-1` maps to `max_input_tokens`.
+    - `-1` maps to ``max_total_tokens - max_output_tokens`` (truncate input
+      so the requested ``max_output_tokens`` still fits inside the model's
+      context). This is the contract used by the ``/v1/responses``
+      ``truncation="auto"`` path and the benchmark request templates.
     """
 
     truncation_side: Literal["left", "right"] | None = None
@@ -186,11 +190,27 @@ class TokenizeParams:
 
     @property
     def max_input_tokens(self) -> int | None:
-        """Maximum allowed number of input tokens."""
+        """Maximum allowed number of input tokens.
+
+        Returns ``max_total_tokens`` rather than
+        ``max_total_tokens - max_output_tokens``. ``max_output_tokens`` is an
+        upper-bound safety cap on generation (per the OpenAI API spec, where
+        ``max_tokens`` is the maximum the model *may* produce, not a
+        reservation off the input space). Treating it as a reservation
+        caused requests with large client-side ``max_tokens`` ceilings
+        (e.g. Zed/Factory/opencode's 65535) to be rejected -- or silently
+        truncated inside ``tokenizer.encode(max_length=...)`` -- even when
+        the prompt itself fit comfortably inside the model's context.
+
+        The real generation budget is clamped downstream by
+        ``get_max_tokens()`` in ``vllm/entrypoints/utils.py`` based on the
+        actual post-tokenization prompt length, so the output side remains
+        bounded. See vllm-project/vllm#42474.
+        """
         if self.max_total_tokens is None:
             return None
 
-        return self.max_total_tokens - self.max_output_tokens
+        return self.max_total_tokens
 
     def __post_init__(self) -> None:
         max_total_tokens = self.max_total_tokens
@@ -226,14 +246,19 @@ class TokenizeParams:
         ):
             raise VLLMValidationError(
                 f"{self.truncate_prompt_tokens_param}={truncate_prompt_tokens} "
-                f"cannot be greater than {self.max_total_tokens_param} - "
-                f"{self.max_output_tokens_param} = {max_input_tokens}. "
+                f"cannot be greater than "
+                f"{self.max_total_tokens_param}={max_total_tokens}. "
                 f"Please request a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
             )
 
     def with_kwargs(self, **tokenization_kwargs: Any):
+        # Track whether the caller passed max_length explicitly. If they did
+        # not, we must NOT recompute max_output_tokens off the default --
+        # since #42474 made the property return max_total_tokens, the default
+        # would zero out the caller's output cap. Inherit it instead.
+        explicit_max_length = "max_length" in tokenization_kwargs
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
@@ -280,13 +305,18 @@ class TokenizeParams:
 
         max_total_tokens = self.max_total_tokens
 
+        if (
+            explicit_max_length
+            and max_total_tokens is not None
+            and max_length is not None
+        ):
+            new_max_output_tokens = max_total_tokens - max_length
+        else:
+            new_max_output_tokens = self.max_output_tokens
+
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
-            max_output_tokens=(
-                0
-                if max_total_tokens is None or max_length is None
-                else max_total_tokens - max_length
-            ),
+            max_output_tokens=new_max_output_tokens,
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
@@ -335,13 +365,11 @@ class TokenizeParams:
                 # attempting tokenization
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_total_tokens} tokens. However, you requested "
-                    f"{self.max_output_tokens} output tokens and your prompt "
-                    f"contains {len(text)} characters (more than "
+                    f"{self.max_total_tokens} tokens. Your prompt contains "
+                    f"{len(text)} characters (more than "
                     f"{max_input_chars} characters, which is the upper bound "
                     f"for {max_input_tokens} input tokens). "
-                    f"Please reduce the length of the input prompt or the "
-                    f"number of requested output tokens.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_text",
                     value=len(text),
                 )
@@ -381,7 +409,15 @@ class TokenizeParams:
         """Apply padding to prompt tokens if necessary."""
         pad_length = self.pad_prompt_tokens
         if pad_length is not None and pad_length < 0:
-            pad_length = self.max_input_tokens
+            # -1 sentinel: pad to max input that leaves room for
+            # max_output_tokens. Do not use max_input_tokens here -- per
+            # #42474 the property returns max_total_tokens, which would
+            # pad past the room actually available for generation.
+            pad_length = (
+                None
+                if self.max_total_tokens is None
+                else self.max_total_tokens - self.max_output_tokens
+            )
 
         if pad_length is None or pad_length <= len(tokens):
             return tokens
@@ -397,7 +433,17 @@ class TokenizeParams:
         """Apply truncation to prompt tokens if necessary."""
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
-            max_length = self.max_input_tokens
+            # -1 sentinel: truncate input to leave room for max_output_tokens.
+            # This is the contract /v1/responses (truncation="auto") and the
+            # benchmark harnesses rely on. Do not use max_input_tokens here
+            # -- per #42474 that property now returns max_total_tokens, which
+            # would fill the entire context and leave zero output budget
+            # (get_max_tokens() would clamp generation to 0).
+            max_length = (
+                None
+                if self.max_total_tokens is None
+                else self.max_total_tokens - self.max_output_tokens
+            )
 
         if max_length is None or max_length >= len(tokens):
             return tokens
@@ -424,15 +470,12 @@ class TokenizeParams:
             # max_input_tokens + 1 (see get_encode_kwargs), so the
             # actual prompt length could be larger.
             qualifier = "at least " if token_count == max_input_tokens + 1 else ""
-            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_total_tokens} tokens. However, you requested "
-                f"{self.max_output_tokens} output tokens and your prompt "
-                f"contains {qualifier}{token_count} input tokens, "
-                f"for a total of {qualifier}{total} tokens. "
-                f"Please reduce the length of the input prompt or the "
-                f"number of requested output tokens.",
+                f"{self.max_total_tokens} tokens. Your prompt contains "
+                f"{qualifier}{token_count} input tokens, which exceeds "
+                f"the context length. Please reduce the length of the "
+                f"input prompt.",
                 parameter="input_tokens",
                 value=token_count,
             )
