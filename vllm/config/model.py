@@ -985,6 +985,7 @@ class ModelConfig:
                 "gptq",
                 "gptq_marlin",
                 "awq_marlin",
+                "fp8",
                 "inc",
                 "moe_wna16",
                 "modelopt",
