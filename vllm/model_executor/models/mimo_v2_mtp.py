@@ -45,7 +45,13 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
+from .mimo_v2 import (
+    MiMoV2Attention,
+    MiMoV2MLP,
+    _mimo_v2_copy_paired_qkv_fp8,
+    _mimo_v2_copy_presharded_qkv_bf16,
+    _mimo_v2_qkv_pair_key,
+)
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
@@ -219,6 +225,7 @@ class MiMoV2MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = MiMoV2MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -266,6 +273,7 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        qkv_buffers: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -279,18 +287,72 @@ class MiMoV2MTP(nn.Module):
             ):
                 continue
 
-            # Support fused qkv_proj checkpoint (Pro format).
-            # The checkpoint is stored pre-sharded for TP=8 as
-            # [Q_rank0, K_rank0, V_rank0, Q_rank1, ...], so splitting along
-            # dim 0 with chunk(tp_size) gives each rank its Q+K+V slice for
-            # both the FP8 weight and the block weight_scale_inv. This matches
-            # how the main model loads the same layout.
-            if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+            # Pro fused-QKV checkpoint: the FP8 weight is stored pre-sharded
+            # for TP=8 with per-chunk block_n=128 scales, and chunk_rows
+            # (3392 for MiMo-V2.5-Pro) is not a multiple of block_n. A naive
+            # chunk(tp_size) at the block-misaligned boundaries produces wrong
+            # slices. Route through the same paired loader the main model
+            # uses, which pairs weight + weight_scale_inv via the buffer below
+            # and either does a direct copy (when local TP == ckpt TP) or
+            # per-chunk dequant→requant for arbitrary local TP.
+            qkv_pair = _mimo_v2_qkv_pair_key(name)
+            if qkv_pair is not None:
+                qkv_base_name, qkv_kind = qkv_pair
+                weight_name = f"{qkv_base_name}.weight"
+                scale_name = f"{qkv_base_name}.weight_scale_inv"
+                has_paired_qkv = (
+                    weight_name in params_dict
+                    and scale_name in params_dict
+                    and getattr(self.quant_config, "weight_block_size", None)
+                    is not None
+                )
+                if not has_paired_qkv:
+                    if name in params_dict:
+                        param = params_dict[name]
+                        # Detect pre-sharded BF16 layout first. This applies
+                        # whenever the source's fused QKV was originally a
+                        # row-wise concat of per-ckpt-TP chunks (e.g. after
+                        # Quark dequantizes the source FP8 to BF16 in
+                        # --file2file_quantization). Vllm's QKVParallelLinear
+                        # loader assumes a canonical [Q_global,K,V] layout
+                        # and would incorrectly slice the pre-sharded tensor.
+                        handled = (
+                            qkv_kind == "weight"
+                            and _mimo_v2_copy_presharded_qkv_bf16(
+                                config=self.config,
+                                weight_name=name,
+                                weight_param=param,
+                                loaded_weight=loaded_weight,
+                                tp_rank=tp_rank,
+                                tp_size=tp_size,
+                            )
+                        )
+                        if not handled:
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+                    continue
+
+                qkv_buffer = qkv_buffers.setdefault(qkv_base_name, {})
+                qkv_buffer[qkv_kind] = loaded_weight
+                if "weight" in qkv_buffer and "scale" in qkv_buffer:
+                    _mimo_v2_copy_paired_qkv_fp8(
+                        config=self.config,
+                        weight_name=weight_name,
+                        scale_name=scale_name,
+                        weight_param=params_dict[weight_name],
+                        scale_param=params_dict[scale_name],
+                        loaded_weight=qkv_buffer["weight"],
+                        loaded_scale=qkv_buffer["scale"],
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                        block_size=self.quant_config.weight_block_size,
+                    )
+                    loaded_params.add(weight_name)
+                    loaded_params.add(scale_name)
+                    del qkv_buffers[qkv_base_name]
                 continue
 
             # gate_proj/up_proj → gate_up_proj stacking (both formats);
@@ -334,6 +396,13 @@ class MiMoV2MTP(nn.Module):
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if qkv_buffers:
+            missing = ", ".join(sorted(qkv_buffers))
+            raise RuntimeError(
+                "Missing fused-QKV FP8 weight/scale pair for MiMo-V2 MTP "
+                f"checkpoint tensors: {missing}"
+            )
 
         return loaded_params
 
