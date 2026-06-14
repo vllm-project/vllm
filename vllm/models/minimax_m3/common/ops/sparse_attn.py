@@ -28,6 +28,7 @@ _FP8_DTYPES = (
     torch.float8_e4m3fn,
     torch.float8_e4m3fnuz,
     torch.float8_e5m2,
+    torch.float8_e5m2fnuz,
 )
 
 _SPARSE_ATTN_NUM_STAGES_KWARG: dict | None = None
