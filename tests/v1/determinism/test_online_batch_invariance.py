@@ -17,7 +17,7 @@ from typing import Any
 
 import openai
 import pytest
-from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_unsupported
+from utils import BACKENDS, TEST_MODEL, _random_prompt, skip_if_not_cuda
 
 from tests.utils import RemoteOpenAIServer
 
@@ -133,7 +133,7 @@ def _compare_bs1_vs_bsn_single_process(
                 )
 
 
-@skip_unsupported
+@skip_if_not_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend: str,

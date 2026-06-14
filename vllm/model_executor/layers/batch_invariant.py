@@ -894,6 +894,26 @@ _batch_invariant_LIB = None
 _fp16_block_size_n = 256
 
 
+def _register_matmul_overrides(lib, key: str):
+    """Register matmul overrides for batch invariance."""
+    lib.impl("aten::mm", mm_batch_invariant, key)
+    lib.impl("aten::addmm", addmm_batch_invariant, key)
+    lib.impl("aten::matmul", matmul_batch_invariant, key)
+    lib.impl("aten::linear", linear_batch_invariant, key)
+
+
+def _register_common_overrides(lib, key: str):
+    """Register batch-invariant overrides shared across CUDA and XPU."""
+    lib.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
+    lib.impl("aten::softmax", softmax_batch_invariant, key)
+    lib.impl("aten::_softmax", softmax_batch_invariant, key)
+    lib.impl("aten::mean.dim", mean_batch_invariant, key)
+    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+    # (torch._native.ops.bmm_outer_product), so we need allow_override
+    # to replace it at the dispatcher level.
+    lib.impl("aten::bmm", bmm_batch_invariant, key, allow_override=True)
+
+
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB
     global _fp16_block_size_n
@@ -904,68 +924,80 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(80):
-        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-        # triton persistent matmul overrides for mm/addmm/matmul/linear.
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-    else:
-        # Hopper (SM90) and Blackwell (SM100): the only source of batch
-        # variance is split-k, which we disable via the cuBLAS workspace
-        # config.
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
-
-    # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
-    # set unconditionally because bmm is overridden on all CUDA platforms.
     if current_platform.is_cuda():
+        if current_platform.is_device_capability_family(80):
+            # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
+            # triton persistent matmul overrides for mm/addmm/matmul/linear.
+            _register_matmul_overrides(_batch_invariant_LIB, "CUDA")
+        else:
+            # Hopper (SM90) and Blackwell (SM100): the only source of batch
+            # variance is split-k, which we disable via the cuBLAS workspace
+            # config.
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
+        # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
+        # set unconditionally because bmm is overridden on all CUDA platforms.
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
 
-    _batch_invariant_LIB.impl(
-        "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
-    )
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
+        _register_common_overrides(_batch_invariant_LIB, "CUDA")
+    elif current_platform.is_xpu():
+        # Intel GPUs load DPAS operands directly into registers (not through
+        # shared memory), so the shared-memory threshold used for CUDA does not
+        # directly apply.  Use 128 as the safe default that works across all
+        # Intel GPU variants (PVC, BMG, Arc).
+        _fp16_block_size_n = 128
+        _register_matmul_overrides(_batch_invariant_LIB, "XPU")
+        _register_common_overrides(_batch_invariant_LIB, "XPU")
 
-    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
-    # (torch._native.ops.bmm_outer_product), so we need allow_override
-    # to replace it at the dispatcher level.
-    _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
-    )
     torch.bmm = bmm_batch_invariant
 
-    reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0") else False
-    )
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
-        reduced_precision_val
-    )
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
-        reduced_precision_val
-    )
-    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
+    if current_platform.is_cuda():
+        # Disable cuBLAS reduced-precision accumulation for determinism.
+        # XPU does not need this: all matmul/bmm ops are replaced by Triton
+        # kernels that explicitly use FP32 accumulators.
+        reduced_precision_val = (
+            (False, False) if is_torch_equal_or_newer("2.10.0") else False
+        )
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+            reduced_precision_val
+        )
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+            reduced_precision_val
+        )
+        torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    if current_platform.is_cuda():
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    # NCCL determinism settings
-    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_ALGO"] = "allreduce:tree"
-    os.environ["NCCL_NTHREADS"] = "1"
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+        # NCCL determinism settings
+        os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+        os.environ["NCCL_COLLNET_ENABLE"] = "0"
+        os.environ["NCCL_NVLS_ENABLE"] = "0"
+        os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+        os.environ["NCCL_MIN_NCHANNELS"] = "1"
+        os.environ["NCCL_MAX_NCHANNELS"] = "1"
+        os.environ["NCCL_PROTO"] = "Simple"
+        os.environ["NCCL_ALGO"] = "allreduce:tree"
+        os.environ["NCCL_NTHREADS"] = "1"
+        os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+    elif current_platform.is_xpu():
+        # oneCCL position-invariant allreduce
+        #
+        # Ring allreduce with P>2 ranks splits the tensor into P chunks,
+        # each reduced starting from a different rank. Because FP addition
+        # is NOT associative, elements in different chunks get different
+        # rounding. With TP=2 this is invisible (commutativity), but with
+        # TP>=3 elements at different flat positions get different results.
+        #
+        # Fix: force recursive_doubling which reduces ALL elements with the
+        # same tree structure: (p0+p1) + (p2+p3), giving position-invariant
+        # results regardless of where the element sits in the tensor.
+        os.environ["CCL_ALLREDUCE"] = "recursive_doubling"
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
