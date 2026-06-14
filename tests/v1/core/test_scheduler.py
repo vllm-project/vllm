@@ -10,12 +10,14 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -1819,6 +1821,7 @@ def create_scheduler_with_priority(
     num_speculative_tokens: int | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    lora_config: LoRAConfig | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1893,6 +1896,7 @@ def create_scheduler_with_priority(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -2384,6 +2388,131 @@ def test_priority_scheduling_waiting_queue_order():
     # Should be ordered by priority: req_1 (1), req_2 (2), req_0 (3)
     assert waiting_req_ids == ["1", "2", "0"]
     assert waiting_priorities == [1, 2, 3]
+
+
+def test_priority_waiting_request_preempts_at_max_num_seqs():
+    """Test waiting-queue priority preemption when max_num_seqs is full."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1", "lo2"],
+            req_id_to_index={"lo1": 0, "lo2": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["hi1"],
+    )[0]
+    scheduler.add_request(hi1)
+
+    output = scheduler.schedule()
+
+    assert [req.req_id for req in output.scheduled_new_reqs] == ["hi1"]
+    assert "hi1" in {req.request_id for req in scheduler.running}
+    assert output.preempted_req_ids is not None
+    assert len(output.preempted_req_ids) == 1
+
+    preempted = [
+        req
+        for req in (scheduler.requests["lo1"], scheduler.requests["lo2"])
+        if req.status == RequestStatus.PREEMPTED
+    ]
+    assert len(preempted) == 1
+    assert len(scheduler.running) == 2
+
+
+def test_priority_waiting_preemption_preserves_scheduled_loras():
+    """Test priority preemption keeps LoRA accounting for admitted waiters."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+        lora_config=LoRAConfig(max_loras=2, max_cpu_loras=2),
+    )
+
+    lora1 = LoRARequest("lora-1", 1, "/tmp/lora-1")
+    lora2 = LoRARequest("lora-2", 2, "/tmp/lora-2")
+    lora3 = LoRARequest("lora-3", 3, "/tmp/lora-3")
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[9, 8],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    lo1.lora_request = lora1
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1", "lo2"],
+            req_id_to_index={"lo1": 0, "lo2": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    w1, w2, w3 = create_requests_with_priority(
+        num_requests=3,
+        priorities=[0, 1, 2],
+        arrival_times=[3.0, 4.0, 5.0],
+        num_tokens=10,
+        req_ids=["w1", "w2", "w3"],
+    )
+    w1.lora_request = lora2
+    w2.lora_request = lora1
+    w3.lora_request = lora3
+    for request in (w1, w2, w3):
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert [req.req_id for req in output.scheduled_new_reqs] == ["w1", "w2"]
+    assert output.preempted_req_ids == {"lo1"}
+    queued_req_ids = {
+        req.request_id
+        for req in list(scheduler.waiting) + list(scheduler.skipped_waiting)
+    }
+    assert "w3" in queued_req_ids
+    scheduled_lora_ids = {
+        req.lora_request.lora_int_id
+        for req in output.scheduled_new_reqs
+        if req.lora_request
+    }
+    assert scheduled_lora_ids == {1, 2}
 
 
 def test_priority_scheduling_fcfs_fallback():
