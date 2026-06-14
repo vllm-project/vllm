@@ -2284,22 +2284,16 @@ def wvSplitKQ(
     return out
 
 
-def pack_swmmac_weight(
-    weight: torch.Tensor,
-) -> torch.Tensor:
-    return torch.ops._rocm_C.packSwmmacWeight(weight)
-
-
 def swmmac_gemm(
-    packed_b: torch.Tensor,
-    x: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
     logical_m: int,
     cu_count: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._rocm_C.swmmacGEMM(
-        packed_b,
-        x,
+        a,
+        b,
         bias,
         logical_m,
         cu_count,

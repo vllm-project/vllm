@@ -52,11 +52,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 #endif
 
-  rocm_ops.def("packSwmmacWeight(Tensor weight) -> Tensor");
-  rocm_ops.impl("packSwmmacWeight", torch::kCUDA, &packSwmmacWeight);
-
   rocm_ops.def(
-      "swmmacGEMM(Tensor packed_b, Tensor in_a, "
+      "swmmacGEMM(Tensor in_a, Tensor in_b, "
       "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
   rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
 
