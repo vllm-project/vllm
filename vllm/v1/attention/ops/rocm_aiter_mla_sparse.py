@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+import os
 from importlib.util import find_spec
 
 import torch
@@ -11,6 +12,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -18,11 +20,49 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
+logger = init_logger(__name__)
+
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+if current_platform.is_cuda_alike():
+    pass
+
+
+@functools.lru_cache(maxsize=1)
+def _check_indexer_fp8_format_consistency() -> None:
+    # The C++ indexer_k_quant_and_cache kernel picks FP8 byte format at build
+    # time via HIP_FP8_TYPE_OCP, while current_platform.fp8_dtype() reports
+    # float8_e4m3fnuz on every gfx942 build. A disagreement halves every
+    # recovered K value during indexer scoring with no other visible error.
+    if not _ON_GFX942:
+        return
+    from vllm import _custom_ops as ops
+
+    head_dim = 128
+    quant_block_size = 128
+    cache_stride = head_dim + head_dim * 4 // quant_block_size
+    # amax = 1.0 with divisor=224 → ue8m0 scale = 2^-7 → post-scale value = 128.
+    # FNUZ encoding of 128: 1.0 * 2^7, biased exp 15, byte = 0x78.
+    # OCP encoding of 128:  1.0 * 2^7, biased exp 14, byte = 0x70.
+    k = torch.full((1, head_dim), 1.0, dtype=torch.bfloat16, device="cuda")
+    kv_cache = torch.zeros((1, 1, cache_stride), dtype=torch.uint8, device="cuda")
+    slot_mapping = torch.tensor([0], dtype=torch.int64, device="cuda")
+    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, quant_block_size, "ue8m0")
+    first_byte = int(kv_cache[0, 0, 0].item())
+    if first_byte != 0x78:
+        raise RuntimeError(
+            f"Indexer FP8 KV cache format mismatch on gfx942: probe byte is "
+            f"{first_byte:#04x}, expected 0x78. The C++ "
+            f"indexer_k_quant_and_cache kernel appears to write "
+            f"{'OCP e4m3fn' if first_byte == 0x70 else 'unknown'} bytes while "
+            f"vllm.platforms.rocm.fp8_dtype() reports float8_e4m3fnuz. "
+            f"Rebuild with HIP_FP8_TYPE_OCP=0 or align fp8_dtype() to the "
+            f"producer."
+        )
 
 
 @triton.jit
@@ -256,7 +296,9 @@ def cp_gather_indexer_k_quant_cache_triton(
     )
 
 
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156.
+# Left here as a reference, very slow for large contexts, not currently used:
+# all pathways use triton or aiter
 def fp8_paged_mqa_logits_torch(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -306,7 +348,12 @@ def fp8_paged_mqa_logits_torch(
             logits[i, :seq_len] = score[:seq_len]
         return logits
 
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
+    block_size = kv_cache.shape[1]
+    N = kv_cache.shape[0]
+    kv_cache = kv_cache.reshape([N, (dim + 4) * block_size])
+    kv_cache, scale = kv_cache[:, : dim * block_size], kv_cache[:, dim * block_size :]
+    kv_cache = kv_cache.reshape([N, block_size, 1, dim])
+    scale = scale.reshape([N, block_size, 1, 4])
     scale = scale.contiguous().view(torch.float)
     q = q.float()
     kv_cache = kv_cache.view(fp8_dtype).float() * scale
@@ -348,7 +395,7 @@ def fp8_paged_mqa_logits_torch(
                 (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
                     logits.dtype
                 ),
-                float("-inf"),
+                0.0,
             )
             s = torch.relu(s) * weight_slice[..., None]
             s = s.sum(dim=0)
@@ -374,6 +421,173 @@ def paged_mqa_logits_module():
         except ImportError:
             return None
     return None
+
+
+@triton.jit
+def _fp8_paged_mqa_logits_kernel(
+    q_ptr,  # [B, next_n, H, D] fp8
+    kv_fp8_ptr,  # [num_blocks, (D_actual+4)*BLOCK_SIZE] fp8
+    kv_scale_ptr,  # [num_blocks, BLOCK_SIZE] float32
+    weights_ptr,  # [B * next_n, H] float32
+    context_lens_ptr,  # [B] int32
+    block_tables_ptr,  # [B, max_blocks_per_seq] int32
+    logits_ptr,  # [B * next_n, max_model_len] float32
+    next_n,
+    max_model_len,
+    max_blocks_per_seq,
+    q_stride_b,
+    q_stride_n,
+    q_stride_h,
+    q_stride_d,
+    logits_stride_m,
+    kv_fp8_row_stride,
+    kv_scale_row_stride,
+    BLOCK_SIZE: tl.constexpr,
+    D: tl.constexpr,  # head dim, padded to next power of 2 by caller
+    D_actual: tl.constexpr,
+    H: tl.constexpr,  # number of query heads
+    BLOCK_N: tl.constexpr,  # MFMA KV tile — must be ≥ BLOCK_SIZE and a power of 2
+):
+    tile_rk = tl.program_id(0)  # which BLOCK_N-sized KV tile
+    i = tl.program_id(1)  # batch item
+    t = tl.program_id(2)  # speculative token index
+    query_idx = i * next_n + t
+
+    context_len = tl.load(context_lens_ptr + i)
+    logi_start = tile_rk * BLOCK_N
+
+    if logi_start >= context_len:
+        return
+
+    q_pos = context_len - next_n + t
+
+    h_offs = tl.arange(0, H)
+    d_offs = tl.arange(0, D)
+    d_mask = d_offs < D_actual
+    logi_offs = logi_start + tl.arange(0, BLOCK_N)  # [BLOCK_N] logical KV positions
+
+    # Map each logical position to a (physical_block, within-block offset) pair.
+    # Works for any BLOCK_SIZE: for BLOCK_SIZE=1, log_blk_rk == logi_offs.
+    log_blk_rk = logi_offs // BLOCK_SIZE  # [BLOCK_N]
+    within_blk = logi_offs % BLOCK_SIZE  # [BLOCK_N]
+    blk_mask = log_blk_rk < max_blocks_per_seq
+    phys_blk = tl.load(
+        block_tables_ptr + i * max_blocks_per_seq + log_blk_rk,
+        mask=blk_mask,
+        other=0,
+    )  # [BLOCK_N] physical block indices
+
+    kv_mask = logi_offs < context_len
+    k_blk = tl.load(
+        kv_fp8_ptr
+        + phys_blk[:, None] * kv_fp8_row_stride
+        + within_blk[:, None] * D_actual
+        + d_offs[None, :],
+        mask=kv_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )  # [BLOCK_N, D] fp8
+
+    # kv_scale_ptr is a float32 view of the same buffer offset to the scale region.
+    # Its row stride is kv_scale_row_stride = (D_actual+4)*BLOCK_SIZE//4.
+    scale = tl.load(
+        kv_scale_ptr + phys_blk * kv_scale_row_stride + within_blk,
+        mask=kv_mask,
+        other=1.0,
+    )  # [BLOCK_N] float32
+
+    # Load all H query heads at once → [H, D] fp8; stays in registers.
+    q_blk = tl.load(
+        q_ptr
+        + i * q_stride_b
+        + t * q_stride_n
+        + h_offs[:, None] * q_stride_h
+        + d_offs[None, :] * q_stride_d,
+        mask=d_mask[None, :],
+        other=0.0,
+        cache_modifier=".cg",
+    )  # [H, D] fp8
+
+    # MFMA: [H, D] × [D, BLOCK_N] → [H, BLOCK_N]  (fp8 × fp8, fp32 accumulate)
+    scores = tl.dot(q_blk, k_blk.T, input_precision="ieee", out_dtype=tl.float32)
+    scores = scores * scale[None, :]  # apply per-token dequant scale
+
+    w = tl.load(weights_ptr + query_idx * H + h_offs)  # [H]
+    scores = tl.maximum(scores, 0.0) * w[:, None]  # [H, BLOCK_N]
+    accum = tl.sum(scores, axis=0)  # [BLOCK_N]
+
+    valid = kv_mask & (logi_offs <= q_pos)
+    accum = tl.where(valid, accum, float("-inf"))
+
+    tl.store(
+        logits_ptr + query_idx * logits_stride_m + logi_offs,
+        accum,
+        mask=logi_offs < max_model_len,
+    )
+
+
+def fp8_paged_mqa_logits_triton(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Triton implementation of fp8_paged_mqa_logits_torch."""
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size, next_n, H, D = q.shape
+    N = kv_cache.shape[0]
+    block_size = kv_cache.shape[1]
+
+    # Unpack kv_cache [N, block_size, 1, D+4] uint8 without copying.
+    # Memory layout (written by indexer_k_quant_and_cache): within each physical
+    # block the D*block_size fp8 bytes come first (all positions, all dims packed),
+    # followed by 4*block_size bytes for per-position float32 scales.
+    kv_2d = kv_cache.reshape(
+        N, (D + 4) * block_size
+    )  # contiguous; reshape never copies here
+
+    kv_fp8 = kv_2d.view(fp8_dtype)  # [N, (D+4)*block_size] fp8, same storage
+
+    kv_scale = kv_2d.view(torch.float32)[
+        :, D * block_size // 4 :
+    ]  # [N, block_size] f32
+
+    M = batch_size * next_n
+    logits = torch.full(
+        (M, max_model_len), float("-inf"), device=q.device, dtype=torch.float32
+    )
+
+    max_blocks_per_seq = block_tables.shape[1]
+    BLOCK_D = triton.next_power_of_2(D)
+    BLOCK_N = max(128, triton.next_power_of_2(block_size))
+    grid = (triton.cdiv(max_model_len, BLOCK_N), batch_size, next_n)
+
+    _fp8_paged_mqa_logits_kernel[grid](
+        q,
+        kv_fp8,
+        kv_scale,
+        weights,
+        context_lens,
+        block_tables,
+        logits,
+        next_n,
+        max_model_len,
+        max_blocks_per_seq,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        logits.stride(0),
+        kv_fp8.stride(0),  # (D+4)*block_size — fp8 elements per block row
+        kv_scale.stride(0),  # (D+4)*block_size//4 — float32 elements per block row
+        BLOCK_SIZE=block_size,
+        D=BLOCK_D,
+        D_actual=D,
+        H=H,
+        BLOCK_N=BLOCK_N,
+    )
+    return logits
 
 
 def rocm_fp8_paged_mqa_logits(
@@ -406,6 +620,27 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+
+    force_triton = os.environ.get("PAGED_MQA_TRITON", "1") == "1"
+
+    block_size = kv_cache_fp8.shape[1]
+    logger.info_once(
+        f"rocm_fp8_paged_mqa_logits: KV cache "
+        f"block size {block_size}, force_triton {force_triton}"
+    )
+    # As of 2026/04/01 (commit 381129b0), deepgemm_fp8_paged_mqa_logits_stage1
+    # (the aiter triton path) triggers an obscure gluon compiler error when
+    # block_size=16.  stage1 correctly handles the kv_cache packed format
+    # (splitting [num_blocks, block_size, 1, D+4] into fp8 data + float32 scale),
+    # so format is not the concern — the gluon error is block-size-specific.
+    # Our triton kernel is confirmed correct at all block sizes and faster than
+    # stage1 in all cases, so always use it unless a specific block size is known
+    # to work with stage1 and batch > 1 makes triton less efficient.
+    if block_size != 1 or force_triton:
+        return fp8_paged_mqa_logits_triton(
+            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+        )
+
     from vllm._aiter_ops import rocm_aiter_ops
 
     aiter_paged_mqa_logits_module = None
@@ -448,6 +683,9 @@ def rocm_fp8_paged_mqa_logits(
             ((heads, batch_size * next_n, max_model_len), torch.float32),
         )
         out_qk.fill_(float("-inf"))
+        ChunkQ = 64
+        while heads % ChunkQ:
+            ChunkQ = ChunkQ // 2
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -456,11 +694,11 @@ def rocm_fp8_paged_mqa_logits(
             context_lens,
             block_tables,
             max_model_len,
-            ChunkQ=heads,
+            ChunkQ,
         )
         return out_qk.sum(dim=0)
     else:
-        return fp8_paged_mqa_logits_torch(
+        return fp8_paged_mqa_logits_triton(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
 
@@ -492,7 +730,7 @@ def fp8_mqa_logits_torch(
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
-    k = k_fp8.to(torch.bfloat16)
+    k = (k_fp8.to(torch.float32) * scale).to(torch.bfloat16)
     q = q.to(torch.bfloat16)
     device = q.device
 
@@ -504,7 +742,7 @@ def fp8_mqa_logits_torch(
     )
     mask = mask_lo & mask_hi
 
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale
+    score = torch.einsum("mhd,nd->hmn", q, k).float()
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
     logits = logits.masked_fill(~mask, float("-inf"))
 
@@ -717,6 +955,7 @@ def rocm_aiter_sparse_attn_indexer(
 
     if not skip_k_cache_insert:
         if _ON_GFX942:
+            _check_indexer_fp8_format_consistency()
             ops.indexer_k_quant_and_cache(
                 k,
                 kv_cache,
