@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypeVar
 
-from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.tracing.otel import Tracer
 
 from .classify.protocol import (
     ClassificationChatRequest,
@@ -69,7 +69,6 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     request: PoolingRequestT
-    raw_request: Request | None = None
     model_name: str
     request_id: str
     pooling_params: PoolingParams | list[PoolingParams]
@@ -82,6 +81,21 @@ class PoolingServeContext(Generic[PoolingRequestT]):
         None
     )
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
+
+    # for Observability
+    trace_headers: Mapping[str, str] | None = None
+    entrypoint_tracer: Tracer | None = None
+    request_span_context: Any | None = None
+    entrypoint_span_links: Any | None = None
+    # time_ns() - monotonic_ns()
+    time_offset: int = 0
+    # timestamp time_ns
+    arrival_time: int = 0
+    preprocessing_finished: int = 0
+    engine_call_finished: int = 0
+    postprocessing_finished: int = 0
+    # request attributes
+    request_attributes: dict[str, str] = field(default_factory=dict)
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence[EngineInput] | None = None

@@ -404,7 +404,9 @@ async def init_app_state(
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling.factories import init_pooling_state
 
-        init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+        await init_pooling_state(
+            engine_client, state, args, request_logger, supported_tasks
+        )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

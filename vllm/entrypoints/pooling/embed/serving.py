@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from typing import TypeAlias, cast
 
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -7,6 +8,7 @@ from typing_extensions import assert_never
 
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.tracing import SpanAttributes
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
 from ..base.serving import PoolingServing
@@ -27,6 +29,8 @@ from .protocol import (
     CohereEmbedRequest,
     CohereEmbedResponse,
     CohereMeta,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
     EmbeddingRequest,
     EmbeddingResponse,
     EmbeddingResponseData,
@@ -207,3 +211,15 @@ class ServingEmbedding(PoolingServing):
             ),
         )
         return self.json_response_cls(content=response.model_dump(exclude_none=True))
+
+    def _get_preprocessing_span_attributes(
+        self, ctx: PoolingServeContext
+    ) -> Mapping[str, str]:
+        if isinstance(ctx.request, (EmbeddingCompletionRequest, EmbeddingChatRequest)):
+            return {
+                SpanAttributes.GEN_AI_POOLING_EMBED_ENCODING_FORMAT: ctx.request.encoding_format,  # noqa E501
+                SpanAttributes.GEN_AI_POOLING_EMBED_DTYPE: ctx.request.embed_dtype,
+                SpanAttributes.GEN_AI_POOLING_EMBED_ENDIANNESS: ctx.request.endianness,
+            }
+        else:
+            return dict()
