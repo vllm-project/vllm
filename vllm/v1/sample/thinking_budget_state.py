@@ -16,6 +16,12 @@ from vllm.v1.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig
 
+# Constants for Tool-Call/Reasoning Handover
+TOOL_CALL_TOKEN_ID = 77093
+# Lookback window to catch the tool-call token even if it appears slightly
+# after the reasoning tokens finish.
+TOOL_CALL_LOOKBACK_TOKENS = 5
+
 
 def maybe_create_thinking_budget_state_holder(
     reasoning_config: "ReasoningConfig | None",
@@ -246,6 +252,19 @@ class ThinkingBudgetStateHolder:
                 state.get("output_tok_ids", []), self.think_start_token_ids
             )
             state["start_thinking"] = start_thinking
+
+        # Check for tool-call signature to implicitly end reasoning early
+        if (
+            state.get("in_think", False)
+            and TOOL_CALL_TOKEN_ID
+            in state.get("output_tok_ids", [])[-TOOL_CALL_LOOKBACK_TOKENS:]
+        ):
+            state["in_think"] = False
+            state["think_count"] = 0
+            # Explicitly reset end_thinking as we are exiting the thinking state
+            state["end_thinking"] = -1
+            return
+
         if state["end_thinking"] == -1:
             end_thinking = self._find_last_sequence_index(
                 state.get("output_tok_ids", []), self.think_end_token_ids
