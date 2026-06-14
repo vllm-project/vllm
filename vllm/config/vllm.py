@@ -1169,6 +1169,7 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+        self.kernel_config.setup_cutedsl_cache_env(self)
 
         self._maybe_override_dynamic_sd_cudagraph_mode()
 

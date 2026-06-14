@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import hashlib
+import json
+import os
 from collections.abc import Callable
 from dataclasses import asdict, fields
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+import sys
 from typing import TYPE_CHECKING, Any, Literal
 
+import torch
 from pydantic import Field, field_validator
 
+from vllm import envs
 from vllm.config.utils import config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
 
@@ -156,7 +164,6 @@ LinearBackend = Literal[
     "emulation",
 ]
 
-
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -169,6 +176,26 @@ class KernelConfig:
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
+
+    enable_cutedsl_warmup: bool = False
+    """If True, run CuTeDSL-specific warmup during kernel warmup."""
+
+    cutedsl_warmup_token_sizes: list[int] = Field(
+        default_factory=lambda: [8, 64]
+    )
+    """Token counts to use for CuTeDSL warmup runs."""
+
+    cutedsl_warmup_use_cudagraph_descriptors: bool = False
+    """If True, warm CuTeDSL kernels for CUDA graph capture descriptors."""
+
+    cutedsl_cache_dir: str | None = None
+    """Root directory for the persistent CuTeDSL cache.
+
+    If unset, CuTeDSL warmup uses ``VLLM_CACHE_ROOT/cutedsl``. When CuTeDSL
+    warmup is disabled and no directory is set, FlashAttention CuTeDSL
+    persistent cache is disabled and the per-process in-memory JIT cache is
+    used.
+    """
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -233,12 +260,113 @@ class KernelConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         ignored_factors = {
+            "cutedsl_cache_dir",
+            "cutedsl_warmup_use_cudagraph_descriptors",
+            "cutedsl_warmup_token_sizes",
+            "enable_cutedsl_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
+
+    def setup_cutedsl_cache_env(self, vllm_config: "VllmConfig") -> None:
+        """Configure FlashAttention CuTeDSL persistent cache env vars early.
+
+        FlashAttention reads these variables when importing
+        ``flash_attn.cute.cache_utils``, so this must run during config
+        finalization before attention backends import FA4 CuTeDSL modules.
+        """
+        if not self.enable_cutedsl_warmup and self.cutedsl_cache_dir is None:
+            os.environ["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "0"
+            os.environ.pop("FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", None)
+            logger.info("FlashAttention CuTeDSL persistent cache is disabled.")
+            return
+
+        cache_root = Path(
+            self.cutedsl_cache_dir or Path(envs.VLLM_CACHE_ROOT) / "cutedsl"
+        ).expanduser()
+        namespace = self._compute_cutedsl_cache_namespace(vllm_config)
+        cache_dir = cache_root / namespace
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        os.environ["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "1"
+        os.environ["FLASH_ATTENTION_CUTE_DSL_CACHE_DIR"] = str(cache_dir)
+        logger.info(
+            "FlashAttention CuTeDSL persistent cache enabled at %s.",
+            cache_dir,
+        )
+
+    def _compute_cutedsl_cache_namespace(self, vllm_config: "VllmConfig") -> str:
+        from vllm.platforms import current_platform
+
+        factors: dict[str, Any] = {
+            "schema": 1,
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "torch": getattr(torch, "__version__", "unknown"),
+            "torch_cuda": getattr(torch.version, "cuda", None),
+            "device_capability": repr(current_platform.get_device_capability()),
+            "vllm_config": self._get_cutedsl_cache_config_factors(vllm_config),
+        }
+        try:
+            from vllm.compilation.caching import aot_compile_hash_factors
+
+            factors["aot_compile_hash_factors"] = aot_compile_hash_factors(
+                vllm_config
+            )
+        except Exception as e:
+            logger.debug(
+                "Could not include AOT compile hash factors in CuTeDSL cache "
+                "namespace: %s",
+                e,
+            )
+            factors["aot_compile_hash_factors"] = "unavailable"
+
+        for package_name in (
+            "vllm",
+            "vllm-flash-attn",
+            "flash-attn",
+            "nvidia-cutlass-dsl",
+            "cutlass",
+            "tvm-ffi",
+        ):
+            try:
+                factors[package_name] = version(package_name)
+            except PackageNotFoundError:
+                factors[package_name] = "not-installed"
+
+        serialized_factors = json.dumps(factors, default=str, sort_keys=True)
+        namespace_hash = hashlib.sha256(serialized_factors.encode()).hexdigest()
+        return namespace_hash[:32]
+
+    def _get_cutedsl_cache_config_factors(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> dict[str, Any]:
+        model_config = getattr(vllm_config, "model_config", None)
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        attention_config = getattr(vllm_config, "attention_config", None)
+        device_config = getattr(vllm_config, "device_config", None)
+
+        return {
+            "model": getattr(model_config, "model", None),
+            "dtype": str(getattr(model_config, "dtype", None)),
+            "max_model_len": getattr(model_config, "max_model_len", None),
+            "max_num_batched_tokens": getattr(
+                scheduler_config, "max_num_batched_tokens", None
+            ),
+            "max_num_seqs": getattr(scheduler_config, "max_num_seqs", None),
+            "tensor_parallel_size": getattr(
+                parallel_config, "tensor_parallel_size", None
+            ),
+            "data_parallel_size": getattr(parallel_config, "data_parallel_size", None),
+            "device": str(getattr(device_config, "device", None)),
+            "attention_config": repr(attention_config),
+            "moe_backend": self.moe_backend,
+            "linear_backend": self.linear_backend,
+        }
 
     @field_validator("enable_flashinfer_autotune", mode="wrap")
     @classmethod

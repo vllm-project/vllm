@@ -698,6 +698,21 @@ class FlashAttentionImpl(AttentionImpl):
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
 
+    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
+        del runner
+
+        if self.vllm_flash_attn_version != 4:
+            return None
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="fa4_attention",
+            model_runner_modes=("prefill", "mixed", "uniform_decode"),
+            cudagraph_capture_modes=True,
+            dedupe_key=("fa4_attention", self.dcp_world_size),
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,

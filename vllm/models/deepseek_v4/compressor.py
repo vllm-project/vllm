@@ -271,6 +271,21 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
+        del runner
+
+        if self.head_dim != 512:
+            return None
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="deepseek_v4_compressor",
+            model_runner_modes=("mixed",),
+            cudagraph_capture_modes=True,
+            dedupe_key=("deepseek_v4_compressor", self.head_dim),
+        )
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]

@@ -3,6 +3,7 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -86,6 +87,125 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+
+    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
+        del runner
+
+        if self.vllm_flash_attn_version != 4:
+            return None
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="fa4_mla_prefill",
+            cudagraph_capture_modes=True,
+            warmup_callbacks=(self._run_cutedsl_warmup,),
+            dedupe_key=(
+                "fa4_mla_prefill",
+                self.num_heads,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+            ),
+        )
+
+    def _get_cutedsl_warmup_seq_lens(
+        self,
+        num_tokens: int,
+        max_num_seqs: int,
+    ) -> list[tuple[int, ...]]:
+        if num_tokens <= 0:
+            return []
+
+        seq_lens: list[tuple[int, ...]] = [(num_tokens,)]
+
+        if num_tokens > 2 and max_num_seqs > 1:
+            ragged: list[int] = [1]
+            remaining = num_tokens - 1
+            if max_num_seqs > 2 and remaining > 2:
+                mid = min(remaining - 1, max(2, num_tokens // 3))
+                ragged.append(mid)
+                remaining -= mid
+            ragged.append(remaining)
+            seq_lens.append(tuple(ragged[:max_num_seqs]))
+
+        return list(dict.fromkeys(seq_lens))
+
+    def _run_cutedsl_warmup(
+        self,
+        runner: object,
+        token_sizes: Sequence[int],
+    ) -> None:
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLACommonPrefillMetadata,
+        )
+
+        device = getattr(runner, "device", torch.device("cuda"))
+        dtype = getattr(runner, "dtype", torch.bfloat16)
+        if dtype not in self.supported_dtypes:
+            dtype = torch.bfloat16
+        scheduler_config = getattr(runner, "scheduler_config", None)
+        max_num_seqs = getattr(scheduler_config, "max_num_seqs", 1)
+        qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+
+        warmed: set[tuple[tuple[int, ...], bool]] = set()
+        for num_tokens in token_sizes:
+            for seq_lens in self._get_cutedsl_warmup_seq_lens(
+                num_tokens, max_num_seqs
+            ):
+                total_tokens = sum(seq_lens)
+                max_query_len = max(seq_lens)
+                cu_seqlens = [0]
+                for seq_len in seq_lens:
+                    cu_seqlens.append(cu_seqlens[-1] + seq_len)
+                query_start_loc = torch.tensor(
+                    cu_seqlens,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                block_table = torch.empty(
+                    (len(seq_lens), 0),
+                    dtype=torch.int32,
+                    device=device,
+                )
+                metadata = MLACommonPrefillMetadata(
+                    block_table=block_table,
+                    query_start_loc=query_start_loc,
+                    max_query_len=max_query_len,
+                    output_dtype=dtype,
+                    q_data_type=dtype,
+                    prefill_backend=self,
+                )
+                self.prepare_metadata(metadata)
+
+                q = torch.empty(
+                    total_tokens,
+                    self.num_heads,
+                    qk_head_dim,
+                    dtype=dtype,
+                    device=device,
+                )
+                k = torch.empty_like(q)
+                v = torch.empty(
+                    total_tokens,
+                    self.num_heads,
+                    self.v_head_dim,
+                    dtype=dtype,
+                    device=device,
+                )
+
+                for return_softmax_lse in (False, True):
+                    warmup_key = (seq_lens, return_softmax_lse)
+                    if warmup_key in warmed:
+                        continue
+                    warmed.add(warmup_key)
+                    self.run_prefill_new_tokens(
+                        q=q,
+                        k=k,
+                        v=v,
+                        return_softmax_lse=return_softmax_lse,
+                    )
 
     def _flash_attn_varlen_diff_headdims(
         self,

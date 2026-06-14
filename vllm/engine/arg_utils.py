@@ -649,6 +649,14 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_cutedsl_warmup: bool = KernelConfig.enable_cutedsl_warmup
+    cutedsl_warmup_token_sizes: list[int] = get_field(
+        KernelConfig, "cutedsl_warmup_token_sizes"
+    )
+    cutedsl_warmup_use_cudagraph_descriptors: bool = (
+        KernelConfig.cutedsl_warmup_use_cudagraph_descriptors
+    )
+    cutedsl_cache_dir: str | None = KernelConfig.cutedsl_cache_dir
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1448,6 +1456,22 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--enable-cutedsl-warmup",
+            **kernel_kwargs["enable_cutedsl_warmup"],
+        )
+        kernel_group.add_argument(
+            "--cutedsl-warmup-token-sizes",
+            **kernel_kwargs["cutedsl_warmup_token_sizes"],
+        )
+        kernel_group.add_argument(
+            "--cutedsl-warmup-use-cudagraph-descriptors",
+            **kernel_kwargs["cutedsl_warmup_use_cudagraph_descriptors"],
+        )
+        kernel_group.add_argument(
+            "--cutedsl-cache-dir",
+            **kernel_kwargs["cutedsl_cache_dir"],
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -2159,6 +2183,17 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.enable_cutedsl_warmup:
+            kernel_config.enable_cutedsl_warmup = self.enable_cutedsl_warmup
+        default_cutedsl_token_sizes = KernelConfig().cutedsl_warmup_token_sizes
+        if self.cutedsl_warmup_token_sizes != default_cutedsl_token_sizes:
+            kernel_config.cutedsl_warmup_token_sizes = self.cutedsl_warmup_token_sizes
+        if self.cutedsl_warmup_use_cudagraph_descriptors:
+            kernel_config.cutedsl_warmup_use_cudagraph_descriptors = (
+                self.cutedsl_warmup_use_cudagraph_descriptors
+            )
+        if self.cutedsl_cache_dir is not None:
+            kernel_config.cutedsl_cache_dir = self.cutedsl_cache_dir
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

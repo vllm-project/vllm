@@ -57,6 +57,25 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
 
+    def get_cutedsl_warmup_plan(self, runner: object) -> object:
+        del runner
+
+        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+
+        return CuTeDSLWarmupPlan(
+            provider="flashinfer_cutedsl_moe",
+            model_runner_modes=("mixed",),
+            cudagraph_capture_modes=True,
+            dedupe_key=(
+                "flashinfer_cutedsl_moe",
+                self.hidden_dim,
+                self.intermediate_size_per_partition,
+                self.topk,
+                self.local_num_experts,
+                self.global_num_experts,
+            ),
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
