@@ -147,6 +147,7 @@ class LinearMethodBase(QuantizeMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        out_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
         """Create weights for a linear layer.
@@ -161,6 +162,7 @@ class LinearMethodBase(QuantizeMethodBase):
             input_size: Size of the input dim of the weight across all ranks.
             output_size: Size of the output dim of the weight across all ranks.
             params_dtype: Datatype of the parameters.
+            out_dtype: Dtype to accumulate the output in.
         """
         raise NotImplementedError
 
@@ -187,6 +189,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        out_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
         # This method creates unquantized linear weights.
@@ -251,6 +254,7 @@ class LinearBase(PluggableLayer):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
@@ -262,6 +266,7 @@ class LinearBase(PluggableLayer):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        self.out_dtype = out_dtype
         self.quant_config = quant_config
         self.prefix = prefix
         self.allow_fp8_block_shape_mismatch = False
@@ -316,6 +321,7 @@ class ReplicatedLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         # If MergedReplicatedLinear, use output size of each partition.
         if hasattr(self, "output_sizes"):
@@ -333,6 +339,7 @@ class ReplicatedLinear(LinearBase):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            out_dtype=out_dtype,
         )
 
         self.quant_method.create_weights(
@@ -342,6 +349,7 @@ class ReplicatedLinear(LinearBase):
             self.input_size,
             self.output_size,
             self.params_dtype,
+            self.out_dtype or self.params_dtype,
             weight_loader=self.weight_loader,
         )
 
@@ -430,6 +438,7 @@ class ColumnParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         # Divide the weight matrix along the last dimension.
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -453,6 +462,7 @@ class ColumnParallelLinear(LinearBase):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            out_dtype=out_dtype,
         )
 
         self._maybe_allow_fp8_block_shape_mismatch()
@@ -465,6 +475,7 @@ class ColumnParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
+            out_dtype=self.out_dtype or self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2
                 if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
@@ -613,6 +624,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         self.output_sizes = output_sizes
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
@@ -630,6 +642,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            out_dtype=out_dtype,
         )
 
     def validate_shard_id(self, loaded_shard_id: int | tuple[int, ...] | None):
@@ -954,6 +967,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
         v_head_size: int | None = None,
+        out_dtype: torch.dtype | None = None,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -994,6 +1008,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             prefix=prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            out_dtype=out_dtype,
         )
 
     def validate_shard_id(self, loaded_shard_id: str | None):
@@ -1353,6 +1368,7 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        out_dtype: torch.dtype | None = None,
     ):
         # Divide the weight matrix along the first dimension.
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -1371,6 +1387,7 @@ class RowParallelLinear(LinearBase):
             prefix,
             return_bias=return_bias,
             disable_tp=disable_tp,
+            out_dtype=out_dtype,
         )
 
         self.input_is_parallel = input_is_parallel
@@ -1383,6 +1400,7 @@ class RowParallelLinear(LinearBase):
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
+            out_dtype=self.out_dtype or self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2
                 if self.quant_method.__class__.__name__ in WEIGHT_LOADER_V2_SUPPORTED
