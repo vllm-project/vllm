@@ -902,6 +902,13 @@ class OpenAIServingResponses(OpenAIServing):
             kv_transfer_params=context.kv_transfer_params,
         )
 
+        # Attach finished_stats for x-vllm-* response headers.
+        # Known limitation: for multi-turn tool-calling flows, timing
+        # breakdown reflects only the final turn. Total wall-clock time
+        # is still correct.
+        if hasattr(context, "last_output") and context.last_output is not None:
+            request_metadata.finished_stats = context.last_output.finished_stats
+
         if request.store:
             async with self.response_store_lock:
                 stored_response = self.response_store.get(response.id)

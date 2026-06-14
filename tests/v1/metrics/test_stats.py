@@ -244,3 +244,30 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_update_from_finished_request_returns_finished_stats():
+    """update_from_finished_request returns the same FinishedRequestStats it appends."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(
+        arrival_time=100.0,
+        queued_ts=100.05,
+        scheduled_ts=100.10,
+        first_token_ts=100.20,
+        last_token_ts=100.50,
+        num_generation_tokens=5,
+    )
+
+    returned = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="req-1",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+        num_cached_tokens=3,
+    )
+
+    assert returned is not None
+    assert iteration_stats.finished_requests[-1] is returned
+    assert returned.request_id == "req-1"
+    assert returned.num_cached_tokens == 3

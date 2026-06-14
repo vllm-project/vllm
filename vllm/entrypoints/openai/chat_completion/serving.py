@@ -1033,6 +1033,7 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        request_metadata.finished_stats = final_res.finished_stats
 
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None

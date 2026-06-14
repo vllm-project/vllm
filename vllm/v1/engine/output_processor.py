@@ -32,6 +32,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     LoRARequestStates,
     RequestStateStats,
@@ -174,6 +175,7 @@ class RequestState:
         self.num_cached_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.finished_stats: FinishedRequestStats | None = None
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -371,6 +373,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            finished_stats=self.finished_stats,
         )
 
     def _new_completion_output(
@@ -647,7 +650,14 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # 4) Create and handle RequestOutput objects.
+            # 4) Finalize per-request stats before constructing RequestOutput
+            # so that finished_stats is populated on the output we hand off.
+            if finish_reason is not None and not req_state.streaming_input:
+                self._update_stats_from_finished(
+                    req_state, finish_reason, iteration_stats
+                )
+
+            # 5) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,
@@ -680,10 +690,6 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
-                    # Track per-request stats
-                    self._update_stats_from_finished(
-                        req_state, finish_reason, iteration_stats
-                    )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
@@ -803,7 +809,7 @@ class OutputProcessor:
 
         assert finish_reason is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_finished_request(
+        req_state.finished_stats = iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             request_id=req_state.external_req_id,
             num_prompt_tokens=req_state.prompt_len,
