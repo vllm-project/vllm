@@ -495,23 +495,11 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        multi_block_table = self.worker.model_runner.input_batch.block_table
-        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for bt in multi_block_table.block_tables:
-            saved_block_tables.append(
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-            )
-        multi_block_table.clear()
-
+        saved_state = self.worker.model_runner.save_serving_state()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
-
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_block_tables
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)
+        self.worker.model_runner.restore_serving_state(saved_state)
         if new_dp_size < old_dp_size:
             self._set_eplb_suppressed(False)
 
@@ -638,13 +626,7 @@ class ElasticEPScalingExecutor:
         # Save and clear block tables so profile_run/compile_or_warm_up_model
         # don't write dummy slot mappings into real KV-cache blocks (mirrors
         # switch_and_prepare's pattern).
-        multi_block_table = self.worker.model_runner.input_batch.block_table
-        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for bt in multi_block_table.block_tables:
-            saved_block_tables.append(
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-            )
-        multi_block_table.clear()
+        saved_state = self.worker.model_runner.save_serving_state()
 
         # _ensure_workspace_size allocates a fresh tensor on grow, leaving
         # captured CUDA graphs with stale data pointers; drop graphs before
@@ -665,9 +647,4 @@ class ElasticEPScalingExecutor:
         self.worker.compile_or_warm_up_model()
 
         lock_workspace()
-
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_block_tables
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)
+        self.worker.model_runner.restore_serving_state(saved_state)

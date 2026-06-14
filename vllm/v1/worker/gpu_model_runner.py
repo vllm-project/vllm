@@ -932,6 +932,26 @@ class GPUModelRunner(
     def post_kv_cache_wake_up(self) -> None:
         self.init_fp8_kv_scales()
 
+    def save_serving_state(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        multi_block_table = self.input_batch.block_table
+        saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for bt in multi_block_table.block_tables:
+            saved_block_tables.append(
+                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            )
+        multi_block_table.clear()
+        return saved_block_tables
+
+    def restore_serving_state(
+        self, saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]]
+    ) -> None:
+        multi_block_table = self.input_batch.block_table
+        for bt, (saved_gpu, saved_cpu) in zip(
+            multi_block_table.block_tables, saved_block_tables
+        ):
+            bt.block_table.gpu.copy_(saved_gpu)
+            bt.block_table.cpu.copy_(saved_cpu)
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
