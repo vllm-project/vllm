@@ -196,7 +196,9 @@ class TurboQuantMetadata(AttentionMetadata):
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -209,6 +211,18 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         # Set seq_lens to 1 so CUDA graph capture is fast
         # (real seq_lens are filled at replay time).
         attn_metadata.seq_lens.fill_(1)
+
+        # Ensure CPU-resident copies are always populated so the
+        # continuation-prefill path never falls back to .tolist()
+        # on GPU tensors (which is illegal during CUDA graph capture).
+        if attn_metadata.seq_lens_cpu is None:
+            attn_metadata.seq_lens_cpu = torch.ones(
+                attn_metadata.seq_lens.shape[0],
+                dtype=attn_metadata.seq_lens.dtype,
+                device="cpu",
+            )
+        if attn_metadata.query_start_loc_cpu is None:
+            attn_metadata.query_start_loc_cpu = attn_metadata.query_start_loc.to("cpu")
         return attn_metadata
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
@@ -591,6 +605,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # For continuation chunks (seq_len > q_len), we must attend to
         # previously cached K/V from the TQ cache, not just the current
         # chunk's raw K/V.
+
+        # Defense-in-depth: if we somehow reach this continuation path
+        # during CUDA graph capture (e.g. spec-decode warmup shapes),
+        # return zeros rather than crashing on .tolist() GPU→CPU sync.
+        # The _cudagraph_support downgrade to UNIFORM_SINGLE_TOKEN_DECODE
+        # should prevent this, but guard here as a safety net.
+        if torch.cuda.is_current_stream_capturing():
+            return torch.zeros(N, Hq, D, device=query.device, dtype=query.dtype)
+
         Hk = key.shape[1]
         use_gqa = Hk < Hq
         query_start_loc = attn_metadata.query_start_loc
