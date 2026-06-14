@@ -197,7 +197,10 @@ class InputProcessingContext:
 
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
-            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
+            # HF processors insert special placeholder tokens (e.g. "[IMG]")
+            # into the prompt text and rely on the tokenizer to encode them
+            # back to their token ids, which mistral-common never does.
+            tokenizer = tokenizer.transformers_tokenizer_with_special_tokens  # type: ignore[union-attr]
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
