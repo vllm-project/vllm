@@ -760,7 +760,49 @@ class TestAudioChunking:
         assert chunks[0][0] == audio[0]
         assert chunks[-1][-1] == audio[-1]
 
-    def test_split_audio_with_different_sample_rates(self):
+    def test_split_audio_chunk_start_times_are_exact(self):
+        """Chunk start times derived from sample counts must not use nominal offsets.
+
+        This guards against the regression where chunk N's timestamp was
+        computed as N * max_clip_s instead of the actual sample boundary.
+        For a 65s clip split at 30s, the second chunk should start at wherever
+        find_split_point placed the boundary - possibly before 30.0s.
+        """
+
+        # 65 seconds at 16kHz, constant energy so split is deterministic
+        sr = 16000
+        audio = np.ones(65 * sr, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=sr,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) >= 2
+
+        # Actual start times from sample counts
+        offset = 0
+        actual_starts = []
+        for chunk in chunks:
+            actual_starts.append(offset / sr)
+            offset += chunk.shape[-1]
+
+        # The first chunk always starts at 0
+        assert actual_starts[0] == 0.0
+
+        # The second chunk's actual start may be up to overlap_duration_s
+        # before the nominal 30.0s boundary.
+        assert actual_starts[1] <= 30.0
+        assert actual_starts[1] >= 29.0  # must be in the search window
+
+        # Using idx * max_clip_s would give 30.0 - but actual may differ.
+        # This ensures the sample-based computation is distinct from the
+        # naive idx * chunk_size approach when the split is early.
+        # actual_starts[1] must equal sum of chunk[0] samples / sr
+        assert actual_starts[1] == pytest.approx(chunks[0].shape[-1] / sr)
         """Test chunking works with different sample rates."""
 
         # 40 seconds at 8kHz

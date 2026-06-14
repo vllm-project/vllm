@@ -227,7 +227,9 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
     models.lora_requests = {}
     models.is_base_model.return_value = True
 
-    preprocess_mock = AsyncMock(return_value=([MagicMock(), MagicMock()], 1.0))
+    preprocess_mock = AsyncMock(
+        return_value=([MagicMock(), MagicMock()], 1.0, [0.0, 5.0])
+    )
 
     with (
         patch(
