@@ -1663,6 +1663,8 @@ class VllmConfig:
             and not self.model_config.enforce_eager
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
+            from vllm.platforms import current_platform
+
             # determine the initial max_cudagraph_capture_size
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
@@ -1674,6 +1676,28 @@ class VllmConfig:
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
+
+            # Mitigation for potential illegal memory access during CUDA graph
+            # replay in some TP>1 + Marlin-quantized configs on Ampere GPUs.
+            # See: https://github.com/vllm-project/vllm/issues/40121
+            if (
+                self.compilation_config.cudagraph_capture_sizes is None
+                and self.compilation_config.max_cudagraph_capture_size is None
+                and self.parallel_config.tensor_parallel_size > 1
+                and current_platform.is_cuda()
+                and current_platform.is_device_capability_family(80)
+            ):
+                quant = getattr(self.model_config, "quantization", None)
+                if isinstance(quant, str) and quant.endswith("_marlin"):
+                    if max_cudagraph_capture_size > 8:
+                        logger.warning_once(
+                            "Capping max_cudagraph_capture_size to 8 for TP>1 with %s "
+                            "on Ampere GPUs to mitigate potential CUDA graph replay "
+                            "instability. Override with --compilation-config if needed.",
+                            quant,
+                            scope="local",
+                        )
+                    max_cudagraph_capture_size = min(max_cudagraph_capture_size, 8)
 
             assert max_cudagraph_capture_size >= 1, (
                 "Maximum cudagraph size should be greater than or equal to 1 "
