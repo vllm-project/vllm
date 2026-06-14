@@ -13,10 +13,17 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight,
     fused_experts_cpu,
 )
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.zentorch_utils import (
+    is_zentorch_moe_supported,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
+
 
 _CPU_MOE_LAYER_CACHE = {}
 
@@ -229,6 +236,12 @@ class CPUFusedMOE:
     """CPU-based fused MoE implementation."""
 
     def __init__(self, layer: torch.nn.Module) -> None:
+        if is_zentorch_moe_supported(layer):
+            self.isa = "none"
+            self.act = str(layer.activation.value).lower()
+            self.forward_method = self.forward_zentorch
+            return
+
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
         if use_grouped_gemm:
@@ -366,6 +379,37 @@ class CPUFusedMOE:
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
 
         _CPU_MOE_LAYER_CACHE[id(layer)] = weakref.ref(layer)
+
+    def forward_zentorch(
+        self,
+        layer: torch.nn.Module,
+        input: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int = -1,
+        skip_weighted: bool = False,
+    ) -> torch.Tensor:
+        if skip_weighted:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            input = input.mul(topk_weights.to(input.dtype))
+
+        output = torch.empty_like(input)
+        torch.ops.zentorch.zentorch_fused_moe(
+            output,
+            input,
+            layer.w13_weight,
+            layer.w2_weight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+            topk_weights,
+            topk_ids,
+            skip_weighted,
+            self.act,
+        )
+        return output
 
     def forward_grouped_gemm(
         self,
