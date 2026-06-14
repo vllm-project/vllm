@@ -228,6 +228,7 @@ def _bias_kernel(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
             mask=mask,
         )
+        mask &= (stop_token_ids >= 0) & (stop_token_ids < vocab_size)
         tl.store(
             logits_ptr + token_idx * logits_stride + stop_token_ids,
             -float("inf"),
