@@ -603,10 +603,17 @@ def fp8_w8a8_moe_quant_config(
     a2_gscale: torch.Tensor | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
+
+    ``gemm1_alpha``/``gemm1_beta`` drive the SwiGLU-OAI GEMM1 activation
+    (``silu_and_mul_with_clamp``); they must be forwarded for SwiGLU-OAI MoEs
+    (e.g. MiniMax-M3 alpha=1.702, beta=1.0), else the kernel defaults to
+    alpha=1.0/beta=0.0 and produces garbage.
     """
     return FusedMoEQuantConfig.make(
         current_platform.fp8_dtype(),
@@ -623,6 +630,8 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
