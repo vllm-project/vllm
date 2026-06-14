@@ -36,6 +36,12 @@ from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9
+
+    # AMD RDNA doesn't have MFMA but WMMA
+    WMMA_TILE = 16
+
 FP8_DTYPE = current_platform.fp8_dtype()
 
 # Default interval for clearing Triton JIT cache during tuning
@@ -64,6 +70,13 @@ def clear_triton_cache():
             and hasattr(triton.runtime.cache, "clear")
         ):
             triton.runtime.cache.clear()
+        else:
+            # On Triton 3.6+ triton.runtime.cache is a module without
+            # .clear(). The real compiled-kernel cache lives on each
+            # JITFunction.device_caches defaultdict.
+            for obj in gc.get_objects():
+                if isinstance(obj, triton.JITFunction):
+                    obj.device_caches.clear()
     except ImportError:
         # Triton not installed, skip cache clearing
         pass
@@ -342,8 +355,6 @@ def get_rocm_tuning_space(use_fp16):
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
     waves_per_eu_range = [0, 1, 2, 4]
-    matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
-    kpack_range = [1, 2] if use_fp16 else []
 
     param_ranges = {
         "BLOCK_SIZE_M": block_mn_range,
@@ -354,9 +365,10 @@ def get_rocm_tuning_space(use_fp16):
         "num_stages": num_stage_range,
         "waves_per_eu": waves_per_eu_range,
     }
-    if use_fp16:
-        param_ranges["matrix_instr_nonkdim"] = matrix_instr_nonkdim_range
-        param_ranges["kpack"] = kpack_range
+    # RDNA doesn't use matrix_instr_nonkdim nor kpack
+    if use_fp16 and on_gfx9():
+        param_ranges["matrix_instr_nonkdim"] = [16, 32]
+        param_ranges["kpack"] = [1, 2]
 
     return param_ranges
 
@@ -441,7 +453,7 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
         num_warps = config.get("num_warps")
 
         if is_fp16:
-            matrix_instr_nonkdim = config.get("matrix_instr_nonkdim")
+            matrix_instr_nonkdim = config.get("matrix_instr_nonkdim", WMMA_TILE)
             if matrix_instr_nonkdim > mfma:
                 continue
         if mfma == 4 and BLOCK_SIZE_K < 64:
@@ -495,6 +507,19 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
             if BLOCK_SIZE_K < 64:
                 continue
             if num_warps < 4:
+                continue
+
+        # RDNA (gfx11/gfx12): reject configs that exceed 256 VGPRs per wave.
+        # WMMA is 16x16, and 8 VGPRs are needed for fp32 accumulator
+        if on_gfx1x():
+            accum_vgprs = (
+                (BLOCK_SIZE_M // WMMA_TILE)
+                * (BLOCK_SIZE_N // WMMA_TILE)
+                // num_warps
+                * 8
+            )
+            # Reject edge case to leave room for inputs and weights
+            if accum_vgprs >= 256:
                 continue
 
         pruned_configs.append(config)
@@ -644,7 +669,7 @@ class BenchmarkWorker:
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
                     )
-                except triton.runtime.autotuner.OutOfResources:
+                except (triton.runtime.autotuner.OutOfResources, RuntimeError):
                     # Some configurations may be invalid and fail to compile.
                     continue
 
