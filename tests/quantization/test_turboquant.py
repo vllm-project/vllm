@@ -506,6 +506,65 @@ class TestHadamardRotation:
 
 
 # ============================================================================
+# Streaming prefill helper tests (CPU-only)
+# ============================================================================
+
+
+def _make_turboquant_impl_for_streaming_tests():
+    try:
+        from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionImpl
+    except ImportError as exc:
+        pytest.skip(f"TurboQuant attention backend unavailable: {exc}")
+
+    impl = object.__new__(TurboQuantAttentionImpl)
+    impl.scale = 1.0 / math.sqrt(8)
+    impl.sliding_window = None
+    impl._can_use_flash_attn = False
+    return impl
+
+
+class TestStreamingPrefillHelpers:
+    def test_streaming_raw_prefill_matches_masked_sdpa(self):
+        impl = _make_turboquant_impl_for_streaming_tests()
+        impl.sliding_window = 3
+
+        torch.manual_seed(123)
+        query = torch.randn(6, 2, 8, dtype=torch.float32)
+        key = torch.randn(6, 1, 8, dtype=torch.float32)
+        value = torch.randn(6, 1, 8, dtype=torch.float32)
+        mm_prefix_ranges = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
+
+        actual = impl._streaming_prefill_from_raw_kv(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=mm_prefix_ranges,
+        )
+        expected = impl._sdpa_with_causal_and_sliding_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=mm_prefix_ranges,
+        )
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_streaming_raw_prefill_routing(self):
+        impl = _make_turboquant_impl_for_streaming_tests()
+
+        assert impl._should_use_streaming_raw_prefill(2048, 2048, None)
+        assert not impl._should_use_streaming_raw_prefill(512, 512, None)
+
+        impl._can_use_flash_attn = True
+        assert not impl._should_use_streaming_raw_prefill(2048, 2048, None)
+
+        impl.sliding_window = 1024
+        assert impl._should_use_streaming_raw_prefill(2048, 2048, None)
+
+
+# ============================================================================
 # Store → Decode round-trip test (GPU + Triton required)
 # ============================================================================
 
@@ -623,3 +682,108 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    @pytest.mark.parametrize(
+        "preset",
+        ["turboquant_k8v4", "turboquant_4bit_nc"],
+    )
+    def test_full_dequant_pos_offset_matches_full_slice(self, preset):
+        """Range dequant with POS_OFFSET must match full dequant slicing."""
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.triton_utils import triton
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            _tq_full_dequant_kv,
+            _use_fp8_e4b15,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=64)
+        D = 64
+        Hk = 2
+        num_tokens = 6
+        block_size = 4
+        num_blocks = 2
+        device = torch.device(DEVICE_TYPE)
+
+        H = _build_hadamard(D, DEVICE_TYPE)
+        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(321)
+        key = torch.randn(num_tokens, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(num_tokens, Hk, D, device=device, dtype=torch.float16)
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.arange(num_tokens, device=device, dtype=torch.int32)
+        mse_bytes = D if cfg.key_fp8 else math.ceil(D * cfg.key_mse_bits / 8)
+        val_data_bytes = math.ceil(D * cfg.effective_value_quant_bits / 8)
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+            H,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+
+        block_table = torch.tensor([[0, 1]], device=device, dtype=torch.int32)
+
+        def run_full_dequant(start: int, length: int):
+            alloc_len = math.ceil(length / block_size) * block_size
+            k_out = torch.empty(1, Hk, alloc_len, D, device=device, dtype=torch.float16)
+            v_out = torch.empty_like(k_out)
+            grid = (alloc_len, Hk)
+            _tq_full_dequant_kv[grid](
+                kv_cache,
+                block_table,
+                centroids,
+                k_out,
+                v_out,
+                k_out.stride(0),
+                k_out.stride(1),
+                k_out.stride(2),
+                v_out.stride(0),
+                v_out.stride(1),
+                v_out.stride(2),
+                kv_cache.stride(0),
+                kv_cache.stride(1),
+                kv_cache.stride(2),
+                block_table.stride(0),
+                start,
+                HEAD_DIM=D,
+                BLOCK_SIZE=block_size,
+                NUM_KV_HEADS=Hk,
+                MSE_BYTES=mse_bytes,
+                KPS=cfg.key_packed_size,
+                VQB=cfg.effective_value_quant_bits,
+                VAL_DATA_BYTES=val_data_bytes,
+                MSE_BITS=cfg.key_mse_bits,
+                KEY_FP8=1 if cfg.key_fp8 else 0,
+                BLOCK_D=triton.next_power_of_2(D),
+                NORM_CORRECTION=1 if cfg.norm_correction else 0,
+                FP8_E4B15=_use_fp8_e4b15(device.index or 0),
+                num_warps=4,
+            )
+            return k_out[:, :, :length, :], v_out[:, :, :length, :]
+
+        full_k, full_v = run_full_dequant(0, num_tokens)
+        offset_k, offset_v = run_full_dequant(3, 3)
+
+        torch.testing.assert_close(offset_k, full_k[:, :, 3:6, :])
+        torch.testing.assert_close(offset_v, full_v[:, :, 3:6, :])
