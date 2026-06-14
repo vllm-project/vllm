@@ -267,18 +267,30 @@ class MinimaxToolParser(ToolParser):
                 return True
         return False
 
-    def _should_buffer_content(self, delta_text: str) -> bool:
+    def _should_buffer_content(self, delta_text: str, current_text: str) -> bool:
         """
         Determine if content should be buffered for later processing.
 
+        Once the tool-call start tag has been found in the accumulated
+        text, stop buffering so that argument tokens flow to the
+        streaming tool-call handlers instead of accumulating silently
+        in ``pending_buffer``. (#40779)
+
         Args:
             delta_text: Delta text to check
+            current_text: Full accumulated text so far
 
         Returns:
             True if content should be buffered
         """
         if self.in_thinking_tag:
             return False
+        if self.tool_call_start_token in current_text:
+            return bool(
+                self.tool_call_start_token in delta_text
+                or self.tool_call_end_token in delta_text
+                or self._is_potential_tag_start(self.pending_buffer + delta_text)
+            )
         return bool(
             self.pending_buffer
             or self.tool_call_start_token in delta_text
@@ -709,9 +721,16 @@ class MinimaxToolParser(ToolParser):
         if self.in_thinking_tag:
             return DeltaMessage(content=delta_text)
 
-        if self._should_buffer_content(delta_text):
+        if self._should_buffer_content(delta_text, current_text):
             buffered_output = self._process_buffer(delta_text)
             return DeltaMessage(content=buffered_output) if buffered_output else None
+
+        # Flush any remaining buffered content (e.g. text after the
+        # <tool_calls> tag was stripped) into the current delta so that
+        # the tool-call argument handlers below can process it.
+        if self.pending_buffer:
+            delta_text = self.pending_buffer + delta_text
+            self.pending_buffer = ""
 
         if self._is_end_tool_calls(current_text):
             return DeltaMessage(content=delta_text)

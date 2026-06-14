@@ -1225,3 +1225,78 @@ def test_streaming_character_by_character_with_buffering(minimax_tool_parser):
     assert "done" in final_content, "Final content should be preserved"
 
     print("✓ Buffering character-by-character test passed")
+
+
+def test_streaming_tool_args_not_buffered_until_end(minimax_tool_parser):
+    """Regression test for #40779.
+
+    Verify that tool-call argument tokens are streamed incrementally,
+    not buffered until generation completes.
+    """
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+    minimax_tool_parser.pending_buffer = ""
+    minimax_tool_parser.in_thinking_tag = False
+
+    # Simulate token-by-token streaming as vLLM would deliver it
+    deltas = [
+        "<tool_calls>",
+        "\n",
+        '{"name": "get_weather",',
+        ' "arguments": {',
+        '"city": ',
+        '"Tokyo"',
+        ", ",
+        '"unit": ',
+        '"celsius"',
+        "}}",
+        "\n",
+        "</tool_calls>",
+    ]
+
+    accumulated = ""
+    tool_call_messages = []
+    first_arg_delta_idx = None
+
+    for idx, delta in enumerate(deltas):
+        previous = accumulated
+        accumulated += delta
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous,
+            current_text=accumulated,
+            delta_text=delta,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        if result is not None and hasattr(result, "tool_calls") and result.tool_calls:
+            tool_call_messages.append(result)
+            tc = result.tool_calls[0]
+            if first_arg_delta_idx is None and tc.function and tc.function.arguments:
+                first_arg_delta_idx = idx
+
+    assert len(tool_call_messages) > 0, (
+        "Tool call streaming should emit at least one DeltaMessage"
+    )
+
+    # Verify we got the function name
+    names = [
+        m.tool_calls[0].function.name
+        for m in tool_call_messages
+        if m.tool_calls[0].function and m.tool_calls[0].function.name
+    ]
+    assert "get_weather" in names, f"Expected function name 'get_weather', got: {names}"
+
+    # Verify arguments arrived BEFORE the final </tool_calls> delta,
+    # proving they were streamed incrementally and not buffered until end.
+    assert first_arg_delta_idx is not None, (
+        "Should have received at least one argument fragment"
+    )
+    assert first_arg_delta_idx < len(deltas) - 1, (
+        f"Arguments first appeared at delta {first_arg_delta_idx} "
+        f"(last delta is {len(deltas) - 1}); "
+        "they should arrive before the final </tool_calls> delta"
+    )
