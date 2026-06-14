@@ -163,6 +163,12 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
+        # True while the engine is asleep at level >= 1 (weights offloaded
+        # and KV cache discarded). Requests that arrive in this state cannot
+        # be scheduled until wake_up(), so they are aborted immediately
+        # instead of being parked in the waiting queue with no response.
+        self._asleep = False
+
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config
@@ -742,10 +748,20 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+
+        Note:
+            At level >= 1, requests that arrive while the engine is asleep
+            are aborted immediately (the client receives an abort response)
+            rather than queued until wake_up.
         """
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
+        if level >= 1:
+            # Mark as asleep *before* pausing so that requests racing with
+            # the pause cannot slip into the waiting queue, where they
+            # would be parked without a response until wake_up.
+            self._asleep = True
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
         if level < 1:
             return pause_future
@@ -783,6 +799,7 @@ class EngineCore:
             self.model_executor.wake_up(tags)
 
         # Resume scheduling (applies to all levels)
+        self._asleep = False
         self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
@@ -1349,7 +1366,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_asleep(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1381,6 +1398,33 @@ class EngineCoreProc(EngineCore):
 
         logger.debug(
             "[shutdown] EngineCore: rejecting new request request_id=%s",
+            request.request_id,
+        )
+        self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_asleep(self, request: Request) -> bool:
+        """Abort requests that arrive while the engine is asleep (level >= 1).
+
+        The model weights are offloaded and the scheduler is paused, so such
+        requests cannot be scheduled until wake_up(). Without this, they
+        would be parked in the scheduler's waiting queue with no response,
+        and clients whose requests race with a sleep call would hang
+        indefinitely (see https://github.com/vllm-project/vllm/issues/45268).
+
+        Args:
+            request: The incoming request.
+
+        Returns:
+            True if the request was rejected (abort output sent to the
+            client), False if the engine is awake and the request should
+            be added normally.
+        """
+        if not self._asleep:
+            return False
+
+        logger.debug(
+            "Engine is asleep: aborting new request request_id=%s",
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
