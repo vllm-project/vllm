@@ -50,6 +50,19 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES = frozenset(
+    {
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+    }
+)
+_QWEN_VL_FP8_E5M2_UNSAFE_MODEL_TYPES = frozenset(
+    {
+        "qwen2_vl",
+        "qwen2_5_vl",
+    }
+)
+
 
 def validate_kv_sharing_target(
     current_layer_name, target_layer_name, static_forward_context
@@ -89,6 +102,58 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
     return quant_method is not None and not isinstance(
         quant_method, UnquantizedLinearMethod
     )
+
+
+def _is_qwen_vl_model_config(model_config: Any | None) -> bool:
+    if model_config is None:
+        return False
+
+    architecture = getattr(model_config, "architecture", None)
+    if architecture in _QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES:
+        return True
+
+    architectures = getattr(model_config, "architectures", None) or []
+    if any(arch in _QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES for arch in architectures):
+        return True
+
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        return False
+
+    hf_architectures = getattr(hf_config, "architectures", None) or []
+    if any(arch in _QWEN_VL_FP8_E5M2_UNSAFE_ARCHITECTURES for arch in hf_architectures):
+        return True
+
+    model_type = getattr(hf_config, "model_type", None)
+    return (
+        isinstance(model_type, str)
+        and model_type.lower() in _QWEN_VL_FP8_E5M2_UNSAFE_MODEL_TYPES
+    )
+
+
+def _kv_cache_scale_is_default(scale: Any) -> bool:
+    if isinstance(scale, torch.Tensor):
+        return scale.numel() == 1 and scale.item() == 1.0
+    return scale == 1.0
+
+
+def _validate_qwen_vl_fp8_e5m2_kv_cache_scales(layer: nn.Module) -> None:
+    if not getattr(layer, "_is_qwen_vl_model", False):
+        return
+
+    if layer.kv_cache_dtype != "fp8_e5m2" or layer.calculate_kv_scales:
+        return
+
+    k_scale = getattr(layer, "_k_scale_float", None)
+    v_scale = getattr(layer, "_v_scale_float", None)
+    if _kv_cache_scale_is_default(k_scale) and _kv_cache_scale_is_default(v_scale):
+        raise ValueError(
+            'kv_cache_dtype="fp8_e5m2" with default KV cache scales '
+            "(k_scale=v_scale=1.0) is known to produce incorrect outputs "
+            "for Qwen2-VL and Qwen2.5-VL models. Use "
+            'kv_cache_dtype="fp8_e4m3", set calculate_kv_scales=True, '
+            "or provide calibrated k_scale/v_scale values in the checkpoint."
+        )
 
 
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
@@ -295,6 +360,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
+        self._is_qwen_vl_model = _is_qwen_vl_model_config(model_config)
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
 
         # During model initialization, the default dtype is set as the model
@@ -559,6 +625,7 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+        _validate_qwen_vl_fp8_e5m2_kv_cache_scales(self)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
