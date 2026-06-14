@@ -392,6 +392,15 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def sleep(self) -> None:
+        """Called from Worker.sleep() before CuMemAllocator unmaps GPU memory.
+
+        Connectors with asynchronous GPU transfers (e.g. offloading) must
+        override this to drain in-flight DMA before the backing VA is released.
+        Default implementation is a no-op.
+        """
+        return None
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process

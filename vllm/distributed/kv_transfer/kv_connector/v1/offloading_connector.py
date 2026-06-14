@@ -65,6 +65,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec)
 
+    def sleep(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.sleep()
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             self.connector_worker.shutdown()

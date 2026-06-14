@@ -172,6 +172,15 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
+        # Drain in-flight KV offload transfers before unmapping GPU memory.
+        # CuMemAllocator.sleep() → unmap_and_release() otherwise races with
+        # active GPU↔CPU DMA on the connector's transfer streams, causing
+        # CUDA_ERROR_ILLEGAL_ADDRESS and EngineDeadError on the next request.
+        # _python_free_callback() (cumem.py:158) uses torch.cuda.synchronize()
+        # for the same reason; sleep() lacked the equivalent quiesce.
+        if has_kv_transfer_group():
+            get_kv_transfer_group().sleep()
+
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
