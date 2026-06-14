@@ -97,6 +97,58 @@ NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
 }
 
 
+def effective_fi_allreduce_fusion_max_bytes(
+    *,
+    capability_str: str,
+    world_size: int,
+    base_cap_bytes: int,
+    multimem_active: bool,
+    nccl_symm_active: bool,
+) -> int:
+    """Clamp the FlashInfer AR+RMSNorm fusion byte cap by the active fast
+    unfused-AR threshold.
+
+    On multimem-capable NVLink Hopper/Blackwell (e.g. sm90, TP>=4), the
+    flashinfer one-shot AR+RMSNorm fusion is slower than the unfused
+    ``multimem_all_reduce`` above ``CUSTOM_ALL_REDUCE_MAX_SIZES[cap][ws]``.
+    If NCCL symm-mem is enabled, it takes over above the upper bound of
+    ``NCCL_SYMM_MEM_ALL_REDUCE_CONFIG['custom_ar_preferred_ranges'][ws]``.
+    This returns the minimum of ``base_cap_bytes`` and whichever fast-AR
+    threshold is active, so the fusion stops firing in the band where the
+    unfused path wins. Returns ``base_cap_bytes`` unchanged when no
+    multimem/NCCL-symm-mem path is active for this ``(capability, world_size)``.
+    """
+    threshold: int | None = None
+    if (
+        multimem_active
+        and capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES
+        and world_size in CUSTOM_ALL_REDUCE_MAX_SIZES[capability_str]
+    ):
+        threshold = CUSTOM_ALL_REDUCE_MAX_SIZES[capability_str][world_size]
+
+    if nccl_symm_active:
+        ranges = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["custom_ar_preferred_ranges"]
+        always_above = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+        nccl_threshold: int | None = None
+        if world_size in ranges:
+            # NCCL symm-mem takes over above the upper bound of the
+            # custom-AR-preferred range.
+            nccl_threshold = ranges[world_size][1]
+        elif world_size > always_above:
+            # NCCL symm-mem is preferred for all sizes above this world size.
+            nccl_threshold = 0
+        if nccl_threshold is not None:
+            threshold = (
+                min(threshold, nccl_threshold)
+                if threshold is not None
+                else nccl_threshold
+            )
+
+    if threshold is None:
+        return base_cap_bytes
+    return min(base_cap_bytes, threshold)
+
+
 def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
     """
     Determine if NCCL symmetric memory allreduce should be used.
