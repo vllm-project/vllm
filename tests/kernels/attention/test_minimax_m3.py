@@ -86,7 +86,12 @@ TOPK = 16
     [
         ("fp8", current_platform.fp8_dtype()),
         ("fp8_e4m3", current_platform.fp8_dtype()),
-        ("fp8_e5m2", torch.float8_e5m2),
+        (
+            "fp8_e5m2",
+            torch.float8_e5m2fnuz
+            if current_platform.is_fp8_fnuz()
+            else torch.float8_e5m2,
+        ),
     ],
 )
 def test_sparse_impl_uses_platform_fp8_dtype(
@@ -111,6 +116,7 @@ def test_sparse_impl_uses_platform_fp8_dtype(
         torch.float8_e4m3fn,
         torch.float8_e4m3fnuz,
         torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
     ],
 )
 def test_sparse_kernels_recognize_fp8_dtypes(dtype: torch.dtype):
