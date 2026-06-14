@@ -187,6 +187,9 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_MAMBA_MTP_REPLAY: bool = False
+    VLLM_MAMBA_MTP_REPLAY_PDL: bool = False
+    VLLM_MAMBA_SKIP_SSD_WARMUP: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -302,6 +305,13 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def _getenv_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -1515,6 +1525,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # Use experimental replay-based SSM state updates for Mamba MTP decode steps.
+    "VLLM_MAMBA_MTP_REPLAY": lambda: _getenv_bool("VLLM_MAMBA_MTP_REPLAY", False),
+    # Use PDL between Mamba MTP replay kernels. Keep off by default while
+    # correctness is being validated separately from kernel overlap.
+    "VLLM_MAMBA_MTP_REPLAY_PDL": lambda: _getenv_bool(
+        "VLLM_MAMBA_MTP_REPLAY_PDL", False
+    ),
+    # Skip the profile-run Mamba2 SSD Triton warmup.
+    "VLLM_MAMBA_SKIP_SSD_WARMUP": lambda: _getenv_bool(
+        "VLLM_MAMBA_SKIP_SSD_WARMUP", False
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for

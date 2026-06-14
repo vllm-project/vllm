@@ -8,6 +8,7 @@
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
@@ -789,11 +790,15 @@ def _causal_conv1d_update_kernel(
     NP2_STATELEN: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    LAUNCH_DEPENDENT_KERNELS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     # ruff: noqa: E501
     idx_seq = tl.program_id(0)
     if idx_seq >= batch:
         return
+    if LAUNCH_DEPENDENT_KERNELS:
+        tl.extra.cuda.gdc_launch_dependents()
 
     # [BLOCK_N,] elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -1080,6 +1085,7 @@ def causal_conv1d_update(
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
+    launch_dependent_kernels: bool = False,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -1183,6 +1189,11 @@ def causal_conv1d_update(
     else:
         state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
+    use_pdl = (
+        launch_dependent_kernels
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+    )
 
     def grid(META):
         return (
@@ -1233,6 +1244,8 @@ def causal_conv1d_update(
         NP2_STATELEN=np2_statelen,
         HAS_NULL_BLOCK=null_block_id is not None,
         BLOCK_N=256,
+        LAUNCH_DEPENDENT_KERNELS=use_pdl,
+        launch_pdl=use_pdl,
     )
     if unsqueeze:
         out = out.squeeze(-1)

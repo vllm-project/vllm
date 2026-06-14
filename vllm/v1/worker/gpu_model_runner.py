@@ -1021,6 +1021,31 @@ class GPUModelRunner(
             )
         return self._mamba_bufs
 
+    def _preserve_mamba_mtp_replay_accepted_state(self, num_reqs: int) -> None:
+        if (
+            self.cache_config.mamba_cache_mode != "none"
+            or self.speculative_config is None
+            or not self.model_config.is_hybrid
+            or not envs.VLLM_MAMBA_MTP_REPLAY
+        ):
+            return
+
+        mamba_group_ids, _ = mamba_utils.get_mamba_groups(self.kv_cache_config)
+        num_accepted_tokens = self.num_accepted_tokens.gpu[:num_reqs]
+        for kv_cache_group_id in mamba_group_ids:
+            state_indices = self.input_batch.block_table[
+                kv_cache_group_id
+            ].get_device_tensor(num_reqs)
+            for layer_name in self.kv_cache_config.kv_cache_groups[
+                kv_cache_group_id
+            ].layer_names:
+                layer = self.compilation_config.static_forward_context.get(layer_name)
+                preserve_replay_state = getattr(
+                    layer, "preserve_mtp_replay_accepted_state", None
+                )
+                if preserve_replay_state is not None:
+                    preserve_replay_state(state_indices, num_accepted_tokens)
+
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
 
@@ -1513,6 +1538,7 @@ class GPUModelRunner(
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+        self._preserve_mamba_mtp_replay_accepted_state(num_reqs)
 
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token

@@ -109,7 +109,7 @@ def kernel_warmup(worker: "Worker"):
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
 # to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
 # invalid tactics to be chosen
-_FLASHINFER_USE_PERSISTENT_CACHE = False
+_FLASHINFER_USE_PERSISTENT_CACHE = bool(envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
