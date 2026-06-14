@@ -7,6 +7,7 @@ import torch
 
 import vllm._custom_ops as ops
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_torch,
@@ -51,6 +52,28 @@ def cpu_gdn_attention_core(
         and attn_metadata_i.num_accepted_tokens is None
     ), "speculative decode not supported in CPU GDN attention."
     assert mixed_qkv.dtype == torch.bfloat16, "CPU GDN attention requires BF16."
+
+    # AMD Zen fast path takes priority over AMX/torch when zentorch is present.
+    # The op list is the set of zentorch C++ GDN core-attention kernels this
+    # path calls; the gated RMSNorm intentionally stays on the native
+    # RMSNormGated path, so gdn_rms_norm_gated is deliberately not required here.
+    if has_zentorch_op(
+        [
+            "gdn_causal_conv1d_update",
+            "gdn_fused_recurrent_gated_delta_rule_packed_decode",
+            "gdn_causal_conv1d_fn",
+            "gdn_fused_post_conv_prep",
+            "gdn_chunk_gated_delta_rule_fwd",
+        ]
+    ):
+        return cpu_gdn_attention_core_zen(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            attn_metadata_i,
+            layer,
+        )
 
     state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
     query_start_loc = attn_metadata_i.non_spec_query_start_loc
@@ -216,6 +239,172 @@ def cpu_gdn_attention_core_fake(
 ) -> None:
     """Fake implementation for torch.compile."""
     return
+
+
+def cpu_gdn_attention_core_zen(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    attn_metadata_i: GDNAttentionMetadata,
+    layer: torch.nn.Module,
+):
+    """AMD Zen GDN core attention backed by zentorch C++ ops.
+
+    Selected by :func:`cpu_gdn_attention_core` ahead of the AMX/torch paths
+    when running on a Zen CPU with the ``zentorch`` GDN ops registered. The
+    enclosing custom op (``cpu_gdn_attention_core``) is already opaque to
+    torch.compile, so the leaf ops here need no extra inductor fallback. Only
+    the core attention is offloaded to zentorch; the gated RMSNorm in the
+    output projection stays on the native ``RMSNormGated`` path.
+    """
+    state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
+    query_start_loc = attn_metadata_i.non_spec_query_start_loc
+    assert state_indices_tensor is not None
+    assert query_start_loc is not None
+
+    # conv_state must be (..., dim, width-1) for the conv kernels.
+    # DS layout stores it that way directly; SD layout needs a transpose.
+    layer_kv_cache = layer.kv_cache
+    conv_state = (
+        layer_kv_cache[0]
+        if is_conv_state_dim_first()
+        else layer_kv_cache[0].transpose(-1, -2)
+    )
+    ssm_state = layer_kv_cache[1]
+
+    num_decodes = attn_metadata_i.num_decodes
+    num_decode_tokens = attn_metadata_i.num_decode_tokens
+    num_prefills = attn_metadata_i.num_prefills
+    num_prefill_tokens = attn_metadata_i.num_prefill_tokens
+
+    conv_weights = layer.conv1d.weight.view(
+        layer.conv1d.weight.size(0), layer.conv1d.weight.size(2)
+    )
+    activation_str = layer.activation if layer.activation is not None else ""
+
+    if num_decodes > 0:
+        decode_mixed_qkv = mixed_qkv[:num_decode_tokens]
+        decode_b = b[:num_decode_tokens]
+        decode_a = a[:num_decode_tokens]
+        decode_state_indices = state_indices_tensor[:num_decodes]
+
+        decode_mixed_qkv = torch.ops.zentorch.gdn_causal_conv1d_update(
+            decode_mixed_qkv,
+            conv_state,
+            conv_weights,
+            layer.conv1d.bias,
+            activation_str,
+            decode_state_indices,
+            0,  # null_block_id: CPU has no paged/block KV cache
+            -1,  # pad_slot_id: CPU has no padded cache slots
+        )
+
+        out_buf = core_attn_out[:num_decode_tokens].unsqueeze(1)
+        torch.ops.zentorch.gdn_fused_recurrent_gated_delta_rule_packed_decode(
+            decode_mixed_qkv,
+            decode_a,
+            decode_b,
+            layer.A_log,
+            layer.dt_bias,
+            layer.head_k_dim**-0.5,
+            ssm_state,
+            out_buf,
+            decode_state_indices,
+            True,
+        )
+
+    if num_prefills > 0:
+        has_initial_state = attn_metadata_i.has_initial_state
+        assert has_initial_state is not None
+
+        prefill_token_start = num_decode_tokens
+        prefill_token_end = prefill_token_start + num_prefill_tokens
+        prefill_mixed_qkv = mixed_qkv[prefill_token_start:prefill_token_end]
+        prefill_b = b[prefill_token_start:prefill_token_end]
+        prefill_a = a[prefill_token_start:prefill_token_end]
+        prefill_state_indices = state_indices_tensor[
+            num_decodes : num_decodes + num_prefills
+        ]
+        prefill_query_start_loc = (
+            query_start_loc[num_decodes : num_decodes + num_prefills + 1]
+            - num_decode_tokens
+        )
+        prefill_has_initial_state = has_initial_state[
+            num_decodes : num_decodes + num_prefills
+        ]
+
+        prefill_mixed_qkv_T = prefill_mixed_qkv.transpose(0, 1)
+        prefill_mixed_qkv = torch.ops.zentorch.gdn_causal_conv1d_fn(
+            prefill_mixed_qkv_T,
+            conv_weights,
+            layer.conv1d.bias,
+            conv_state,
+            prefill_query_start_loc,
+            prefill_state_indices,
+            prefill_has_initial_state,
+            activation_str,
+            -1,  # pad_slot_id: CPU has no padded cache slots
+        ).transpose(0, 1)
+
+        (
+            query,
+            key,
+            value,
+            g,
+            beta,
+        ) = torch.ops.zentorch.gdn_fused_post_conv_prep(
+            prefill_mixed_qkv,
+            prefill_a,
+            prefill_b,
+            layer.A_log,
+            layer.dt_bias,
+            layer.num_k_heads // layer.tp_size,
+            layer.head_k_dim,
+            layer.head_v_dim,
+            True,
+            False,
+        )
+        query = query.unsqueeze(0)
+        key = key.unsqueeze(0)
+        value = value.unsqueeze(0)
+        g = g.unsqueeze(0)
+        beta = beta.unsqueeze(0)
+
+        # Rebase chunk_indices / chunk_offsets onto the prefill-only slice;
+        # vLLM computes them against the full non-spec batch.
+        if num_decodes > 0:
+            prefill_chunk_offsets = (
+                attn_metadata_i.chunk_offsets[num_decodes:] - num_decodes
+            )
+            prefill_chunk_indices = attn_metadata_i.chunk_indices[
+                num_decodes:
+            ].clone()
+            prefill_chunk_indices[:, 0] -= num_decodes
+        else:
+            prefill_chunk_indices = attn_metadata_i.chunk_indices
+            prefill_chunk_offsets = attn_metadata_i.chunk_offsets
+
+        initial_state = ssm_state[prefill_state_indices].contiguous()
+        initial_state[~prefill_has_initial_state, ...] = 0
+        o, last_recurrent_state = torch.ops.zentorch.gdn_chunk_gated_delta_rule_fwd(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            float(layer.head_k_dim**-0.5),
+            initial_state,
+            True,
+            64,  # chunk size expected by zentorch's gdn_chunk_gated_delta_rule_fwd
+            prefill_query_start_loc,
+            prefill_chunk_indices,
+            prefill_chunk_offsets,
+        )
+        o = o.to(query.dtype)
+
+        ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+        core_attn_out[prefill_token_start:prefill_token_end] = o.squeeze(0)
 
 
 def register_cpu_gdn_attention_ops() -> None:
