@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
@@ -20,26 +19,31 @@ class PromptLogprobsWorker:
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
         # req_idx -> list of in-progress LogprobsTensors
         self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
+        self.prompt_token_ids: dict[str, list[int]] = {}
 
-    def add_request(self, req_id: str, req_idx: int, sampling_params: SamplingParams):
+    def add_request(
+        self,
+        req_id: str,
+        req_idx: int,
+        sampling_params: SamplingParams,
+        prompt_token_ids: list[int],
+    ):
         uses_prompt_logprobs = sampling_params.prompt_logprobs is not None
         self.uses_prompt_logprobs[req_idx] = uses_prompt_logprobs
         self.num_prompt_logprobs[req_idx] = sampling_params.prompt_logprobs or 0
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
+            self.prompt_token_ids[req_id] = list(prompt_token_ids)
 
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
+        self.prompt_token_ids.pop(req_id, None)
 
     def compute_prompt_logprobs(
         self,
         logits_fn: Callable[[torch.Tensor], torch.Tensor],
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
-        # [max_num_reqs, max_model_len]
-        all_token_ids: torch.Tensor,
-        # [max_num_reqs]
-        num_computed_tokens: torch.Tensor,
         # [max_num_reqs]
         prompt_lens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
@@ -68,13 +72,10 @@ class PromptLogprobsWorker:
             else int(requested_num_prompt_logprobs.max())
         )
 
-        # Get the prompt logprobs token_ids.
-        prompt_logprobs_token_ids = get_prompt_logprobs_token_ids(
-            input_batch.num_tokens,
-            input_batch.query_start_loc,
-            input_batch.idx_mapping,
-            num_computed_tokens,
-            all_token_ids,
+        prompt_logprobs_token_ids = self._get_prompt_logprobs_token_ids(
+            input_batch,
+            computed_prefill,
+            needs_prompt_logprobs,
         )
         prompt_token_ids, prompt_logprobs, prompt_ranks = (
             compute_prompt_logprobs_with_chunking(
@@ -146,59 +147,32 @@ class PromptLogprobsWorker:
             prompt_logprobs_dict[req_id] = logprobs
         return prompt_logprobs_dict
 
+    def _get_prompt_logprobs_token_ids(
+        self,
+        input_batch: InputBatch,
+        computed_prefill: np.ndarray,
+        needs_prompt_logprobs: np.ndarray,
+    ) -> torch.Tensor:
+        token_ids = [0] * input_batch.num_tokens
+        query_start_loc_np = input_batch.query_start_loc_np
+        for i, req_id in enumerate(input_batch.req_ids):
+            if not needs_prompt_logprobs[i]:
+                continue
 
-@triton.jit
-def _prompt_logprobs_token_ids_kernel(
-    prompt_logprobs_token_ids_ptr,
-    query_start_loc_ptr,
-    idx_mapping_ptr,
-    num_computed_tokens_ptr,
-    all_token_ids_ptr,
-    all_token_ids_stride,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+            prompt_token_ids = self.prompt_token_ids[req_id]
+            start_idx = int(query_start_loc_np[i])
+            end_idx = int(query_start_loc_np[i + 1])
+            target_start = int(computed_prefill[i]) + 1
+            for offset, out_idx in enumerate(range(start_idx, end_idx)):
+                target_idx = target_start + offset
+                if target_idx < len(prompt_token_ids):
+                    token_ids[out_idx] = prompt_token_ids[target_idx]
 
-    query_start = tl.load(query_start_loc_ptr + batch_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    query_len = query_end - query_start
-
-    num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
-    for i in range(0, query_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < query_len
-        # NOTE(woosuk): We should shift the pos by one
-        # because the logprob is computed for the next token.
-        target_pos = num_computed_tokens + 1 + block
-        token_ids = tl.load(
-            all_token_ids_ptr + req_state_idx * all_token_ids_stride + target_pos,
-            mask=mask,
+        return torch.tensor(
+            token_ids,
+            dtype=torch.int64,
+            device=input_batch.input_ids.device,
         )
-        tl.store(
-            prompt_logprobs_token_ids_ptr + query_start + block, token_ids, mask=mask
-        )
-
-
-def get_prompt_logprobs_token_ids(
-    num_tokens: int,
-    query_start_loc: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    num_computed_tokens: torch.Tensor,
-    all_token_ids: torch.Tensor,
-) -> torch.Tensor:
-    token_ids = torch.empty(num_tokens, dtype=torch.int64, device=idx_mapping.device)
-    num_reqs = idx_mapping.shape[0]
-    _prompt_logprobs_token_ids_kernel[(num_reqs,)](
-        token_ids,
-        query_start_loc,
-        idx_mapping,
-        num_computed_tokens,
-        all_token_ids,
-        all_token_ids.stride(0),
-        BLOCK_SIZE=1024,
-    )
-    return token_ids
 
 
 def compute_prompt_logprobs_with_chunking(
