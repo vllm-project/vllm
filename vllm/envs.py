@@ -224,6 +224,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_ALLREDUCE_QUANTIZATION: Literal["NONE", "INT8", "FP8"] = "NONE"
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
@@ -1638,6 +1639,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
+    ),
+    # Quantized allreduce mode: "NONE" (disabled), "INT8", or "FP8"
+    "VLLM_ALLREDUCE_QUANTIZATION": env_with_choices(
+        "VLLM_ALLREDUCE_QUANTIZATION",
+        default="NONE",
+        choices=["NONE", "INT8", "FP8"],
+        case_sensitive=False,
     ),
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(

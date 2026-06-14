@@ -66,6 +66,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             FlashInferAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.distributed.device_communicators.quantized_all_reduce import (
+            QuantizedAllReduceCommunicator,
+        )
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
         )
@@ -84,9 +87,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.quant_comm: QuantizedAllReduceCommunicator | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        # Quantized all-reduce (controlled by VLLM_ALLREDUCE_QUANTIZATION env var)
+        if (
+            "tp" in unique_name
+            and self.world_size > 1
+            and envs.VLLM_ALLREDUCE_QUANTIZATION.lower() in ("int8", "fp8")
+        ):
+            self.quant_comm = QuantizedAllReduceCommunicator(
                 group=self.cpu_group,
                 device=self.device,
             )
@@ -252,6 +267,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        # Quantized all-reduce (highest priority when enabled via env var)
+        if self.quant_comm is not None and self.quant_comm.should_use_quantized(input_):
+            out = self.quant_comm.all_reduce(input_)
+            assert out is not None
+            return out
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
