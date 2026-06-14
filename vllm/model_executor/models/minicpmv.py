@@ -376,7 +376,9 @@ class Resampler4_5(Resampler2_5):
                     )
                 else:
                     pos_embed_temporal.append(
-                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(dtype)
+                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(
+                            device=device, dtype=dtype
+                        )
                     )  # D
 
             pos_embed_2d.append(
