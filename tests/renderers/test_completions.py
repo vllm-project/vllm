@@ -64,13 +64,17 @@ class DummyTokenizer:
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
+        self._captured_encode_texts: list[str] = []
+        self._captured_batch_texts: list[str] = []
+        self._encode_calls = 0
+        self._batch_encode_calls = 0
+        self._call_encode_calls = 0
 
     def decode(self, tokens: list[int]):
         return str(tokens)
 
-    def encode(self, text: str, **kwargs):
-        self._captured_encode_kwargs = kwargs
-
+    @staticmethod
+    def _encode_text(text: str, **kwargs):
         in_length = len(text)
         truncation = kwargs.get("truncation")
         max_length = kwargs.get("max_length")
@@ -78,6 +82,24 @@ class DummyTokenizer:
             return list(range(min(in_length, max_length)))
 
         return list(range(in_length))
+
+    def encode(self, text: str, **kwargs):
+        self._encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_encode_texts.append(text)
+        return self._encode_text(text, **kwargs)
+
+    def batch_encode_plus(self, texts: list[str], **kwargs):
+        self._batch_encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_batch_texts = list(texts)
+        return {"input_ids": [self._encode_text(text, **kwargs) for text in texts]}
+
+    def __call__(self, texts: list[str], **kwargs):
+        self._call_encode_calls += 1
+        self._captured_encode_kwargs = kwargs
+        self._captured_batch_texts = list(texts)
+        return {"input_ids": [self._encode_text(text, **kwargs) for text in texts]}
 
 
 def _build_renderer(
@@ -194,6 +216,62 @@ class TestRenderPrompt:
         assert len(results) == 3
         for text_input, result in zip(text_list_input, results):
             assert len(result["prompt_token_ids"]) == len(text_input)
+        assert renderer.tokenizer._batch_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 0
+
+    def test_text_list_input_uses_callable_batch_tokenizer(self):
+        renderer = _build_renderer(MockModelConfig())
+        renderer.tokenizer.batch_encode_plus = None
+
+        text_list_input = ["x" * 10, "x" * 12, "x" * 14]
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_list_input)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100),
+        )
+
+        assert len(results) == 3
+        for text_input, result in zip(text_list_input, results):
+            assert len(result["prompt_token_ids"]) == len(text_input)
+        assert renderer.tokenizer._call_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 0
+
+    def test_text_list_batch_tokenize_failure_does_not_mutate_fallback(self):
+        class PrefixTokenizeParams(TokenizeParams):
+            def apply_pre_tokenization(self, tokenizer, prompt):
+                prompt["prompt"] = "prefix:" + prompt["prompt"]
+                return prompt
+
+        renderer = _build_renderer(MockModelConfig())
+
+        def broken_batch_encode_plus(texts: list[str], **kwargs):
+            renderer.tokenizer._batch_encode_calls += 1
+            renderer.tokenizer._captured_batch_texts = list(texts)
+            return {"input_ids": []}
+
+        renderer.tokenizer.batch_encode_plus = broken_batch_encode_plus
+        text_list_input = ["abc", "def"]
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_list_input)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            PrefixTokenizeParams(max_total_tokens=100),
+        )
+
+        assert len(results) == 2
+        assert renderer.tokenizer._batch_encode_calls == 1
+        assert renderer.tokenizer._encode_calls == 2
+        assert renderer.tokenizer._captured_batch_texts == [
+            "prefix:abc",
+            "prefix:def",
+        ]
+        assert renderer.tokenizer._captured_encode_texts == [
+            "prefix:abc",
+            "prefix:def",
+        ]
 
     def test_zero_truncation(self):
         renderer = _build_renderer(MockModelConfig())
