@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -84,6 +85,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Capture bias dtype before params_dtype is overridden to int8 below.
+        bias_dtype = params_dtype
         params_dtype = torch.int8
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
 
@@ -111,6 +114,26 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Per-expert biases (gpt-oss), allocated only when has_bias.
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    w13_num_shards * intermediate_size_per_partition,
+                    dtype=bias_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=bias_dtype),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
         # WEIGHT_SCALES
         assert self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -142,6 +165,50 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        # ZenDNN's swiglu_oai_mul reads gate/up interleaved (stride 2) but
+        # _load_w13 produces a half-split layout. Reorder w13 to interleaved
+        # once, gated on Zen CPU so other backends keep the half-split layout.
+        _act = getattr(layer, "activation", None)
+        _act_str = getattr(_act, "value", _act)
+        if (
+            current_platform.is_zen_cpu()
+            and isinstance(_act_str, str)
+            and _act_str.lower() == "swigluoai"
+        ):
+            two_i = layer.w13_weight.size(1)
+            i = two_i // 2
+            device = layer.w13_weight.device
+            perm = torch.stack(
+                [
+                    torch.arange(0, i, device=device),
+                    torch.arange(i, two_i, device=device),
+                ],
+                dim=1,
+            ).flatten()
+            has_w13_bias = getattr(layer, "w13_bias", None) is not None
+            logger.info_once(
+                "[zen_cpu][swigluoai-permute] Reordering w13 from "
+                "half-split to interleaved for ZenDNN swiglu_oai_mul "
+                "kernel: E=%d, 2I=%d, I=%d, has_w13_bias=%s",
+                layer.w13_weight.size(0),
+                two_i,
+                i,
+                has_w13_bias,
+            )
+            layer.w13_weight = torch.nn.Parameter(
+                layer.w13_weight.data[:, perm, :].contiguous(),
+                requires_grad=False,
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(
+                layer.w13_weight_scale.data[:, perm].contiguous(),
+                requires_grad=False,
+            )
+            if has_w13_bias:
+                layer.w13_bias = torch.nn.Parameter(
+                    layer.w13_bias.data[:, perm].contiguous(),
+                    requires_grad=False,
+                )
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
@@ -166,6 +233,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
             per_act_token_quant=True,
         )
 
