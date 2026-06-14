@@ -723,7 +723,7 @@ class LoRAModelManager:
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            # For 2D FusedMoE modules with EP, narrow the per-expert
+            # For 2D FusedMoEFactory modules with EP, narrow the per-expert
             # sub-module list to this rank's owned experts so pack_moe
             # produces a tensor sized to local_num_experts directly.
             packed_module_names = new_module_names
@@ -1083,7 +1083,7 @@ class LoRAModelManager:
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
         """
-        Per-rank slicing metadata for 2D FusedMoE LoRA modules.
+        Per-rank slicing metadata for 2D FusedMoEFactory LoRA modules.
         """
         if not self._use_ep or not self._is_moe:
             return None

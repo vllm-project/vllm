@@ -1099,9 +1099,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 

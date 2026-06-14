@@ -832,7 +832,7 @@ def _process_weights_xpu(
         w2:  [E, K, N]   int4 (uint8 storage [E, K, N // 2])
         w2_scales:  [E, K, N // group_size]   params_dtype
 
-    Input GPTQ layout from FusedMoE.weight_loader:
+    Input GPTQ layout from FusedMoEFactory.weight_loader:
         w13: [E, K // 8, 2*N] int32 (8 nibbles per int32 along the input dim)
         w13_scales: [E, K // group_size, 2*N] params_dtype
         w2:  [E, N // 8, K] int32
@@ -908,7 +908,7 @@ def convert_to_wna16_moe_kernel_format(
 
     Args:
         backend: the selected ``WNA16MoEBackend``.
-        layer: the ``FusedMoE`` layer whose parameters are being prepared.
+        layer: the ``FusedMoEFactory`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """

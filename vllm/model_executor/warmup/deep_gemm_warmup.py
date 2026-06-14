@@ -102,7 +102,7 @@ def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
-    Extract weights, weight scales and num_topk from FusedMoE module.
+    Extract weights, weight scales and num_topk from FusedMoEFactory module.
     """
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts

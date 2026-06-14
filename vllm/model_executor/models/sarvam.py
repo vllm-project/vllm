@@ -36,7 +36,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -339,7 +339,7 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,

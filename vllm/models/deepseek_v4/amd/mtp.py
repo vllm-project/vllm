@@ -49,7 +49,7 @@ from .model import DeepseekV4DecoderLayer
 logger = init_logger(__name__)
 
 # MoE expert scales are fused into per-layer w13/w2 tensors. The exact
-# parameter suffix depends on which FusedMoE method handles the experts:
+# parameter suffix depends on which FusedMoEFactory method handles the experts:
 # - fp4 experts (Mxfp4MoEMethod) register ``w{1,2,3}_weight_scale``;
 # - fp8 experts (Fp8MoEMethod with block_quant=True) register
 #   ``w{1,2,3}_weight_scale_inv``.

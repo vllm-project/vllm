@@ -29,7 +29,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -53,7 +53,7 @@ class TransformersMoEState:
 # --8<-- [start:transformers_fused_moe]
 @PluggableLayer.register("transformers_fused_moe")
 class TransformersFusedMoE(MoERunner):
-    """Custom FusedMoE for the Transformers modeling backend."""
+    """Custom FusedMoEFactory for the Transformers modeling backend."""
 
     # --8<-- [end:transformers_fused_moe]
     def __init__(self, *args, moe_state: TransformersMoEState, **kwargs):
@@ -169,7 +169,7 @@ class MoEMixin(MixtureOfExperts):
         # - After Transformers v5
         # - Before Transformers v5, but re-saved with save_original_format=False
         # In the fused experts case, we repurpose the expert_id as shard_idx for
-        # deconcatenating w1 and w3 in FusedMoE.load_weights.
+        # deconcatenating w1 and w3 in FusedMoEFactory.load_weights.
         expert_mapping = [
             ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
             ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
@@ -227,7 +227,7 @@ class MoEMixin(MixtureOfExperts):
         #    and hard code `use_grouped_topk=False`
         # - `renormalize` passed anyway because it's easy to infer
         # - `num_expert_group` and `topk_group` used for inferring expert
-        #    placement strategy in FusedMoE
+        #    placement strategy in FusedMoEFactory
         # - `apply_router_weight_on_input` is already applied in Transformers
         renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
         num_expert_group = getattr(text_config, "n_group", None)
@@ -292,7 +292,7 @@ class MoEMixin(MixtureOfExperts):
                                 self.num_shared_experts = 1
                                 break
 
-                    # Replace experts module with FusedMoE
+                    # Replace experts module with FusedMoEFactory
                     moe_state = TransformersMoEState()
 
                     def custom_routing_function(
@@ -317,7 +317,7 @@ class MoEMixin(MixtureOfExperts):
                             (topk_ids,) = dist_group.all_gatherv([topk_ids], 0, sizes)
                         return topk_weights, topk_ids
 
-                    fused_experts = FusedMoE(
+                    fused_experts = FusedMoEFactory(
                         num_experts=num_experts,
                         top_k=top_k,
                         hidden_size=hidden_size,

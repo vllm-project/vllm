@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 
 @dataclass(frozen=True)
 class MoEEPLoadSpec:
-    """Per-expert-parallel slicing metadata for one FusedMoE LoRA module.
+    """Per-expert-parallel slicing metadata for one FusedMoEFactory LoRA module.
 
     Threaded into the LoRA loader so per-expert weights from EP ranks
     other than this one can be skipped before they ever hit CPU memory.
@@ -193,7 +193,7 @@ class LoRAModel:
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
-            moe_ep_spec: When 2D FusedMoE LoRA modules are present with
+            moe_ep_spec: When 2D FusedMoEFactory LoRA modules are present with
                 expert parallelism enabled, the (ep_rank, local, global)
                 slicing metadata shared across all MoE layers. Non-local
                 expert weights are skipped at read time instead of being

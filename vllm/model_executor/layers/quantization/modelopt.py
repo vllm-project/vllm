@@ -2350,7 +2350,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(prefix_dot):
                     return info["quant_algo"].upper()
 
-        # FusedMoE expert prefix is e.g. "...moe.experts", while ModelOpt's
+        # FusedMoEFactory expert prefix is e.g. "...moe.experts", while ModelOpt's
         # quantized_layers entries use "...moe.gate_proj" / "...moe.up_proj".
         if prefix.endswith(".experts"):
             parent_dot = prefix.rsplit(".experts", 1)[0] + "."

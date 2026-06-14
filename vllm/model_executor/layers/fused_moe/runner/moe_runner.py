@@ -347,7 +347,7 @@ class MoERunner(MoERunnerInterface):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Apply transform for routed experts (e.g., latent projection).
 
-        This is called by FusedMoE.forward_native. The original hidden_states
+        This is called by FusedMoEFactory.forward_native. The original hidden_states
         is saved separately so shared experts get [S, hidden_size] while
         routed experts get the transformed [S, moe_latent_size].
 
@@ -601,7 +601,7 @@ class MoERunner(MoERunnerInterface):
     ):
         # If router/gate provided, then apply it here.
         # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
+        #        parallel execution of shared experts with the FusedMoEFactory via
         #        separate cuda stream)
         if self._shared_experts is not None:
             assert shared_experts_input is not None
@@ -832,7 +832,7 @@ class MoERunner(MoERunnerInterface):
 
     #########################################################
     #
-    # Old methods from FusedMoE layer. Remove when possible.
+    # Old methods from FusedMoEFactory layer. Remove when possible.
     #
     #########################################################
 

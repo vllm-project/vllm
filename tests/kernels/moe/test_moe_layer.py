@@ -39,7 +39,11 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    MoERunner,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -77,7 +81,7 @@ NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
 
 # dp_size, tp_size, use_ep
-# Note: DP+TP is not yet supported in the FusedMoE layer.
+# Note: DP+TP is not yet supported in the FusedMoEFactory layer.
 PARALLEL_COMBOS = [
     [1, 2, False],
     [1, 4, False],
@@ -1002,7 +1006,7 @@ def make_fused_moe_layer(
         kwargs["routed_input_transform"] = routed_input_transform
         kwargs["routed_output_transform"] = routed_output_transform
 
-    layer = FusedMoE(
+    layer = FusedMoEFactory(
         num_experts=global_num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
@@ -1246,7 +1250,7 @@ def _test_body_eplb(
     ):
         output_before = sp_wrapper(moe_layer)(hidden_states, router_logits)
 
-    # Create a fresh FusedMoE layer with enable_eplb=True
+    # Create a fresh FusedMoEFactory layer with enable_eplb=True
     # Delete the original layer's registration so the constructor can
     # re-use the same "from_forward_context" prefix
     cc = vllm_config.compilation_config
@@ -1377,7 +1381,8 @@ def _run_one_config(
 
     - When is_sequence_parallel=True (EP + sequence splitting):
       * ep_size: Number of expert parallel ranks (equals dp_size * tp_size)
-      * tp_size: Number of ranks to split sequence across (becomes sp_size in FusedMoE)
+      * tp_size: Number of ranks to split sequence across (becomes sp_size in
+        FusedMoEFactory)
       * Weights are chunked by ep_size (experts) but NOT by tp_size
       * Input sequences are chunked by tp_size (via sp_wrapper)
     """
@@ -1452,8 +1457,8 @@ def _run_one_config(
         torch.accelerator.empty_cache()
 
         with set_current_vllm_config(vllm_config):
-            # Chunk weights for EP BEFORE creating FusedMoE
-            # FusedMoE uses EP-chunked weights and handles reductions internally
+            # Chunk weights for EP BEFORE creating FusedMoEFactory
+            # FusedMoEFactory uses EP-chunked weights and handles reductions internally
             if ep_size > 1:
                 # Split experts across ranks (dimension 0 is the expert dimension)
                 # When EP is enabled, use EP group rank and ep_size for chunking

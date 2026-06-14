@@ -195,7 +195,7 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
             self.gate = gate  # canonical path: "moe.gate"
 
             # Inner submodule holding the SAME gate instance under another
-            # path. This mirrors how FusedMoE.runner.gate references the
+            # path. This mirrors how FusedMoEFactory.runner.gate references the
             # block's gate in qwen3_moe.
             class _Runner(nn.Module):
                 def __init__(self, g):

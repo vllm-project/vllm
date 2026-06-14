@@ -1458,7 +1458,7 @@ def maybe_remap_moe_expert_param_name(
     """
     Remap MoE expert parameter names to account for routed_experts hierarchy.
 
-    This handles the transition from the old FusedMoE structure where weights
+    This handles the transition from the old FusedMoEFactory structure where weights
     were directly in the experts module, to the new MoERunner → RoutedExperts
     structure.
 

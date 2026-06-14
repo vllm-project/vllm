@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -162,7 +162,7 @@ class MiMoV2MoE(nn.Module):
             torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
