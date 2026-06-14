@@ -135,10 +135,11 @@ def _cached_get_attn_backend(
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout(required_layout)
-        logger.info(
+        logger.info_once(
             "Using %s KV cache layout for %s backend.",
             required_layout,
             backend.get_name(),
+            scope="local",
         )
 
     return backend

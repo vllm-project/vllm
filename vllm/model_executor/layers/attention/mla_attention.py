@@ -753,7 +753,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if self.impl.dcp_world_size > 1:
+                if fp8_attention and self.impl.supports_quant_query_input:
+                    # Quantize local Q before the DCP all-gather to avoid
+                    # sending BF16 query activations across DCP ranks.
+                    assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                    assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+                else:
+                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
+                    mqa_q = torch.cat((mqa_ql_nope, mqa_q_pe), dim=-1)
+                    # mqa_q do allgather in head dim.
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -761,12 +776,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
-            if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
-                # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not is_sparse_impl:
@@ -1223,6 +1232,7 @@ class MLACommonPrefillMetadata:
         padded_local_chunk_seq_lens: list[list[int]] | None = None
         local_context_lens_allranks: list[list[int]] | None = None
         padded_local_cu_seq_lens: torch.Tensor | None = None
+        padded_local_token_to_seq: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
         prefill_tokens_with_context: int | None = None
@@ -1511,7 +1521,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.model_config.dtype,
+                dtype=self.q_data_type,
                 device=device,
             )
         else:
@@ -1745,6 +1755,23 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
                     )
+                    padded_local_max_token_num_over_chunk = (
+                        padded_local_cu_chunk_seq_lens_cpu[:, -1].max().item()
+                    )
+                    padded_local_token_to_seq_tensor_cpu = torch.zeros(
+                        [num_chunks, padded_local_max_token_num_over_chunk],
+                        dtype=torch.int32,
+                    )
+                    for i in range(num_chunks):
+                        padded_local_token_to_seq_tensor = torch.repeat_interleave(
+                            range_idx, padded_local_chunk_seq_lens[i]
+                        )
+                        padded_local_chunk_len = padded_local_token_to_seq_tensor.shape[
+                            0
+                        ]
+                        padded_local_token_to_seq_tensor_cpu[
+                            i, :padded_local_chunk_len
+                        ] = padded_local_token_to_seq_tensor
 
                 prefill_tokens_with_context = None
                 if num_prefills_with_context_cpu > 0:
@@ -1767,6 +1794,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
                         local_context_lens_allranks=local_context_lens_allranks.tolist(),
                         padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        padded_local_token_to_seq=padded_local_token_to_seq_tensor_cpu.to(
                             device, non_blocking=True
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
@@ -2048,6 +2078,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         if use_fp8_prefill:
             q = q.to(prefill_metadata.q_data_type)
@@ -2145,7 +2176,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -2153,6 +2183,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill_metadata.chunked_context.padded_local_chunk_seq_lens is not None
         assert prefill_metadata.chunked_context.local_context_lens_allranks is not None
         assert prefill_metadata.chunked_context.padded_local_cu_seq_lens is not None
+        assert prefill_metadata.chunked_context.padded_local_token_to_seq is not None
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
         assert prefill_metadata.chunked_context.chunk_size is not None
 
@@ -2160,19 +2191,39 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+        use_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            ops.cp_gather_cache(
-                src_cache=kv_c_and_k_pe_cache,
-                dst=workspace,
-                block_table=prefill_metadata.block_table,
-                cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
-                    i
-                ],
-                batch_size=attn_metadata.num_prefills,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
-            )
+            if use_fp8_prefill or not use_fp8_kv_cache:
+                ops.cp_gather_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace,
+                    block_table=prefill_metadata.block_table,
+                    cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
+                        i
+                    ],
+                    batch_size=attn_metadata.num_prefills,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
+            else:
+                assert k_scale is not None, "FP8 KV cache dequant requires k_scale."
+                ops.gather_and_maybe_dequant_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace,
+                    block_table=prefill_metadata.block_table,
+                    cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
+                        i
+                    ],
+                    token_to_seq=prefill_metadata.chunked_context.padded_local_token_to_seq[
+                        i
+                    ],
+                    num_tokens=toks,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=k_scale,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                )
             # workspace
             # |------- N tokens --------|--------- N*dcp_size tokens ----------|
             # |<- use for local_gather ->|<--------- use for allgather -------->|
@@ -2210,9 +2261,25 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 toks=toks,
             )
 
+            # Match the non-DCP FP8 prefill bridge: kv_b_proj may need a
+            # non-FP8 activation dtype, then its projected K/V are recast for
+            # FP8 context attention.
+            _kv_b_proj_w_dtype = (
+                self.kv_b_proj.weight.dtype
+                if hasattr(self.kv_b_proj, "weight")
+                else self.kv_b_proj.params_dtype
+            )
+            if (
+                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
+            ) and _kv_b_proj_w_dtype != torch.uint8:
+                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            if use_fp8_prefill:
+                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
@@ -2294,7 +2361,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                         q,
                         kv_c_and_k_pe_cache,
                         attn_metadata,
-                        k_scale=None,
+                        k_scale=k_scale,
                         dcp_world_size=self.dcp_world_size,
                     )
                 )
