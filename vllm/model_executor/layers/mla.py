@@ -121,6 +121,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        quant_group_size: int | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -176,6 +179,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            quant_group_size=quant_group_size,
         )
 
         return self.o_proj(attn_out)[0]
