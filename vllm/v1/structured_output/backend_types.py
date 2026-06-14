@@ -94,6 +94,14 @@ class StructuredOutputGrammar(ABC):
         Resets the state of the structured output grammar.
         """
 
+    @property
+    def suppress_accept_errors(self) -> bool:
+        return False
+
+    @suppress_accept_errors.setter
+    def suppress_accept_errors(self, value: bool) -> None:
+        pass
+
 
 @dataclass
 class StructuredOutputBackend(ABC):
