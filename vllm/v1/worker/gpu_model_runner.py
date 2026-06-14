@@ -148,6 +148,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -7050,12 +7051,24 @@ class GPUModelRunner(
                     else:
                         shape_block_size = kernel_block_size
 
+                    # With --kv-cache-dtype-skip-layers, some layers (e.g.
+                    # sliding-window) keep the model dtype while the global
+                    # cache_config.cache_dtype is the *target* (e.g. "nvfp4").
+                    # Passing the target dtype here would make the backend
+                    # pick a quantized layout (e.g. FP4 packed) for layers
+                    # that are actually unquantized. Use the per-layer
+                    # kv_quant_mode to pick the right shape.
+                    if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE:
+                        layer_cache_dtype_str = "auto"
+                    else:
+                        layer_cache_dtype_str = self.cache_config.cache_dtype
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
-                        cache_dtype_str=self.cache_config.cache_dtype,
+                        cache_dtype_str=layer_cache_dtype_str,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
