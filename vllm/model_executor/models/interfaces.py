@@ -43,7 +43,7 @@ from .interfaces_base import VllmModel
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -339,6 +339,28 @@ class SupportsMultiModal(Protocol):
         multi-modal connector tokens.
         """
         ...
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: "MultiModalKwargsItem | None",
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """
+        Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
+
+        MM LoRA uses these counts to build adapter mappings for the tower and
+        connector forwards. Models with multiple modalities can override this
+        when each modality has different encoder padding or pooling behavior.
+        """
+        del modality, mm_kwargs
+        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
+        return (
+            num_encoder_tokens,
+            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        )
 
     @overload
     def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
