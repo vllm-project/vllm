@@ -1,0 +1,5 @@
+model_name: "baidu/ERNIE-4.5-VL-28B-A3B-Thinking"
+accuracy_threshold: 0.75
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096 --tensor-parallel-size 2"
