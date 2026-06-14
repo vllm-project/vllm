@@ -108,6 +108,27 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('nested:{inner:<|"|>value<|"|>}')
         assert result == {"nested": {"inner": "value"}}
 
+    def test_string_quoted_dict_key(self):
+        """String-typed keys wrapped in STRING_DELIM must be stripped.
+
+        Regression test for #44715: the model wraps a string-typed dict key in
+        ``<|"|>`` (e.g. ``<|"|>3<|"|>``) to signal it is a string rather than an
+        int. The delimiter must be stripped from the key, just like it is from
+        string values, instead of being kept verbatim.
+        """
+        result = _parse_gemma4_args('record_map:{<|"|>3<|"|>:<|"|>new text<|"|>}')
+        assert result == {"record_map": {"3": "new text"}}
+
+    def test_string_quoted_key_top_level(self):
+        """A STRING_DELIM-wrapped key at the top level is stripped too."""
+        result = _parse_gemma4_args('<|"|>3<|"|>:<|"|>value<|"|>')
+        assert result == {"3": "value"}
+
+    def test_mixed_quoted_and_bare_keys(self):
+        """Bare keys keep working alongside string-quoted keys."""
+        result = _parse_gemma4_args('name:<|"|>x<|"|>,<|"|>3<|"|>:<|"|>y<|"|>')
+        assert result == {"name": "x", "3": "y"}
+
     def test_array_of_strings(self):
         result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
         assert result == {"items": ["a", "b"]}

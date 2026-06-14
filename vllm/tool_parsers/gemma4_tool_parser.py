@@ -117,14 +117,34 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
 
-        # Parse key (unquoted, ends at ':')
-        key_start = i
-        while i < n and args_str[i] != ":":
-            i += 1
-        if i >= n:
-            break
-        key = args_str[key_start:i].strip()
-        i += 1  # skip ':'
+        # Parse key. Keys are usually bare identifiers terminated by ':', but
+        # the model may wrap a string-typed key in STRING_DELIM (e.g.
+        # <|"|>3<|"|>) to mark a numeric-looking key as a string. Handle that
+        # case the same way as string values below so the delimiter is stripped
+        # from the key rather than kept verbatim (#44715).
+        if args_str[i:].startswith(STRING_DELIM):
+            i += len(STRING_DELIM)
+            key_start = i
+            end_pos = args_str.find(STRING_DELIM, i)
+            if end_pos == -1:
+                # Unterminated key string — nothing parseable follows.
+                break
+            key = args_str[key_start:end_pos]
+            i = end_pos + len(STRING_DELIM)
+            # Skip to the ':' separator (whitespace may precede it).
+            while i < n and args_str[i] != ":":
+                i += 1
+            if i >= n:
+                break
+            i += 1  # skip ':'
+        else:
+            key_start = i
+            while i < n and args_str[i] != ":":
+                i += 1
+            if i >= n:
+                break
+            key = args_str[key_start:i].strip()
+            i += 1  # skip ':'
 
         # Parse value
         if i >= n:
