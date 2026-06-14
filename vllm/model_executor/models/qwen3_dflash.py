@@ -309,7 +309,6 @@ class DFlashQwen3Model(nn.Module):
                 DFlashQwen3DecoderLayer(
                     current_vllm_config,
                     config=self.config,
-                    layer_type=self.layer_types[layer_idx],
                     cache_config=current_vllm_config.cache_config,
                     quant_config=self.quant_config,
                     layer_type=self.layer_types[layer_idx],
