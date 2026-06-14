@@ -92,27 +92,36 @@ class BlockHashToBlockMap:
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """
-        Checks if block_hash exists and pop block_id from the cache
+        Checks if block_hash exists and pop block_id from the cache.
+        In the single-block case, the caller is expected to pass the
+        *exact* block that is stored at `key` (i.e. block_id must
+        match ``blocks.block_id``).  When this invariant holds the
+        entry is removed from the cache and returned.
+
+        When ``key`` maps to a ``dict[int, KVCacheBlock]`` (hash
+        collision) we look up the inner dict by ``block_id`` so that
+        siblings remain in the cache.
         """
         blocks = self._cache.pop(key, None)
         if blocks is None:
-            # block_hash not found in the cache
             return None
-        # TODO(Jialin): If key is found, block_id should always present
-        # in blocks. We currently keep the original behaviour for safety.
-        #
-        # Will add block_id == blocks.block_id assertion and
-        # use del blocks[block_id] instead as followup.
+
         if isinstance(blocks, KVCacheBlock):
+            # Fast-path: no collision.
             if blocks.block_id == block_id:
                 return blocks
-            # If the single block ID doesn't match, we should put the
-            # block back (it should happen rarely)
+            # The block stored at this key does NOT match the caller's
+            # block_id.  This is a rare inconsistency (e.g. after a
+            # prefix-cache reset or a race in the caller's lifecycle).
+            # We still clear the caller's hash below so that the block
+            # can be safely re-cached: the caller is *this* block's
+            # eviction, and even though the cache entry belonged to a
+            # different block we must not leave a dangling hash.
             self._cache[key] = blocks
             return None
         if isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict still
-            # contain blocks, put back to the cache.
+            # contains blocks, put back to the cache.
             block = blocks.pop(block_id, None)
             if len(blocks) > 0:
                 self._cache[key] = blocks
@@ -283,6 +292,7 @@ class BlockPool:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
+            assert new_hashes is not None
             if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
@@ -367,6 +377,11 @@ class BlockPool:
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
+        When the block's hash is not found in the cache (e.g. the cache entry
+        was already removed, or a different block with the same hash exists),
+        we still reset the block's hash because the block is about to be
+        reused for new content and its old hash would become stale.
+
         Args:
             block: The block to evict.
 
@@ -382,14 +397,20 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        if self.cached_block_hash_to_block.pop(block_hash, block.block_id) is None:
-            # block not found in cached_block_hash_to_block,
-            # eviction is not needed
-            return False
+        evicted = (
+            self.cached_block_hash_to_block.pop(block_hash, block.block_id)
+            is not None
+        )
 
+        # Reset the block hash regardless of whether it was found in the
+        # cache. The block is being reused for new tokens, so its old hash
+        # is about to become stale. If we don't clear it here, the
+        # subsequent cache_full_blocks call (which asserts block_hash is
+        # None) would fail, or worse, the stale hash could silently
+        # accumulate in the block hash map.
         block.reset_hash()
 
-        if self.enable_kv_cache_events:
+        if evicted and self.enable_kv_cache_events:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
@@ -397,7 +418,7 @@ class BlockPool:
                     group_idx=get_group_id(block_hash),
                 )
             )
-        return True
+        return evicted
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
