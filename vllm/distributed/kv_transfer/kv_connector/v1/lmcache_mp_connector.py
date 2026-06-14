@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import hashlib
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.utils import ConstantList
+from vllm.v1.utils import ConstantList, tensor_data
 
 try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -185,6 +186,62 @@ class LMCacheMPRequestState(enum.Enum):
     READY = enum.auto()
 
 
+def _get_prompt_embeds_digest(request: "Request") -> str | None:
+    """Return a memoized hex digest of `request.prompt_embeds`, or None.
+
+    The digest is cached on the request itself so trackers re-created on
+    preempt/resume don't repeat the (potentially large) D2H copy + hash.
+    """
+    if request.prompt_embeds is None:
+        return None
+    cached = request._prompt_embeds_digest
+    if cached is None:
+        cached = hashlib.sha256(tensor_data(request.prompt_embeds)).hexdigest()
+        request._prompt_embeds_digest = cached
+    return cached
+
+
+def _get_mm_features_digest(request: "Request") -> str | None:
+    """Return a stable hex digest of `request.mm_features`, or None.
+
+    Uses the precomputed `identifier` strings on each MultiModalFeatureSpec
+    plus their placeholder offsets/lengths. No tensor data is touched.
+    """
+    if not request.mm_features:
+        return None
+    h = hashlib.sha256()
+    for f in request.mm_features:
+        h.update(f.identifier.encode("utf-8"))
+        h.update(b"|")
+        h.update(str(f.mm_position.offset).encode("utf-8"))
+        h.update(b":")
+        h.update(str(f.mm_position.length).encode("utf-8"))
+        h.update(b";")
+    return h.hexdigest()
+
+
+def _augment_cache_salt(request: "Request") -> str:
+    """Build the effective LMCache cache_salt for a request.
+
+    For token-only requests with no MM inputs, returns the user-provided
+    salt unchanged (preserving historical behavior). When prompt_embeds or
+    mm_features are present, appends `|pe:<digest>` and/or `|mm:<digest>`
+    so two requests with the same token_ids placeholder shape but different
+    content map to distinct external KV keys.
+    """
+    base = request.cache_salt or ""
+    parts = [base]
+    pe = _get_prompt_embeds_digest(request)
+    if pe is not None:
+        parts.append(f"pe:{pe}")
+    mm = _get_mm_features_digest(request)
+    if mm is not None:
+        parts.append(f"mm:{mm}")
+    if len(parts) == 1:
+        return base
+    return "|".join(parts)
+
+
 @dataclass
 class LMCacheMPRequestTracker:
     # NOTE: this class used vLLM data structures, should be part of
@@ -220,7 +277,15 @@ class LMCacheMPRequestTracker:
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
-        self.cache_salt: str = request.cache_salt or ""
+        # When a request carries prompt_embeds or mm_features, the placeholder
+        # token IDs in `request.all_token_ids` cannot distinguish requests
+        # with the same length but different content. The LMCache external KV
+        # key (derived from token_ids + cache_salt) would then collide. Mix
+        # stable per-request digests of the embedding bytes / mm identifiers
+        # into the salt so the augmented value propagates through every
+        # IPCCacheEngineKey downstream (lookup, store, retrieve,
+        # free_lookup_locks). See vllm-project/vllm#42119.
+        self.cache_salt: str = _augment_cache_salt(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
