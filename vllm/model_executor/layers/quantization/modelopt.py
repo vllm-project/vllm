@@ -1614,6 +1614,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            marlin_padded_w13_n=getattr(layer, "marlin_padded_w13_n", None),
+            marlin_padded_w2_k=getattr(layer, "marlin_padded_w2_k", None),
         )
 
     @property

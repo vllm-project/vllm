@@ -8,5 +8,6 @@ Qwen3-30B-A3B-Fp8-CT-Block-marlin.yaml
 Qwen3-30B-A3B-Fp8-CT-Block-triton.yaml
 Qwen3-30B-A3B-Fp8-CT-Channel-marlin.yaml
 Qwen3-30B-A3B-Fp8-CT-Channel-vllm-cutlass.yaml
+Qwen3-30B-A3B-NvFp4-CT-marlin.yaml
 Qwen3-30B-A3B-BF16-fi-cutlass.yaml
 Qwen3-30B-A3B-BF16-triton.yaml

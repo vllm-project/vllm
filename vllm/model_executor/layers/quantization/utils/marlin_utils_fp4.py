@@ -27,8 +27,100 @@ from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
+FP4_MARLIN_TILE_N_SIZE = 64
 
 logger = init_logger(__name__)
+
+
+def _pad_tensor_dim(
+    tensor: torch.Tensor,
+    dim: int,
+    padded_size: int,
+) -> torch.Tensor:
+    """Pad ``tensor`` along ``dim`` with zeros up to ``padded_size``.
+
+    Returns the input unchanged when no padding is needed. Raises ``ValueError``
+    if ``padded_size`` is smaller than the current size on ``dim``.
+    """
+    pad_size = padded_size - tensor.size(dim)
+    if pad_size == 0:
+        return tensor
+    if pad_size < 0:
+        raise ValueError(
+            f"Cannot pad dim {dim} from {tensor.size(dim)} to {padded_size}."
+        )
+    pad_shape = list(tensor.shape)
+    pad_shape[dim] = pad_size
+    pad = tensor.new_zeros(pad_shape)
+    return torch.cat((tensor, pad), dim=dim)
+
+
+def _pad_w13_for_marlin_tile(
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    unpadded_w13_size_n: int,
+    w13_num_shards: int,
+    tile_n_size: int = FP4_MARLIN_TILE_N_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Pad each w13 shard along size_n to the Marlin tile size. The new
+    layout is ``[shard_0, pad_0, shard_1, pad_1, ...]`` so the activation
+    can split the gemm output by ``padded_per_shard`` without unpadding;
+    zero-padded slots produce zero through both element-wise and gated
+    activations."""
+    per_shard_unpadded = unpadded_w13_size_n // w13_num_shards
+    per_shard_padded = round_up(per_shard_unpadded, tile_n_size)
+    if per_shard_padded == per_shard_unpadded:
+        return w13, w13_scale, unpadded_w13_size_n
+
+    padded_w13_size_n = w13_num_shards * per_shard_padded
+    logger.warning_once(
+        "Padding is required for Marlin FP4 MoE w13 (per-shard n=%d -> %d).",
+        per_shard_unpadded,
+        per_shard_padded,
+    )
+    e, _, half_k = w13.shape
+    w13 = w13.view(e, w13_num_shards, per_shard_unpadded, half_k)
+    w13 = _pad_tensor_dim(w13, dim=2, padded_size=per_shard_padded)
+    w13 = w13.reshape(e, padded_w13_size_n, half_k)
+
+    scale_last = w13_scale.shape[-1]
+    w13_scale = w13_scale.view(e, w13_num_shards, per_shard_unpadded, scale_last)
+    w13_scale = _pad_tensor_dim(w13_scale, dim=2, padded_size=per_shard_padded)
+    w13_scale = w13_scale.reshape(e, padded_w13_size_n, scale_last)
+    return w13, w13_scale, padded_w13_size_n
+
+
+def _pad_w2_for_marlin_tile(
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    unpadded_w2_size_k: int,
+    group_size: int,
+    tile_n_size: int = FP4_MARLIN_TILE_N_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Pad w2 along size_k to the Marlin tile size so the kernel's
+    thread-config selector (thread_k in {64, 128}) accepts the gemm. The
+    activation input is padded to match in ``_fused_marlin_moe``."""
+    padded_w2_size_k = round_up(unpadded_w2_size_k, tile_n_size)
+    if padded_w2_size_k != unpadded_w2_size_k:
+        logger.warning_once(
+            "Padding is required for Marlin FP4 MoE w2 (k=%d -> %d).",
+            unpadded_w2_size_k,
+            padded_w2_size_k,
+        )
+        w2 = _pad_tensor_dim(w2, dim=2, padded_size=padded_w2_size_k // 2)
+        w2_scale = _pad_tensor_dim(
+            w2_scale, dim=2, padded_size=padded_w2_size_k // group_size
+        )
+    return w2, w2_scale, padded_w2_size_k
+
+
+def _fp4_marlin_moe_tile_n_size(hidden_size: int) -> int:
+    if hidden_size % 128 == 0:
+        return FP4_MARLIN_TILE_N_SIZE
+    assert hidden_size % 64 == 0, (
+        f"hidden_size = {hidden_size} unsupported by Marlin tiles"
+    )
+    return 2 * FP4_MARLIN_TILE_N_SIZE
 
 
 def is_fp4_marlin_supported():
@@ -333,32 +425,21 @@ def prepare_nvfp4_moe_layer_for_marlin(
     E = layer.num_experts
     K = layer.hidden_size
     N = layer.intermediate_size_per_partition
-    num_shards = 2 if is_act_and_mul else 1
+    w13_num_shards = 2 if is_act_and_mul else 1
+    tile_n_size = _fp4_marlin_moe_tile_n_size(K)
 
-    # Pad the rank-local intermediate size to satisfy Marlin thread tiles:
-    # N is an output extent of w13 (per gate/up shard) and the input extent
-    # of w2, so the padded region never reaches the MoE output.
-    if K % 128 == 0:
-        padded_N = round_up(N, 64)
-    else:
-        assert K % 64 == 0, f"hidden_size = {K} unsupported by Marlin tiles"
-        padded_N = round_up(N, 128)
-
-    def pad_w13(x: torch.Tensor) -> torch.Tensor:
-        """Zero-pad each gate/up shard of a (E, num_shards * N, cols)
-        tensor to padded_N rows."""
-        if padded_N == N:
-            return x
-        x = x.view(E, num_shards, N, x.size(-1))
-        x = torch.nn.functional.pad(x, (0, 0, 0, padded_N - N))
-        return x.reshape(E, num_shards * padded_N, -1)
-
-    def pad_w2(x: torch.Tensor, packing: int) -> torch.Tensor:
-        """Zero-pad the packed N (last) dim of a (E, K, N / packing)
-        tensor."""
-        if padded_N == N:
-            return x
-        return torch.nn.functional.pad(x, (0, (padded_N - N) // packing))
+    w13, w13_scale, padded_w13_size_n = _pad_w13_for_marlin_tile(
+        w13,
+        w13_scale,
+        w13_num_shards * N,
+        w13_num_shards,
+        tile_n_size=tile_n_size,
+    )
+    layer.marlin_padded_w13_n = padded_w13_size_n
+    w2, w2_scale, padded_w2_size_k = _pad_w2_for_marlin_tile(
+        w2, w2_scale, N, GROUP_SIZE, tile_n_size=tile_n_size
+    )
+    layer.marlin_padded_w2_k = padded_w2_size_k
 
     device = w13.device
     param_dtype = layer.params_dtype
@@ -373,15 +454,11 @@ def prepare_nvfp4_moe_layer_for_marlin(
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = N * num_shards, K
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w13(weight)
-            size_n = padded_N * num_shards
+            size_n, size_k = padded_w13_size_n, K
         else:
-            size_n, size_k = K, N
-            assert weight.shape == (E, size_n, size_k // 2)
-            weight = pad_w2(weight, packing=2)
-            size_k = padded_N
+            size_n, size_k = K, padded_w2_size_k
+
+        assert weight.shape == (E, size_n, size_k // 2)
 
         for i in range(E):
             qweight = weight[i].view(torch.int32).T.contiguous()
@@ -410,11 +487,9 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
         tensor_list = []
         if "w13" in name:
-            scales = pad_w13(scales)
-            size_n, size_k = padded_N * num_shards, K
+            size_n, size_k = padded_w13_size_n, K
         else:
-            scales = pad_w2(scales, packing=GROUP_SIZE)
-            size_n, size_k = K, padded_N
+            size_n, size_k = K, padded_w2_size_k
 
         # All experts share one global_scale, so compute the max
         # scale_factor across all experts first, then apply uniformly.
@@ -460,6 +535,35 @@ def prepare_moe_fp4_layer_for_marlin(
     e = layer.moe_config.num_experts
     k = layer.moe_config.hidden_dim
     n = layer.moe_config.intermediate_size_per_partition
+    tile_n_size = _fp4_marlin_moe_tile_n_size(k)
+
+    # In-place gated-MoE variant: pad and re-wrap as nn.Parameter only when
+    # padding actually changed the tensors.
+    w13_padded, w13_scale_padded, padded_w13_size_n = _pad_w13_for_marlin_tile(
+        layer.w13_weight.data,
+        layer.w13_weight_scale.data,
+        n * 2,
+        w13_num_shards=2,
+        tile_n_size=tile_n_size,
+    )
+    if w13_padded is not layer.w13_weight.data:
+        layer.w13_weight = torch.nn.Parameter(w13_padded, requires_grad=False)
+        layer.w13_weight_scale = torch.nn.Parameter(
+            w13_scale_padded, requires_grad=False
+        )
+    layer.marlin_padded_w13_n = padded_w13_size_n
+
+    w2_padded, w2_scale_padded, padded_w2_size_k = _pad_w2_for_marlin_tile(
+        layer.w2_weight.data,
+        layer.w2_weight_scale.data,
+        n,
+        group_size,
+        tile_n_size=tile_n_size,
+    )
+    if w2_padded is not layer.w2_weight.data:
+        layer.w2_weight = torch.nn.Parameter(w2_padded, requires_grad=False)
+        layer.w2_weight_scale = torch.nn.Parameter(w2_scale_padded, requires_grad=False)
+    layer.marlin_padded_w2_k = padded_w2_size_k
 
     # WORKSPACE
     device = layer.w13_weight.device
@@ -474,9 +578,9 @@ def prepare_moe_fp4_layer_for_marlin(
         weight = getattr(layer, name)
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = padded_w13_size_n, k
         else:
-            size_n, size_k = k, n
+            size_n, size_k = k, padded_w2_size_k
 
         assert weight.shape == (e, size_n, size_k // 2)
 
@@ -510,9 +614,9 @@ def prepare_moe_fp4_layer_for_marlin(
 
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = padded_w13_size_n, k
         else:
-            size_n, size_k = k, n
+            size_n, size_k = k, padded_w2_size_k
 
         # For NVFP4: compute unified scale_factor across all experts
         combined_scale_factor = None
@@ -607,19 +711,29 @@ def prepare_moe_mxfp4_layer_for_marlin(
     e = w13.shape[0]
     n = w13.shape[1] // 2  # intermediate_size_per_partition
     k = w13.shape[2] * 2  # hidden_size
+    tile_n_size = _fp4_marlin_moe_tile_n_size(k)
 
     device = w13.device
     param_dtype = layer.params_dtype
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     perm = torch.empty(0, dtype=torch.int, device=device)
 
+    w13, w13_scale, padded_w13_size_n = _pad_w13_for_marlin_tile(
+        w13, w13_scale, n * 2, w13_num_shards=2, tile_n_size=tile_n_size
+    )
+    layer.marlin_padded_w13_n = padded_w13_size_n
+    w2, w2_scale, padded_w2_size_k = _pad_w2_for_marlin_tile(
+        w2, w2_scale, n, group_size, tile_n_size=tile_n_size
+    )
+    layer.marlin_padded_w2_k = padded_w2_size_k
+
     # WEIGHT: Repack weights to marlin format
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = padded_w13_size_n, k
         else:
-            size_n, size_k = k, n
+            size_n, size_k = k, padded_w2_size_k
 
         assert weight.shape == (e, size_n, size_k // 2)
 
@@ -646,9 +760,9 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = padded_w13_size_n, k
         else:
-            size_n, size_k = k, n
+            size_n, size_k = k, padded_w2_size_k
 
         for i in range(e):
             scale = scales[i].T
