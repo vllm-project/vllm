@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
@@ -9,7 +10,7 @@ from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -530,6 +531,28 @@ class SpeculativeConfig:
 
         return hf_config
 
+    @staticmethod
+    def compose_draft_hf_overrides(
+        target_hf_overrides: HfOverrides | None,
+    ) -> Callable[[PretrainedConfig], PretrainedConfig]:
+        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+        Dict overrides are target-specific key patches and are not applied
+        to the draft.
+        """
+        if not callable(target_hf_overrides):
+            return SpeculativeConfig.hf_config_override
+
+        def composed(hf_config: PretrainedConfig) -> PretrainedConfig:
+            hf_config = SpeculativeConfig.hf_config_override(hf_config)
+            return target_hf_overrides(hf_config)
+
+        return composed
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -697,7 +720,9 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=SpeculativeConfig.compose_draft_hf_overrides(
+                        self.target_model_config.hf_overrides
+                    ),
                     config_format=self.target_model_config.config_format,
                 )
 
