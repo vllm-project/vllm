@@ -1181,6 +1181,19 @@ class SpecDecodeBaseProposer:
             ),
         )
 
+        # Use the draft model's own parallel config, model config, and load config
+        # instead of inheriting the target model's. This is critical for correct
+        # TP group behavior when draft_tensor_parallel_size > 1.
+        base = replace(
+            base,
+            model_config=spec_cfg.draft_model_config,
+            load_config=spec_cfg.draft_load_config,
+            parallel_config=replace(
+                spec_cfg.draft_parallel_config,
+                rank=self.vllm_config.parallel_config.rank,
+            ),
+        )
+
         return base
 
     def _get_model(self) -> nn.Module:

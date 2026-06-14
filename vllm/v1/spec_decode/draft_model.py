@@ -53,16 +53,11 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
-        spec = self.speculative_config
 
+        # Draft models should not inherit the target model's quantization config.
         return replace(
             base,
             quant_config=None,
-            parallel_config=replace(
-                spec.draft_parallel_config,
-                rank=self.vllm_config.parallel_config.rank,
-            ),
-            model_config=spec.draft_model_config,
         )
 
     @override
