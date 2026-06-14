@@ -11,8 +11,11 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.13.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
-ARG MORI_REPO="https://github.com/ROCm/mori.git"
+# MoRI is installed from a prebuilt wheel published on ROCm's GitHub releases.
+# Leave MORI_WHEEL_URL empty to auto-construct the URL from MORI_VERSION and the
+# image PYTHON_VERSION (e.g. 3.12 -> cp312); set it to override entirely.
+ARG MORI_VERSION=1.1.1
+ARG MORI_WHEEL_URL=
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -30,7 +33,6 @@ ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
-ENV MORI_GPU_ARCHS=gfx942;gfx950
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
@@ -189,22 +191,6 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
 
 
 ###
-### MORI Build
-###
-FROM base AS build_mori
-ARG MORI_BRANCH
-ARG MORI_REPO
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN git clone ${MORI_REPO}
-RUN cd mori \
-    && git checkout ${MORI_BRANCH} \
-    && git submodule update --init --recursive \
-    && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
-RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
-
-
-###
 ### FlashAttention Build
 ###
 FROM base AS build_fa
@@ -269,25 +255,25 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
-# Full debs stage - includes Mori (used by Docker releases)
-FROM base AS debs
-RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
-
 FROM base AS final
-RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
+RUN --mount=type=bind,from=debs_wheel_release,src=/app/debs,target=/install \
     pip install /install/*.whl
+
+ARG MORI_VERSION
+ARG MORI_WHEEL_URL
+# Install prebuilt MoRI wheel from ROCm GitHub releases.
+# Python tag is derived from the image PYTHON_VERSION (3.12 -> cp312).
+# --no-deps: only install MoRI itself so the wheel cannot pull/upgrade deps and
+# disturb the pinned ROCm torch/component stack; MoRI's runtime deps
+# (quart/msgpack/...) are installed separately in Dockerfile.rocm's mori_base.
+RUN set -eux; \
+    url="${MORI_WHEEL_URL}"; \
+    if [ -z "$url" ]; then \
+      pytag="cp$(echo "${PYTHON_VERSION}" | tr -d '.')"; \
+      url="https://github.com/ROCm/mori/releases/download/v${MORI_VERSION}/amd_mori-${MORI_VERSION}-${pytag}-${pytag}-linux_x86_64.whl"; \
+    fi; \
+    echo "[MORI] Installing $url"; \
+    pip install --no-deps "$url"
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
@@ -302,8 +288,6 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG MORI_BRANCH
-ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
@@ -317,5 +301,4 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
-    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
-    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
+    && echo "MORI_VERSION: ${MORI_VERSION}" >> /app/versions.txt

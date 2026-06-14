@@ -220,7 +220,19 @@ uv pip install vllm==${VLLM_VERSION} \
     cd mori
     git checkout $MORI_BRANCH_OR_COMMIT
     git submodule sync; git submodule update --init --recursive
-    MORI_GPU_ARCHS="gfx942;gfx950" python3 setup.py install
+    pip3 install . --no-build-isolation -v
+    ```
+
+    That's it. No hipcc needed at install time - host code compiles with a standard C++ compiler. GPU kernels are JIT-compiled on first use and cached to `~/.mori/jit/`. If a GPU is detected during install, kernel precompilation starts automatically in the background. To manually precompile all kernels (e.g. in a Docker image build):
+
+    ```bash
+    MORI_PRECOMPILE=1 python -c "import mori"
+    ```
+
+    Verify installation
+
+    ```bash
+    python -c "import mori; print('OK')"
     ```
 
     !!! note
