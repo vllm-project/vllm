@@ -30,6 +30,17 @@ else:
 logger = init_logger(__name__)
 
 
+def get_device_context(
+    device: torch.device,
+) -> contextlib.AbstractContextManager[Any]:
+    if device.type == "cuda":
+        # torch.accelerator.device_index is generally preferred, but it
+        # will cause a torch.compile Dynamo break issue.
+        # see https://github.com/pytorch/pytorch/issues/181540
+        return torch.cuda.device(device.index)
+    return torch.accelerator.device_index(device.index)
+
+
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(platform.uname()).lower()
