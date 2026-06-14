@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.import_utils import import_from_path
+from vllm.utils.import_utils import import_plugin
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -334,16 +333,5 @@ class ReasoningParserManager:
 
     @classmethod
     def import_reasoning_parser(cls, plugin_path: str) -> None:
-        """
-        Import a user-defined reasoning parser by the path
-        of the reasoning parser define file.
-        """
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-
-        try:
-            import_from_path(module_name, plugin_path)
-        except Exception:
-            logger.exception(
-                "Failed to load module '%s' from %s.", module_name, plugin_path
-            )
-            return
+        """Import a user-defined reasoning parser."""
+        import_plugin(plugin_path)
