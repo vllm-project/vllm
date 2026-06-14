@@ -469,7 +469,10 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-                        break
+                    # Scale was handled (or skipped by remap); do not fall
+                    # through to the generic params_dict lookup below which
+                    # would KeyError on the rewritten qkv_proj.{k,v}_scale name.
+                    break
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
