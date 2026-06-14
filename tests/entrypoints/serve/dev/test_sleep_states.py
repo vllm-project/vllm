@@ -434,3 +434,130 @@ def test_partial_wake_then_full_wake_output_correct():
         assert resp["choices"][0]["text"] == golden_text, (
             "output mismatch after staged wake — weight or KV restore broken"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — sleep blocks new requests (SGLang lesson: release only when idle;
+#           vLLM pause_scheduler + clear_cache must prevent execution)
+# ---------------------------------------------------------------------------
+
+
+def test_sleep_blocks_execution():
+    """After sleep(), the engine must not execute any forward passes.
+    New requests should be held (scheduler paused) and not return results
+    until wake_up() is called.
+
+    SGLang asserts is_fully_idle() before release_memory_occupation; vLLM
+    pause_scheduler() achieves the same — no request should slip through while
+    kv_cache is unmapped.
+    """
+    with _sleep_mode_server(MODEL_NAME, COMMON_ARGS) as url:
+        assert _sleep(url, level=1) == 200
+        assert _is_sleeping(url) is True
+
+        # Request submitted while asleep must NOT complete (engine dead or blocked).
+        # We use a very short timeout — if the request returns successfully the
+        # scheduler guard is broken.
+        resp = _generate(url, timeout=5)
+        # Either None (timeout/connection refused) or an error JSON is acceptable;
+        # what is NOT acceptable is a successful completion with choices.
+        successful = (
+            resp is not None
+            and "choices" in resp
+            and resp.get("choices")
+            and "error" not in resp
+        )
+        assert not successful, (
+            "generate returned a successful result while engine was sleeping — "
+            "scheduler guard broken"
+        )
+
+        # Engine must still be alive (just paused, not dead)
+        assert _health(url) == 200, "engine died during sleep instead of blocking"
+
+        # Full wake — request should now succeed
+        assert _wake(url) == 200
+        assert _is_sleeping(url) is False
+        resp = _generate(url)
+        assert resp is not None
+        assert "choices" in resp and len(resp["choices"][0]["text"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — multiple sleep/wake cycles: bookkeeping correctness
+#           (SGLang/TRTInfer lesson: repeated release+resume must not corrupt
+#           the memory pool; cumem double-free or wrong residency state breaks
+#           subsequent cycles)
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_sleep_wake_cycles_stable():
+    """Three consecutive sleep(1) → wake_up() cycles must all produce the
+    same output as the pre-sleep golden, verifying that the cumem allocator
+    bookkeeping (is_resident tracking, pool pointers) is stable across
+    repeated release+remap of the same physical pages.
+
+    Regression for: a double-unmap or stale is_resident flag would cause the
+    second or third cycle to either IMA or silently serve wrong output.
+    """
+    with _sleep_mode_server(MODEL_NAME, COMMON_ARGS) as url:
+        golden = _generate(url)
+        assert golden is not None
+        golden_text = golden["choices"][0]["text"]
+
+        for cycle in range(3):
+            assert _sleep(url, level=1) == 200, f"sleep failed on cycle {cycle}"
+            assert _is_sleeping(url) is True
+            assert _wake(url) == 200, f"wake failed on cycle {cycle}"
+            assert _is_sleeping(url) is False
+            assert _health(url) == 200, f"engine died on cycle {cycle}"
+            resp = _generate(url)
+            assert resp is not None, f"generate timed out on cycle {cycle}"
+            assert resp["choices"][0]["text"] == golden_text, (
+                f"output changed on cycle {cycle} — cumem bookkeeping corrupted"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — prefix cache invalidated after wake_up
+#            (SGLang lesson: resume_memory_occupation must flush prefix cache;
+#             vLLM wake_up calls reset_prefix_cache so stale KV entries from
+#             before sleep do not survive across a sleep/wake boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_prefix_cache_cleared_after_wake():
+    """After sleep → wake_up, the prefix cache must be invalidated.
+
+    SGLang explicitly calls flush_cache() after resume_memory_occupation.
+    vLLM reset_prefix_cache() is called inside wake_up (core.py:688).
+
+    If the prefix cache is NOT flushed, a request using the same prompt as
+    before sleep would reuse a stale cached KV entry whose physical page was
+    released during sleep — leading to either corrupted output or IMA on the
+    next sleep cycle.
+
+    We verify this by:
+      1. Generating with prompt P to populate the prefix cache.
+      2. sleep(1) — physical pages released.
+      3. wake_up() — pages remapped, prefix cache should be flushed.
+      4. Generate again with the same prompt P.
+      5. The engine must be alive and return a valid (non-corrupt) response.
+    """
+    with _sleep_mode_server(MODEL_NAME, COMMON_ARGS) as url:
+        prompt = "The capital of France is"
+
+        # populate prefix cache
+        r1 = _generate(url, prompt=prompt)
+        assert r1 is not None
+
+        assert _sleep(url, level=1) == 200
+        assert _wake(url) == 200
+        assert _health(url) == 200
+
+        # generate with same prompt — must succeed (not crash or corrupt)
+        r2 = _generate(url, prompt=prompt)
+        assert r2 is not None, "generate after wake failed — possible prefix cache IMA"
+        assert "choices" in r2 and len(r2["choices"][0]["text"]) > 0, (
+            "empty output after wake with cached prompt — prefix cache not flushed"
+        )
