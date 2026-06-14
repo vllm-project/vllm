@@ -21,6 +21,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -30,6 +31,7 @@ class ModelRequestData(NamedTuple):
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
     sampling_params: list[SamplingParams] | None = None
+    use_llm_chat: bool = False
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -1523,18 +1525,20 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     # NOTE: Need L40 (or equivalent) to avoid OOM
     engine_args = EngineArgs(
         model=model_name,
+        tokenizer_mode="mistral",
+        config_format="mistral",
+        load_format="mistral",
+        ignore_patterns=["model*.safetensors"],
         max_model_len=8192,
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
-        ignore_patterns=["consolidated.safetensors"],
     )
-
-    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
-        prompts=prompts,
+        prompts=questions,
+        use_llm_chat=True,
     )
 
 
@@ -2892,6 +2896,29 @@ def main(args):
     lora_request = (
         req_data.lora_requests * args.num_prompts if req_data.lora_requests else None
     )
+
+    if req_data.use_llm_chat:
+        if args.verify_mm_cache_hit_with_uuids:
+            raise ValueError("verify-mm-cache-hit-with-uuids is not supported when use_llm_chat is True.")
+
+        images = [inputs["multi_modal_data"][modality]] if args.num_prompts == 1 else [inp["multi_modal_data"][modality] for inp in inputs]
+        messages = [
+            [{"role": "user", "content": [
+                {"type": "text", "text": prompts[i % len(prompts)]},
+                {"type": "image_url", "image_url": {"url": encode_image_url(images[i])}},
+            ]}]
+            for i in range(args.num_prompts)
+        ]
+
+        with time_counter(args.time_generate):
+            outputs = llm.chat(messages, sampling_params=sampling_params)
+
+        print("-" * 50)
+        for o in outputs:
+             generated_text = o.outputs[0].text
+             print(generated_text)
+             print("-" * 50)
+        return
 
     with time_counter(args.time_generate):
         outputs = llm.generate(
