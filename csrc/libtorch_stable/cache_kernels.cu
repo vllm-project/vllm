@@ -993,9 +993,9 @@ __global__ void gather_and_maybe_dequant_cache(
     const int32_t* __restrict__ cu_seq_lens,   // [BATCH+1]
     const int32_t* __restrict__ token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNK]
     const int32_t num_tokens, const int32_t block_size,
-    const int64_t block_table_stride, const int64_t cache_block_stride,
-    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
-    const float* __restrict__ scale,
+    const int32_t num_block_indices, const int64_t block_table_stride,
+    const int64_t cache_block_stride, const int64_t cache_entry_stride,
+    const int64_t dst_entry_stride, const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
                                                // batch
   constexpr int vec_size = sizeof(float4) / sizeof(scalar_t);
@@ -1020,6 +1020,9 @@ __global__ void gather_and_maybe_dequant_cache(
     }
     batch_offset += offset;
     int32_t block_table_id = batch_offset / block_size;
+    // Guard against reading past the block table row: seq_starts combined
+    // with the in-batch offset can index beyond BLOCK_INDICES (issue #45380).
+    if (block_table_id >= num_block_indices) continue;
     int32_t slot_id = batch_offset % block_size;
     int32_t block_table_offset = batch_id * block_table_stride + block_table_id;
     int32_t block_id = block_table[block_table_offset];
@@ -1076,9 +1079,9 @@ __global__ void gather_and_maybe_dequant_cache(
           block_table.const_data_ptr<int32_t>(),                              \
           cu_seq_lens.const_data_ptr<int32_t>(),                              \
           token_to_seq.const_data_ptr<int32_t>(), num_tokens, block_size,     \
-          block_table_stride, cache_block_stride, cache_entry_stride,         \
-          dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
-          seq_starts_ptr);
+          num_block_indices, block_table_stride, cache_block_stride,          \
+          cache_entry_stride, dst_entry_stride,                               \
+          reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
 
 #define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
@@ -1136,6 +1139,7 @@ void gather_and_maybe_dequant_cache(
                     "src_cache and seq_starts must be on the same device");
   }
 
+  int32_t num_block_indices = block_table.size(1);
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
   int64_t cache_entry_stride = src_cache.stride(1);
@@ -1189,6 +1193,10 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
   // Compute physical token address via block table
   const int out_token_id = flat_warp_id;
   const int token_offset = out_token_id - workspace_starts[req_id];
+  // Guard against workspace_starts whose first entry is nonzero: the binary
+  // search clamps req_id to 0, so token_offset can go negative and underflow
+  // the block table read below (issue #45377).
+  if (token_offset < 0) return;
   const int cache_block_idx = token_offset / block_size;
   const int offset_in_block = token_offset % block_size;
   const int physical_block =
