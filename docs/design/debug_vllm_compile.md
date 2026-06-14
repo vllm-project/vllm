@@ -2,6 +2,7 @@
 
 TL;DR:
 
+- set `VLLM_DEBUG_DUMP_PATH` to inspect vLLM graph dumps.
 - use tlparse to acquire torch.compile logs. Include these logs in bug reports and/or support asks.
 - The vLLM-torch.compile integration is multiple pieces. vLLM exposes flags to turn off each piece:
 
@@ -13,6 +14,37 @@ TL;DR:
 | -cc.cudagraph_mode=NONE        | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE)        | Turn off CUDAGraphs only                             |
 | -cc.backend=eager              | compilation_config=CompilationConfig(backend='eager')                          | Turn off TorchInductor                               |
 | -cc.ir_enable_torch_wrap=False | compilation_config=CompilationConfig(ir_enable_torch_wrap=False)               | Turn off vLLM IR wrapping                            |
+
+## Use vLLM graph dumps
+
+If you mainly want to inspect the vLLM graphs, set `VLLM_DEBUG_DUMP_PATH`.
+This writes a rank-local dump directory. You can also use
+`-cc.debug_dump_path=/tmp/vllm-dumps` or `CompilationConfig(debug_dump_path=...)`.
+
+```sh
+VLLM_DEBUG_DUMP_PATH=/tmp/vllm-dumps vllm serve <model>
+```
+
+For offline inference, the same env var works around the Python script:
+
+```sh
+VLLM_DEBUG_DUMP_PATH=/tmp/vllm-dumps python my_script.py
+```
+
+The useful entry point is:
+
+```text
+/tmp/vllm-dumps/rank_0_dp_0/graphs/index.md
+```
+
+Open `index.md` first. It lists the graph stages in order and links to the
+three files for each stage:
+
+- `*.structured.txt`: the graph nested by model/layer where Dynamo metadata
+  is available
+- `*.raw.py`: the raw FX graph
+- `*.metadata.json`: vLLM context like model name, compile ranges,
+  pass context, function name, and vLLM IR provider metadata
 
 ## vLLM-torch.compile overview
 
