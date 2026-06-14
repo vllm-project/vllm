@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
+    VLLM_USE_AITER_FUSED: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -1184,6 +1185,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    # Whether to use AITER fused kernels (RoPE+KV cache fusion for MLA)
+    "VLLM_USE_AITER_FUSED": lambda: (
+        os.getenv("VLLM_USE_AITER_FUSED", "True").lower() in ("true", "1")
+    ),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
