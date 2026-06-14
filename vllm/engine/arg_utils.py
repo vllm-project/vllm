@@ -2098,9 +2098,18 @@ class EngineArgs:
                 * (speculative_config.num_speculative_tokens + 1)
             )
         ):
+            min_batched_tokens = scheduler_config.max_num_seqs * (
+                speculative_config.num_speculative_tokens + 1
+            )
             raise ValueError(
-                "Consider increasing max_num_batched_tokens or "
-                "decreasing num_speculative_tokens"
+                f"When LoRA and speculative decoding are both enabled, "
+                f"max_num_batched_tokens ({scheduler_config.max_num_batched_tokens}) "
+                f"must be >= max_num_seqs * (num_speculative_tokens + 1) = "
+                f"{scheduler_config.max_num_seqs} * "
+                f"({speculative_config.num_speculative_tokens} + 1) = "
+                f"{min_batched_tokens}. "
+                f"Consider increasing --max-num-batched-tokens to at least "
+                f"{min_batched_tokens}, or decreasing --num-speculative-tokens."
             )
 
         # bitsandbytes pre-quantized model need a specific model loader
@@ -2112,8 +2121,10 @@ class EngineArgs:
         if self.attention_backend is not None:
             if attention_config.backend is not None:
                 raise ValueError(
-                    "attention_backend and attention_config.backend "
-                    "are mutually exclusive"
+                    f"--attention-backend ({self.attention_backend}) and "
+                    f"attention_config.backend ({attention_config.backend}) "
+                    f"are mutually exclusive. Use only --attention-backend, "
+                    f"or remove the backend field from --attention-config."
                 )
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
