@@ -542,6 +542,7 @@ class Qwen3CoderToolParser(ToolParser):
                 func_content_end = tool_text.find(self.function_end_token, func_start)
                 if func_content_end != -1:
                     func_content = tool_text[func_start:func_content_end]
+                    parse_succeeded = False
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
@@ -552,12 +553,36 @@ class Qwen3CoderToolParser(ToolParser):
                             self.prev_tool_call_arr[self.current_tool_index][
                                 "arguments"
                             ] = parsed_tool.function.arguments
+                            parse_succeeded = True
                     except Exception:
                         logger.debug(
                             "Failed to parse tool call during streaming: %s",
                             tool_text,
                             exc_info=True,
                         )
+                    # When _parse_xml_function_call fails (returns None
+                    # or throws), prev_tool_call_arr still has the "{}"
+                    # placeholder from the header-sent step.  Fall back
+                    # to the arguments that were incrementally streamed so
+                    # the serving layer's remaining-args check produces
+                    # correct output instead of double-emitting "{}".
+                    # Only trigger when parsing actually failed — a successful
+                    # parse with empty parameters produces "{}" legitimately.
+                    if (
+                        not parse_succeeded
+                        and self.current_tool_index < len(self.prev_tool_call_arr)
+                        and self.current_tool_index
+                        < len(self.streamed_args_for_tool)
+                    ):
+                        # Append closing brace so prev_tool_call_arr
+                        # matches streamed_args_for_tool after the "+="
+                        # "}" below — otherwise the serving layer's
+                        # remainder check loses the closing brace.
+                        self.prev_tool_call_arr[self.current_tool_index][
+                            "arguments"
+                        ] = self.streamed_args_for_tool[
+                            self.current_tool_index
+                        ] + "}"
 
                 if self.current_tool_index < len(self.streamed_args_for_tool):
                     self.streamed_args_for_tool[self.current_tool_index] += "}"
