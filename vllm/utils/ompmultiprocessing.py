@@ -33,7 +33,7 @@ class OMPProcessManager:
         # is always 1 for non-MoE models
         self.internal_dp_size = config.parallel_config._api_process_count
 
-        self.simulate_multi_node = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
+        self.simulate_multi_node = envs.VLLM_CPU_SIM_MULTI_NUMA
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         self.use_iomp = "libiomp" in ld_preload_str or "libomp" in ld_preload_str
         self.use_gomp = "libgomp" in ld_preload_str

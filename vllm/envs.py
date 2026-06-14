@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
+    VLLM_CPU_SIM_MULTI_NUMA: bool = False
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_CPU_ATTN_SPLIT_KV: bool = True
     VLLM_ZENTORCH_WEIGHT_PREPACK: bool = True
@@ -812,6 +813,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
         if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ
         else None
+    ),
+    # (CPU backend only) whether to simulate multiple NUMA nodes on a single node.
+    "VLLM_CPU_SIM_MULTI_NUMA": lambda: bool(
+        int(os.getenv("VLLM_CPU_SIM_MULTI_NUMA", "0"))
     ),
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
@@ -2031,6 +2036,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
         "VLLM_CPU_KVCACHE_SPACE",
         "VLLM_CPU_MOE_PREPACK",
+        "VLLM_CPU_SIM_MULTI_NUMA",
         "VLLM_ZENTORCH_WEIGHT_PREPACK",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
