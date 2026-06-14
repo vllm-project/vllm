@@ -2399,13 +2399,32 @@ class Scheduler(SchedulerInterface):
             marked_invalid_block = False
             req_id = request.request_id
             # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
 
+            if len(req_block_ids_by_group) > 1:
+                # TODO: Replace this conservative fallback with precise,
+                # group-aware recovery once invalid blocks can be mapped to
+                # safe token prefixes across hybrid KV groups.
+                req_block_ids_set = {
+                    block_id
+                    for group_block_ids in req_block_ids_by_group
+                    for block_id in group_block_ids
+                }
+                if req_block_ids_set & invalid_block_ids:
+                    affected_req_ids.add(req_id)
+                    total_affected_tokens += req_num_computed_tokens
+                    request.num_computed_tokens = 0
+                    request.num_output_placeholders = 0
+                    if evict_blocks:
+                        blocks_to_evict.update(req_block_ids_set)
+                continue
+
+            (req_block_ids,) = req_block_ids_by_group
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
@@ -2434,6 +2453,7 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                request.num_output_placeholders = 0
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -2454,6 +2474,7 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+                    request.num_output_placeholders = 0
 
                 affected_req_ids.add(request.request_id)
 
