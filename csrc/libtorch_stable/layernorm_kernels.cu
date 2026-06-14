@@ -10,6 +10,31 @@
 
 namespace vllm {
 
+template <typename scalar_t, int width>
+__device__ __forceinline__ _f16Vec<scalar_t, width> load_f16_vec(
+    const _f16Vec<scalar_t, width>* ptr, int64_t idx) {
+  _f16Vec<scalar_t, width> out;
+  if constexpr (width == 8 && sizeof(scalar_t) <= 2) {
+    *reinterpret_cast<float4*>(&out) =
+        *reinterpret_cast<const float4*>(ptr + idx);
+  } else {
+    out = ptr[idx];
+  }
+  return out;
+}
+
+template <typename scalar_t, int width>
+__device__ __forceinline__ void store_f16_vec(
+    _f16Vec<scalar_t, width>* ptr, int64_t idx,
+    const _f16Vec<scalar_t, width>& value) {
+  if constexpr (width == 8 && sizeof(scalar_t) <= 2) {
+    *reinterpret_cast<float4*>(ptr + idx) =
+        *reinterpret_cast<const float4*>(&value);
+  } else {
+    ptr[idx] = value;
+  }
+}
+
 // TODO(woosuk): Further optimize this kernel.
 template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
 __global__ void rms_norm_kernel(
@@ -114,13 +139,18 @@ fused_add_rms_norm_kernel(
   auto* __restrict__ weight_v =
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
+  _f16Vec<scalar_t, width> first_residual;
+
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
+    int64_t id = (int64_t)blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = input_v[strided_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
     residual_v[id] = temp;
+    if (idx == threadIdx.x) {
+      first_residual = temp;
+    }
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -132,19 +162,59 @@ fused_add_rms_norm_kernel(
   }
   __syncthreads();
 
-  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
-    _f16Vec<scalar_t, width> w = weight_v[idx];
+  // Phase 2: RMS normalization with software pipelining.
+  // Prefetch the next iteration's residual and weight data while computing
+  // the current iteration, overlapping memory latency with arithmetic.
+  int idx = threadIdx.x;
+  const int stride_idx = blockDim.x;
+  int next_idx = idx + stride_idx;
+
+  _f16Vec<scalar_t, width> res_current, res_next;
+  _f16Vec<scalar_t, width> w_current, w_next;
+
+  // Prologue: reuse the first residual vector produced in phase 1.
+  if (idx < vec_hidden_size) {
+    res_next = first_residual;
+    w_next = load_f16_vec(weight_v, idx);
+  }
+
+  for (; idx < vec_hidden_size; idx += stride_idx, next_idx += stride_idx) {
+    // State advance: current = prefetched previous
+    res_current = res_next;
+    w_current = w_next;
+
+    // Prefetch next chunk (128-bit load) while computing current
+    if (next_idx < vec_hidden_size) {
+      int64_t next_id = (int64_t)blockIdx.x * vec_hidden_size + next_idx;
+      res_next = load_f16_vec(residual_v, next_id);
+      w_next = load_f16_vec(weight_v, next_idx);
+    }
+
+    // Compute RMS norm: pair-wise float2 conversion
     _f16Vec<scalar_t, width> out;
     using Converter = _typeConvert<scalar_t>;
+    using T2 = typename Converter::packed_hip_type;
 #pragma unroll
-    for (int j = 0; j < width; ++j) {
-      float x = Converter::convert(res.data[j]);
-      out.data[j] = Converter::convert(x * s_variance) * w.data[j];
+    for (int j = 0; j < width; j += 2) {
+      float2 x =
+          Converter::convert(T2{res_current.data[j], res_current.data[j + 1]});
+      float2 norm_f2;
+      norm_f2.x = x.x * s_variance;
+      norm_f2.y = x.y * s_variance;
+      T2 out_pair = Converter::convert(norm_f2);
+      T2 weight_pair{w_current.data[j], w_current.data[j + 1]};
+      if constexpr (std::is_same_v<T2, float2>) {
+        out_pair.x *= weight_pair.x;
+        out_pair.y *= weight_pair.y;
+      } else {
+        out_pair *= weight_pair;
+      }
+      out.data[j] = out_pair.x;
+      out.data[j + 1] = out_pair.y;
     }
-    input_v[strided_id] = out;
+    // 128-bit store
+    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
+    store_f16_vec(input_v, strided_id, out);
   }
 }
 
@@ -247,6 +317,17 @@ void rms_norm(torch::stable::Tensor& out,     // [..., hidden_size]
                 hidden_size);                                           \
       });
 
+#define LAUNCH_FUSED_ADD_RMS_NORM_HALF(width)                           \
+  VLLM_STABLE_DISPATCH_HALF_TYPES(                                      \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {           \
+        vllm::fused_add_rms_norm_kernel<scalar_t, width>                \
+            <<<grid, block, 0, stream>>>(                               \
+                input.mutable_data_ptr<scalar_t>(), input_stride,       \
+                residual.mutable_data_ptr<scalar_t>(),                  \
+                weight.const_data_ptr<scalar_t>(), epsilon, num_tokens, \
+                hidden_size);                                           \
+      });
+
 void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
                         torch::stable::Tensor& residual,  // [..., hidden_size]
                         torch::stable::Tensor& weight,    // [hidden_size]
@@ -280,18 +361,19 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
   constexpr int vector_width = 8;
-  constexpr int req_alignment_bytes =
-      vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
-                         // falls back to non-vectorized version anyway)
+  constexpr int req_alignment_bytes = vector_width * 2;
   bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
                           res_ptr % req_alignment_bytes == 0 &&
                           wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
   bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
-  if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
-      !batch_invariant_launch) {
-    LAUNCH_FUSED_ADD_RMS_NORM(8);
+  bool dtype_is_half =
+      input.scalar_type() == torch::headeronly::ScalarType::Half ||
+      input.scalar_type() == torch::headeronly::ScalarType::BFloat16;
+  if (dtype_is_half && ptrs_are_aligned &&
+      offsets_are_multiple_of_vector_width && !batch_invariant_launch) {
+    LAUNCH_FUSED_ADD_RMS_NORM_HALF(8);
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);
   }
