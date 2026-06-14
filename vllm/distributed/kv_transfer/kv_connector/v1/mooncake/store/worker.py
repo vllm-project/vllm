@@ -1552,15 +1552,67 @@ class LookupKeyClient:
             bind=False,
         )
 
+        # Async lookup support
+        self.socket_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        self.results: dict[str, int] = {}
+        self.inflight: set[str] = set()
+        self.cancelled: set[str] = set()
+        self.job_queue: queue.Queue[tuple[str, int, list[BlockHash]]] = queue.Queue()
+        self.thread = threading.Thread(
+            target=self.process_lookups,
+            name="MooncakeLookupClient",
+            daemon=True,
+        )
+        self.thread.start()
+
     def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
         all_frames = [LOOKUP_MSG, token_len_bytes] + list(hash_frames)
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
+        with self.socket_lock:
+            self.socket.send_multipart(all_frames, copy=False)
+            resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
+
+    def get_or_submit(
+        self, req_id: str, token_len: int, block_hashes: list[BlockHash]
+    ) -> int | None:
+        """Return a finished lookup result, or non-blocking submit one."""
+        with self.state_lock:
+            if req_id in self.results:
+                return self.results.pop(req_id)
+            if req_id not in self.inflight:
+                self.inflight.add(req_id)
+                self.job_queue.put((req_id, token_len, list(block_hashes)))
+            return None
+
+    def discard(self, req_id: str) -> None:
+        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        with self.state_lock:
+            self.results.pop(req_id, None)
+            if req_id in self.inflight:
+                # A job may already be running; mark it so its result is not
+                # re-inserted into results after we discard it here.
+                self.inflight.discard(req_id)
+                self.cancelled.add(req_id)
+
+    def process_lookups(self) -> None:
+        while True:
+            req_id, token_len, block_hashes = self.job_queue.get()
+            try:
+                res = self.lookup(token_len, block_hashes)
+            except Exception as e:
+                logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+                res = 0
+            with self.state_lock:
+                if req_id in self.cancelled:
+                    self.cancelled.discard(req_id)
+                else:
+                    self.results[req_id] = res
+                self.inflight.discard(req_id)
 
     def reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
@@ -1570,8 +1622,9 @@ class LookupKeyClient:
         holds naturally at the step boundary after weight updates and
         rollout drain. Returns True on ACK, False on NACK.
         """
-        self.socket.send(RESET_MSG)
-        resp = self.socket.recv()
+        with self.socket_lock:
+            self.socket.send(RESET_MSG)
+            resp = self.socket.recv()
         return bytes(resp) == RESP_OK
 
     def close(self):

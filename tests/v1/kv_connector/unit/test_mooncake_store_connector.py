@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from unittest.mock import MagicMock, patch
 
 from vllm.config import set_current_vllm_config
@@ -433,6 +434,105 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     # NACK path: server returns RESP_ERR -> client returns False.
     fake_socket.recv.return_value = protocol.RESP_ERR
     assert client.reset() is False
+
+
+def _poll_get_or_submit(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
+    """Drive get_or_submit until the background lookup completes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = client.get_or_submit(req_id, token_len, list(block_hashes))
+        if result is not None:
+            return result
+        time.sleep(0.005)
+    return None
+
+
+def test_lookup_key_client_get_or_submit_async():
+    """get_or_submit() defers to the background thread: None first, hit later."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+    fake_socket.recv.return_value = (7).to_bytes(4, "big")
+
+    # First query submits the lookup and returns None immediately.
+    assert client.get_or_submit("req1", 128, []) is None
+    # The background thread resolves it; a later poll returns the hit length.
+    assert _poll_get_or_submit(client, "req1") == 7
+    # Result is consumed (popped) on read.
+    with client.state_lock:
+        assert "req1" not in client.results
+        assert "req1" not in client.inflight
+
+
+def test_lookup_key_client_discard_clears_state():
+    """discard() drops a completed lookup result so it is not served stale."""
+    vllm_config = _make_vllm_config()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as mock_make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+
+    fake_socket = mock_make_socket.return_value
+    fake_socket.recv.return_value = (9).to_bytes(4, "big")
+
+    client.get_or_submit("req2", 128, [])
+    # Wait for the background thread to store the result, then discard it.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        with client.state_lock:
+            if "req2" in client.results:
+                break
+        time.sleep(0.005)
+    client.discard("req2")
+    with client.state_lock:
+        assert "req2" not in client.results
+    # A fresh query re-submits rather than returning a stale value.
+    assert client.get_or_submit("req2", 128, []) is None
+
+
+def test_get_num_new_matched_tokens_async_defers_then_reports():
+    """Async lookup returns (None, False) until ready, then the hit count."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        sched = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+
+    assert sched.lookup_async is True
+    mock_client = mock_client_cls.return_value
+
+    block_size = sched._block_size
+    request = MagicMock()
+    request.request_id = "r1"
+    request.num_tokens = 4 * block_size
+    request.block_hashes = []
+
+    # Lookup not ready -> defer.
+    mock_client.get_or_submit.return_value = None
+    assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert "r1" not in sched.load_specs
+
+    # Lookup ready with a hit -> report need_to_allocate + async-load flag.
+    hit = 3 * block_size
+    mock_client.get_or_submit.return_value = hit
+    need, load_async = sched.get_num_new_matched_tokens(request, 0)
+    assert need == hit
+    assert load_async == sched.load_async
+    assert sched.load_specs["r1"].kvpool_cached_tokens == hit
 
 
 def test_protocol_tags_are_distinct_and_non_empty():
