@@ -58,6 +58,7 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    watermark: float = 0.0,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -91,7 +92,7 @@ def create_scheduler(
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Ensure admission/preemption mechanics are deterministic
-        watermark=0.0,
+        watermark=watermark,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

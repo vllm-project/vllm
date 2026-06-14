@@ -144,6 +144,150 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("max_num_seqs", [2, 3])
+def test_async_scheduling_skipped_running_reqs_do_not_block_admission(
+    max_num_seqs: int,
+):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=128,
+    )
+    requests = create_requests(
+        num_requests=2 * max_num_seqs,
+        num_tokens=10,
+        max_tokens=1,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+
+    assert len(first_output.scheduled_new_reqs) == max_num_seqs
+    assert len(first_output.num_scheduled_tokens) == max_num_seqs
+    assert len(scheduler.running) == max_num_seqs
+    assert len(scheduler.waiting) == max_num_seqs
+    assert all(req.num_output_placeholders == 1 for req in scheduler.running)
+
+    second_output = scheduler.schedule()
+
+    assert len(second_output.scheduled_new_reqs) == max_num_seqs
+    assert len(second_output.num_scheduled_tokens) == max_num_seqs
+    assert set(second_output.num_scheduled_tokens) == {
+        request.request_id for request in requests[max_num_seqs:]
+    }
+    assert all(
+        num_tokens == 10 for num_tokens in second_output.num_scheduled_tokens.values()
+    )
+    assert len(scheduler.running) == 2 * max_num_seqs
+    assert len(scheduler.waiting) == 0
+
+
+def test_async_scheduling_skipped_running_reqs_do_not_trigger_watermark():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        num_blocks=3,
+        watermark=1 / 3,
+    )
+    requests = create_requests(num_requests=2, num_tokens=10, max_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+
+    assert set(first_output.num_scheduled_tokens) == {requests[0].request_id}
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+    assert scheduler.running[0].num_output_placeholders == 1
+
+    second_output = scheduler.schedule()
+
+    assert set(second_output.num_scheduled_tokens) == {requests[1].request_id}
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+
+
+def _make_model_runner_output(output: SchedulerOutput) -> ModelRunnerOutput:
+    req_ids = list(output.num_scheduled_tokens)
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[0]] * len(req_ids),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
+def test_async_scheduling_over_limit_running_reqs_drain():
+    max_num_seqs = 2
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=128,
+    )
+    requests = create_requests(
+        num_requests=2 * max_num_seqs,
+        num_tokens=10,
+        max_tokens=1,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    second_output = scheduler.schedule()
+
+    assert len(first_output.num_scheduled_tokens) == max_num_seqs
+    assert len(second_output.num_scheduled_tokens) == max_num_seqs
+    assert len(scheduler.running) == 2 * max_num_seqs
+
+    scheduler.update_from_output(first_output, _make_model_runner_output(first_output))
+    assert len(scheduler.running) == max_num_seqs
+    scheduler.update_from_output(
+        second_output, _make_model_runner_output(second_output)
+    )
+
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+
+
+def test_async_scheduling_pp_ineligible_running_reqs_do_not_block_admission():
+    max_num_seqs = 2
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        pipeline_parallel_size=2,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=128,
+    )
+    scheduler.use_v2_model_runner = True
+    requests = create_requests(
+        num_requests=2 * max_num_seqs,
+        num_tokens=10,
+        max_tokens=4,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    second_output = scheduler.schedule()
+
+    assert set(first_output.num_scheduled_tokens) == {
+        request.request_id for request in requests[:max_num_seqs]
+    }
+    assert set(second_output.num_scheduled_tokens) == {
+        request.request_id for request in requests[max_num_seqs:]
+    }
+    assert all(
+        requests[i].next_decode_eligible_step > scheduler.current_step
+        for i in range(max_num_seqs)
+    )
+    assert len(scheduler.running) == 2 * max_num_seqs
+    assert len(scheduler.waiting) == 0
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 

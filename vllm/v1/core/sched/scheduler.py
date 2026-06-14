@@ -77,6 +77,7 @@ class Scheduler(SchedulerInterface):
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.use_async_scheduling = False
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
@@ -393,6 +394,16 @@ class Scheduler(SchedulerInterface):
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
+            # Async scheduling can keep in-flight requests resident in
+            # self.running while they are skipped this step. In that mode,
+            # max_num_seqs limits the model batch for this iteration rather
+            # than the resident running queue size.
+            if (
+                self.use_async_scheduling
+                and len(num_scheduled_tokens) >= self.max_num_running_reqs
+            ):
+                break
+
             request = self.running[req_index]
 
             if (
@@ -584,7 +595,10 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if self.use_async_scheduling:
+                    if len(num_scheduled_tokens) >= self.max_num_running_reqs:
+                        break
+                elif len(self.running) == self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -823,6 +837,10 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                if self.use_async_scheduling:
+                    has_scheduled_reqs = bool(num_scheduled_tokens)
+                else:
+                    has_scheduled_reqs = bool(self.running)
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -834,7 +852,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
-                    has_scheduled_reqs=bool(self.running),
+                    has_scheduled_reqs=has_scheduled_reqs,
                 )
 
                 if new_blocks is None:
@@ -938,7 +956,10 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        if self.use_async_scheduling:
+            assert len(num_scheduled_tokens) <= self.max_num_running_reqs
+        else:
+            assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
