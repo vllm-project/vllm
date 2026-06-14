@@ -590,6 +590,11 @@ class SimpleCPUOffloadScheduler:
                         advanced_per_group[g] += 1
                         continue
 
+                    # Skip blocks already scheduled in this step.
+                    if gpu_block_id in in_flight:
+                        advanced_per_group[g] += 1
+                        continue
+
                     bhash_with_group = gpu_block.block_hash
                     if bhash_with_group is None:
                         # Masked-out SWA position the coordinator chose not to
@@ -597,10 +602,9 @@ class SimpleCPUOffloadScheduler:
                         advanced_per_group[g] += 1
                         continue
 
-                    # Skip if already scheduled for store or already cached in CPU.
+                    # Skip if already cached in CPU.
                     if (
-                        gpu_block_id in in_flight
-                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
                         is not None
@@ -613,6 +617,7 @@ class SimpleCPUOffloadScheduler:
                         break
                     num_free -= 1
 
+                    in_flight.add(gpu_block_id)
                     gpu_block_ids.append(gpu_block_id)
                     block_hashes_to_store.append(bhash_with_group)
                     advanced_per_group[g] += 1
@@ -634,7 +639,6 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
                 merged_gpu_block_ids.extend(gpu_block_ids)
                 merged_cpu_block_ids.extend(cpu_block_ids)
-                in_flight.update(gpu_block_ids)
 
                 # Touch GPU blocks to prevent freeing during async copy
                 gpu_block_pool.touch(
@@ -799,16 +803,19 @@ class SimpleCPUOffloadScheduler:
                     self._load_event_to_reqs.pop(state.load_event, None)
 
         if state.transfer_meta is not None:
-            # Free CPU touch refs
+            # Free CPU touch refs. Dedup to avoid double-free: the
+            # transfer pairs may repeat the same CPU block when
+            # different GPU blocks share identical content.
             self.cpu_block_pool.free_blocks(
                 self.cpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.cpu_block_ids
+                for bid in dict.fromkeys(state.transfer_meta.cpu_block_ids)
             )
-            # Free GPU touch refs
+            # Free GPU touch refs (defensive dedup; gpu_block_ids
+            # already deduped in update_state_after_alloc).
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(
                 self._gpu_block_pool.blocks[bid]
-                for bid in state.transfer_meta.gpu_block_ids
+                for bid in dict.fromkeys(state.transfer_meta.gpu_block_ids)
             )
 
     def _cleanup_store_request(self, req_id: str) -> None:
