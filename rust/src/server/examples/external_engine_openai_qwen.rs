@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         api_server_options: ApiServerOptions::default(),
         api_keys: Vec::new(),
+        root_path: None,
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,

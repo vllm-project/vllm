@@ -5308,3 +5308,193 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
     let new_len = new_assistant["tokens"].as_array().unwrap().len();
     assert!(new_len > continue_len);
 }
+
+// ---------------------------------------------------------------------------
+// root-path nesting tests
+// ---------------------------------------------------------------------------
+// These tests verify the `Router::nest()` logic from `lib.rs` by calling
+// the shared `apply_root_path_nesting` helper on a test router. This mirrors
+// how `serve_with_router_extension` applies root_path at startup.
+
+use crate::apply_root_path_nesting;
+
+#[tokio::test]
+#[serial]
+async fn root_path_nesting_makes_health_available_on_prefixed_path() {
+    let base_app = test_app().await;
+    let app = apply_root_path_nesting(base_app, Some("/api"));
+
+    // Bare path should still work.
+    let mut service = app.clone();
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Prefixed path should also work.
+    let mut service = app.clone();
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Wrong prefix should 404.
+    let mut service = app;
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/wrong/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial]
+async fn root_path_nesting_works_for_models_endpoint() {
+    let base_app = test_app().await;
+    let app = apply_root_path_nesting(base_app, Some("/proxy"));
+
+    // Bare /v1/models should work.
+    let mut service = app.clone();
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Prefixed /proxy/v1/models should also work.
+    let mut service = app;
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/proxy/v1/models")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn root_path_empty_string_is_noop() {
+    let base_app = test_app().await;
+    let app = apply_root_path_nesting(base_app, Some(""));
+
+    let mut service = app.clone();
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn root_path_trailing_slash_is_trimmed() {
+    let base_app = test_app().await;
+    let app = apply_root_path_nesting(base_app, Some("/api/"));
+
+    // Should respond at /api/health even though the input had a trailing slash.
+    let mut service = app;
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn root_path_none_does_not_add_prefix_routes() {
+    let base_app = test_app().await;
+    let app = apply_root_path_nesting(base_app, None);
+
+    // Bare path works.
+    let mut service = app.clone();
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Random prefix should 404 since no nesting was applied.
+    let mut service = app;
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/api/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial]
+async fn root_path_without_leading_slash_is_normalized() {
+    let base_app = test_app().await;
+    // Missing leading slash — should be auto-normalized to "/myapp".
+    let app = apply_root_path_nesting(base_app, Some("myapp"));
+
+    let mut service = app;
+    let response = service
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/myapp/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+}
