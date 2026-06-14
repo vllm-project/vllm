@@ -22,6 +22,7 @@ The following are the supported quantization formats for vLLM:
 - [Quantized KV Cache](quantized_kvcache.md)
 - [TorchAO](torchao.md)
 - [FP8 ViT Encoder Attention](fp8_vit_attn.md)
+- [TurboQuant](turboquant.md)
 
 ## Supported Hardware
 
