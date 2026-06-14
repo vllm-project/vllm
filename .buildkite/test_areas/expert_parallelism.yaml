@@ -11,9 +11,11 @@ steps:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
   - tests/distributed/test_eplb_utils.py
+  - tests/distributed/test_eplb_offline.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
+  - pytest -v -s distributed/test_eplb_offline.py
 
 - label: EPLB Execution # 17min
   key: eplb-execution
