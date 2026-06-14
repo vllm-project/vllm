@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_tool_parser",
         "MinimaxToolParser",
     ),
+    "nemotron_nano_v2": (
+        "nemotron_nano_v2_tool_parser",
+        "NemotronNanoV2ToolParser",
+    ),
     "minicpm5": (
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",

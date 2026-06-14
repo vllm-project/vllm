@@ -334,6 +334,17 @@ Supported models:
 
 Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
 
+### Nemotron Nano v2 Models (`nemotron_nano_v2`)
+
+Supported models:
+
+* `nvidia/NVIDIA-Nemotron-Nano-9B-v2` (and FP8/NVFP4 variants; use with [examples/tool_chat_template_nemotron_nano_v2.jinja](../../examples/tool_chat_template_nemotron_nano_v2.jinja))
+* `nvidia/NVIDIA-Nemotron-Nano-12B-v2` (and FP8/NVFP4 variants; use with [examples/tool_chat_template_nemotron_nano_v2.jinja](../../examples/tool_chat_template_nemotron_nano_v2.jinja))
+
+The parser handles the `<TOOLCALL>[{"name": ..., "arguments": ...}, ...]</TOOLCALL>` envelope emitted by the Nemotron chat template, and works with the model's hybrid thinking mode: any `<think>...</think>` prefix is preserved as message content (or stripped by a reasoning parser if one is configured).
+
+Flags: `--tool-call-parser nemotron_nano_v2 --chat-template examples/tool_chat_template_nemotron_nano_v2.jinja`
+
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
@@ -538,8 +549,8 @@ Here is a summary of a plugin file:
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: TokenizerLike):
-            super().__init__(tokenizer)
+        def __init__(self, tokenizer: TokenizerLike, tools=None):
+            super().__init__(tokenizer, tools)
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
