@@ -8,9 +8,6 @@ import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
-    MLARoPEKVCacheCatFusionPass,
-)
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )
@@ -40,8 +37,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
-VLLM_UNIFIED_MLA_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_mla_kv_cache_update
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -61,8 +56,10 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
+        manual_fusion: bool = False,
     ):
         super().__init__()
+        self.manual_fusion = manual_fusion
         self.num_heads = num_heads
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -121,7 +118,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             torch.nn.init.normal_(self.q_b_proj.weight, std=0.02)
             torch.nn.init.normal_(self.kv_b_proj.weight, std=0.02)
 
-        # Register layer metadata for the fusion pass via MLAAttention
+        # Register layer metadata via MLAAttention.
         self.mla_attn = MLAAttention(
             num_heads=self.num_heads,
             scale=self.scale,
@@ -208,30 +205,37 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
-        k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if self.manual_fusion:
+            kv_c = kv_c.contiguous()
+            dummy = torch.ops.vllm.fused_rope_unified_mla_kv_cache_update(
+                positions,
+                q[..., self.qk_nope_head_dim :],
+                k_pe,
+                kv_c,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                self.kv_cache_dtype_str,
+                self.mla_attn._k_scale,
+                _encode_layer_name(self.layer_name),
+            )
+            k_pe = k_pe.unsqueeze(1)
+            return q, kv_c, k_pe, dummy
+        else:
+            k_pe = k_pe.unsqueeze(1)
 
-        dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-            kv_c,
-            k_pe,
-            _encode_layer_name(self.layer_name),
-            self.kv_cache_dtype_str,
-            self.mla_attn._k_scale,
-        )
-        return q, kv_c, k_pe, dummy
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
-    def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops = [
-            INDEX_SELECT_OP,
-            torch.ops.vllm.unified_mla_kv_cache_update.default,
-        ]
-        return ops
-
-    def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
-        return [torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default]
+            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c,
+                k_pe,
+                _encode_layer_name(self.layer_name),
+                self.kv_cache_dtype_str,
+                self.mla_attn._k_scale,
+            )
+            return q, kv_c, k_pe, dummy
 
 
 MLA_BACKENDS = [AttentionBackendEnum.TRITON_MLA]
@@ -333,7 +337,6 @@ def test_mla_rope_kvcache_cat_fusion(
             device=torch.get_default_device(),
         )
 
-        fusion_pass = MLARoPEKVCacheCatFusionPass(vllm_config)
         # note: FixFunctionalizationPass is required to correctly lower
         # the fused op to its inplace version with auto-functionalization v1.
         # Without it, decompose_auto_functionalized calls clone_preserve_strides
@@ -344,7 +347,6 @@ def test_mla_rope_kvcache_cat_fusion(
         # offset is never passed through as_strided lowering.
         passes = [
             NoOpEliminationPass(vllm_config),
-            fusion_pass,
             PostCleanupPass(vllm_config),
             FixFunctionalizationPass(vllm_config),
         ]
@@ -376,6 +378,8 @@ def test_mla_rope_kvcache_cat_fusion(
             kv_cache_unfused = attn_layer.kv_cache.clone()
         del dummy
 
+        model.manual_fusion = True
+
         # Run fused version (compiled)
         torch._dynamo.mark_dynamic(qkv_lora, 0)
         torch._dynamo.mark_dynamic(pos, 0)
@@ -391,10 +395,12 @@ def test_mla_rope_kvcache_cat_fusion(
             kv_cache_fused = attn_layer.kv_cache
         del dummy
 
-        assert fusion_pass.matched_count == 1
+        from vllm.compilation.passes.fx_utils import find_op_nodes
 
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
+        fused_op = torch.ops.vllm.fused_rope_unified_mla_kv_cache_update
+        assert len(list(find_op_nodes(fused_op, backend.graph_post_pass))) == 1
+        for node in backend.graph_post_pass.nodes:
+            assert node.target != torch.ops.higher_order.auto_functionalized
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
