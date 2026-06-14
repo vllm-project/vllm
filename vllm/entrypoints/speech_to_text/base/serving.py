@@ -254,7 +254,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+    ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         request.language = self.model_cls.validate_language(request.language)
         request.to_language = (
@@ -272,6 +272,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+
+        chunk_start_offsets: list[float] = [0.0]
+
+        for chunk in chunks[:-1]:
+            chunk_start_offsets.append(chunk_start_offsets[-1] + chunk.shape[-1] / sr)
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -302,7 +307,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_inputs, duration
+        return engine_inputs, duration, chunk_start_offsets
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -387,7 +392,7 @@ class OpenAISpeechToText(OpenAIServing):
                     SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        seek=start_time,
+                        seek=int(start_time),
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
@@ -463,7 +468,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_inputs, duration_s = await self._preprocess_speech_to_text(
+        (
+            engine_inputs,
+            duration_s,
+            chunk_start_offsets,
+        ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -585,9 +594,7 @@ class OpenAISpeechToText(OpenAIServing):
                 )
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = chunk_start_offsets[idx]
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
