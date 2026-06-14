@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
@@ -414,6 +415,7 @@ class OpenAIServingChat(OpenAIServing):
             history_tool_call_cnt = 0
 
         previous_texts = [""] * num_choices
+        per_choice_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
 
         try:
             if self.parser_cls is not None:
@@ -603,6 +605,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    per_choice_token_ids[i].extend(output.token_ids)
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -736,6 +739,22 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens
+                    )
+
+                if self.reasoning_parser_cls and any(per_choice_token_ids):
+                    reasoning_parser = self.reasoning_parser_cls(
+                        tokenizer,
+                        chat_template_kwargs=(
+                            self._effective_chat_template_kwargs(request)
+                        ),
+                    )
+                    reasoning_count = sum(
+                        reasoning_parser.count_reasoning_tokens(ids)
+                        for ids in per_choice_token_ids
+                        if ids
+                    )
+                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
+                        reasoning_tokens=reasoning_count,
                     )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
@@ -1030,6 +1049,19 @@ class OpenAIServingChat(OpenAIServing):
         ):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
+            )
+
+        if self.reasoning_parser_cls:
+            reasoning_parser = self.reasoning_parser_cls(
+                tokenizer,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            reasoning_count = sum(
+                reasoning_parser.count_reasoning_tokens(list(output.token_ids))
+                for output in final_res.outputs
+            )
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=reasoning_count,
             )
 
         request_metadata.final_usage_info = usage
