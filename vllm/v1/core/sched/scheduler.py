@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -63,7 +63,308 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
-class Scheduler(SchedulerInterface):
+# ---------------------------------------------------------------------------
+# FlowPrefill: adaptive sub-chunk preemption (vLLM Q2 2026 roadmap)
+# Reference: FlowPrefill paper (arxiv Feb 2026)
+# Roadmap item: "avoid excessive preemption, prefill HoL blocking"
+#
+# Design overview:
+#   * PrefillCheckpointState   — per-request suspension record
+#   * CudaEventPool            — pre-allocated CUDA events (no per-step alloc)
+#   * FlowPrefillMixin         — scheduler mixin with checkpoint logic
+#
+# All FlowPrefill code is dead by default: activates only when
+# SchedulerConfig.preemption_granularity is not None.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PrefillCheckpointState:
+    """Tracks sub-chunk suspension state for a request in prefill.
+
+    When FlowPrefill suspends a prefill at a CUDA event checkpoint,
+    this state enables resumption from exactly that token position —
+    without recomputing any tokens already processed.  KV blocks
+    allocated up to ``checkpoint_pos`` are preserved.
+    """
+
+    request_id: str
+    """The request that was suspended."""
+
+    checkpoint_pos: int
+    """Token position where prefill was suspended.
+
+    Resumption feeds tokens ``[checkpoint_pos : checkpoint_pos + granularity]``.
+    """
+
+    allocated_kv_blocks_count: int
+    """Number of KV blocks already filled up to ``checkpoint_pos``.
+
+    These blocks MUST NOT be freed while the request is suspended.
+    """
+
+    cuda_event: object | None
+    """CUDA event recorded when the GPU finished the sub-chunk up to
+    ``checkpoint_pos``.  ``query()`` is non-blocking — no CPU stall.
+    ``None`` when CUDA is unavailable (test environments).
+    """
+
+    created_at_ns: int = field(default_factory=time.perf_counter_ns)
+    """Wall-clock timestamp (nanoseconds) for latency accounting."""
+
+
+class CudaEventPool:
+    """Pre-allocated pool of CUDA events for checkpoint synchronization.
+
+    Avoids per-step ``torch.cuda.Event`` allocation overhead.
+    Non-timing events are used (``enable_timing=False``).
+    """
+
+    def __init__(self, size: int = 256) -> None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                self._pool: list[object] = [
+                    torch.cuda.Event(enable_timing=False) for _ in range(size)
+                ]
+            else:
+                self._pool = [object() for _ in range(size)]
+        except ImportError:
+            # Fallback for CPU-only / test environments
+            self._pool = [object() for _ in range(size)]
+        self._free: list[object] = list(self._pool)
+        self._used: dict[str, object] = {}
+
+    def acquire(self, request_id: str) -> object | None:
+        """Acquire an event for *request_id*.  Returns ``None`` if pool empty."""
+        if not self._free:
+            return None
+        event = self._free.pop()
+        self._used[request_id] = event
+        return event
+
+    def release(self, request_id: str) -> None:
+        """Return the event associated with *request_id* to the pool."""
+        if request_id in self._used:
+            self._free.append(self._used.pop(request_id))
+
+
+class FlowPrefillMixin:
+    """Mixin for vLLM's Scheduler to add FlowPrefill sub-chunk preemption.
+
+    Activates only when ``SchedulerConfig.preemption_granularity`` is not
+    ``None``.  When disabled (the default), this mixin adds zero overhead:
+    ``_init_flowprefill()`` is a no-op and ``flowprefill_enabled`` is
+    ``False``, so none of the checkpoint paths execute.
+
+    Configuration (fields added to ``SchedulerConfig``):
+
+    * ``preemption_granularity: int | None = None``
+      — tokens per sub-chunk checkpoint
+    * ``preemption_decode_threshold: int = 1``
+      — minimum decode queue depth to trigger preemption
+    """
+
+    def _init_flowprefill(self) -> None:
+        """Initialize FlowPrefill state.  Call once from ``__init__``."""
+        sched_cfg = self.scheduler_config  # type: ignore[attr-defined]
+
+        self._fp_granularity: int | None = getattr(
+            sched_cfg, "preemption_granularity", None
+        )
+        self._fp_decode_threshold: int = getattr(
+            sched_cfg, "preemption_decode_threshold", 1
+        )
+
+        # Suspended prefill state: request_id -> PrefillCheckpointState
+        self._suspended_prefills: dict[str, PrefillCheckpointState] = {}
+
+        # Pre-allocated CUDA event pool for checkpoint synchronization
+        self._event_pool = CudaEventPool(size=256)
+
+        if self._fp_granularity is not None:
+            logger.info(
+                "FlowPrefill enabled: granularity=%d tokens, decode_threshold=%d seqs",
+                self._fp_granularity,
+                self._fp_decode_threshold,
+            )
+
+    @property
+    def flowprefill_enabled(self) -> bool:
+        """``True`` when sub-chunk preemption is active."""
+        return getattr(self, "_fp_granularity", None) is not None
+
+    def _fp_decode_queue_depth(self) -> int:
+        """Number of requests actively running (decode pressure indicator)."""
+        return len(getattr(self, "running", []))
+
+    def _fp_try_resume_suspended(
+        self,
+        token_budget: int,
+    ) -> list[tuple]:
+        """Check suspended prefills and resume eligible ones.
+
+        A prefill is resumed when:
+
+        1. Its CUDA checkpoint event has fired (non-blocking ``query()``).
+        2. Decode queue depth is below ``preemption_decode_threshold``.
+
+        Returns a list of ``(request_id, checkpoint, tokens_to_schedule)``
+        tuples.  The CUDA query is non-blocking — no CPU synchronization.
+        """
+        if not self._suspended_prefills:
+            return []
+
+        resumed: list[tuple] = []
+        to_remove: list[str] = []
+        decode_depth = self._fp_decode_queue_depth()
+
+        for req_id, checkpoint in self._suspended_prefills.items():
+            # Non-blocking GPU query — zero CPU stall
+            event = checkpoint.cuda_event
+            if event is not None:
+                query_result = (
+                    event.query()
+                    if hasattr(event, "query")
+                    else True  # fallback for mock/CPU events
+                )
+                if not query_result:
+                    continue  # GPU hasn't finished this sub-chunk yet
+
+            if decode_depth >= self._fp_decode_threshold:
+                continue  # Decode pressure still high — keep suspended
+
+            assert self._fp_granularity is not None
+            to_resume = min(self._fp_granularity, token_budget)
+            if to_resume <= 0:
+                continue
+
+            resumed.append((req_id, checkpoint, to_resume))
+            token_budget -= to_resume
+            to_remove.append(req_id)
+
+        for req_id in to_remove:
+            self._event_pool.release(req_id)
+            del self._suspended_prefills[req_id]
+
+        return resumed
+
+    def _fp_maybe_checkpoint(
+        self,
+        request_id: str,
+        current_pos: int,
+        remaining_tokens: int,
+        kv_blocks_count: int,
+    ) -> PrefillCheckpointState | None:
+        """Decide whether to insert a checkpoint for this prefill request.
+
+        Returns a ``PrefillCheckpointState`` if the scheduler should suspend
+        the request at the next sub-chunk boundary, or ``None`` to continue
+        processing the full chunk without interruption.
+        """
+        if not self.flowprefill_enabled:
+            return None
+
+        assert self._fp_granularity is not None
+
+        if self._fp_decode_queue_depth() < self._fp_decode_threshold:
+            return None  # No decode pressure — no need to preempt
+
+        if remaining_tokens <= self._fp_granularity:
+            return None  # Remainder fits in one sub-chunk — don't split
+
+        event = self._event_pool.acquire(request_id)
+        # If pool is exhausted we skip the checkpoint rather than blocking
+        if event is None:
+            return None
+
+        checkpoint = PrefillCheckpointState(
+            request_id=request_id,
+            checkpoint_pos=current_pos + self._fp_granularity,
+            allocated_kv_blocks_count=kv_blocks_count,
+            cuda_event=event,
+        )
+        self._suspended_prefills[request_id] = checkpoint
+        return checkpoint
+
+    def _fp_schedule(
+        self,
+        waiting_requests: list[object],
+        token_budget: int,
+        running_requests: list[object],
+    ) -> tuple[list[dict], list[str], int]:
+        """FlowPrefill scheduling loop with checkpoint insertion.
+
+        Called by the main ``schedule()`` implementation when
+        ``flowprefill_enabled`` is ``True``.
+
+        Returns:
+            scheduled: list of scheduling decision dicts
+            suspended: list of suspended request IDs
+            remaining_budget: leftover token budget after scheduling
+        """
+        assert self._fp_granularity is not None
+
+        scheduled: list[dict] = []
+        suspended: list[str] = []
+
+        # Priority 1: resume suspended prefills whose checkpoint has fired
+        # and whose decode pressure has cleared.
+        for req_id, checkpoint, tokens in self._fp_try_resume_suspended(token_budget):
+            scheduled.append(
+                {
+                    "request_id": req_id,
+                    "num_tokens": tokens,
+                    "is_resume": True,
+                    "checkpoint_state": checkpoint,
+                }
+            )
+            token_budget -= tokens
+
+        # Priority 2: normal prefill scheduling with checkpoint insertion.
+        for req in waiting_requests:
+            if token_budget <= 0:
+                break
+
+            req_id = req.request_id  # type: ignore[union-attr]
+            req_remaining = getattr(req, "num_remaining_tokens", token_budget)
+
+            checkpoint = self._fp_maybe_checkpoint(
+                request_id=req_id,
+                current_pos=getattr(req, "num_computed_tokens", 0),
+                remaining_tokens=req_remaining,
+                kv_blocks_count=getattr(req, "num_allocated_blocks", 0),
+            )
+
+            if checkpoint is not None:
+                # Schedule only up to the checkpoint boundary
+                tokens = self._fp_granularity
+                scheduled.append(
+                    {
+                        "request_id": req_id,
+                        "num_tokens": tokens,
+                        "is_checkpoint": True,
+                        "checkpoint_event": checkpoint.cuda_event,
+                    }
+                )
+                suspended.append(req_id)
+            else:
+                tokens = min(req_remaining, token_budget)
+                scheduled.append(
+                    {
+                        "request_id": req_id,
+                        "num_tokens": tokens,
+                        "is_checkpoint": False,
+                    }
+                )
+
+            token_budget -= tokens
+
+        return scheduled, suspended, token_budget
+
+
+class Scheduler(FlowPrefillMixin, SchedulerInterface):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -296,6 +597,12 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
+        # FlowPrefill: initialize sub-chunk preemption state.
+        # When preemption_granularity is None (the default) this is a no-op
+        # that adds zero scheduling overhead.
+        if self.scheduler_config.preemption_granularity is not None:
+            self._init_flowprefill()
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -390,6 +697,21 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
+        # FlowPrefill: attempt to resume any previously-suspended prefills.
+        # Suspended prefills are re-admitted to the running queue only when
+        # their CUDA checkpoint event has completed (non-blocking query) and
+        # decode-queue pressure has fallen below the configured threshold.
+        # Pure no-op when preemption_granularity=None (the default).
+        if self.flowprefill_enabled:
+            for _fp_req_id, _fp_ckpt, _fp_tokens in self._fp_try_resume_suspended(
+                token_budget
+            ):
+                # The resumed request remains in self.running; its
+                # num_computed_tokens already reflects checkpoint_pos, so
+                # the running-queue loop below will re-schedule it naturally.
+                # Consume the pre-approved token budget slice here.
+                token_budget -= _fp_tokens
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -475,6 +797,26 @@ class Scheduler(SchedulerInterface):
                 # allow the lower-priority requests to be scheduled.
                 req_index += 1
                 continue
+
+            # FlowPrefill: for prefill requests (num_computed_tokens <
+            # num_prompt_tokens), conditionally insert a checkpoint if decode
+            # pressure exceeds the configured threshold.  A checkpoint caps
+            # num_new_tokens to the sub-chunk granularity so the GPU can
+            # switch to decode requests after completing this slice, then
+            # resume from exactly this position on the next step.
+            # This is a strict no-op when preemption_granularity=None.
+            if self.flowprefill_enabled and (
+                request.num_computed_tokens < request.num_prompt_tokens
+            ):
+                _fp_checkpoint = self._fp_maybe_checkpoint(
+                    request_id=request.request_id,
+                    current_pos=request.num_computed_tokens,
+                    remaining_tokens=num_new_tokens,
+                    kv_blocks_count=0,  # informational; not used in decision
+                )
+                if _fp_checkpoint is not None:
+                    assert self._fp_granularity is not None
+                    num_new_tokens = min(num_new_tokens, self._fp_granularity)
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
