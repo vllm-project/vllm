@@ -296,7 +296,11 @@ def sparse_attn_indexer(
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
-        seq_lens = decode_metadata.seq_lens[:batch_size]
+        # Force contiguous: this slice is 2D (B, next_n) under MTP spec-decode and
+        # is non-contiguous under batched decode; persistent_topk (csrc/topk.cu)
+        # and deep_gemm paged-MQA both assert lengths.is_contiguous(), otherwise
+        # EngineCore dies with "lengths must be contiguous".
+        seq_lens = decode_metadata.seq_lens[:batch_size].contiguous()
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
         # the downstream topk kernels accept both 1D and 2D.
