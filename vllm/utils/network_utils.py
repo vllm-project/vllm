@@ -196,12 +196,10 @@ def _get_open_port(
     if port is not None:
         attempts = 0
         while True:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("", port))
-                    return port
-            except OSError:
-                port += 1  # Increment port number if already in use
+            if is_port_available(port):
+                return port
+            else:
+                port += 1
                 logger.info("Port %d is already in use, trying port %d", port - 1, port)
             attempts += 1
             if max_attempts is not None and attempts >= max_attempts:
@@ -209,16 +207,73 @@ def _get_open_port(
                     f"Could not find open port after {max_attempts} "
                     f"attempts starting from port {start_port}"
                 )
-    # try ipv4
+    s = try_bind_socket(None, 0)
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
-    except OSError:
-        # try ipv6
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            return s.getsockname()[1]
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _get_addrinfos_for_bind(
+    host: str | None = None,
+    port: int = 0,
+) -> list[tuple]:
+    """Return (family, socktype, proto, canonname, sockaddr)
+    tuples suitable for bind(), IPv4 first."""
+    flags = socket.AI_PASSIVE
+    infos = socket.getaddrinfo(
+        host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, flags
+    )
+    infos.sort(key=lambda x: (x[0] != socket.AF_INET,))
+    return infos
+
+
+def try_bind_socket(
+    host: str | None = None,
+    port: int = 0,
+    *,
+    reuse_addr: bool = True,
+    reuse_port: bool = False,
+    listen: bool = False,
+) -> socket.socket:
+    """Bind a TCP socket on the first available address family."""
+    infos = _get_addrinfos_for_bind(host, port)
+    last_err: OSError | None = None
+    for family, socktype, proto, _, sockaddr in infos:
+        s = socket.socket(family, socktype, proto)
+        try:
+            if reuse_addr:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if reuse_port:
+                with contextlib.suppress(AttributeError, OSError):
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            if family == socket.AF_INET6:
+                s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            s.bind(sockaddr)
+            if listen:
+                s.listen()
+            return s
+        except OSError as e:
+            s.close()
+            last_err = e
+    raise last_err or OSError("No address families available for binding")
+
+
+def is_port_available(port: int) -> bool:
+    """Check that *port* is free on every configured address family."""
+    infos = _get_addrinfos_for_bind(None, port)
+    for family, socktype, proto, _, sockaddr in infos:
+        try:
+            s = socket.socket(family, socktype, proto)
+            try:
+                if family == socket.AF_INET6:
+                    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                s.bind(sockaddr)
+            finally:
+                s.close()
+        except OSError:
+            return False
+    return True
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
