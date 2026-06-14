@@ -92,13 +92,13 @@ ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VISION_VERSION=v0.26.0
+ARG TORCH_VISION_VERSION=v0.27.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder

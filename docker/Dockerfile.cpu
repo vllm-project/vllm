@@ -207,7 +207,7 @@ RUN \
     esac; \
     }; \
     remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.11.0/g' requirements/test/cpu.in && \
+    sed -i 's/^torch==.*/torch==2.12.0/g' requirements/test/cpu.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
     # Related issue: https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
