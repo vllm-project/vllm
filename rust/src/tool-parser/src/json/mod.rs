@@ -1,5 +1,7 @@
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
+pub use granite::GraniteToolParser;
+pub use granite_20b_fc::Granite20bFcToolParser;
 pub use granite4::Granite4ToolParser;
 pub use hermes::HermesToolParser;
 pub use internlm2::Internlm2ToolParser;
@@ -8,7 +10,9 @@ pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
 pub use qwen::Qwen3XmlToolParser;
 
+mod granite;
 mod granite4;
+mod granite_20b_fc;
 mod hermes;
 mod internlm2;
 mod llama;

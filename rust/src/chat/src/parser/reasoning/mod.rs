@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 
 pub use vllm_reasoning_parser::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser,
-    ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
-    Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, GraniteReasoningParser,
+    KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -21,6 +21,7 @@ pub mod names {
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GEMMA4: &str = "gemma4";
     pub const GLM45: &str = "glm45";
+    pub const GRANITE: &str = "granite";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const MINIMAX_M2: &str = "minimax_m2";
@@ -59,6 +60,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
             .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
+            .register_parser::<GraniteReasoningParser>(names::GRANITE)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
@@ -75,6 +77,7 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("granite", names::GRANITE)
             .register_pattern("qwen", names::QWEN3)
             .register_pattern("glm-5", names::GLM45)
             .register_pattern("glm-4.7", names::GLM45)
