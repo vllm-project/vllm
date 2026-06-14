@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
+    VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -1084,6 +1085,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
+    ),
+    # Opt-in: preserve NCCL_ASYNC_ERROR_HANDLING /
+    # TORCH_NCCL_ASYNC_ERROR_HANDLING (which vLLM normally pops in
+    # gpu_worker.init_device) so torch's NCCL watchdog can abort hung
+    # collectives. Trades CUDA-graph-capture stability for the ability
+    # to detect and recover from NCCL deadlocks such as
+    # vllm-project/vllm#45094. Default: False (current behavior).
+    "VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING": lambda: (
+        os.getenv("VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING", "False").lower()
+        in ("true", "1")
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.
