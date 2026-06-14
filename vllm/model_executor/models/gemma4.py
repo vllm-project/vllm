@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.gemma4_fused_ops import (
+    gemma_dual_rmsnorm_residual_scalar,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -690,6 +693,11 @@ class Gemma4DecoderLayer(nn.Module):
             self.per_layer_projection = None
             self.post_per_layer_input_norm = None
 
+        self.has_ple = (
+            self.hidden_size_per_layer_input is not None
+            and self.hidden_size_per_layer_input > 0
+        )
+
         # Layer scalar (loaded from checkpoint) — applies to ALL text layers
         self.register_buffer("layer_scalar", torch.ones(1))
 
@@ -723,11 +731,31 @@ class Gemma4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.enable_moe_block:
-            hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
+            hidden_states_1 = hidden_states
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
             router_logits = self.router(residual)
             hidden_states_2 = self.moe(hidden_states_2, router_logits)
+
+            if (
+                not self.has_ple
+                and hidden_states_1.is_cuda
+                and hidden_states_1.dim() == 2
+            ):
+                return gemma_dual_rmsnorm_residual_scalar(
+                    hidden_states_1,
+                    self.post_feedforward_layernorm_1.weight,
+                    hidden_states_2,
+                    self.post_feedforward_layernorm_2.weight.data,
+                    self.post_feedforward_layernorm.weight.data,
+                    residual,
+                    self.layer_scalar,
+                    self.post_feedforward_layernorm_1.variance_epsilon,
+                    self.post_feedforward_layernorm_2.variance_epsilon,
+                    self.post_feedforward_layernorm.variance_epsilon,
+                ), None
+
+            hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states_1)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
             # Combine MLP and MoE outputs
