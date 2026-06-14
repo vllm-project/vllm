@@ -10,20 +10,32 @@ use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer
 /// Lowered completion request plus the public response metadata carried by
 /// every SSE chunk.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PreparedRequest {
+pub(super) struct PreparedRequest {
     /// Stable OpenAI-style request ID, reused as the external text request ID.
     pub request_id: String,
     /// Public model ID echoed back to the client.
     pub response_model: String,
-    /// Whether the caller asked for the final streamed usage chunk.
-    pub include_usage: bool,
+    /// Public response rendering options for route-layer helpers.
+    pub options: ResponseOptions,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct ResponseOptions {
+    /// Whether the caller asked for the final streamed usage chunk.
+    pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Whether the caller requested prompt-only echo via `max_tokens=0`.
     pub prompt_only: bool,
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
+    /// Whether the caller requested output logprobs on completion choices.
+    pub requested_logprobs: Option<u32>,
+    /// Whether the caller requested choice-level prompt logprobs.
+    pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
     /// Whether to format logprob tokens as `token_id:{id}`.
@@ -35,7 +47,7 @@ pub struct PreparedRequest {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
-pub(crate) fn prepare_completion_request(
+pub(super) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
@@ -68,6 +80,13 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
+    let include_prompt_logprobs = prompt_logprobs.is_some();
     let max_tokens = if prompt_only {
         Some(1)
     } else {
@@ -125,12 +144,17 @@ pub(crate) fn prepare_completion_request(
     Ok(PreparedRequest {
         request_id,
         response_model,
-        include_usage,
+        options: ResponseOptions {
+            include_usage,
+            include_continuous_usage,
+            prompt_only,
+            echo,
+            requested_logprobs: request.logprobs,
+            include_prompt_logprobs,
+            return_token_ids: request.return_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+        },
         text_request,
-        prompt_only,
-        echo,
-        return_token_ids: request.return_token_ids.unwrap_or(false),
-        return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
 
@@ -216,7 +240,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(prepared.include_usage);
+        assert!(prepared.options.include_usage);
         assert_eq!(
             prepared.text_request.prompt,
             Prompt::TokenIds(vec![11, 22, 33])
@@ -243,6 +267,55 @@ mod tests {
     }
 
     #[test]
+    fn prepare_completion_request_maps_stream_usage_and_token_format_options() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "stream_options": {
+                "include_usage": true,
+                "continuous_usage_stats": true
+            },
+            "return_tokens_as_token_ids": true
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.options.include_usage);
+        assert!(prepared.options.include_continuous_usage);
+        assert!(prepared.options.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_completion_request_gates_continuous_usage_on_include_usage() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "stream_options": {
+                "continuous_usage_stats": true
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
+    }
+
+    #[test]
     fn prepare_completion_request_accepts_text_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -260,9 +333,9 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert_eq!(prepared.options.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
-        assert!(!prepared.prompt_only);
+        assert!(!prepared.options.prompt_only);
     }
 
     #[test]
@@ -283,8 +356,8 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(prepared.prompt_only);
-        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert!(prepared.options.prompt_only);
+        assert_eq!(prepared.options.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
     }
 
@@ -307,7 +380,7 @@ mod tests {
         )
         .expect("prepare");
 
-        assert!(prepared.prompt_only);
+        assert!(prepared.options.prompt_only);
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
