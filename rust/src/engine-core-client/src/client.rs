@@ -409,6 +409,16 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
     }
 
+    /// Return the world size (TP * PP) from the parallel config, if available.
+    pub fn world_size(&self) -> Option<u64> {
+        self.engines.first().map(|engine| engine.ready_response.world_size)
+    }
+
+    /// Return the data parallel size from the parallel config, if available.
+    pub fn data_parallel_size(&self) -> Option<u64> {
+        self.engines.first().map(|engine| engine.ready_response.data_parallel_size)
+    }
+
     /// Get the model name associated with this client used for metrics
     /// labeling.
     pub fn model_name(&self) -> &str {
