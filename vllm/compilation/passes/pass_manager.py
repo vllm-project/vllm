@@ -98,6 +98,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def __init__(self) -> None:
         self.passes: list[InductorPass] = []
+        self._uuid_cache: dict[str, str] = {}
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
@@ -135,6 +136,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config
+        self._uuid_cache.clear()
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
@@ -200,6 +202,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
+        self._uuid_cache.clear()
 
     def uuid(self) -> str:
         """
@@ -207,6 +210,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
+        key = str(get_pass_context().compile_range)
+        if key in self._uuid_cache:
+            return self._uuid_cache[key]
+
         passes = []
 
         state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
@@ -221,6 +228,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         # Include the compile range in the uuid to ensure that inductor
         # recompiles the graph for the new dynamic compile range.
-        state["compile_range"] = str(get_pass_context().compile_range)
+        state["compile_range"] = key
         state["passes"] = passes
-        return InductorPass.hash_dict(state)
+        result = InductorPass.hash_dict(state)
+        self._uuid_cache[key] = result
+        return result
