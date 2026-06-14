@@ -782,8 +782,10 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # Partial wakes intentionally keep the remaining allocations asleep.
+        # Resume scheduling only once all executor memory is resident again.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1907,9 +1909,17 @@ class DPEngineCoreProc(EngineCoreProc):
                     continue
 
                 # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                with self.log_iteration_details(None):
-                    self.execute_dummy_batch()
+                # if the model didn't execute any ready requests -- unless the
+                # engine is sleeping. sleep(level>=1) calls pause_scheduler()
+                # before the device→host KV offload begins; model_executor
+                # .is_sleeping only flips True after the offload completes, so
+                # we guard on self.is_sleeping() (= is_scheduler_paused() or
+                # model_executor.is_sleeping) to cover the offload window too.
+                # The finished-sync all-reduce below still runs (DP group, no
+                # GPU work), keeping DP ranks in lockstep.
+                elif not self.is_sleeping():
+                    with self.log_iteration_details(None):
+                        self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
