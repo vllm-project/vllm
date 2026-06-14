@@ -136,6 +136,7 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {"has_no_defaults_at_init": True},
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
+    "ernie4_5_moe_vl": {"has_no_defaults_at_init": True},
 }
 
 
