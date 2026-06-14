@@ -1906,8 +1906,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
-        if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
-            raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+        # Both linear and exponential ramp-up break when start RPS is 0:
+        # linear yields rate=0 at progress=0 (fails the `rate > 0` assertion
+        # in `get_request` and would otherwise hit a ZeroDivisionError in the
+        # gamma delay computation); exponential divides by start RPS to
+        # compute the ratio.
+        if args.ramp_up_start_rps == 0:
+            raise ValueError("Ramp-up start RPS must be greater than 0.")
 
     label = args.label
 
