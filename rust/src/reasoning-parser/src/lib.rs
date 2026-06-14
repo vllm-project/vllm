@@ -17,6 +17,7 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod delimited;
+mod ernie45;
 mod gemma4;
 mod kimi;
 mod qwen3;
@@ -29,6 +30,7 @@ use vllm_tokenizer::DynTokenizer;
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub(crate) use self::delimited::DelimitedReasoningParser;
+pub use self::ernie45::Ernie45ReasoningParser;
 pub use self::gemma4::Gemma4ReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;

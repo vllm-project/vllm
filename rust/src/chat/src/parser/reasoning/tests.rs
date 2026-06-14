@@ -89,6 +89,28 @@ fn factory_routes_seed_oss_models() {
 }
 
 #[test]
+fn factory_routes_ernie45_models() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-VL-28B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ernie4.5-custom"),
+        Some(names::ERNIE45)
+    );
+
+    // Negative: non-4.5 ERNIE model IDs must NOT route here, so future
+    // pattern widening can't silently pick up unrelated ERNIE versions.
+    assert_eq!(factory.resolve_name_for_model("baidu/ERNIE-Bot-4"), None);
+    assert_eq!(factory.resolve_name_for_model("baidu/ernie-3.5-8k"), None);
+}
+
+#[test]
 fn factory_rejects_unknown_parser_names() {
     let tokenizer = Arc::new(FakeTokenizer);
     let factory = ReasoningParserFactory::new();

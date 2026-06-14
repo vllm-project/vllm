@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 
 pub use vllm_reasoning_parser::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser,
-    ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
-    Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, Ernie45ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser,
+    KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -19,6 +19,7 @@ pub mod names {
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
+    pub const ERNIE45: &str = "ernie45";
     pub const GEMMA4: &str = "gemma4";
     pub const GLM45: &str = "glm45";
     pub const KIMI: &str = "kimi";
@@ -57,6 +58,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
+            .register_parser::<Ernie45ReasoningParser>(names::ERNIE45)
             .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
@@ -73,6 +75,11 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
+            // Route Baidu ERNIE 4.5 model families (`baidu/ERNIE-4.5-*`,
+            // including the `*-Thinking` and VL variants) to the dedicated
+            // parser that strips `<response>` wrappers after `</think>`.
+            .register_pattern("ernie-4.5", names::ERNIE45)
+            .register_pattern("ernie4.5", names::ERNIE45)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("qwen", names::QWEN3)
