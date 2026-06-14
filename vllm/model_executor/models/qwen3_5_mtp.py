@@ -224,6 +224,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             fused_expert_params_mapping.append(
                 (f"{param_name}weight", f"{parts[0]}.{parts[2]}", 0, shard_id)
             )
+            # Also accept pre-fused checkpoints (AutoRound-style
+            # w13_weight/w2_weight): same target param, alternative ckpt name.
+            alt_ckpt_name = "w13_weight" if shard_id == "w1" else "w2_weight"
+            fused_expert_params_mapping.append(
+                (f"{param_name}weight", f"{parts[0]}.{alt_ckpt_name}", 0, shard_id)
+            )
         num_experts = (
             self.config.num_experts if hasattr(self.config, "num_experts") else 0
         )
@@ -232,7 +238,11 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
+                if (
+                    "experts.gate_up_proj" in name
+                    or "experts.down_proj" in name
+                    or "experts.w13_weight" in name
+                    or "experts.w2_weight" in name):
                     is_fused_expert = True
                     expert_params_mapping = fused_expert_params_mapping
 
@@ -269,7 +279,15 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                     if is_fused_expert:
                         # qwen3.5 no need to transpose
                         # loaded_weight = loaded_weight.transpose(-1, -2)
-                        if "experts.gate_up_proj" in name:
+                        # Guard for (quantized MTP + pre-fused checkpoint):
+                        # params_dict has w13_qweight not w13_weight, so the
+                        # lookup below would raise KeyError. Reset
+                        # is_expert_weight so the outer fallback emits the
+                        # standard 'not found in params_dict' warning.
+                        if name_mapped not in params_dict:
+                            is_expert_weight = False
+                            continue
+                        if "experts.gate_up_proj" in name or "experts.w13_weight" in name:
                             loaded_weight = loaded_weight.chunk(2, dim=-2)
                             success_w1 = self.load_fused_expert_weights(
                                 name_mapped,
@@ -287,7 +305,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                             )
                             success = success_w1 and success_w3
                         else:
-                            # down_proj
+                            # down_proj or pre-fused w2_weight
                             success = self.load_fused_expert_weights(
                                 name_mapped,
                                 params_dict,
