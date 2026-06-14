@@ -13,7 +13,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.config.compilation import PassConfig
-from vllm.distributed.parallel_state import get_node_count
+from vllm.distributed.parallel_state import _use_torchcomms_enabled, get_node_count
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -97,9 +97,13 @@ def _resolve_fi_ar_backend() -> str:
         logger.info_once(f"Using flashinfer allreduce backend: {backend}")
         return backend
 
-    if get_node_count() > 1:  # noqa: SIM108
+    if get_node_count() > 1:
         # Use mnnvl backend for multi-node setup since
         # trtllm backend does not support multi-node allreduce
+        backend = "mnnvl"
+    elif _use_torchcomms_enabled():
+        # trtllm opens its own TCP socket for IPC buffer exchange which
+        # can deadlock under torchcomms' process-group wrapping.
         backend = "mnnvl"
     else:
         # Currently defaulting to trtllm backend for single-node

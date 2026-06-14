@@ -348,6 +348,14 @@ direct_register_custom_op(
 )
 
 
+try:
+    from torch.distributed.distributed_c10d import _use_torchcomms_enabled
+except (ImportError, AttributeError):
+
+    def _use_torchcomms_enabled() -> bool:
+        return False
+
+
 class GroupCoordinator:
     """
     PyTorch ProcessGroup wrapper for a group of processes.
@@ -398,7 +406,7 @@ class GroupCoordinator:
 
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
-        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
             self_device_group, self_cpu_group = _create_subgroups_split_group(
                 group_ranks, group_name, torch_distributed_backend
             )
@@ -1586,7 +1594,7 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
-        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
             # split_group needs local_rank early to compute device_id for
             # the eager init. local_rank is not available in torch
             # ProcessGroup, see https://github.com/pytorch/pytorch/issues/122816
@@ -1625,7 +1633,10 @@ def init_distributed_environment(
                     "Elastic EP is not yet supported with multi-node TP/PP"
                 )
 
-    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP and torch.accelerator.is_available():
+    if (
+        (envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled())
+        and torch.accelerator.is_available()
+    ):
         _validate_default_pg_for_split_group()
 
     # set the local rank
@@ -2050,7 +2061,9 @@ def destroy_distributed_environment():
         _WORLD.destroy()
     _WORLD = None
     _NODE_COUNT = None
-    if torch.distributed.is_initialized():
+    if torch.distributed.is_initialized() and not _use_torchcomms_enabled():
+        # torchcomms wraps NCCL communicators; calling destroy_process_group
+        # triggers ncclCommDestroy which can deadlock during shutdown.
         torch.distributed.destroy_process_group()
 
 
@@ -2105,9 +2118,13 @@ def in_the_same_node_as(
     memory system (shared access to shared memory).
     """
     if isinstance(pg, ProcessGroup):
-        assert torch.distributed.get_backend(pg) != torch.distributed.Backend.NCCL, (
-            "in_the_same_node_as should be tested with a non-NCCL group."
-        )
+        # When torchcomms is enabled, all groups (including gloo) are wrapped
+        # by torchcomms and may report as NCCL. Torchcomms handles CPU
+        # tensors transparently, so the check is safe to skip.
+        if not _use_torchcomms_enabled():
+            assert (
+                torch.distributed.get_backend(pg) != torch.distributed.Backend.NCCL
+            ), "in_the_same_node_as should be tested with a non-NCCL group."
         # local rank inside the group
         rank = torch.distributed.get_rank(group=pg)
         world_size = torch.distributed.get_world_size(group=pg)
