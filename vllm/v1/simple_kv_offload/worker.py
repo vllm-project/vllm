@@ -17,6 +17,7 @@ from vllm.v1.simple_kv_offload.metadata import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -173,6 +174,74 @@ class SimpleCPUOffloadWorker:
         self.store_stream = torch.cuda.Stream(priority=low_pri)
 
         # Initialize copy backend with caches and streams.
+        self._backend.init(
+            self.gpu_kv_caches,
+            self.cpu_kv_caches,
+            self.device,
+            self.load_stream,
+            self.store_stream,
+        )
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type["AttentionBackend"],
+    ) -> None:
+        """Register cross-layer KV cache for offloading."""
+        self.device = kv_cache.device
+
+        assert self.kv_cache_config is not None
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
+        assert len(kv_cache_groups) == 1
+        kv_cache_spec = kv_cache_groups[0].kv_cache_spec
+        num_layers = len(kv_cache_groups[0].layer_names)
+        page_size_bytes = kv_cache_spec.page_size_bytes * num_layers
+
+        # View the raw storage as (num_blocks, page_size_bytes)
+        storage = kv_cache.untyped_storage()
+        assert len(storage) % page_size_bytes == 0
+        num_blocks = len(storage) // page_size_bytes
+        gpu_tensor = (
+            torch.tensor([], dtype=torch.int8, device=self.device)
+            .set_(storage)
+            .view(num_blocks, page_size_bytes)
+        )
+
+        unique_gpu_caches: dict[str, torch.Tensor] = {
+            "cross_layer": gpu_tensor,
+        }
+
+        total_bytes_per_block = page_size_bytes
+        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+
+        logger.info(
+            "SimpleCPUOffloadWorker: cross-layer KV cache, "
+            "%d layers, %d GPU blocks, allocating %d CPU blocks (%.2f GB)",
+            num_layers,
+            num_blocks,
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
+        )
+
+        pin_memory = is_pin_memory_available()
+        if not pin_memory:
+            logger.warning(
+                "Pinned memory not available. CPU offload performance may be degraded."
+            )
+
+        self.gpu_kv_caches = unique_gpu_caches
+        self.cpu_kv_caches = {}
+        for name, gt in unique_gpu_caches.items():
+            cpu_shape = (self.num_cpu_blocks,) + gt.shape[1:]
+            tensor = torch.zeros(cpu_shape, dtype=gt.dtype, device="cpu")
+            if pin_memory:
+                pin_tensor(tensor)
+            self.cpu_kv_caches[name] = tensor
+
+        low_pri, _ = torch.cuda.Stream.priority_range()
+        self.load_stream = torch.cuda.Stream(priority=low_pri)
+        self.store_stream = torch.cuda.Stream(priority=low_pri)
+
         self._backend.init(
             self.gpu_kv_caches,
             self.cpu_kv_caches,
