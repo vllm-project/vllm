@@ -155,6 +155,20 @@ class MultiprocExecutor(Executor):
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        # MegaMoE symmetric memory needs all GPUs visible with distinct
+        # device indices. Pop CVD here (before fork/CUDA init) and save
+        # the GPU ID so init_device can use it.
+        if (
+            self.vllm_config.kernel_config is not None
+            and getattr(self.vllm_config.kernel_config, "moe_backend", None)
+            == "deep_gemm_mega_moe"
+        ):
+            cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            gpu_ids = [int(x) for x in cvd.split(",") if x.strip()] if cvd else []
+            if len(gpu_ids) == 1:
+                os.environ["_VLLM_MEGAMOE_GPU_ID"] = str(gpu_ids[0])
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()

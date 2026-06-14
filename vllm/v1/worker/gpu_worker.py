@@ -249,11 +249,19 @@ class Worker(WorkerBase):
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
+            # MegaMoE symmetric memory needs all GPUs visible with
+            # distinct physical device indices. The launcher passes
+            # the physical GPU ID via _VLLM_MEGAMOE_GPU_ID.
+            megamoe_gpu = os.environ.get("_VLLM_MEGAMOE_GPU_ID")
+            if megamoe_gpu is not None:
+                self.local_rank = int(megamoe_gpu)
+
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
             if (
-                parallel_config.distributed_executor_backend
+                megamoe_gpu is None
+                and parallel_config.distributed_executor_backend
                 not in ("ray", "external_launcher")
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
