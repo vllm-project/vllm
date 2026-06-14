@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import inspect
+import os
 
 import torch
 import torch.nn as nn
@@ -100,6 +101,39 @@ class PluggableLayer(nn.Module):
             raise TypeError("Decorator can only be applied to classes.")
 
 
+def _is_trivial_forward_cuda(cls) -> bool:
+    """Return True if cls.forward_cuda is a one-liner delegating to forward_native.
+
+    Detects the pattern::
+
+        def forward_cuda(self, x, residual=None):
+            return self.forward_native(x, residual)
+
+    This indicates no CUDA-specific kernel exists. Under enforce_eager=True the
+    op silently falls back to the PyTorch implementation on every call, producing
+    multiple unfused elementwise kernels instead of a single fused Triton kernel.
+    """
+    forward_cuda = getattr(cls, "forward_cuda", None)
+    forward_native = getattr(cls, "forward_native", None)
+    if forward_cuda is None or forward_native is None:
+        return False
+    if forward_cuda is forward_native:
+        return True
+    try:
+        src = inspect.getsource(cls.forward_cuda)
+    except (OSError, TypeError):
+        return False
+    body = [
+        line.strip() for line in src.splitlines()
+        if line.strip()
+        and not line.strip().startswith(("#", "@", "def ", '"""', "'''"))
+    ]
+    return (
+        len(body) == 1
+        and body[0].startswith("return")
+        and "forward_native" in body[0]
+    )
+
 class CustomOp(nn.Module):
     """
     Base class for custom ops.
@@ -192,6 +226,45 @@ class CustomOp(nn.Module):
             # Compile forward_native to avoid eager torch ops if inside
             # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
             return self.maybe_compile(self.forward_native, enable=compile_native)
+
+        # Auto-fuse trivial fallbacks when opted in.
+        # Must run before the platform dispatch below: on ROCm, forward_hip
+        # defaults to `return self.forward_cuda(...)`, so the same unfused
+        # pattern exists there and benefits equally from compilation.
+        # Patching forward_native (rather than forward_cuda) means all
+        # dispatch paths — forward_cuda, forward_hip — pick up the compiled
+        # version without needing platform-specific branches here.
+        #
+        # _auto_fused uses three states (None/False/True) to avoid redundant
+        # inspect.getsource calls across instances of the same class:
+        #   None  — not yet checked (first instance of this class)
+        #   False — checked, not a trivial fallback; skip cheaply on future instances
+        #   True  — fused; forward_native already replaced
+        if os.environ.get("VLLM_AUTO_FUSE_OPS") == "1":
+            cls = self.__class__
+            auto_fused = getattr(cls, "_auto_fused", None)
+            if auto_fused is None:
+                # First time we see this class: run the (expensive) source check
+                # and cache the result so subsequent instances skip it.
+                if _is_trivial_forward_cuda(cls):
+                    from vllm.config.compilation import CompilationMode
+                    if compilation_config.mode == CompilationMode.NONE:
+                        _original_native = cls.forward_native
+                        # dynamic=True: handles variable sequence lengths (prefill).
+                        # mode="default": avoids CUDAGraph inside torch.compile,
+                        #   which conflicts with vLLM's own CUDAGraph management.
+                        _compiled = torch.compile(
+                            _original_native, dynamic=True, mode="default"
+                        )
+                        def _fused_forward_native(self, *args, **kwargs):
+                            return _compiled(self, *args, **kwargs)
+                        cls.forward_native = _fused_forward_native
+                        cls._auto_fused = True
+                    else:
+                        cls._auto_fused = False
+                else:
+                    # Not a trivial fallback; mark so future instances skip cheaply.
+                    cls._auto_fused = False
 
         if current_platform.is_rocm():
             return self.forward_hip
