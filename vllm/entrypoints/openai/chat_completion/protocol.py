@@ -508,6 +508,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_output_tokens = self.max_tokens
             max_output_tokens_param = "max_tokens"
 
+        # Chat templates can prepend tokens that the caller cannot easily
+        # predict (e.g. ``<think>\n\n</think>\n\n`` injected when
+        # ``enable_thinking=False``), so the strict early-fail check that
+        # reserves ``max_output_tokens`` produces spurious errors. The actual
+        # generation budget is capped later by ``get_max_tokens``; here we
+        # only fail when the prompt does not fit in ``max_model_len``.
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_output_tokens or 0,
@@ -517,6 +523,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
             max_output_tokens_param=max_output_tokens_param,
+            reserve_max_output_tokens=False,
         )
 
     # Default sampling parameters for chat completion requests

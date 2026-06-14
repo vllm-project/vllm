@@ -329,6 +329,53 @@ class TestRenderPrompt:
                 TokenizeParams(max_total_tokens=100, truncate_prompt_tokens=None),
             )
 
+    def test_reserve_max_output_tokens_false_allows_overshoot(self):
+        # Regression for vllm-project/vllm#40689 — chat templates can prepend
+        # tokens that the caller cannot easily predict (e.g. the
+        # ``<think></think>`` block injected for Qwen3.5 when
+        # ``enable_thinking=False``). When opted out of the output-budget
+        # reservation, the renderer must not fail just because
+        # ``len(tokens) > max_total_tokens - max_output_tokens``.
+        renderer = _build_renderer(MockModelConfig())
+
+        tokens = list(range(95))  # Fits in max_total_tokens=100 but not 100-50.
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, tokens)
+        )
+
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                max_output_tokens=50,
+                reserve_max_output_tokens=False,
+            ),
+        )
+
+        assert len(results) == 1
+        assert results[0]["prompt_token_ids"] == tokens
+
+    def test_reserve_max_output_tokens_false_still_fails_above_context(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        tokens = list(range(150))  # Exceeds max_total_tokens=100.
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, tokens)
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="prompt alone exceeds",
+        ):
+            renderer.tokenize_prompts(
+                prompts,
+                TokenizeParams(
+                    max_total_tokens=100,
+                    max_output_tokens=50,
+                    reserve_max_output_tokens=False,
+                ),
+            )
+
     def test_no_tokenizer_for_text(self):
         renderer = _build_renderer(MockModelConfig(skip_tokenizer_init=True))
 

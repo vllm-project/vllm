@@ -184,6 +184,22 @@ class TokenizeParams:
     truncate_prompt_tokens_param: str = "truncate_prompt_tokens"
     """Override this to edit the message for validation errors."""
 
+    reserve_max_output_tokens: bool = True
+    """
+    Whether the strict early-fail length check must reserve
+    ``max_output_tokens`` from the model's context window.
+
+    Set to ``False`` for endpoints (such as chat completions) where the
+    chat template can prepend tokens that the caller cannot easily predict
+    (e.g. ``<think>\\n\\n</think>\\n\\n`` injected when
+    ``enable_thinking=False``). In that case the renderer only fails if the
+    prompt does not fit in ``max_total_tokens``; the actual generation
+    budget is capped later by ``vllm.entrypoints.utils.get_max_tokens``.
+
+    The truncation/padding semantics tied to ``max_input_tokens``
+    (e.g. ``truncate_prompt_tokens=-1``) are unaffected by this flag.
+    """
+
     @property
     def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens."""
@@ -191,6 +207,13 @@ class TokenizeParams:
             return None
 
         return self.max_total_tokens - self.max_output_tokens
+
+    @property
+    def _length_check_limit(self) -> int | None:
+        """Upper bound used by the early-fail length checks."""
+        if not self.reserve_max_output_tokens:
+            return self.max_total_tokens
+        return self.max_input_tokens
 
     def __post_init__(self) -> None:
         max_total_tokens = self.max_total_tokens
@@ -293,6 +316,7 @@ class TokenizeParams:
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
+            reserve_max_output_tokens=self.reserve_max_output_tokens,
         )
 
     def get_encode_kwargs(self) -> dict[str, Any]:
@@ -300,10 +324,10 @@ class TokenizeParams:
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
-        elif max_length is None and self.max_input_tokens is not None:
+        elif max_length is None and self._length_check_limit is not None:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
-            max_length = self.max_input_tokens + 1
+            max_length = self._length_check_limit + 1
 
         # Explicit truncation-side overrides require the full token sequence so
         # we can slice from the requested side in _token_truncation. Disable
@@ -323,23 +347,33 @@ class TokenizeParams:
 
     def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply length checks to prompt text if necessary."""
-        max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        length_limit = self._length_check_limit
+        if length_limit is None:
             return text
 
         if self.truncate_prompt_tokens is None and tokenizer is not None:
-            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+            max_input_chars = length_limit * tokenizer.max_chars_per_token
 
             if len(text) > max_input_chars:
                 # To save resources, fail the request outright without even
                 # attempting tokenization
+                if self.reserve_max_output_tokens:
+                    detail = (
+                        f"you requested {self.max_output_tokens} output tokens "
+                        f"and your prompt contains {len(text)} characters "
+                        f"(more than {max_input_chars} characters, which is "
+                        f"the upper bound for {length_limit} input tokens)."
+                    )
+                else:
+                    detail = (
+                        f"your prompt contains {len(text)} characters "
+                        f"(more than {max_input_chars} characters, which is "
+                        f"the upper bound for {length_limit} input tokens)."
+                    )
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_total_tokens} tokens. However, you requested "
-                    f"{self.max_output_tokens} output tokens and your prompt "
-                    f"contains {len(text)} characters (more than "
-                    f"{max_input_chars} characters, which is the upper bound "
-                    f"for {max_input_tokens} input tokens). "
+                    f"{self.max_total_tokens} tokens. However, "
+                    f"{detail} "
                     f"Please reduce the length of the input prompt or the "
                     f"number of requested output tokens.",
                     parameter="input_text",
@@ -414,23 +448,33 @@ class TokenizeParams:
 
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
-        max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        length_limit = self._length_check_limit
+        if length_limit is None:
             return tokens
 
-        if len(tokens) > max_input_tokens:
+        if len(tokens) > length_limit:
             token_count = len(tokens)
             # The tokenizer may have truncated the prompt to
-            # max_input_tokens + 1 (see get_encode_kwargs), so the
+            # length_limit + 1 (see get_encode_kwargs), so the
             # actual prompt length could be larger.
-            qualifier = "at least " if token_count == max_input_tokens + 1 else ""
-            total = token_count + self.max_output_tokens
+            qualifier = "at least " if token_count == length_limit + 1 else ""
+            if self.reserve_max_output_tokens:
+                total = token_count + self.max_output_tokens
+                detail = (
+                    f"you requested {self.max_output_tokens} output tokens "
+                    f"and your prompt contains {qualifier}{token_count} "
+                    f"input tokens, for a total of {qualifier}{total} tokens."
+                )
+            else:
+                detail = (
+                    f"your prompt contains {qualifier}{token_count} "
+                    f"input tokens (the prompt alone exceeds the model's "
+                    f"context window)."
+                )
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_total_tokens} tokens. However, you requested "
-                f"{self.max_output_tokens} output tokens and your prompt "
-                f"contains {qualifier}{token_count} input tokens, "
-                f"for a total of {qualifier}{total} tokens. "
+                f"{self.max_total_tokens} tokens. However, "
+                f"{detail} "
                 f"Please reduce the length of the input prompt or the "
                 f"number of requested output tokens.",
                 parameter="input_tokens",
