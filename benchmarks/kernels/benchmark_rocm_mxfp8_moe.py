@@ -32,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
     _grouped_gemm_mxfp8,
-    _select_split_k,
     fused_moe_mxfp8_native,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
@@ -241,12 +240,6 @@ def run(args: argparse.Namespace) -> None:
             )
             sorted_ids, expert_ids, num_post = run_align()
             a_q, a_s = mxfp8_e4m3_quantize(hidden_states)
-            max_post_padded = min(sorted_ids.shape[0], M * block_m)
-            g1_dtype = (
-                torch.float32
-                if _select_split_k(max_post_padded, block_m, 2 * inter, H) > 1
-                else hidden_states.dtype
-            )
             run_gemm1 = partial(
                 _grouped_gemm_mxfp8,
                 a_q,
@@ -259,7 +252,7 @@ def run(args: argparse.Namespace) -> None:
                 M,
                 args.top_k,
                 block_m,
-                g1_dtype,
+                hidden_states.dtype,
                 args.top_k,
                 expert_map=expert_map,
             )
