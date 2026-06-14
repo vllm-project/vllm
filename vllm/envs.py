@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
@@ -1447,6 +1448,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB": lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+    # Maximum time in seconds allowed for regex compilation in structured
+    # output backends (xgrammar, outlines). Prevents ReDoS attacks where
+    # adversarial patterns cause exponential DFA state-space explosion.
+    # Set to 0 to disable the timeout (not recommended in production).
+    "VLLM_REGEX_COMPILATION_TIMEOUT_S": lambda: int(
+        os.getenv("VLLM_REGEX_COMPILATION_TIMEOUT_S", "5")
+    ),
     # Control the threshold for msgspec to use 'zero copy' for
     # serialization/deserialization of tensors. Tensors below
     # this limit will be encoded into the msgpack buffer, and
