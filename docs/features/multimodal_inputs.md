@@ -13,6 +13,9 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+    A less restrictive flag is also available to limit media access to public domains only. This can be activated by setting `--forbid-media-private-networks-access`.
+    Note that when this flag is set, the HTTP redirects are automatically prevented.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
