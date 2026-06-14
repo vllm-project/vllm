@@ -987,8 +987,13 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
+        mm_encoder_attn = ["flash_attn", "native"]
+
         return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            default,
+            rms_norm=rms_norm,
+            fused_add_rms_norm=rms_norm,
+            mm_encoder_attn=mm_encoder_attn,
         )
 
     @classmethod

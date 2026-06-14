@@ -588,8 +588,13 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
+        mm_encoder_attn = ["flash_attn", "triton", "native"]
+
         return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            default,
+            rms_norm=rms_norm,
+            fused_add_rms_norm=rms_norm,
+            mm_encoder_attn=mm_encoder_attn,
         )
 
     @classmethod

@@ -351,7 +351,9 @@ class XPUPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["xpu_kernels", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        mm_encoder_attn = ["flash_attn", "triton", "native"]
+
+        return IrOpPriorityConfig.with_default(default, mm_encoder_attn=mm_encoder_attn)
 
     @classmethod
     def device_count(cls) -> int:
