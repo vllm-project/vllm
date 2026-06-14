@@ -25,6 +25,39 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
+# Cached probe: does the installed AITER build expose custom_fused_qknorm_ar?
+_AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE: bool | None = None
+
+
+def _aiter_has_custom_fused_qknorm_ar() -> bool:
+    global _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
+    if _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE is None:
+        if not current_platform.is_rocm():
+            _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
+        else:
+            try:
+                from aiter.dist.device_communicators.custom_all_reduce import (
+                    CustomAllreduce as _AiterCustomAllreduce,
+                )
+
+                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = hasattr(
+                    _AiterCustomAllreduce, "custom_fused_qknorm_ar"
+                )
+            except ImportError:
+                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
+    return _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
+
+
+def _get_aiter_custom_all_reduce():
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return None
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    if aiter_ar is None or getattr(aiter_ar, "disabled", False):
+        return None
+    return aiter_ar
+
 
 def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
     """All-reduce a per-token variance tensor across the TP group.
@@ -96,6 +129,29 @@ def _minimax_qk_norm_fusion(
             tp_world,
             eps,
         )
+    # ROCm fast path: AITER fused QK-norm + AllReduce (ROCm/aiter#3163).
+    # AITER's kernel requires q/k/v dims aligned to WARP_SIZE * PACK_SIZE;
+    # skip for incompatible shapes (e.g. TP=8 MiniMax-M2) and fall through.
+    if (
+        tp_world > 1
+        and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
+        and _aiter_has_custom_fused_qknorm_ar()
+    ):
+        pack_size = 16 // qkv.element_size()
+        warp_work_size = 32 * pack_size
+        if q_size % warp_work_size == 0 and kv_size % warp_work_size == 0:
+            aiter_ar = _get_aiter_custom_all_reduce()
+            if aiter_ar is not None:
+                try:
+                    q_out, k_out, _ = aiter_ar.custom_fused_qknorm_ar(
+                        qkv, q_weight, k_weight, eps
+                    )
+                    return q_out, k_out
+                except RuntimeError:
+                    logger.warning_once(
+                        "AITER custom_fused_qknorm_ar failed, "
+                        "falling back to unfused path."
+                    )
     return _minimax_qk_norm_fallback(
         qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
     )
