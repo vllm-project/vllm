@@ -5,7 +5,6 @@
 from enum import Enum
 
 import torch
-import torch.nn.functional as F
 
 
 class MoEActivation(Enum):
@@ -136,14 +135,13 @@ def apply_moe_activation(
 
     # Activations without gated multiplication
     elif activation == MoEActivation.SILU_NO_MUL:
-        output.copy_(F.silu(input))
+        torch.ops._C.silu_only(output, input)
     elif activation == MoEActivation.GELU_NO_MUL:
-        output.copy_(F.gelu(input))
+        torch.ops._C.gelu_only(output, input)
     elif activation == MoEActivation.GELU_TANH_NO_MUL:
-        output.copy_(F.gelu(input, approximate="tanh"))
+        torch.ops._C.gelu_tanh_only(output, input)
     elif activation == MoEActivation.RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
+        torch.ops._C.relu2_only(output, input)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
