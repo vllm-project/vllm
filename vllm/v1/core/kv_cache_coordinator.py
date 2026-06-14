@@ -691,6 +691,45 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         ), hit_length
 
+    def find_longest_cache_hit_per_group(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
+        """Like find_longest_cache_hit but evaluates each group independently.
+
+        Returns:
+            (blocks_per_group, hit_lengths_per_group)
+        """
+
+        def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+            if kv_cache_spec.block_size == self.hash_block_size:
+                return block_hashes
+            return BlockHashListWithBlockSize(
+                block_hashes, self.hash_block_size, kv_cache_spec.block_size
+            )
+
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
+        hit_lengths: list[int] = [0] * num_groups
+
+        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            blocks = manager_cls.find_longest_cache_hit(
+                block_hashes=_get_block_hashes(spec),
+                max_length=max_cache_hit_length,
+                kv_cache_group_ids=group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=spec,
+                drop_eagle_block=use_eagle,
+                alignment_tokens=self.scheduler_block_size,
+            )
+            group_hit = len(blocks[0]) * spec.block_size
+            for gid, blks in zip(group_ids, blocks):
+                hit_blocks[gid] = blks
+                hit_lengths[gid] = group_hit
+
+        return tuple(hit_blocks), tuple(hit_lengths)
+
 
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,

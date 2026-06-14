@@ -31,6 +31,7 @@ from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .diffusion import DiffusionConfig
 from .ec_transfer import ECTransferConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
@@ -66,9 +67,11 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
+        "Qwen3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Qwen2MoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
-        "Qwen3ForCausalLM",
     }
 )
 
@@ -323,6 +326,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    diffusion_config: DiffusionConfig | None = None
+    """Diffusion LLM (dLLM) configuration."""
+
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
@@ -511,6 +517,11 @@ class VllmConfig:
             and self.speculative_config.num_speculative_tokens is not None
         ):
             return self.speculative_config.num_speculative_tokens
+        if (
+            self.diffusion_config is not None
+            and self.diffusion_config.canvas_length is not None
+        ):
+            return self.diffusion_config.canvas_length
         return 0
 
     @property
@@ -518,6 +529,9 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
+
+        if self.model_config is not None and self.model_config.is_diffusion:
+            return True
 
         if not self._is_default_v2_model_runner_model():
             return False
@@ -547,13 +561,13 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        architectures = getattr(model_config, "architectures", [])
-        if not any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
-        ):
+        if model_config.is_quantized:
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        architectures = getattr(model_config, "architectures", [])
+        return any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -750,23 +764,29 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding changes the target verification "
+            "length at runtime. Overriding cudagraph_mode from %s to "
+            "PIECEWISE for reliability.",
+            self.compilation_config.cudagraph_mode.name,
+        )
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        # Check if KV connector requires chunked prefill to be disabled.
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
-            and self.scheduler_config.enable_chunked_prefill
-        ):
-            raise ValueError(
-                "ExampleHiddenStatesConnector does not support chunked prefill. "
-                "Please disable chunked prefill (--no-enable-chunked-prefill)."
-            )
-
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
@@ -946,6 +966,15 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
+            if (
+                self.model_config is not None
+                and self.model_config.enable_prompt_embeds
+                and self.model_config.is_multimodal_model
+            ):
+                raise ValueError(
+                    "Async scheduling is not yet supported with prompt embeds "
+                    "for multimodal models."
+                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -987,6 +1016,16 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.model_config is not None
+                and self.model_config.enable_prompt_embeds
+                and self.model_config.is_multimodal_model
+            ):
+                logger.warning_once(
+                    "Async scheduling is not yet supported with prompt embeds "
+                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1149,6 +1188,8 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+
+        self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -1665,12 +1706,7 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1
-                if (
-                    self.speculative_config
-                    and self.speculative_config.num_speculative_tokens
-                ):
-                    decode_query_len += self.speculative_config.num_speculative_tokens
+                decode_query_len = 1 + self.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )
@@ -2007,6 +2043,9 @@ class VllmConfig:
             elif speculative_config.method not in ("eagle", "eagle3", "mtp", "dflash"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
+            if speculative_config.uses_dynamic_speculative_decoding():
+                unsupported.append("dynamic speculative decoding")
+
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
             # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.
             if (
@@ -2023,6 +2062,9 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
+
+        if self.parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
 
         if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
