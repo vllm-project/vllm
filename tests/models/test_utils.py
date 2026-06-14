@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
 )
 from vllm.platforms import current_platform
@@ -172,6 +173,45 @@ class raise_if_cuda_sync:
 
     def __exit__(self, exception_type, exception_value, traceback):
         torch.cuda.set_sync_debug_mode(self.previous_debug_mode)
+
+
+@pytest.mark.cpu_test
+def test_weights_mapper_suffix_is_idempotent():
+    """Regression for #42777: ``orig_to_new_suffix`` must be a no-op on a
+    key that is already in the target form.
+
+    The DeepSeek V4 suffix map remaps ``head.weight -> lm_head.weight``.
+    A canonical ``lm_head.weight`` also ends with ``head.weight``, so
+    without the idempotency guard the rule fires and produces
+    ``lm_lm_head.weight``, which then fails the downstream module lookup
+    with ``ValueError: There is no module or parameter named 'lm_lm_head'``.
+    """
+    mapper = WeightsMapper(
+        orig_to_new_suffix={
+            "head.weight": "lm_head.weight",
+            "embed.weight": "embed_tokens.weight",
+        }
+    )
+    # The reported bug shape: canonical name must pass through unchanged.
+    assert mapper._map_name("lm_head.weight") == "lm_head.weight"
+    assert mapper._map_name("model.lm_head.weight") == "model.lm_head.weight"
+    # The intended remap still happens for the bare-suffix form.
+    assert mapper._map_name("head.weight") == "lm_head.weight"
+    assert mapper._map_name("embed.weight") == "embed_tokens.weight"
+    # And remapped tensors picked up by .apply() match.
+    weights = [
+        ("lm_head.weight", torch.zeros(1)),
+        ("head.weight", torch.zeros(1)),
+    ]
+    out_names = [name for name, _ in mapper.apply(weights)]
+    assert out_names == ["lm_head.weight", "lm_head.weight"]
+
+    # The idempotency guard must not interfere with the ``new_key is None``
+    # (drop the tensor) or ``new_key == ""`` (strip the suffix) cases.
+    drop_mapper = WeightsMapper(orig_to_new_suffix={".skip_me": None})
+    assert drop_mapper._map_name("a.skip_me") is None
+    strip_mapper = WeightsMapper(orig_to_new_suffix={"_inv": ""})
+    assert strip_mapper._map_name("weight_scale_inv") == "weight_scale"
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
