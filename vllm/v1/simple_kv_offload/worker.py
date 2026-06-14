@@ -30,15 +30,22 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        disk_path: str | None = None,
+        disk_capacity_bytes: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.cpu_capacity_bytes = cpu_capacity_bytes
+        self._disk_path = disk_path
+        self._disk_capacity_bytes = disk_capacity_bytes
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.device: torch.device | None = None
         self.num_cpu_blocks: int = 0
+
+        # Disk backend (initialized in register_kv_caches)
+        self._disk_backend: "DiskBackend | None" = None
 
         # CUDA streams for the async transfers
         self.load_stream: torch.cuda.Stream | None = None
@@ -181,6 +188,25 @@ class SimpleCPUOffloadWorker:
             self.store_stream,
         )
 
+        # Initialize disk backend if configured.
+        if self._disk_path and self._disk_capacity_bytes > 0:
+            from vllm.v1.simple_kv_offload.disk import create_disk_backend
+            bytes_per_block = {
+                name: t.shape[1] * t.element_size()
+                for name, t in self.cpu_kv_caches.items()
+            }
+            total_bpb = sum(bytes_per_block.values())
+            num_disk_blocks = max(
+                1, self._disk_capacity_bytes // total_bpb
+            )
+            self._disk_backend = create_disk_backend(
+                disk_path=self._disk_path,
+                tensor_names=list(self.cpu_kv_caches.keys()),
+                bytes_per_block=bytes_per_block,
+                num_disk_blocks=num_disk_blocks,
+                try_gds=True,
+            )
+
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
         if metadata.load_event >= 0:
@@ -235,6 +261,37 @@ class SimpleCPUOffloadWorker:
                     is_store=True,
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
+                )
+
+            # Disk write-back: queue evicted CPU blocks for background write
+            if (
+                self._disk_backend is not None
+                and metadata.disk_write_cpu_blocks
+            ):
+                assert self.cpu_kv_caches is not None
+                self._disk_backend.write_blocks(
+                    self.cpu_kv_caches,
+                    metadata.disk_write_cpu_blocks,
+                    metadata.disk_write_disk_blocks,
+                )
+
+            # Disk read (prefetch): read disk blocks into CPU (blocking)
+            # Must complete before CPU→GPU load can use these blocks
+            if (
+                self._disk_backend is not None
+                and metadata.disk_read_cpu_blocks
+            ):
+                assert self.cpu_kv_caches is not None
+                # Issue fadvise WILLNEED hint to trigger kernel
+                # readahead before the blocking pread calls
+                if hasattr(self._disk_backend, 'prefetch_hint'):
+                    self._disk_backend.prefetch_hint(
+                        metadata.disk_read_disk_blocks
+                    )
+                self._disk_backend.read_blocks_to_cpu(
+                    self.cpu_kv_caches,
+                    metadata.disk_read_cpu_blocks,
+                    metadata.disk_read_disk_blocks,
                 )
 
         # (2) Track completed transfer events
