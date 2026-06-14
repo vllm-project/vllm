@@ -52,6 +52,51 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     return output_dir / "autotune_configs.json"
 
 
+def _warmup_zero_kv_blocks(worker: "Worker") -> None:
+    """Warm up the Triton KV-zeroing kernel via the real model-runner path."""
+    runner = worker.model_runner
+    if not hasattr(runner, "_kv_block_zeroer"):
+        return
+
+    try:
+        with torch.inference_mode():
+            # Warm up with the smallest valid block id list.
+            runner._zero_block_ids([0])
+    except Exception:
+        logger.debug("Skipping KV zero warmup.", exc_info=True)
+
+
+def _warmup_slot_mapping(worker: "Worker") -> None:
+    """Warm up the Triton slot-mapping kernel through BlockTable wrappers."""
+    runner = worker.model_runner
+    input_batch = getattr(runner, "input_batch", None)
+    if input_batch is None:
+        return
+
+    block_tables = getattr(input_batch, "block_table", None)
+    if block_tables is None:
+        return
+
+    device = runner.device
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    positions = torch.tensor([0], dtype=torch.int64, device=device)
+
+    try:
+        with torch.inference_mode():
+            block_tables.clear()
+            for block_table in block_tables.block_tables:
+                block_table.add_row([0], row_idx=0)
+            block_tables.commit_block_table(num_reqs=1)
+            block_tables.compute_slot_mapping(
+                num_reqs=1,
+                query_start_loc=query_start_loc,
+                positions=positions,
+            )
+            block_tables.clear()
+    except Exception:
+        logger.debug("Skipping slot-mapping warmup.", exc_info=True)
+
+
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -104,6 +149,9 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+
+    _warmup_zero_kv_blocks(worker)
+    _warmup_slot_mapping(worker)
 
 
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
