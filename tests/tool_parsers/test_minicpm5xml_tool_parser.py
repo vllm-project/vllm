@@ -733,3 +733,20 @@ def test_extract_tool_calls_streaming_multiple(parser: ToolParser) -> None:
         "nums": [7, 8, 9],
         "exact": False,
     }
+
+
+def test_xml_external_entity_prevention(parser: ToolParser) -> None:
+    request = make_request(make_tools_weather())
+    text = (
+        '<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>'
+        '<function name="get_weather">'
+        '<param name="city">&xxe;</param>'
+        '<param name="date">2024-06-27</param>'
+        '</function>\n'
+    )
+    out = parser.extract_tool_calls(text, request)
+    if out.tools_called:
+        args = json.loads(out.tool_calls[0].function.arguments)
+        # Should not resolve external entity.
+        assert args["city"] != "root:x:0:0:root:/root:/bin/bash"
+        assert args["city"] in (None, "", "&xxe;")
