@@ -181,6 +181,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
