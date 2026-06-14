@@ -117,6 +117,60 @@ def test_cumem_with_cudagraph():
     # cache content is as expected
     assert torch.allclose(x, cache[: x.size(0)])
 
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="cumem discarded-tag zeroing behavior is CUDA-specific",
+)
+def test_cumem_wake_zeros_discarded_tag_pages():
+    """Regression: ``wake_up`` must zero allocations whose tag was discarded
+    (not in the suspend ``offload_tags`` set), because ``create_and_map``
+    returns physical pages with *undefined* contents.
+
+    Before the fix, ``allocator.sleep(offload_tags=("weights",))`` followed
+    by ``allocator.wake_up()`` left the "kv_cache" / "discard" / etc. tagged
+    pages mapped to whatever bytes the driver handed back. Downstream
+    attention kernels on a non-FP8 KV cache (e.g. Qwen3-4B AWQ INT4) then
+    consumed that garbage and emitted incoherent tokens while the wake-up
+    API still returned 200 OK. The fix zeroes any allocation without a CPU
+    backup on remap; this test pins that contract.
+    """
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag="weights"):
+        weight = torch.full((1024, 1024), 7.0, device=DEVICE_TYPE)
+    with allocator.use_memory_pool(tag="discard"):
+        # Fill with a sentinel pattern; if the bug regresses, wake-up
+        # would (with high but not certain probability) preserve some of
+        # these bytes - the assertion below catches the deterministic case
+        # where the same physical frame is handed back, which on a
+        # quiet-process test is the common outcome.
+        scratch = torch.full((1024, 1024), 42.0, device=DEVICE_TYPE)
+
+    # Sanity baseline: both pools live, contents as written.
+    assert torch.all(weight == 7.0)
+    assert torch.all(scratch == 42.0)
+
+    # Suspend with selective offload: only "weights" is backed up to host;
+    # the "discard"-tagged allocation is unmapped without a CPU copy.
+    allocator.sleep(offload_tags=("weights",))
+    allocator.wake_up()
+
+    # Weights survive (CPU backup restored).
+    assert torch.all(weight == 7.0), (
+        "weights tag should round-trip through sleep/wake unchanged"
+    )
+
+    # Discarded tag must come back zero-initialized, NOT with stale
+    # sentinel bytes. This is the load-bearing invariant - it's what
+    # makes non-FP8 KV cache safe across a sleep/wake cycle and what
+    # the gibberish-after-wake regression broke.
+    assert torch.all(scratch == 0.0), (
+        "discarded-tag pages must be zero-initialized on wake_up; "
+        "found non-zero residual bytes - the wake-corruption "
+        "regression is back"
+    )
+
     # output content is as expected
     assert torch.allclose(y, x + 1)
 
