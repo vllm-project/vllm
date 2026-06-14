@@ -852,7 +852,11 @@ class TritonAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before.
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if is_quantized_kv_cache(self.kv_cache_dtype) and not self._fp8_software_conv:
+            # Native fp8 path reinterprets the uint8 cache as fp8. On the
+            # software-emulation path the cache stays uint8 and the reshape
+            # kernel encodes bf16->fp8e4nv bytes itself (an fp8e4nv-typed pointer
+            # would fail to compile on SM80/86).
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
