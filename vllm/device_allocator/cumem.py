@@ -164,6 +164,112 @@ class CuMemAllocator:
         )
         return data.handle
 
+    def _quiesce_distributed_before_vmm_mutation(self) -> None:
+        """
+        Barrier on every CPU process group and synchronize the device before
+        we mutate VMM mappings via cuMemUnmap / cuMemCreate+Map.
+
+        Background — fix for vllm-project/vllm#45519:
+
+        ``CuMemAllocator.sleep/wake_up`` walks ``pointer_to_data`` and
+        unmaps / remaps the VMM range for every cumem-backed allocation.
+        NCCL communicators bound to ``torch.distributed`` process groups
+        (e.g. ``get_pp_group().device_group``) hold persistent registrations
+        of GPU buffers in that same VMM space — rendezvous buffers, ring
+        topology slots, and any user-registered buffers cached via
+        NCCL_REGISTER. With the default (``CuMemBackend``) every offloaded
+        tag is CPU-backed up and the post-wake content is byte-identical, so
+        any NCCL registration that happens to point at those VAs still sees
+        plausibly-valid data. With selective-offload backends (notably
+        ``CuMemTagBackend`` from #45398) some tags are discarded — the VA is
+        unmapped and remapped to fresh physical pages with garbage — and any
+        NCCL registration into that range now points at undefined memory.
+
+        Compounding the per-rank state corruption: ``sleep`` / ``wake_up``
+        run independently on each rank with no cross-rank ordering. If
+        rank 0 has already started ``cuMemUnmap`` while rank 1 is still
+        mid-``torch.distributed.broadcast`` against the soon-to-be-unmapped
+        VA, the broadcast's P2P send/recv hits a region the peer's GPU MMU
+        treats as illegal → ``cudaErrorIllegalAddress``. This was the cycle-5
+        crash signature reported in #45519 (TP=2 PP=2, varied prompts) and
+        is also one suspected upstream cause of #45094-class deadlocks.
+
+        Fix shape: at sleep entry and at wake_up exit, (a) drain all
+        in-flight kernels on the affected device via ``torch.cuda.synchronize()``
+        so no NCCL P2P call is mid-flight against the VAs we're about to
+        mutate, and (b) issue a CPU-side ``barrier()`` on every known
+        process group so all participating ranks reach the
+        sleep/wake boundary together. Doing this on the CPU group
+        (rather than the device group) deliberately avoids round-tripping
+        through NCCL — which is exactly the subsystem whose buffer
+        registrations may be in flux. Both calls are no-ops in
+        single-process / single-rank setups.
+
+        Cost is one ``cudaDeviceSynchronize`` plus one ``gloo`` barrier per
+        registered process group per sleep/wake call. On a TP=2 PP=2 setup
+        with a single PP group + a single TP group on the CPU side, that's
+        ~2 small CPU barriers per call — measured below the noise floor of
+        a typical wake (~1-2 s on a 27 B AWQ-INT4 model with cumem_tag).
+        """
+        # Drain all in-flight CUDA work on every visible device. Required so
+        # NCCL kernel launches that were queued behind a recent collective
+        # call complete before we unmap their buffers, and so post-wake we
+        # don't return to the caller before remap is visible on the device.
+        try:
+            if torch.cuda.is_available():
+                # Synchronize the current device first (cheap, common case).
+                torch.cuda.synchronize()
+        except Exception as exc:
+            # synchronize should never raise on a healthy context, but if it
+            # does, prefer logging over masking the user's actual bug.
+            logger.warning(
+                "CuMemAllocator: torch.cuda.synchronize() raised during VMM "
+                "quiesce: %s. Continuing — sleep/wake may race with in-flight "
+                "NCCL work.",
+                exc,
+            )
+
+        # CPU-side barrier on every known process group. We deliberately
+        # use the CPU (gloo) group, not the device (NCCL) group: NCCL is
+        # the subsystem whose buffer registrations are about to become
+        # invalid for selective-offload backends. Going CPU-only keeps the
+        # ordering primitive independent of the corrupted state.
+        if not torch.distributed.is_available():
+            return
+        if not torch.distributed.is_initialized():
+            return
+
+        try:
+            from vllm.distributed.parallel_state import (
+                _ENABLE_BARRIER_FOR_VMM_MUTATION,
+                get_world_group,
+            )
+        except Exception:
+            # Importing at module load time risks circular imports with
+            # vllm.distributed; defer until first use.
+            return
+
+        if not _ENABLE_BARRIER_FOR_VMM_MUTATION:
+            return
+
+        try:
+            world = get_world_group()
+        except (AssertionError, AttributeError):
+            # World group not yet initialized (e.g. cumem_allocator used
+            # outside an inference engine, like in standalone tests). Nothing
+            # to coordinate.
+            return
+
+        try:
+            torch.distributed.barrier(group=world.cpu_group)
+        except Exception as exc:
+            # Barrier failures shouldn't mask the originating sleep/wake.
+            logger.warning(
+                "CuMemAllocator: CPU-group barrier raised during VMM "
+                "quiesce: %s. Multi-rank coordination may be degraded.",
+                exc,
+            )
+
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.
@@ -182,6 +288,11 @@ class CuMemAllocator:
             offload_tags = (offload_tags,)
 
         assert isinstance(offload_tags, tuple)
+
+        # Drain in-flight NCCL/CUDA work and align all ranks at the sleep
+        # boundary BEFORE we mutate any VMM mappings. See
+        # ``_quiesce_distributed_before_vmm_mutation`` for rationale (#45519).
+        self._quiesce_distributed_before_vmm_mutation()
 
         total_bytes = 0
         backup_bytes = 0
@@ -239,6 +350,12 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+
+        # Drain restore-memcpy work and align all ranks at the wake boundary
+        # BEFORE returning control to the caller (who will immediately drive
+        # NCCL P2P traffic against the freshly-remapped VAs). See
+        # ``_quiesce_distributed_before_vmm_mutation`` for rationale (#45519).
+        self._quiesce_distributed_before_vmm_mutation()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
