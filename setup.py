@@ -876,13 +876,13 @@ class precompiled_wheel_utils:
                     ["git", "fetch", "https://github.com/vllm-project/vllm", "main"]
                 )
 
-            # Then get the commit hash of the current branch that is the same as
-            # the upstream main commit.
+            # Get the current branch name, or "HEAD" for detached HEAD
+            # (e.g. git submodules, `git checkout <hash>`).
             current_branch = (
                 subprocess.check_output(["git", "branch", "--show-current"])
                 .decode("utf-8")
                 .strip()
-            )
+            ) or "HEAD"
 
             base_commit = (
                 subprocess.check_output(
