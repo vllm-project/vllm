@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -34,6 +35,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -279,6 +281,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
 class KimiK25ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsQuant,
     SupportsEagle,
@@ -292,6 +295,21 @@ class KimiK25ForConditionalGeneration(
     """
 
     supports_encoder_tp_data = True
+
+    # Default: skip mm_projector and vision_tower LoRA weights at adapter-load
+    # time so checkpoints that also include vision/projector LoRA tensors still
+    # load successfully and the language-tower LoRA is applied. The DeepseekV2
+    # backbone (SupportsLoRA in its own right) supplies the packed_modules_mapping
+    # (gate_up_proj, MLA fused_qkv_a_proj when q_lora_rank is set) and
+    # get_expert_mapping (MoE experts), which are picked up via
+    # get_packed_modules_mapping's descent into the language_model child.
+    #
+    # When the engine is started with --enable-tower-connector-lora,
+    # ``__init__`` overrides this with an empty list so the projector
+    # (and any vision-tower) LoRA weights flow into the connector/tower punica
+    # wrappers set up by ``LoRAModelManager._maybe_init_mm``. This path is
+    # experimental and validated upstream only against the Qwen VL family.
+    lora_skip_prefixes = ["mm_projector.", "vision_tower."]
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -325,6 +343,16 @@ class KimiK25ForConditionalGeneration(
         config: KimiK25Config = model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
+
+        # When --enable-tower-connector-lora is set at engine launch, drop the
+        # class-level skip so mm_projector/vision_tower LoRA weights flow into
+        # the connector/tower punica wrappers ``LoRAModelManager`` will build
+        # via ``get_mm_mapping`` + ``get_num_mm_{encoder,connector}_tokens``
+        # below. Otherwise keep the safer default and silently skip those
+        # weights at adapter load time.
+        lora_config = vllm_config.lora_config
+        if lora_config is not None and lora_config.enable_tower_connector_lora:
+            self.lora_skip_prefixes = []
 
         # Check for MoonViT config compatibility
         self.use_data_parallel = (
@@ -459,6 +487,46 @@ class KimiK25ForConditionalGeneration(
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         return self.language_model.get_eagle3_aux_hidden_state_layers()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Module prefixes the LoRA manager uses to route adapters.
+
+        - ``language_model``: K2.5 wires the DeepseekV2 backbone under
+          ``self.language_model``.
+        - ``tower_model``: the MoonViT3d vision encoder is at
+          ``self.vision_tower``.
+        - ``connector``: the patch-merging MLP is at ``self.mm_projector``.
+
+        Required (alongside ``get_num_mm_encoder_tokens``) for the LoRA manager
+        to consider this model as supporting tower-connector LoRA. The feature
+        only actually activates when the engine is started with
+        ``--enable-tower-connector-lora`` (see ``LoRAConfig``).
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="mm_projector.",
+            tower_model="vision_tower.",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """Vision-tower output token count for a given LM-side token count.
+
+        ``num_image_tokens`` is the post-projector (LM-side) count. The
+        vision tower emits ``merge_h * merge_w`` patches per merged token
+        (the ``tpool_patch_merger`` collapses each kh*kw block into one),
+        so the encoder output count is ``num_image_tokens * merge_h * merge_w``.
+        Only valid for the image / single-frame path that K2.5 takes when
+        video chunks are disabled (``--limit-mm-per-prompt.video=0``); video
+        chunks additionally collapse the temporal axis via mean pooling, which
+        is not modelled here.
+        """
+        merge_h, merge_w = self.config.vision_config.merge_kernel_size
+        return num_image_tokens * merge_h * merge_w
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """LM-side token count after the mm_projector (inverse of the above)."""
+        merge_h, merge_w = self.config.vision_config.merge_kernel_size
+        return num_vision_tokens // (merge_h * merge_w)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
