@@ -171,6 +171,16 @@ TEST_CASES = [
 ]
 
 
+def _encode_text(generic_tokenizer, text: str) -> list[int]:
+    if not text:
+        return []
+    enc = getattr(generic_tokenizer, "tokenizer", generic_tokenizer)
+    try:
+        return enc.encode(text, add_special_tokens=False)
+    except TypeError:
+        return enc.encode(text)
+
+
 def gemma4_encode_output(generic_tokenizer, output: str) -> list[int]:
     # Resolve token IDs dynamically from the real tokenizer
     vocab = generic_tokenizer.get_vocab()
@@ -185,14 +195,8 @@ def gemma4_encode_output(generic_tokenizer, output: str) -> list[int]:
     output_tokens = []
 
     def _encode(text: str) -> list[int]:
-        if not text:
-            return []
         # Handle both raw transformers and vLLM wrappers
-        enc = getattr(generic_tokenizer, "tokenizer", generic_tokenizer)
-        try:
-            return enc.encode(text, add_special_tokens=False)
-        except TypeError:
-            return enc.encode(text)
+        return _encode_text(generic_tokenizer, text)
 
     if index_start != -1:
         output_before = output[:index_start]
@@ -273,3 +277,43 @@ def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert not is_reasoning_end
+
+
+def test_gemma4_tool_call_boundary_before_tool_response(generic_tokenizer):
+    vocab = generic_tokenizer.get_vocab()
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+
+    output_tokens = (
+        [vocab["<|channel>"]]
+        + _encode_text(generic_tokenizer, "thought\nNeed a tool.")
+        + [vocab["<channel|>"], vocab["<|tool_call>"]]
+        + _encode_text(generic_tokenizer, '{"name":"first_tool"}')
+        + [vocab["<|tool_response>"]]
+    )
+
+    assert parser.is_reasoning_end(output_tokens)
+    assert parser.is_reasoning_end_streaming(output_tokens, output_tokens)
+    assert parser.extract_content_ids(output_tokens) == output_tokens[
+        output_tokens.index(vocab["<channel|>"]) + 1 :
+    ]
+
+
+def test_gemma4_tool_call_boundary_without_channel_end(generic_tokenizer):
+    vocab = generic_tokenizer.get_vocab()
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+
+    output_tokens = (
+        [vocab["<|channel>"]]
+        + _encode_text(generic_tokenizer, "thought\nNeed a tool.")
+        + [vocab["<|tool_call>"]]
+        + _encode_text(generic_tokenizer, '{"name":"first_tool"}')
+    )
+
+    tool_call_index = output_tokens.index(vocab["<|tool_call>"])
+    assert parser.is_reasoning_end(output_tokens)
+    assert parser.is_reasoning_end_streaming(output_tokens, output_tokens)
+    assert parser.extract_content_ids(output_tokens) == output_tokens[tool_call_index:]
