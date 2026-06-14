@@ -447,8 +447,64 @@ counted separately via Prometheus (see
 | `Avg post time (ms)` | ms | Mean time to submit the transfer request to the RDMA backend (`postDuration` in NIXL telemetry). This is the synchronous cost of posting work to the NIC queue (descriptor setup, etc.) before the async data movement begins. |
 | `P90 post time (ms)` | ms | 90th-percentile request-posting duration. Elevated P90 here (with low xfer P90) points to overhead in submitting requests rather than in the data transfer itself. |
 | `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
-| `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
+| `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. In single-rank (TP=1) deployments this reflects the actual transfer bandwidth. In multi-rank (TP > 1) deployments both the numerator and denominator are summed across ranks; for symmetric parallel transfers this yields an average per-rank throughput rather than aggregate system throughput. See [Multi-rank aggregation](#multi-rank-tp-1-aggregation) below. |
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
+
+### Multi-rank (TP > 1) aggregation
+
+In tensor-parallel deployments (TP > 1), the metrics reported in the
+`KV Transfer metrics` log line are computed over observations pooled
+from **all TP ranks**:
+
+1. **Collection** -- each TP rank independently records per-transfer
+   telemetry (transfer duration, post duration, bytes transferred,
+   descriptor count) via `NixlKVConnectorStats.record_transfer()`.
+2. **Aggregation** -- the per-rank observation lists are concatenated
+   into a single combined pool via `aggregate()` (`list.extend()`).
+3. **Reduction** -- `reduce()` computes averages, percentiles, and
+   throughput over the **combined** pool of observations from all ranks.
+
+This has practical implications for interpreting the log line:
+
+- **`Num successful transfers`** is the **total** count of rank-level
+  transfers across all ranks, not the number of logical KV cache
+  movements. For example, a single prefill request on a TP=4 deployment
+  produces 4 rank-level transfers (one per rank), so the count
+  attributable to that request is 4.
+- **`Avg MB per transfer`** is the mean payload size over all
+  individual rank-level transfers. Each rank transfers only its shard
+  of the KV cache, so this value reflects the per-rank shard size
+  rather than the total bytes moved for a single prefill operation.
+- **`Throughput (MB/s)`** is computed as
+  `sum(bytes across all ranks) / sum(xfer_duration across all ranks)`.
+  Because TP ranks transfer in parallel, the denominator sums
+  concurrent durations. For symmetric transfers (equal bytes and
+  latency per rank) the result equals the **average per-rank
+  throughput**. To approximate the aggregate system throughput,
+  multiply this value by the TP size.
+- **Percentiles (P90)** are computed over the combined distribution
+  from all ranks. A slow transfer on any rank will appear in the
+  pooled sample and therefore affect the reported tail latency.
+
+!!! example
+
+    Consider a TP=2 deployment where each rank transfers 2 MB in 1 ms for
+    a given request. The aggregated observation pool contains 2 entries
+    (one per rank) with `[1 ms, 1 ms]` durations and `[2 MB, 2 MB]` sizes:
+
+    - `Num successful transfers` = 2
+    - `Avg MB per transfer` = 2.0 MB (per-rank shard)
+    - `Throughput (MB/s)` = (2 + 2) MB / (1 + 1) ms = 2000 MB/s
+      (per-rank; aggregate system throughput is 4000 MB/s)
+    - `P90 xfer time (ms)` = 1.0 ms
+
+!!! tip
+    The Prometheus histograms (see below) receive the same combined
+    observations, so their distributions also span all TP ranks.
+    Use the per-engine labels to distinguish between engines in
+    multi-engine (DP) deployments, but note that within a single
+    engine the histogram already pools observations from all TP
+    ranks of that engine.
 
 ### Prometheus metrics
 
