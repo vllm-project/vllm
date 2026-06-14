@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import random
 
 import pytest
@@ -12,7 +13,9 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
+    VLLM_PATH,
     ensure_model_parallel_initialized,
+    get_open_port,
     init_test_distributed_environment,
     multi_process_parallel,
 )
@@ -82,6 +85,59 @@ def graph_allreduce(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
+def graph_capture_mismatched_custom_ar_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> str:
+    """Different TP ranks record different custom AR counts in one graph.
+
+    With custom all-reduce enabled, `register_graph_buffers` must error clearly
+    (legacy path could read past peer IPC blobs → UB / bogus CUDA errors).
+    """
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        group = get_tp_group().device_group
+
+        data = torch.zeros(1, device=device)
+        dist.all_reduce(data, group=group)
+        torch.accelerator.synchronize()
+        del data
+
+        ca = get_tp_group().device_communicator.ca_comm
+        if ca is None or ca.disabled:
+            return "skip"
+
+        rank_in_tp = get_tp_group().rank_in_group
+        device_idx = torch.accelerator.current_device_index()
+        # Float32; byte size divisible by 16 (custom AR).
+        inp = torch.ones(4096, dtype=torch.float32, device=device_idx)
+
+        try:
+            with graph_capture(device=device) as graph_capture_context:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                    _ = tensor_model_parallel_all_reduce(inp)
+                    if rank_in_tp == 0:
+                        _ = tensor_model_parallel_all_reduce(inp)
+        except RuntimeError as e:
+            if "buffer count mismatch" in str(e):
+                return "ok"
+            raise
+        raise AssertionError(
+            "Expected RuntimeError mentioning buffer count mismatch "
+            "when custom all-reduce is enabled."
+        )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
@@ -115,6 +171,48 @@ def eager_allreduce(
         for _ in range(num_communication):
             out = fa.all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
+
+
+@pytest.mark.parametrize("tp_size", [2])
+def test_graph_capture_mismatched_custom_ar_count_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+) -> None:
+    """Asymmetric custom-AR capture counts must fail fast (register_graph_buffers)."""
+    pp_size = 1
+    world_size = tp_size * pp_size
+    if world_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+
+    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    ray.init(
+        runtime_env={
+            "working_dir": VLLM_PATH,
+            "excludes": [
+                "build",
+                ".git",
+                "cmake-build-*",
+                "shellcheck",
+                "dist",
+                "ep_kernels_workspace",
+            ],
+        }
+    )
+    distributed_init_port = get_open_port()
+    refs = [
+        graph_capture_mismatched_custom_ar_raises.remote(
+            monkeypatch, tp_size, pp_size, rank, distributed_init_port
+        )
+        for rank in range(world_size)
+    ]
+    try:
+        results = ray.get(refs)
+    finally:
+        ray.shutdown()
+
+    if all(r == "skip" for r in results):
+        pytest.skip("Custom allreduce not available on this host (ca_comm disabled).")
+    assert all(r == "ok" for r in results), results
 
 
 @pytest.mark.parametrize("tp_size", [2])
