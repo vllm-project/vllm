@@ -31,6 +31,11 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "FLASHINFER_CUBINS_REPOSITORY",
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
+_FLASHINFER_JIT_COMPILE_MESSAGE = (
+    "FlashInfer is running without precompiled cubins (flashinfer-cubin). "
+    "FlashInfer may JIT-compile kernels on first use, which can take "
+    "several minutes; subsequent runs should reuse the cache."
+)
 
 
 @functools.cache
@@ -61,6 +66,16 @@ def has_flashinfer() -> bool:
         )
         return False
     return True
+
+
+@functools.cache
+def _may_need_flashinfer_jit_compile() -> bool:
+    return not has_flashinfer_cubin() and shutil.which("nvcc") is not None
+
+
+def _log_flashinfer_jit_compile_once() -> None:
+    if _may_need_flashinfer_jit_compile():
+        logger.info_once(_FLASHINFER_JIT_COMPILE_MESSAGE)
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -105,6 +120,7 @@ def _lazy_import_wrapper(
         impl = _get_impl()
         if impl is None:
             return fallback_fn(*args, **kwargs)
+        _log_flashinfer_jit_compile_once()
         return impl(*args, **kwargs)
 
     return wrapper
@@ -499,6 +515,7 @@ if has_flashinfer():
             k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
                   This is broadcast to all heads.
         """
+        _log_flashinfer_jit_compile_once()
         from flashinfer.concat_ops import concat_mla_k
 
         concat_mla_k(k, k_nope, k_pe)
@@ -535,6 +552,7 @@ if has_flashinfer():
         block_size: int = 16,
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
+        _log_flashinfer_jit_compile_once()
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
         return flashinfer_mm_fp4_(
@@ -605,6 +623,7 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
+        _log_flashinfer_jit_compile_once()
         from flashinfer import bmm_fp8 as bmm_fp8_
 
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
@@ -632,6 +651,7 @@ if has_flashinfer():
     def flashinfer_nvfp4_quantize(
         a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        _log_flashinfer_jit_compile_once()
         from flashinfer import SfLayout
         from flashinfer import nvfp4_quantize as nvfp4_quantize_
 
@@ -670,6 +690,7 @@ if has_flashinfer():
         out_dtype: torch.dtype,
         backend: str = "cutlass",
     ) -> torch.Tensor:
+        _log_flashinfer_jit_compile_once()
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
         return mm_mxfp8_(
@@ -798,6 +819,7 @@ def flashinfer_scaled_fp4_mm_out(
         if block_scale_b.dtype != torch.uint8:
             block_scale_b = block_scale_b.view(torch.uint8)
 
+    _log_flashinfer_jit_compile_once()
     from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
     flashinfer_mm_fp4_(
@@ -861,6 +883,7 @@ def flashinfer_scaled_fp8_mm_out(
     assert out.device.type == "cuda"
     assert a.is_contiguous()
 
+    _log_flashinfer_jit_compile_once()
     from flashinfer import bmm_fp8 as bmm_fp8_
 
     bmm_fp8_(
