@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils.flashinfer_moe import (
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
