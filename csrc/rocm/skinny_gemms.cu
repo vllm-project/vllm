@@ -1292,13 +1292,14 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-// This version targets cases skinny where CUs are not filled
-// Wave-SplitK is used with reduction done via atomics.
-#if defined(__gfx950__)
+// Skinny GEMM for [N, M] output matrices too small to saturate all CUs through M-tiling.
+// Partitions K into 512-element chunks across CUs; each CU accumulates a partial dot
+// product and atomically reduces into the output.
+#if defined(__HIP__MI3XX__)
   #define WVSPLITKRC_1KPASS
-template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
-__global__ void __launch_bounds__(WvPrGrp* THRDS)
+template <typename scalar_t, int THRDS, int YTILE, int waves_per_block, int A_CHUNK,
+          int UNRL, int N, int wavefronts_sharing_b, int CHUNKK, int DTRMNSTC>
+__global__ void __launch_bounds__(waves_per_block * THRDS)
     __attribute__((amdgpu_waves_per_eu(1, 1)))
     wvSplitKrc_(const int actlN, const int K, const int Kap, const int M,
                 const int Bx, const int By, const scalar_t* __restrict__ A,
@@ -1332,14 +1333,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   };
   using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
 
-  __shared__ scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
-  unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
-  __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
+  __shared__ scalar_t b_staging[waves_per_block * WVLDS / wavefronts_sharing_b];
+  unsigned int* b_staging_offset = (unsigned int*)(&b_staging[WVLDS * (threadIdx.y / wavefronts_sharing_b)]);
+  __shared__ scalar_t a_tile[max_lds_len - waves_per_block * WVLDS / wavefronts_sharing_b];
+
+  uint32_t numCuWithFullK =
+      ((M + (waves_per_block * YTILE / wavefronts_sharing_b) - 1) / (waves_per_block * YTILE / wavefronts_sharing_b));
 
   #ifndef WVSPLITKRC_1KPASS
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
-  constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
+  constexpr uint32_t kFit__ = (max_lds_len - waves_per_block * WVLDS / wavefronts_sharing_b) / N;
   constexpr uint32_t kFit_ = (kFit__ * ASTRD) / (APAD + ASTRD);
   uint32_t kFit = kFit_ - (kFit_ % TUC_);
   uint32_t kfitsPerRdc = (K + kFit - 1) / kFit;
@@ -1369,22 +1373,20 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
   bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
-  uint32_t numCuWithFullK =
-      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
-  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
+  uint32_t Mmod = numCuWithFullK * (waves_per_block * YTILE / wavefronts_sharing_b);
 
   // given above k-split, find this wave's position
   uint32_t kFitPdd = kFit * CHUNKK + ((kFit * CHUNKK) / ASTRD) * APAD;
-  uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
-  uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
+  uint32_t m0 = (blockIdx.x * waves_per_block / wavefronts_sharing_b) * YTILE;
+  uint32_t m1 = ((threadIdx.y % waves_per_block) / wavefronts_sharing_b) * YTILE;
   uint32_t m = (m0 + m1) % Mmod;
   const uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
   const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
 
-  scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
-  bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
-  const uint32_t bLoader = (threadIdx.y % GrpsShrB);
+  scalar8 sum4[N / NTILE / wavefronts_sharing_b][1] = {0};
+  bigType bigB_[YTILE / wavefronts_sharing_b / CHUNKK][UNRL];
+  const uint32_t bLoader = (threadIdx.y % wavefronts_sharing_b);
   uint32_t kBase = 0;
   if (k_str >= K) return;
   if (m >= Mmod) return;
@@ -1400,14 +1402,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_str == 0) {
           int mindx = m + (threadIdx.x % 16);
           int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                       (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                       (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
           int adr_ = mindx + M * nindx_ / 4;
           __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
                              __HIP_MEMORY_SCOPE_AGENT);
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                          (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
               int adr = mindx + M * nindx;
               __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
                                  __HIP_MEMORY_SCOPE_AGENT);
@@ -1423,9 +1425,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
     const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+    for (uint32_t y = 0; y < YTILE / wavefronts_sharing_b; y += CHUNKK)
       bigB_[y / CHUNKK][k2].h8 = (loadnt(
-          (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
+          (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * wavefronts_sharing_b +
                                    bLoader + m,
                                M - 1) *
                          K])));
@@ -1442,14 +1444,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           if (k_str == 0) {
             int mindx = m + (threadIdx.x % 16);
             int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                         (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
             int adr_ = mindx + M * nindx_ / 4;
             __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
                                __HIP_MEMORY_SCOPE_AGENT);
-            for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
               for (uint32_t j = 0; j < 4; j++) {
                 int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                            (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                            (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
                 int adr = mindx + M * nindx;
                 __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
                                    __HIP_MEMORY_SCOPE_AGENT);
@@ -1486,7 +1488,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifndef WVSPLITKRC_1KPASS
     #pragma unroll
         for (int k = 0; k < kFit;
-             k += (THRDS * (WvPrGrp / sprdN) * A_CHUNK) / CHUNKK) {
+             k += (THRDS * (waves_per_block / sprdN) * A_CHUNK) / CHUNKK) {
   #else
         const unsigned int k = 0;
         {
@@ -1494,15 +1496,28 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           unsigned int kOff = k + (thrd * A_CHUNK);
           unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
           for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
+  #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
-                (int*)(&A[min__(Kap * actlN - A_CHUNK,
-                                kOffcp + Kap * (n / CHUNKK +
-                                                (N / CHUNKK) * (threadIdx.x /
-                                                                (64 / CHUNKK)) +
-                                                (threadIdx.y % sprdN)))]),
-                (int*)(&s[(k +
-                           kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
+                /* src */ (int*)(&A[min__(
+                    Kap * actlN - A_CHUNK,
+                    kOffcp +
+                        Kap * (n / CHUNKK +
+                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                               (threadIdx.y % sprdN)))]),
+                /* dst */
+                (int*)(&a_tile[k +
+                          kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN))]),
                 16, 0, 0);
+  #else
+            /* dst */ *((bigType*)(&a_tile[k + kFitPdd * ((n / CHUNKK) +
+                                                     (threadIdx.y % sprdN))])) =
+                /* src */ *((bigType*)(&A[min__(
+                    Kap * actlN - A_CHUNK,
+                    kOffcp +
+                        Kap * (n / CHUNKK +
+                               (N / CHUNKK) * (threadIdx.x / (64 / CHUNKK)) +
+                               (threadIdx.y % sprdN)))]));
+  #endif
           }
 
           // Stage loaded B[] to LDS for MFMA swizzling...
@@ -1510,14 +1525,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             uint32_t k = k1 + k2 * THRDS * A_CHUNK;
             uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
             const bool oob_k = (k_ >= K);
-            for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
+            for (uint32_t y = 0; y < YTILE / wavefronts_sharing_b; y += CHUNKK) {
               uint32_t idx =
                   (threadIdx.x % (THRDS / CHUNKK)) * 4 +
-                  ((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB + bLoader) *
+                  ((y + threadIdx.x / (THRDS / CHUNKK)) * wavefronts_sharing_b + bLoader) *
                       ((THRDS / CHUNKK + BPAD) * 4);
               // zero out if oob
-              *((scalar8*)&myStg[idx]) =
-                  (oob_k)  // TODO: ever necessary (y*GrpsShrB+bLoader+m>=M) ?
+              *((scalar8*)&b_staging_offset[idx]) =
+                  (oob_k)  // TODO: ever necessary (y*wavefronts_sharing_b+bLoader+m>=M) ?
                       ? 0
                       : bigB_[y / CHUNKK][k2].h8;
             }
@@ -1535,17 +1550,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+        for (uint32_t y = 0; y < YTILE / wavefronts_sharing_b; y += CHUNKK)
           bigB_[y / CHUNKK][k2].h8 = (loadnt(
               (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
-                                           GrpsShrB +
+                                           wavefronts_sharing_b +
                                        bLoader + m,
                                    M - 1) *
                              K])));
       }
   #endif
 
-    // B[] staging is cooperative across GrpsShrB, so sync here before reading
+    // B[] staging is cooperative across wavefronts_sharing_b, so sync here before reading
     // back. This wait is currently inserted by compiler, but not guaranteed.
     asm volatile("s_waitcnt 0");
     __syncthreads();
@@ -1557,28 +1572,28 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         unsigned int idx =
             (threadIdx.x % YTILE) * ((THRDS / CHUNKK + BPAD) * 4) +
             (threadIdx.x / YTILE) * 4 + y * 16;
-        bigB[y][k2].h8 = *((scalar8*)&myStg[idx]);
+        bigB[y][k2].h8 = *((scalar8*)&b_staging_offset[idx]);
       }
     }
 
     // rReadback A[] swizzled for MFMA...
-    bigType bigA[N / GrpsShrB / CHUNKK][UNRL];
+    bigType bigA[N / wavefronts_sharing_b / CHUNKK][UNRL];
   #pragma unroll
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
       uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
   #pragma unroll
-      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+      for (uint32_t nt = 0; nt < N / wavefronts_sharing_b; nt += NTILE)
   #pragma unroll
         for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
           uint32_t idxa =
-              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) % (N / CHUNKK) +
+              ((nt + (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b)) % (N / CHUNKK) +
                (threadIdx.x % NTILE)) *
                   kFitPdd +
-              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) /
+              ((nt + (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b)) /
                (N / CHUNKK)) *
                   A_CHUNK * (64 / CHUNKK) +
               A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
-          bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
+          bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(a_tile[idxa])));
         }
     }
 
@@ -1586,7 +1601,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
   #pragma unroll
-      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+      for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
   #pragma unroll
         for (uint32_t j = 0; j < YTILE / CHUNKK; j++) {
           if constexpr (std::is_same_v<scalar_t, half>) {
@@ -1612,11 +1627,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     int my_cntr;
     int mindx = m + (threadIdx.x % 16);
     int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
-    scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+    scalar_t biases[N / NTILE / wavefronts_sharing_b][4] = {};
     // Atomic add the output, read biases
-    for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+    for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
       int g_nindx =
-          (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          (nt * NTILE + (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b)) / 4;
       int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
       if (DTRMNSTC) {
         flt4 flt4_ = {.s8 = sum4[nt][0]};
@@ -1637,7 +1652,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
 
     int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
-                 (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                 (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
     int adr_ = mindx + M * nindx_ / 4;
     my_cntr = atomicAdd(&cntr[adr_], 1);
 
@@ -1645,62 +1660,69 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (DTRMNSTC) __syncthreads();
 
     // Update the complete counter
-    flt4 vals[N / NTILE / GrpsShrB] = {};
+    flt4 vals[N / NTILE / wavefronts_sharing_b] = {};
     // If we're the last k-shard, read back the value and convert...
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
       if constexpr (DTRMNSTC) {
   #pragma unroll
         for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
             int g_nindx =
-                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+                (nt * NTILE + (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b)) / 4;
             int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+  #if defined(__gfx950__)
             __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                /* src */ (float4*)(&glbl[g_adr + M * N * ks]),
+                /* dst */
+                &(((float4*)a_tile)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
                                nt * THRDS * 4 * k_rnd]),
                 16, 0, 0);
+  #else
+            /* dst */ ((float4*)a_tile)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                                   nt * THRDS * 4 * k_rnd] =
+                /* src */ *((const float4*)(&glbl[g_adr + M * N * ks]));
+  #endif
           }
         }
         if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                          (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
               biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
             }
           }
         asm volatile("s_waitcnt 0");
         for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
+          for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
+            float4 eval = ((float4*)a_tile)[(threadIdx.x + threadIdx.y * THRDS) +
                                        ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
             vals[nt].f4 += eval;
           }
         }
       } else {
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
           int g_nindx =
-              (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+              (nt * NTILE + (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b)) / 4;
           int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
           vals[nt].f4 = *(float4*)(&glbl[g_adr]);
           *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
         }
         if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                          (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
               biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
             }
           }
       }
       __builtin_amdgcn_sched_barrier(0);
-      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+      for (uint32_t nt = 0; nt < N / NTILE / wavefronts_sharing_b; nt++) {
         for (uint32_t j = 0; j < 4; j++) {
           int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                      (N / wavefronts_sharing_b) * (threadIdx.y % wavefronts_sharing_b);
           if (nindx < actlN) {
             int adr = mindx + M * nindx;
             if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
@@ -1716,7 +1738,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
 
   #ifndef WVSPLITKRC_1KPASS
-    m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
+    m0 += CuCount * waves_per_block * YTILE / wavefronts_sharing_b;
     m = (m0 + m1) % Mmod;
     k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
     k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
@@ -1726,15 +1748,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   }
 }
 #else
-template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
+template <typename scalar_t, int THRDS, int YTILE, int waves_per_block, int A_CHUNK,
+          int UNRL, int N, int wavefronts_sharing_b, int CHUNKK, int DTRMNSTC>
 __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const int M, const int Bx, const int By,
                             const scalar_t* B, const scalar_t* __restrict__ A,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             int* cntr, scalar_t* C,
                             const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI3XX__) TODO: Add __HIP__GFX9__ (MI200) and
+        // __HIP__GFX1X__ (RDNA) support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -1766,29 +1789,31 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       {N_in, M_in},
       torch::TensorOptions().dtype(in_a.dtype()).device(in_a.device()));
 
-  auto N_p2 = 1U << (32 - __builtin_clz(N_in - 1));
-
   dim3 grid(CuCount);
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  // const int max_lds_len = get_lds_size() / 2;
 
-  // With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-  // and each working on a 512-shard of K, how many CUs would we need?
-  int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
+  constexpr int k_shard_size = 512;   // K elements per CU per pass
+  constexpr int waves_per_block = 4;  // wavefronts per block
+  constexpr int ntile =
+      16;  // MFMA output tile height (matches NTILE in kernel)
 
-  // How many of 4 waves in a group can work on same 16 Ms at same time? First
-  // try to maximize this. This reduces the Ms each group works on, i.e.
-  // increasing the number of CUs needed.
-  int GrpsShrB = min(N_p2 / 16, 4);
+  int m_tiles = (M_in + WARP_SIZE - 1) / WARP_SIZE;
+  int k_shards = (K_in + k_shard_size - 1) / k_shard_size;
 
-  // Given the above, how many CUs would we need?
-  int CuNeeded = rndup_cus * GrpsShrB;
+  // Next power of 2 >= N_in; kernel is templated on N as a power of 2.
+  auto n_next_pow2 = 1U << (32 - __builtin_clz(N_in - 1));
 
-  if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
+  // As high as possible — but capped by waves_per_block (LDS is per-block)
+  // and n_tiles (more sharers than N-tiles means unused compute).
+  int wavefronts_sharing_b = min(n_next_pow2 / ntile, waves_per_block);
+
+  int cus_needed = m_tiles * k_shards * wavefronts_sharing_b;
+
+  if (cus_needed > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
   // Can we increase SplitK by shrinking the K-shared to 256?
-  int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
+  int chunkk = (cus_needed * 2 <= CuCount) ? 2 : 1;
 
   static torch::Tensor axl_glbl =
       torch::zeros(
@@ -1803,19 +1828,26 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto glbl = axl_glbl.data_ptr<float>();
   auto cntr = axl_cntr.data_ptr<int>();
 
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
-  {                                                                            \
-    dim3 block(64, 4);                                                         \
-    if (_DTRMNSTC)                                                             \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 1>          \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
-    else                                                                       \
-      wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, 0>          \
-          <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
-                                       af4, bf4, biasf4, glbl, cntr, c,        \
-                                       CuCount);                               \
+// Template params: <scalar, THRDS, YTILE, waves_per_block, A_CHUNK, UNRL, N, wavefronts_sharing_b,
+// CHUNKK, DTRMNSTC>
+//   THRDS=64        : wavefront width (lanes per wavefront)
+//   YTILE=16        : MFMA tile height (output rows per wavefront, matches
+//   16x16 matrix unit) waves_per_block=waves_per_block : wavefronts per block A_CHUNK=8
+//   : elements of A loaded per lane per LDS transaction (vectorized load width)
+//   UNRL=1          : unroll factor for the K-load loop
+#define WVSPLITKRC(_N, _wavefronts_sharing_b, _CHUNKK)                                \
+  {                                                                       \
+    dim3 block(64, waves_per_block);                                      \
+    if (_DTRMNSTC)                                                        \
+      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _wavefronts_sharing_b,   \
+                  _CHUNKK, 1><<<grid, block, 0, stream>>>(                \
+          N_in, K_in, Kap_in, M_in, Bx_in, By_in, af4, bf4, biasf4, glbl, \
+          cntr, c, CuCount);                                              \
+    else                                                                  \
+      wvSplitKrc_<fptype, 64, 16, waves_per_block, 8, 1, _N, _wavefronts_sharing_b,   \
+                  _CHUNKK, 0><<<grid, block, 0, stream>>>(                \
+          N_in, K_in, Kap_in, M_in, Bx_in, By_in, af4, bf4, biasf4, glbl, \
+          cntr, c, CuCount);                                              \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_a.scalar_type(), "wvSplitKrc", [&] {
@@ -1828,34 +1860,35 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
 
-    switch (N_p2) {
+    switch (n_next_pow2) {
       case 16:
-        WVSPLITKrc(16, 1, 1) break;
+        WVSPLITKRC(16, 1, 1) break;
       case 32:
-        if (chunkk == 2) WVSPLITKrc(32, 2, 2) else WVSPLITKrc(32, 2, 1) break;
+        if (chunkk == 2) WVSPLITKRC(32, 2, 2) else WVSPLITKRC(32, 2, 1) break;
       case 64:
-        if (chunkk == 2) WVSPLITKrc(64, 4, 2) else WVSPLITKrc(64, 4, 1) break;
+        if (chunkk == 2) WVSPLITKRC(64, 4, 2) else WVSPLITKRC(64, 4, 1) break;
       case 128:
-        if (chunkk == 2) WVSPLITKrc(128, 4, 2) else WVSPLITKrc(128, 4, 1) break;
+        if (chunkk == 2) WVSPLITKRC(128, 4, 2) else WVSPLITKRC(128, 4, 1) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
             std::to_string(K_in) + "," + std::to_string(N_in));
     }
   });
+#undef WVSPLITKRC
   return out_c;
 }
 
 #if defined(__HIP__MI3XX__) || defined(__GFX12__)
-template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int waves_per_block,
           int A_CHUNK, int UNRL, int N>
-__global__ void __launch_bounds__(WvPrGrp* THRDS)
+__global__ void __launch_bounds__(waves_per_block* THRDS)
     wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp, const int M,
                       const int Bx, const int By, const fp8_t* B,
                       const fp8_t* __restrict__ A,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const float* __restrict__ s_A,
-                      const float* __restrict__ s_B, const int _WvPrGrp,
+                      const float* __restrict__ s_B, const int _waves_per_block,
                       const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE;
   using scalar8 =
@@ -1876,7 +1909,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(Kap * N, max_lds_len); k += THRDS * waves_per_block * A_CHUNK) {
   #if defined(__gfx950__)
     __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
   #else
@@ -1886,9 +1919,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   asm volatile("s_waitcnt vmcnt(0)");
   __syncthreads();
 
-  if (threadIdx.y >= _WvPrGrp) return;
+  if (threadIdx.y >= _waves_per_block) return;
 
-  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+  uint32_t m = (blockIdx.x * _waves_per_block + (threadIdx.y % _waves_per_block)) * YTILE;
 
   float sA = *s_A;
   float sB = *s_B;
@@ -2025,11 +2058,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
     }
 
-    m += CuCount * _WvPrGrp * YTILE;
+    m += CuCount * _waves_per_block * YTILE;
   }
 }
 #else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
-template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int waves_per_block,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const int M, const int Bx, const int By,
@@ -2037,21 +2070,21 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const scalar_t* __restrict__ BIAS,
                                   scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
-                                  const int _WvPrGrp, const int CuCount) {
+                                  const int _waves_per_block, const int CuCount) {
   UNREACHABLE_CODE
 }
 #endif  // defined(__HIP__MI3XX__) || defined(__GFX12__)
 
 #if defined(__HIP__MI3XX__) || defined(__GFX12__)
-template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int waves_per_block,
           int A_CHUNK, int UNRL, int N>
-__global__ void __launch_bounds__(WvPrGrp* THRDS)
+__global__ void __launch_bounds__(waves_per_block* THRDS)
     wvSplitKQ_hf_(const int K, const int Kap, const int Kbp, const int M,
                   const int Bx, const int By, const fp8_t* B,
                   const fp8_t* __restrict__ A,
                   const scalar_t* __restrict__ BIAS, scalar_t* C,
                   const float* __restrict__ s_A, const float* __restrict__ s_B,
-                  const int _WvPrGrp, const int CuCount) {
+                  const int _waves_per_block, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE;
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 4) * sizeof(float)))) float;
@@ -2071,7 +2104,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   __shared__ fp8_t s[max_lds_len];
 
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
-       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+       k < min__(Kap * N, max_lds_len); k += THRDS * waves_per_block * A_CHUNK) {
   #if defined(__gfx950__)
     __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
   #else
@@ -2081,9 +2114,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   asm volatile("s_waitcnt vmcnt(0)");
   __syncthreads();
 
-  if (threadIdx.y >= _WvPrGrp) return;
+  if (threadIdx.y >= _waves_per_block) return;
 
-  uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
+  uint32_t m = (blockIdx.x * _waves_per_block + (threadIdx.y % _waves_per_block)) * YTILE;
 
   float sA = *s_A;
   float sB = *s_B;
@@ -2222,18 +2255,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
     }
 
-    m += CuCount * _WvPrGrp * YTILE;
+    m += CuCount * _waves_per_block * YTILE;
   }
 }
 #else   // !defined(__HIP__MI3XX__) && !defined(__GFX12__)
-template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
+template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int waves_per_block,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const int M, const int Bx, const int By,
                               const fp8_t* B, const fp8_t* __restrict__ A,
                               const scalar_t* __restrict__ BIAS, scalar_t* C,
                               const float* __restrict__ s_A,
-                              const float* __restrict__ s_B, const int _WvPrGrp,
+                              const float* __restrict__ s_B, const int _waves_per_block,
                               const int CuCount) {
   UNREACHABLE_CODE
 }
@@ -2270,29 +2303,29 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size();
 
-#define WVSPLITKQ_IMPL(_THRDS, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
+#define WVSPLITKQ_IMPL(_THRDS, _waves_per_block, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
   {                                                                            \
-    dim3 block(_THRDS, _WvPrGrp);                                              \
+    dim3 block(_THRDS, _waves_per_block);                                              \
     if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {             \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));      \
-      wvSplitKQ_hf_sml_<fptype, fp8_t, _THRDS, _YTILEs, _WvPrGrp, 16, _UNRLs,  \
+      int __wvPrGrp = min(_waves_per_block, mindiv(M_in, CuCount * _YTILEs, 16));      \
+      wvSplitKQ_hf_sml_<fptype, fp8_t, _THRDS, _YTILEs, _waves_per_block, 16, _UNRLs,  \
                         _N><<<grid, block, 0, stream>>>(                       \
           K_in, Kap_in, Kbp_in, M_in, Bx_in, By_in, b_ptr, a_ptr, bias_ptr,    \
           c_ptr, s_a, s_b, __wvPrGrp, CuCount);                                \
     } else {                                                                   \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));      \
-      wvSplitKQ_hf_<fptype, fp8_t, _THRDS, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>  \
+      int __wvPrGrp = min(_waves_per_block, mindiv(M_in, CuCount * _YTILEm, 16));      \
+      wvSplitKQ_hf_<fptype, fp8_t, _THRDS, _YTILEm, _waves_per_block, 16, _UNRLm, _N>  \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,      \
                                        By_in, b_ptr, a_ptr, bias_ptr, c_ptr,   \
                                        s_a, s_b, __wvPrGrp, CuCount);          \
     }                                                                          \
   }
 
-#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)      \
+#define WVSPLITKQ(_waves_per_block, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)      \
   if (on_gfx12())                                                      \
-    WVSPLITKQ_IMPL(32, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
+    WVSPLITKQ_IMPL(32, _waves_per_block, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
   else                                                                 \
-    WVSPLITKQ_IMPL(64, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)
+    WVSPLITKQ_IMPL(64, _waves_per_block, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(out_c.scalar_type(), "wvSplitKQ", [&] {
     using fptype = typename scalar<scalar_t>::type;
