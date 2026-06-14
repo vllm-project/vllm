@@ -117,3 +117,179 @@ def test_allowlist_too_small_raises(monkeypatch):
 
     with pytest.raises(ValueError):  # not enough placement groups created
         _run(cfg, resources)
+
+
+def _run_add(cfg, new_dp_size, resources, total_resources, nodes):
+    created = []
+
+    def fake_pg(name, strategy, bundles):
+        created.append({"name": name, "strategy": strategy, "bundles": bundles})
+        return SimpleNamespace(name=name, strategy=strategy, bundle_specs=bundles)
+
+    with (
+        patch(
+            "ray._private.state.available_resources_per_node",
+            return_value=resources,
+        ),
+        patch(
+            "ray._private.state.total_resources_per_node",
+            return_value=total_resources,
+        ),
+        patch("ray.util.state.list_nodes", return_value=nodes),
+        patch.object(utils, "current_platform", SimpleNamespace(ray_device_key="GPU")),
+        patch("ray.util.placement_group", side_effect=fake_pg),
+    ):
+        pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(
+            cfg, new_dp_size
+        )
+    return pgs, local_ranks, created
+
+
+def test_add_allowlist_confines_dp_to_listed_nodes(monkeypatch):
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.1,10.0.0.3")
+
+    # 10.0.0.1 (master) and 10.0.0.3 are allowed. 10.0.0.2 is not allowed.
+    resources = {
+        "id-10.0.0.1": {"GPU": 0.0, "node:10.0.0.1": 1.0},  # all 8 GPUs used by old_dp
+        "id-10.0.0.2": {
+            "GPU": 8.0,
+            "node:10.0.0.2": 1.0,
+        },  # 8 GPUs available but not allowed!
+        "id-10.0.0.3": {
+            "GPU": 8.0,
+            "node:10.0.0.3": 1.0,
+        },  # 8 GPUs available and allowed
+    }
+    total_resources = {
+        "id-10.0.0.1": {"GPU": 8.0, "node:10.0.0.1": 1.0},
+        "id-10.0.0.2": {"GPU": 8.0, "node:10.0.0.2": 1.0},
+        "id-10.0.0.3": {"GPU": 8.0, "node:10.0.0.3": 1.0},
+    }
+
+    nodes = [
+        SimpleNamespace(node_ip="10.0.0.1", node_id="id-10.0.0.1"),
+        SimpleNamespace(node_ip="10.0.0.2", node_id="id-10.0.0.2"),
+        SimpleNamespace(node_ip="10.0.0.3", node_id="id-10.0.0.3"),
+    ]
+
+    # old dp_size=8, new dp_size=9, world_size=8 (so num_pg_to_create = 1).
+    cfg = _vllm_config(dp_size=8, dp_local=8, master_ip="10.0.0.1", world_size=8)
+
+    pgs, local_ranks, created = _run_add(
+        cfg,
+        new_dp_size=9,
+        resources=resources,
+        total_resources=total_resources,
+        nodes=nodes,
+    )
+
+    # We requested 1 new PG.
+    # Since .2 is disallowed, and .1 has 0 available GPUs,
+    # the new PG must be placed on .3.
+    assert len(pgs) == 1
+    # Check that it is constrained to 10.0.0.3
+    assert _pinned_ips(created) == {"10.0.0.3"}
+
+
+def test_add_empty_allowlist_is_noop(monkeypatch):
+    monkeypatch.delenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", raising=False)
+
+    # Both 10.0.0.1 and 10.0.0.2 are allowed (no allowlist set).
+    resources = {
+        "id-10.0.0.1": {"GPU": 0.0, "node:10.0.0.1": 1.0},
+        "id-10.0.0.2": {"GPU": 8.0, "node:10.0.0.2": 1.0},
+    }
+    total_resources = {
+        "id-10.0.0.1": {"GPU": 8.0, "node:10.0.0.1": 1.0},
+        "id-10.0.0.2": {"GPU": 8.0, "node:10.0.0.2": 1.0},
+    }
+
+    nodes = [
+        SimpleNamespace(node_ip="10.0.0.1", node_id="id-10.0.0.1"),
+        SimpleNamespace(node_ip="10.0.0.2", node_id="id-10.0.0.2"),
+    ]
+
+    cfg = _vllm_config(dp_size=8, dp_local=8, master_ip="10.0.0.1", world_size=8)
+
+    pgs, local_ranks, created = _run_add(
+        cfg,
+        new_dp_size=9,
+        resources=resources,
+        total_resources=total_resources,
+        nodes=nodes,
+    )
+
+    assert len(pgs) == 1
+    assert _pinned_ips(created) == {"10.0.0.2"}
+
+
+def test_add_master_auto_added_with_warning(monkeypatch):
+    # Allowlist omits the master; vLLM must still keep it and warn.
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.3")
+
+    resources = {
+        "id-10.0.0.1": {
+            "GPU": 8.0,
+            "node:10.0.0.1": 1.0,
+        },  # master node has 8 GPUs available
+        "id-10.0.0.3": {
+            "GPU": 8.0,
+            "node:10.0.0.3": 1.0,
+        },  # allowed node has 8 GPUs available
+    }
+    total_resources = resources
+
+    nodes = [
+        SimpleNamespace(node_ip="10.0.0.1", node_id="id-10.0.0.1"),
+        SimpleNamespace(node_ip="10.0.0.3", node_id="id-10.0.0.3"),
+    ]
+
+    cfg = _vllm_config(dp_size=8, dp_local=8, master_ip="10.0.0.1", world_size=8)
+
+    pgs, local_ranks, created = _run_add(
+        cfg,
+        new_dp_size=10,
+        resources=resources,
+        total_resources=total_resources,
+        nodes=nodes,
+    )
+
+    # requested 2 new engines. They should be created on both .1 and .3
+    # because master is auto-added
+    assert len(pgs) == 2
+    assert _pinned_ips(created) == {"10.0.0.1", "10.0.0.3"}
+
+
+def test_add_allowlist_too_small_raises(monkeypatch):
+    monkeypatch.setenv("VLLM_RAY_DP_PLACEMENT_NODE_IPS", "10.0.0.1")
+
+    resources = {
+        "id-10.0.0.1": {
+            "GPU": 0.0,
+            "node:10.0.0.1": 1.0,
+        },  # master node has 0 GPUs available
+        "id-10.0.0.2": {
+            "GPU": 8.0,
+            "node:10.0.0.2": 1.0,
+        },  # 8 GPUs available but not allowed
+    }
+    total_resources = {
+        "id-10.0.0.1": {"GPU": 8.0, "node:10.0.0.1": 1.0},
+        "id-10.0.0.2": {"GPU": 8.0, "node:10.0.0.2": 1.0},
+    }
+
+    nodes = [
+        SimpleNamespace(node_ip="10.0.0.1", node_id="id-10.0.0.1"),
+        SimpleNamespace(node_ip="10.0.0.2", node_id="id-10.0.0.2"),
+    ]
+
+    cfg = _vllm_config(dp_size=8, dp_local=8, master_ip="10.0.0.1", world_size=8)
+
+    with pytest.raises(ValueError):
+        _run_add(
+            cfg,
+            new_dp_size=9,
+            resources=resources,
+            total_resources=total_resources,
+            nodes=nodes,
+        )

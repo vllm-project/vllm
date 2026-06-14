@@ -11,7 +11,7 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import patch
 
 import msgspec
@@ -116,6 +116,49 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
         ):
             return key.split(":", 1)[1]
     return None
+
+
+T = TypeVar("T")
+
+
+def _filter_dp_nodes_by_allowlist(
+    nodes: list[T],
+    dp_master_ip: str,
+    get_ip_fn: Callable[[T], str | None],
+) -> list[T]:
+    """Filter Ray nodes by ``VLLM_RAY_DP_PLACEMENT_NODE_IPS``.
+
+    Args:
+        nodes: Candidate nodes to filter.
+        dp_master_ip: DP master IP; always included even if omitted from
+            the allowlist.
+        get_ip_fn: Extracts node IP from each node object.
+
+    Returns:
+        Filtered node list, or the original list if the allowlist is empty.
+    """
+    requested_node_ips = {
+        ip.strip()
+        for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
+        if ip.strip()
+    }
+    if not requested_node_ips:
+        return nodes
+
+    allowed_node_ips = set(requested_node_ips)
+    # The master node must host the local ranks, so it has to be allowed.
+    if dp_master_ip not in allowed_node_ips:
+        allowed_node_ips.add(dp_master_ip)
+
+    filtered_nodes = [node for node in nodes if get_ip_fn(node) in allowed_node_ips]
+    logger.info(
+        "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
+        "from %d to %d node(s): %s",
+        len(nodes),
+        len(filtered_nodes),
+        sorted(allowed_node_ips),
+    )
+    return filtered_nodes
 
 
 class CoreEngineProcManager:
@@ -525,29 +568,9 @@ class CoreEngineActorManager:
         )
 
         # optionally restrict DP placement to a caller-provided node set.
-        requested_node_ips = {
-            ip.strip()
-            for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
-            if ip.strip()
-        }
-        if requested_node_ips:
-            allowed_node_ips = set(requested_node_ips)
-            # The master node must host the local ranks, so it has to be allowed.
-            if dp_master_ip not in allowed_node_ips:
-                allowed_node_ips.add(dp_master_ip)
-            filtered_nodes = [
-                node_resources
-                for node_resources in nodes
-                if _node_ip_from_resources(node_resources) in allowed_node_ips
-            ]
-            logger.info(
-                "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
-                "from %d to %d node(s): %s",
-                len(nodes),
-                len(filtered_nodes),
-                sorted(allowed_node_ips),
-            )
-            nodes = filtered_nodes
+        nodes = _filter_dp_nodes_by_allowlist(
+            nodes, dp_master_ip, _node_ip_from_resources
+        )
 
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
@@ -741,6 +764,11 @@ class CoreEngineActorManager:
             "There can only be one head node"
         )
 
+        # optionally restrict DP placement to a caller-provided node set.
+        nodes = _filter_dp_nodes_by_allowlist(
+            nodes, dp_master_ip, lambda node: node.node_ip
+        )
+
         available_resources = available_resources_per_node()
         total_resources = total_resources_per_node()
 
@@ -777,13 +805,9 @@ class CoreEngineActorManager:
 
                 rank = old_dp_size + num_pg_created
 
-                # Create bundles with node constraint for master node
-                if node_ip == dp_master_ip:
-                    bundles = [
-                        {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                    ] * world_size + [{"CPU": 1.0}]
-                else:
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [
+                    _make_control_bundle(node_ip)
+                ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{rank}",
@@ -797,6 +821,13 @@ class CoreEngineActorManager:
                 local_rank = used_engines_on_node + i
                 local_dp_ranks.append(local_rank)
                 num_pg_created += 1
+
+        if num_pg_created < num_pg_to_create:
+            raise ValueError(
+                f"Not enough resources to allocate {new_data_parallel_size} "
+                "placement groups, only created "
+                f"{old_dp_size + num_pg_created} placement groups."
+            )
 
         return placement_groups, local_dp_ranks
 
