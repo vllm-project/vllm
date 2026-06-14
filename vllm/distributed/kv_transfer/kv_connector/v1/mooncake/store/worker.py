@@ -969,7 +969,13 @@ class MooncakeStoreWorker:
         else:
             self.num_kv_head = model_config.get_total_num_kv_heads()
 
-        if self.num_kv_head < self.tp_size:
+        if self.num_kv_head < self.tp_size and self.dcp_size <= 1:
+            # Dedup: TP ranks holding the same KV heads stripe PUTs across
+            # one shared key namespace. DCP splits the TP group, so with
+            # DCP>1 those ranks have different `@dcpN` namespaces and
+            # striping would leave keys unwritten (OBJECT_NOT_FOUND on
+            # GET). PCP is outer to TP (pcp_rank is constant within a TP
+            # group), so it needs no guard.
             self.put_step = self.tp_size // self.num_kv_head
             self.head_or_tp_rank = self.tp_rank // self.put_step
         else:
