@@ -33,6 +33,7 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
+PYPROJECT_TOML_PATH = ROOT_DIR / "pyproject.toml"
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
 # setuptools-rust installs PyO3 artifacts as `<module>.<ext-suffix>`, where the
@@ -45,6 +46,42 @@ envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
 rust_build = load_module_from_path(
     "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
 )
+
+
+def get_package_name() -> str:
+    if env_version := os.getenv("VLLM_OVERRIDE_WHEEL_NAME"):
+        logger.info(
+            "Using VLLM_OVERRIDE_WHEEL_NAME=%s as the package name", env_version
+        )
+        return env_version
+    return "vllm"
+
+
+def sync_pyproject_project_name(package_name: str, target_device: str) -> None:
+    pyproject_lines = PYPROJECT_TOML_PATH.read_text(encoding="utf-8").splitlines()
+    in_project_section = False
+    for index, line in enumerate(pyproject_lines):
+        stripped_line = line.strip()
+        if stripped_line == "[project]":
+            in_project_section = True
+            continue
+        if in_project_section and stripped_line.startswith("["):
+            break
+        if in_project_section and stripped_line.startswith("name = "):
+            expected_line = f'name = "{package_name}"'
+            if stripped_line != expected_line:
+                pyproject_lines[index] = expected_line
+                PYPROJECT_TOML_PATH.write_text(
+                    "\n".join(pyproject_lines) + "\n",
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "Updated pyproject.toml project name to %s for %s build",
+                    package_name,
+                    target_device,
+                )
+            break
+
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
@@ -101,6 +138,10 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
         logger.info("Auto-detected CUDA")
     else:
         VLLM_TARGET_DEVICE = "cpu"
+
+
+PACKAGE_NAME = get_package_name()
+sync_pyproject_project_name(PACKAGE_NAME, VLLM_TARGET_DEVICE)
 
 
 def is_sccache_available() -> bool:
@@ -1204,6 +1245,7 @@ rust_extensions = rust_build.rust_extensions(
 )
 
 setup(
+    name=PACKAGE_NAME,
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
