@@ -117,13 +117,17 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
 
-        # Parse key (unquoted, ends at ':')
+        # Parse key (usually unquoted, ends at ':')
+        # The model may wrap keys in STRING_DELIM when the schema
+        # declares a string-keyed dict (e.g. <|"|>3<|"|>:...).
         key_start = i
         while i < n and args_str[i] != ":":
             i += 1
         if i >= n:
             break
         key = args_str[key_start:i].strip()
+        if key.startswith(STRING_DELIM) and key.endswith(STRING_DELIM):
+            key = key[len(STRING_DELIM) : -len(STRING_DELIM)]
         i += 1  # skip ':'
 
         # Parse value

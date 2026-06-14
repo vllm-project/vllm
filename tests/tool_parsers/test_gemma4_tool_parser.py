@@ -155,6 +155,13 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
         assert result == {"left": 108.0, "right": 22.8}
 
+    def test_string_delimited_dict_keys(self):
+        """Keys wrapped in STRING_DELIM must be stripped (issue #44715)."""
+        result = _parse_gemma4_args(
+            'record_map:{<|"|>3<|"|>:<|"|>new text<|"|>}'
+        )
+        assert result == {"record_map": {"3": "new text"}}
+
     @pytest.mark.timeout(5)
     def test_malformed_partial_array(self):
         result = _parse_gemma4_args(":[t:[]")
