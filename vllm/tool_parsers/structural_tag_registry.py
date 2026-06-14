@@ -114,12 +114,17 @@ def get_model_structural_tag(
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
 
-    return get_xgrammar_model_structural_tag(
+    tag = get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+
+    if model == "harmony":
+        _patch_harmony(tag.format)
+
+    return tag
 
 
 def _dump_tool_for_xgrammar(
@@ -253,6 +258,46 @@ def get_hermes_structural_tag(
         )
 
     return StructuralTag(format=suffix_tag)
+
+
+def _patch_harmony(fmt: object) -> None:
+    """Patch harmony structural tag
+    - add commentary channel as additional allowed channel.
+    - replace '<|return|>' with '' in end lists across the format tree.
+    """
+    _patch_harmony_tag_ends(fmt)
+
+    # No perf gain from adding commentary channel as additional allowed channel.
+    # _patch_harmony_add_commentary_channel(fmt)
+
+
+def _patch_harmony_tag_ends(fmt: object) -> None:
+    """Replace '<|return|>' with '' in end lists across the format tree.
+    '<|return|>' is a model stop token and is disallowed by grammar so the
+    model keeps generating until it stops due to context length.
+    """
+    if isinstance(fmt, TagFormat):
+        if isinstance(fmt.end, list) and "<|return|>" in fmt.end:
+            fmt.end = ["" if e == "<|return|>" else e for e in fmt.end]
+        _patch_harmony_tag_ends(fmt.content)
+    elif isinstance(fmt, (TagsWithSeparatorFormat, TriggeredTagsFormat)):
+        for tag in fmt.tags:
+            _patch_harmony_tag_ends(tag)
+    elif isinstance(fmt, SequenceFormat):
+        for elem in fmt.elements:
+            _patch_harmony_tag_ends(elem)
+
+
+def _patch_harmony_add_commentary_channel(fmt: object) -> None:
+    """Add commentary channel as additional allowed channel."""
+    assert isinstance(fmt, TagsWithSeparatorFormat)
+    fmt.tags.append(
+        TagFormat(
+            begin="<|channel|>commentary<|message|>",
+            content=AnyTextFormat(),
+            end=["<|end|>", ""],
+        )
+    )
 
 
 def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:

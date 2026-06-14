@@ -189,17 +189,18 @@ class OpenAIServingRender:
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
+            is_harmony=self.use_harmony,
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
         self.log_error_stack = log_error_stack
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
@@ -287,7 +288,7 @@ class OpenAIServingRender:
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
         """
-        tokenizer = self.renderer.tokenizer
+        tokenizer = self.renderer.get_tokenizer()
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
 
@@ -357,6 +358,16 @@ class OpenAIServingRender:
             conversation, engine_inputs = self._make_request_with_harmony(
                 request, should_include_tools
             )
+
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            if self.parser is not None:
+                # HarmonyParser doesn't need chat_template_kwargs
+                self.parser(
+                    tokenizer,
+                    request.tools,
+                    model_config=self.model_config,
+                ).adjust_request(request=request)
 
         return conversation, engine_inputs
 
