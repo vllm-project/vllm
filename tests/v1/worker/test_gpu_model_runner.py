@@ -1689,3 +1689,27 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_cleanup_profiling_kv_cache_without_accelerator(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.kv_caches = [object()]
+    runner.attn_groups = [object()]
+    runner.kv_cache_config = object()
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("accelerator cleanup should be skipped")
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", fail_if_called)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", fail_if_called)
+
+    GPUModelRunner._cleanup_profiling_kv_cache(runner)
+
+    assert runner.kv_caches == []
+    assert runner.attn_groups == []
+    assert not hasattr(runner, "kv_cache_config")
+    assert runner.cache_config.num_gpu_blocks is None

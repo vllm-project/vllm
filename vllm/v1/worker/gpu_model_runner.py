@@ -6312,7 +6312,9 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
 
     def _cleanup_profiling_kv_cache(self) -> None:
-        torch.accelerator.synchronize()
+        accelerator_available = torch.accelerator.is_available()
+        if accelerator_available:
+            torch.accelerator.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
@@ -6341,7 +6343,8 @@ class GPUModelRunner(
                     layer.impl._v_scale_cache = None
 
         gc.collect()
-        torch.accelerator.empty_cache()
+        if accelerator_available:
+            torch.accelerator.empty_cache()
 
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
