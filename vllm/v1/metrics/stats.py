@@ -168,6 +168,21 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class EplbMetrics:
+    """
+    Stores EPLB metrics.
+
+    - `ep_rank`: The EP rank of the worker that produced this sample.
+    - `num_routed_tokens`: For each model, a list of per-layer token
+      counts. Each count is the number of tokens routed to this rank's
+      experts in that layer since the previous sample.
+    """
+
+    ep_rank: int = 0
+    num_routed_tokens: dict[str, list[int]] = field(default_factory=dict)
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -196,6 +211,8 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    eplb_metrics: EplbMetrics | None = None
 
 
 @dataclass

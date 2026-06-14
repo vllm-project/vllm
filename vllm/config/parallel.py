@@ -84,6 +84,11 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
+    disable_metrics_collection: bool = False
+    """
+    Can be used to disable EPLB prometheus metrics collection.
+    """
+
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 

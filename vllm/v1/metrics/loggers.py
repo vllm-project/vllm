@@ -531,6 +531,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        # Cumulative count of tokens routed per (model, layer, rank).
+        self.counter_eplb_tokens_per_rank = self._counter_cls(
+            name="vllm:eplb_tokens_per_rank_total",
+            documentation="Cumulative tokens routed per (model, layer, rank).",
+            labelnames=labelnames + ["model", "layer", "rank"],
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1112,6 +1119,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            if scheduler_stats.eplb_metrics is not None:
+                model_name, engine = self.per_engine_labelvalues[engine_idx]
+                rank = str(scheduler_stats.eplb_metrics.ep_rank)
+                for (
+                    model,
+                    delta,
+                ) in scheduler_stats.eplb_metrics.num_routed_tokens.items():
+                    for layer_idx, value in enumerate(delta):
+                        self.counter_eplb_tokens_per_rank.labels(
+                            model_name=model_name,
+                            engine=engine,
+                            model=model,
+                            layer=str(layer_idx),
+                            rank=rank,
+                        ).inc(value)
 
             if (
                 self.kv_cache_metrics_enabled

@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -153,6 +154,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.metrics.stats import EplbMetrics
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -4569,6 +4571,15 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
 
+        eplb_metrics: EplbMetrics | None = None
+        if self.eplb_state is not None:
+            delta_per_model = self.eplb_state.get_latest_metric_delta()
+            if delta_per_model:
+                eplb_metrics = EplbMetrics(
+                    ep_rank=get_ep_group().device_group.rank(),
+                    num_routed_tokens=delta_per_model,
+                )
+
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
@@ -4587,6 +4598,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                eplb_metrics=eplb_metrics,
             )
 
         if not self.use_async_scheduling:

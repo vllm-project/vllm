@@ -87,6 +87,65 @@ class EplbStats:
     """
 
 
+class EplbMetricsState:
+    """Per-model state for the EPLB Prometheus metrics."""
+
+    def __init__(self, num_layers: int, device: torch.device):
+        self.cumulative_tokens: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device=device
+        )
+        self.cumulative_tokens_cpu: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device="cpu", pin_memory=True
+        )
+        self.event: torch.cuda.Event = torch.cuda.Event()
+        self.previous_cumulative_tokens: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device="cpu"
+        )
+        self.pending: bool = False
+        self.delta: list[int] | None = None
+
+    def accumulate(self, expert_load_pass: torch.Tensor) -> None:
+        """
+        Adds the per-rank routed tokens from this step into the cumulative total.
+        This code assumes that expert_load_pass is zeroed out between calls.
+        Args:
+            expert_load_pass: (num_moe_layers, num_physical_experts) contains the number
+            of routed tokens for each layer and physical expert across all ranks.
+            Populated by the router and zeroed out by EPLB every step.
+        """
+        ep_group = get_ep_group().device_group
+        ep_size = ep_group.size()
+        rank = ep_group.rank()
+        # (num_moe_layers,) where each element is the number of tokens routed
+        # to "rank" for that layer
+        per_layer_tokens = expert_load_pass.reshape(
+            expert_load_pass.shape[0], ep_size, -1
+        )[:, rank, :].sum(dim=-1)
+
+        # Add the per_layer routed tokens for this rank to the cumulative total.
+        # This tensor is asynchronously copied to cpu in EplbMetricsState.step().
+        # Because the copy is async and non-blocking, this tensor needs to hold
+        # multiple steps worth of routed tokens.
+        self.cumulative_tokens.add_(per_layer_tokens)
+
+    def step(self) -> None:
+        """Records a snapshot of cumulative_tokens and then compute the delta from the
+        previous snapshot."""
+        # If there's not a device to host transfer in-flight, start one
+        if not self.pending:
+            self.cumulative_tokens_cpu.copy_(self.cumulative_tokens, non_blocking=True)
+            self.event.record()
+            self.pending = True
+            self.delta = None
+        # if the transfer from device to host has finished, compute the result
+        elif self.event.query():
+            self.delta = (
+                self.cumulative_tokens_cpu - self.previous_cumulative_tokens
+            ).tolist()
+            self.previous_cumulative_tokens.copy_(self.cumulative_tokens_cpu)
+            self.pending = False
+
+
 @dataclass
 class EplbModelState:
     """EPLB metrics."""
@@ -195,6 +254,10 @@ class EplbModelState:
     communicator: EplbCommunicator
     """
     The communicator for expert weight transfers.
+    """
+    metrics_state: EplbMetricsState
+    """
+    State used to populate Prometheus metrics
     """
     pending_result: AsyncEplbLayerResult | None = None
     """
@@ -470,6 +533,10 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            metrics_state=EplbMetricsState(
+                num_layers=model.num_moe_layers,
+                device=self.device,
+            ),
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
@@ -508,6 +575,14 @@ class EplbState:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+
+        # Metrics collection is on by default
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            for eplb_model_state in self.model_states.values():
+                eplb_model_state.metrics_state.accumulate(
+                    eplb_model_state.expert_load_pass
+                )
+                eplb_model_state.metrics_state.step()
 
         if (
             log_stats
@@ -615,6 +690,12 @@ class EplbState:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
         """
+
+        # If eplb metrics are being collected, which is the default behavior,
+        # _should_record_current_step returns True
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            return True
+
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
@@ -636,6 +717,14 @@ class EplbState:
             self.should_record_tensor.fill_(
                 self._should_record_current_step(log_stats=log_stats)
             )
+
+    def get_latest_metric_delta(self) -> dict[str, list[int]]:
+        """Returns per-model routed tokens since the last snapshot."""
+        return {
+            state.model_name: state.metrics_state.delta
+            for state in self.model_states.values()
+            if state.metrics_state.delta is not None
+        }
 
     def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
         """Allocate (once) and propagate the shared ``should_record_tensor``.
