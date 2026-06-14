@@ -342,7 +342,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def _finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -364,6 +363,16 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
+        # The combine kernel writes the per-token result in place, so allocate
+        # the (num_tokens, hidden_dim) output buffer for it here.
+        num_tokens = topk_ids.size(0)
+        hidden_dim = fused_expert_output.size(-1)
+        output = torch.empty(
+            (num_tokens, hidden_dim),
+            device=fused_expert_output.device,
+            dtype=fused_expert_output.dtype,
+        )
+
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
@@ -378,11 +387,10 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
-        return recv_hook, lambda: None
+        return recv_hook, lambda: output
 
     def finalize_async(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -390,7 +398,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> tuple[Callable, Callable]:
         return self._finalize(
-            output,
             fused_expert_output,
             topk_weights,
             topk_ids,
@@ -401,15 +408,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        self._finalize(
-            output,
+    ) -> torch.Tensor:
+        _, receiver = self._finalize(
             fused_expert_output,
             topk_weights,
             topk_ids,
@@ -417,3 +422,4 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             do_async=False,
         )
+        return receiver()

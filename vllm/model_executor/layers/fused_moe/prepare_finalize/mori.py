@@ -108,17 +108,17 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        num_token = output.shape[0]
+    ) -> torch.Tensor:
+        num_token = topk_ids.shape[0]
         result = self.mori_op.combine(
             fused_expert_output,
             None,
             topk_ids,
         )[0]
-        output.copy_(result[:num_token])
+        # combine() returns a fresh buffer; return the token slice directly.
+        return result[:num_token]
