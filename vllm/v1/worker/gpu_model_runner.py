@@ -111,6 +111,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -5482,10 +5483,18 @@ class GPUModelRunner(
             tgt_token_ids = prompt_token_ids[start_tok : start_tok + num_logits]
 
             # Compute prompt logprobs.
-            logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
-                logprobs, num_prompt_logprobs, tgt_token_ids
-            )
+            if num_prompt_logprobs >= logits.shape[-1] or not HAS_TRITON:
+                # Full-vocab prompt logprobs are inherently memory-heavy.
+                # Keep the existing full log_softmax path for compatibility.
+                logprobs = self.sampler.compute_logprobs(logits)
+                token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+                    logprobs, num_prompt_logprobs, tgt_token_ids
+                )
+            else:
+                # Avoid materializing full [num_logits, vocab_size] logprobs.
+                token_ids, logprobs, ranks, _ = self.sampler.compute_topk_logprobs(
+                    logits, num_prompt_logprobs, tgt_token_ids
+                )
 
             # Transfer GPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -13,6 +14,11 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+
+if HAS_TRITON:
+    from vllm.v1.worker.gpu.sample.logprob import (
+        compute_topk_logprobs as compute_topk_logprobs_gpu,
+    )
 
 _SAMPLING_EPS = 1e-5
 
@@ -304,6 +310,16 @@ class Sampler(nn.Module):
     @staticmethod
     def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
+
+    @staticmethod
+    def compute_topk_logprobs(
+        logits: torch.Tensor,
+        num_logprobs: int,
+        token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        if not HAS_TRITON:
+            raise RuntimeError("Triton is required to compute top-k logprobs.")
+        return compute_topk_logprobs_gpu(logits, num_logprobs, token_ids)
 
     @staticmethod
     def gather_logprobs(
