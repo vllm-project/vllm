@@ -171,7 +171,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor,
+        output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -190,6 +190,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
+        assert output is not None, "Output tensor must be provided."
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
