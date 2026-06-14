@@ -180,9 +180,12 @@ class MooncakeStoreScheduler:
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
             load_spec = self.load_specs.pop(request.req_id, None)
+            num_scheduled = scheduler_output.num_scheduled_tokens[request.req_id]
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(request.req_id, [])
+            )
             num_tokens_to_compute = (
-                request.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens[request.req_id]
+                request.num_computed_tokens + num_scheduled - num_spec_tokens
             )
             assert request.req_id in self._unfinished_requests
             request_tuple = self._unfinished_requests.get(request.req_id)
@@ -240,9 +243,14 @@ class MooncakeStoreScheduler:
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]
+                    num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+                    num_spec_tokens = len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                    )
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens
-                        + scheduler_output.num_scheduled_tokens[req_id]
+                        + num_scheduled
+                        - num_spec_tokens
                     )
                     # On resume, the request re-prefills prompt + previously
                     # generated tokens (all_token_ids).
@@ -274,6 +282,10 @@ class MooncakeStoreScheduler:
                     # Decode/chunked request
                     request_tracker = self._request_trackers[req_id]
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                    num_spec_tokens = len(
+                        scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+                    )
+                    num_new_tokens -= num_spec_tokens
                     req_tuple = self._unfinished_requests.get(req_id)
                     if req_tuple:
                         unfinished_req = req_tuple[0]
