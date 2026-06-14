@@ -55,10 +55,15 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
+    import gguf
+except ImportError:
+    gguf = PlaceholderModule("gguf")
+
+try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+
 except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
-    SafeTensorsFileLoader = fastsafetensors.placeholder_attr("SafeTensorsFileLoader")
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
@@ -1022,25 +1027,19 @@ def runai_safetensors_weights_iterator(
             yield name, tensor.clone()
 
 
-def _init_fastsafetensors_loader(
-    pg: "torch.distributed.ProcessGroup",
-    device: torch.device,
-    f_list: list[str],
-    *,
-    nogds: bool = False,
-):
-    loader = SafeTensorsFileLoader(pg, device, nogds=nogds)
-    rank_file_map = {i: [f] for i, f in enumerate(f_list)}
-    loader.add_filenames(rank_file_map)
-    return loader
-
-
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
-    using fastsafetensor library."""
+    using fastsafetensor library.
+
+    Uses ParallelLoader for pipelined loading: the producer thread
+    prepares metadata for the next shard while the consumer yields
+    tensors from the current shard.
+    """
+    from fastsafetensors.parallel_loader import ParallelLoader
+
     if torch.distributed.is_initialized():
         pg = torch.distributed.group.WORLD
     else:
@@ -1048,48 +1047,45 @@ def fastsafetensors_weights_iterator(
 
     device = torch.device(f"cuda:{current_platform.current_device()}")
     hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
-    weight_files_sub_lists = [
-        hf_weights_files[i : i + pg.size()]
-        for i in range(0, len(hf_weights_files), pg.size())
-    ]
 
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
     nogds = pg.size() > 1
 
-    for f_list in tqdm(
-        weight_files_sub_lists,
-        desc="Loading safetensors using Fastsafetensor loader",
-        disable=not enable_tqdm(use_tqdm_on_load),
-        bar_format=_BAR_FORMAT,
-    ):
-        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
-        try:
-            try:
-                fb = loader.copy_files_to_device()
-            except RuntimeError as e:
-                if "gds" not in str(e):
-                    raise
+    queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
+    tqdm_enabled = enable_tqdm(use_tqdm_on_load)
+    try:
+        pl = ParallelLoader(
+            pg=pg,
+            hf_weights_files=hf_weights_files,
+            queue_size=queue_size,
+            use_tqdm_on_load=tqdm_enabled,
+            device=str(device),
+            nogds=nogds,
+        )
+    except RuntimeError as e:
+        if "gds" not in str(e):
+            raise
+        nogds = True
+        logger.warning_once(
+            "GDS not enabled, setting `nogds=True`.\n"
+            "For more information, see: https://github.com/foundation-model-stack/"
+            "fastsafetensors?tab=readme-ov-file#basic-api-usages"
+        )
+        pl = ParallelLoader(
+            pg=pg,
+            hf_weights_files=hf_weights_files,
+            queue_size=queue_size,
+            use_tqdm_on_load=tqdm_enabled,
+            device=str(device),
+            nogds=nogds,
+        )
 
-                loader.close()
-                nogds = True
-                logger.warning_once(
-                    "GDS not enabled, setting `nogds=True`.\n"
-                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
-                )
-                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
-                fb = loader.copy_files_to_device()
-
-            try:
-                keys = list(fb.key_to_rank_lidx.keys())
-                for k in keys:
-                    t = fb.get_tensor(k)
-                    yield k, t
-            finally:
-                fb.close()
-        finally:
-            loader.close()
+    try:
+        yield from pl.iterate_weights()
+    finally:
+        pl.close()
 
 
 def instanttensor_weights_iterator(

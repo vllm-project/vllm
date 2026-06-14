@@ -107,6 +107,7 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
+    VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -1013,6 +1014,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
+    # Queue size for fastsafetensors ParallelLoader pipelined weight
+    # loading. Peak load-time VRAM is roughly
+    # model_weights + (1 + queue_size) * shard_size.
+    # Default 0 preserves the non-pipelined memory footprint so this
+    # change does not shrink the loadable-model envelope. Set to 1
+    # (or higher) to overlap producing the next shard's device buffer
+    # with the consumer copying the current shard into model params,
+    # at the cost of `queue_size` extra shard-sized buffers resident
+    # at peak during loading.
+    "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
+    ),
+    # Time in ms for the zmq client to wait for a response from the backend
+    # server for simple data operations
+    "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
