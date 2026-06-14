@@ -627,12 +627,20 @@ class IquestMoeSinkAttentionConfig(VerifyAndUpdateConfig):
         built.
         """
         hf_config = vllm_config.model_config.hf_config
-        if getattr(hf_config, "enable_sink_attention", False):
-            vllm_config.model_config.disable_cascade_attn = True
-            logger.info(
-                "Disabling cascade attention for Iquest MoE model with sink "
-                "attention enabled."
+        if not getattr(hf_config, "enable_sink_attention", False):
+            return
+
+        # NOTE(yxing): check attention backend. Now the backend for sink
+        # attention is `flash attention`
+        backend = vllm_config.attention_config.backend
+        if backend is not None and backend != AttentionBackendEnum.FLASH_ATTN:
+            raise ValueError(
+                f"Iquest Moe sink attention requires the FLASH_ATTN attention "
+                f"backend, but got {backend.name}. Pass "
+                f"--attention-backend FLASH_ATTN."
             )
+        vllm_config.model_config.disable_cascade_attn = True
+        logger.info("Sink attention enabled: forcing FLASH_ATTN, disabling cascade.")
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
