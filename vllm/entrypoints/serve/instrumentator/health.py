@@ -30,4 +30,8 @@ async def health(raw_request: Request) -> Response:
         await client.check_health()
         return Response(status_code=200)
     except EngineDeadError:
+        logger.warning("Engine is dead, returning 503")
+        return Response(status_code=503)
+    except Exception as e:
+        logger.error(f"Health check failed with unexpected error: {e}")
         return Response(status_code=503)
