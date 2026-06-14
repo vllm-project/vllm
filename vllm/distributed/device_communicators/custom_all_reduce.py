@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -26,6 +27,31 @@ except Exception:
     custom_ar = False
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _disable_expandable_segments_for_cuda_ipc(active: bool):
+    # Custom allreduce exports its CUDA graph buffers to peer TP ranks via
+    # cudaIpcGetMemHandle, which only accepts cudaMalloc allocations. With
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True those buffers come from
+    # CUDA VMM segments instead, so the export fails with "invalid argument".
+    # Disabling expandable_segments during capture keeps the buffers on
+    # cudaMalloc, mirroring CuMemAllocator's handling of the sleep-mode pool.
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    should_disable = (
+        active and current_platform.is_cuda() and "expandable_segments:True" in conf
+    )
+    if should_disable:
+        logger.info_once(
+            "Temporarily disabling expandable_segments during custom allreduce "
+            "CUDA graph capture for CUDA IPC compatibility."
+        )
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+    try:
+        yield
+    finally:
+        if should_disable:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -198,13 +224,14 @@ class CustomAllreduce:
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """
-        try:
-            self._IS_CAPTURING = True
-            yield
-        finally:
-            self._IS_CAPTURING = False
-            if not self.disabled:
-                self.register_graph_buffers()
+        with _disable_expandable_segments_for_cuda_ipc(not self.disabled):
+            try:
+                self._IS_CAPTURING = True
+                yield
+            finally:
+                self._IS_CAPTURING = False
+                if not self.disabled:
+                    self.register_graph_buffers()
 
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
