@@ -202,6 +202,13 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    pre_warm_nccl: bool = False
+    """Pre-warm NCCL/RCCL communicators during startup to reduce P99 TTFT
+    cold-start latency. When enabled, a single all-reduce is executed right
+    after the process group is created so that the first real inference
+    request does not pay the NCCL/RCCL initialization cost. Default: False
+    (enable explicitly via --pre-warm-nccl)."""
+
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
 
@@ -755,6 +762,7 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            "pre_warm_nccl",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",
