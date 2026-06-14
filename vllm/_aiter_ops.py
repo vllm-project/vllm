@@ -2730,6 +2730,8 @@ class rocm_aiter_ops:
         K_QScale: torch.Tensor,
         V_QScale: torch.Tensor,
         out_: torch.Tensor,
+        max_qlen: int = 1,
+        qo_indptr: torch.Tensor | None = None,
     ):
         """
         Paged attention forward pass using assembly kernel.
@@ -2737,6 +2739,8 @@ class rocm_aiter_ops:
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
         even when VLLM_ROCM_USE_AITER=0.
+
+        max_qlen, qo_indptr enable the multi-query path.
 
         Note: This performs lazy import of aiter.pa_fwd_asm
         """
@@ -2749,9 +2753,11 @@ class rocm_aiter_ops:
             block_tables=block_tables,
             context_lens=context_lens,
             block_tables_stride0=block_tables_stride0,
+            max_qlen=max_qlen,
             K_QScale=K_QScale,
             V_QScale=V_QScale,
             out_=out_,
+            qo_indptr=qo_indptr,
         )
 
     @staticmethod
@@ -2773,6 +2779,9 @@ class rocm_aiter_ops:
         V_QScale_asm: torch.Tensor,
         out_: torch.Tensor,
         kv_cache_dtype: str,
+        max_qlen: int = 1,
+        qo_indptr: torch.Tensor | None = None,
+        high_precision: int = 1,
     ):
         """
         Paged attention common function.
@@ -2780,6 +2789,8 @@ class rocm_aiter_ops:
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
         even when VLLM_ROCM_USE_AITER=0.
+        
+        max_qlen>1 with qo_indptr enables the multi-query asm path.
 
         Note: This performs lazy import of aiter.paged_attention_common
         """
@@ -2797,11 +2808,14 @@ class rocm_aiter_ops:
             context_lens=context_lens,
             block_tables_stride0=block_tables_stride0,
             scale=scale,
+            max_qlen=max_qlen,
             K_QScale_hip=K_QScale_hip,
             V_QScale_hip=V_QScale_hip,
             K_QScale_asm=K_QScale_asm,
             V_QScale_asm=V_QScale_asm,
             out_=out_,
+            qo_indptr=qo_indptr,
+            high_precision=high_precision,
             kv_cache_dtype=kv_cache_dtype,
         )
 
