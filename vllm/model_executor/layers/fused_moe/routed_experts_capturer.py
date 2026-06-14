@@ -110,7 +110,7 @@ class RoutedExpertsCapturer:
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
 
-        Under data parallelism, ``topk_ids`` may have three different batch
+        Under data parallelism, ``topk_ids`` may have four different batch
         layouts depending on where the DP combine happens and whether
         Sequence Parallelism (SP) is active for the MoE layer:
           - ``n == total`` (naive dispatch): all DP ranks' tokens are
@@ -119,6 +119,12 @@ class RoutedExpertsCapturer:
           - ``n == token_num_per_dp`` (modular-kernel path): DP combine
             happens inside ``quant_method.apply``; ``select_experts`` only
             ever sees this rank's tokens, so we take the whole tensor.
+          - ``n == total_with_padding`` (padded all-gather path): tokens are
+            padded to max_tokens before all-gather across DP group; each
+            DP rank occupies a contiguous block of size max_tokens, and we
+            extract only the actual tokens for this rank (skip padding).
+            When all DP ranks have equal token counts, ``total == total_with_padding``,
+            so the naive dispatch branch fires instead (equivalent result).
           - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
             path): tokens were split along dim=0 across the TP group by
             ``_sequence_parallel_context``
@@ -146,6 +152,15 @@ class RoutedExpertsCapturer:
             total = int(num_tokens_dp.sum().item())
             n = topk_ids.shape[0]
 
+            # Calculate total with padding for all-gather scenario.
+            # When tokens are padded to max_tokens before all-gather across DP group,
+            # the total size becomes max_tokens * dp_size.
+            # Example: DP0 has 5 tokens, DP1 has 7 tokens, max_tokens=7.
+            # After padding: DP0 has 7 tokens, DP1 has 7 tokens.
+            # After all-gather: total_with_padding = 7 * 2 = 14.
+            max_tokens = int(num_tokens_dp.max().item())
+            total_with_padding = max_tokens * len(num_tokens_dp)
+
             if n == total:
                 # Naive dispatch: all DP ranks' tokens concatenated
                 # before routing. This rank owns tokens
@@ -159,6 +174,22 @@ class RoutedExpertsCapturer:
                 # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
+            elif n == total_with_padding:
+                # NOTE(Ronald1995): When all DP ranks have equal token counts,
+                # total == total_with_padding, so the first branch (n == total)
+                # fires instead. This overlap is intentional since both branches
+                # produce equivalent results in that case.
+
+                # Padded all-gather path: tokens are padded to max_tokens before
+                # all-gather across DP group. Each DP rank occupies a contiguous
+                # block of size max_tokens. Extract only the actual tokens for
+                # this rank (skip padding).
+                # Example: dp_rank=0, max_tokens=7, token_num_per_dp=5.
+                # start_loc = 0 * 7 = 0
+                # end_loc = 0 + 5 = 5 (only first 5 tokens are valid)
+
+                start_loc = self.dp_rank * max_tokens
+                end_loc = start_loc + token_num_per_dp
             elif (
                 self.tp_size > 1
                 and n != token_num_per_dp
@@ -191,8 +222,8 @@ class RoutedExpertsCapturer:
                 raise AssertionError(
                     "RoutedExpertsCapturer: unexpected topk_ids batch "
                     f"dim {n} (expected {total}, {token_num_per_dp}, "
-                    f"or {sp_expected} for dp_rank={self.dp_rank}, "
-                    f"tp_size={self.tp_size})"
+                    f"{total_with_padding}, or {sp_expected} for "
+                    f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
                 )
 
         # Defensive: model may expose more layers than the capture buffer

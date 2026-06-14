@@ -234,6 +234,35 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
+@pytest.mark.parametrize(
+    "dp_rank,expected_slice,expected_count",
+    [
+        (0, slice(0, 5), 5),  # dp_rank=0: tokens 0-4 (first 5 tokens)
+        (1, slice(7, 14), 7),  # dp_rank=1: tokens 7-13 (second block, all 7 valid)
+    ],
+)
+def test_routed_experts_capturer_dp_padded_all_gather(
+    dp_rank, expected_slice, expected_count
+):
+    """n == total_with_padding: padded all-gather path for different DP ranks."""
+    # DP0 has 5 tokens, DP1 has 7 tokens, max_tokens=7.
+    # After padding: DP0 has 7 tokens, DP1 has 7 tokens.
+    # After all-gather: total_with_padding = 7 * 2 = 14.
+    capturer = _capturer_with_buffer(dp_rank=dp_rank, max_tokens=7)
+    num_tokens_dp = torch.tensor([5, 7], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+    )
+    topk = torch.arange(28, dtype=torch.int32).view(14, 2)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    want = topk[expected_slice]
+    assert torch.equal(capturer.device_buffer[:expected_count, 0, :], want)
+    # For dp_rank=0, remaining buffer slots should remain -1
+    if dp_rank == 0:
+        assert capturer.device_buffer[5, 0, 0].item() == -1
+
+
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
