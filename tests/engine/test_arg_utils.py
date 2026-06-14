@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError
+from argparse import ArgumentError, ArgumentTypeError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
 
@@ -38,6 +38,31 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
     assert parse_type_func(value) == expected
+
+
+def test_parse_type_json_error_hint():
+    # Regression test for https://github.com/vllm-project/vllm/issues/39687:
+    # passing the old `key=val,key=val` syntax (removed in #20969) to a
+    # JSON-typed CLI argument produced a useless error that printed the
+    # `json.loads` function object's repr instead of a JSON hint.
+    parse_json = parse_type(json.loads)
+    with pytest.raises(ArgumentTypeError) as exc_info:
+        parse_json("image=4,audio=1")
+    msg = str(exc_info.value)
+    assert "image=4,audio=1" in msg
+    assert "JSON" in msg
+    assert '{"image"' in msg
+    assert "<function" not in msg
+
+
+def test_parse_type_generic_error_message():
+    parse_int = parse_type(int)
+    with pytest.raises(ArgumentTypeError) as exc_info:
+        parse_int("not-a-number")
+    msg = str(exc_info.value)
+    assert "not-a-number" in msg
+    assert "int" in msg
+    assert "<class" not in msg
 
 
 def test_optional_type():
