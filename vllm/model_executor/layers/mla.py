@@ -5,9 +5,21 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
+
+# Check if AITER RMSNorm ops are available
+try:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _AITER_AVAILABLE = rocm_aiter_ops.is_rmsnorm_enabled()
+except ImportError:
+    _AITER_AVAILABLE = False
+    rocm_aiter_ops = None
 
 
 @dataclass
@@ -116,6 +128,20 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+        # Enable dual RMSNorm fusion when AITER is available
+        self.fuse_dual_rmsnorm = False
+
+        if _AITER_AVAILABLE:
+            from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm
+
+            if check_aiter_fused_qk_rmsnorm():
+                self.fuse_dual_rmsnorm = True
+                logger.info(
+                    "[MLA_FUSION_INIT] Dual RMSNorm fusion enabled for %s: "
+                    "Using aiter.fused_qk_rmsnorm (2× faster than separate norms)",
+                    prefix,
+                )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -136,13 +162,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 "q_b_proj is required when q_lora_rank is not None"
             )
 
+            # Step 1: QKV projection (use existing layer)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Step 2: Apply RMSNorm (fused if available)
+            if self.fuse_dual_rmsnorm:
+                # Fused dual RMSNorm using AITER op (2× faster than separate)
+                # Returns BF16 outputs, same as unfused path
+                mla_dual_rmsnorm_op = rocm_aiter_ops.get_mla_dual_rmsnorm_op()
+                q_c_normed, kv_c_normed = mla_dual_rmsnorm_op(
+                    q_c,
+                    self.q_a_layernorm.weight,
+                    self.q_a_layernorm.variance_epsilon,
+                    kv_c,
+                    self.kv_a_layernorm.weight,
+                    self.kv_a_layernorm.variance_epsilon,
+                )
+                # q_c_normed is BF16, same as unfused path below
+                q = self.q_b_proj(q_c_normed)[0]
+            else:
+                # Unfused path: Separate RMSNorm calls
+                q_c = self.q_a_layernorm(q_c)
+                kv_c_normed = self.kv_a_layernorm(kv_c)
+                q = self.q_b_proj(q_c)[0]
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -152,9 +201,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
