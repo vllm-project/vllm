@@ -1204,6 +1204,7 @@ rust_extensions = rust_build.rust_extensions(
 )
 
 setup(
+    name="vllm",
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
