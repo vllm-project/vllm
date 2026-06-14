@@ -877,6 +877,46 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
         return {"image": max_image_tokens, "video": max_video_tokens}
 
+    def _get_auto_max_pixels_from_batched_tokens(
+        self,
+        *,
+        size: Mapping[str, object],
+        patch_size: int,
+        merge_size: int,
+        mm_kwargs: Mapping[str, object],
+        token_budget: int | None = None,
+    ) -> int | None:
+        if mm_kwargs.get("max_pixels") is not None or mm_kwargs.get("size") is not None:
+            return None
+
+        # ``min_pixels`` is only a quality floor, not a high-resolution opt-in.
+        # Keep applying the automatic cap, clamped above the floor below.
+        if token_budget is None:
+            token_budget = self.ctx.max_num_batched_tokens_hint
+        if token_budget is None or token_budget <= 0:
+            return None
+
+        shortest_edge = size.get("shortest_edge")
+        longest_edge = size.get("longest_edge")
+        if shortest_edge is None or longest_edge is None:
+            return None
+
+        auto_max_pixels = token_budget * (patch_size * merge_size) ** 2
+        auto_max_pixels = max(auto_max_pixels, int(shortest_edge))
+        auto_max_pixels = min(auto_max_pixels, int(longest_edge))
+        if auto_max_pixels < int(longest_edge):
+            logger.info_once(
+                "Qwen VL default max_pixels is capped from %d to %d based on "
+                "max_num_batched_tokens=%d. To use the model default, set "
+                "--mm-processor-kwargs '{\"max_pixels\": %d}' or increase "
+                "--max-num-batched-tokens.",
+                int(longest_edge),
+                auto_max_pixels,
+                self.ctx.max_num_batched_tokens_hint or token_budget,
+                int(longest_edge),
+            )
+        return auto_max_pixels
+
     def _get_vision_info(
         self,
         *,
@@ -901,6 +941,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             size = size | {"shortest_edge": override_min_pixels}
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             size = size | {"longest_edge": override_max_pixels}
+        elif (
+            auto_max_pixels := self._get_auto_max_pixels_from_batched_tokens(
+                size=size,
+                patch_size=patch_size,
+                merge_size=merge_size,
+                mm_kwargs=mm_kwargs,
+            )
+        ) is not None:
+            size = size | {"longest_edge": auto_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -994,6 +1043,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 size = size | {"shortest_edge": override_min_pixels}
             if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
                 size = size | {"longest_edge": override_max_pixels}
+            elif (
+                auto_max_pixels := self._get_auto_max_pixels_from_batched_tokens(
+                    size=size,
+                    patch_size=patch_size,
+                    merge_size=merge_size,
+                    mm_kwargs=mm_kwargs,
+                )
+            ) is not None:
+                size = size | {"longest_edge": auto_max_pixels}
 
             max_pixels = size["longest_edge"]
 
@@ -1056,6 +1114,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
         max_videos = mm_counts.get("video", 0)
+
+        if (
+            self.ctx.max_num_batched_tokens_hint is not None
+            and self.ctx.max_num_batched_tokens_hint > 0
+        ):
+            seq_len = min(seq_len, self.ctx.max_num_batched_tokens_hint)
 
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(

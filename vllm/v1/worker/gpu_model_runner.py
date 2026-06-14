@@ -5588,6 +5588,7 @@ class GPUModelRunner(
             self.model_config,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
+            processor=self.mm_budget.processor,
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
 

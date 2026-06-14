@@ -100,6 +100,9 @@ class InputProcessingContext:
     tokenizer: TokenizerLike | None
     """The tokenizer used to tokenize the inputs."""
 
+    max_num_batched_tokens_hint: int | None = None
+    """Internal scheduler token hint for model-specific MM budget defaults."""
+
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
