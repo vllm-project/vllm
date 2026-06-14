@@ -182,11 +182,12 @@ def test_read_blocks_for_req_expands_remote_ids(
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
+    worker._remote_pp_size = {remote_engine_id: 1}
 
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
-    worker.tp_mappings = {remote_engine_id: mock_plan}
+    worker.tp_mappings = {(remote_engine_id, 0): mock_plan}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -203,10 +204,29 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
 
     meta = metadata.reqs_to_recv["test-req"]
-    worker._read_blocks_for_req("test-req", meta)
 
-    assert meta.remote.block_ids == expected_remote_block_ids, (
-        f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
+    # Spy on the kernel-block-id expansion helper to capture its output.
+    real_expand = NixlConnectorWorker._logical_to_remote_kernel_block_ids
+    captured = []
+
+    def _capture_expand(self, logical_ids, phys_per_logical):
+        result = real_expand(self, logical_ids, phys_per_logical)
+        captured.append(result)
+        return result
+
+    with patch.object(
+        NixlConnectorWorker,
+        "_logical_to_remote_kernel_block_ids",
+        _capture_expand,
+    ):
+        worker._read_blocks_for_req("test-req", meta)
+
+    # Remote IDs stay logical (unchanged) for retry/failure reuse.
+    assert meta.remote.block_ids == remote_block_ids
+    # The expansion still produces the expected kernel block IDs.
+    assert captured, "expansion helper was not called"
+    assert captured[0] == expected_remote_block_ids, (
+        f"Expected {expected_remote_block_ids}, got {captured[0]}"
     )
 
 

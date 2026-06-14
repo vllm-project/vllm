@@ -104,9 +104,13 @@ def _make_connector_with_fake_worker(
             host="localhost",
             port=1234,
             remote_tp_size=1,
+            remote_pp_size=1,
             expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
         )
         worker._remote_agents[FakeNixlConnectorWorker.REMOTE_ENGINE_ID] = remote_agents
+        # done_callback records the completed handshake's pp_size; mirror it here
+        # since this test drives _nixl_handshake directly.
+        worker._remote_pp_size[FakeNixlConnectorWorker.REMOTE_ENGINE_ID] = 1
     return connector, worker
 
 
