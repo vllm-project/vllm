@@ -33,6 +33,7 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
@@ -44,6 +45,22 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     return (
         x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
     )
+
+
+def _pad_w13_intermediate_dim(
+    x: torch.Tensor, padded_intermediate: int, is_act_and_mul: bool
+) -> torch.Tensor:
+    up_mult = 2 if is_act_and_mul else 1
+    intermediate = x.shape[1] // up_mult
+    padded_x = x.new_zeros((x.shape[0], up_mult * padded_intermediate, *x.shape[2:]))
+    if is_act_and_mul:
+        padded_x[:, :intermediate, ...] = x[:, :intermediate, ...]
+        padded_x[:, padded_intermediate : padded_intermediate + intermediate, ...] = x[
+            :, intermediate:, ...
+        ]
+    else:
+        padded_x[:, :intermediate, ...] = x
+    return padded_x
 
 
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
@@ -211,20 +228,17 @@ def align_fp4_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
-
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
-    padded_w13[:, : w13.shape[1], :] = w13
+    # Pad w13 and w2 along the intermediate dimension. Gated W13 tensors must
+    # pad each half separately because downstream gated layout handling treats
+    # the row dimension as [2, padded_intermediate, ...].
+    padded_w13 = _pad_w13_intermediate_dim(w13, padded_intermediate, is_act_and_mul)
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
 
-    padded_w13_scale = w13_scale.new_zeros(
-        (num_experts, padded_gate_up_dim, hidden_size // 16)
+    padded_w13_scale = _pad_w13_intermediate_dim(
+        w13_scale, padded_intermediate, is_act_and_mul
     )
-    padded_w13_scale[:, : w13_scale.shape[1], :] = w13_scale
 
     padded_w2_scale = w2_scale.new_zeros(
         (num_experts, hidden_size, padded_intermediate // 16)
@@ -301,12 +315,8 @@ def align_fp8_moe_weights_for_fi(
         padded_intermediate,
     )
 
-    up_mult = 2 if is_act_and_mul else 1
-    padded_gate_up_dim = up_mult * padded_intermediate
-
-    # Pad w13 and w2 along its intermediate dimension.
-    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
-    padded_w13[:, : w13.shape[1], :] = w13
+    # Pad w13 and w2 along the intermediate dimension.
+    padded_w13 = _pad_w13_intermediate_dim(w13, padded_intermediate, is_act_and_mul)
 
     padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
@@ -425,6 +435,59 @@ def _shuffle_mxfp8_moe_weights(
     return w13_out, w2_out, w13_scale_out, w2_scale_out
 
 
+def _shuffle_fp8_ptpc_moe_weights_for_trtllm(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    is_gated: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Preprocess FP8 PTPC weights and per-channel scales for TRT-LLM MoE."""
+    from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
+
+    epilogue_tile_m = 128
+    num_experts = w13.shape[0]
+    intermediate_size = w13.shape[1] // (2 if is_gated else 1)
+    hidden_size = w13.shape[2]
+
+    w13_scale = w13_scale.squeeze(-1) if w13_scale.ndim == 3 else w13_scale
+    w2_scale = w2_scale.squeeze(-1) if w2_scale.ndim == 3 else w2_scale
+
+    w13_interleaved: list[torch.Tensor] = []
+    w13_scale_interleaved: list[torch.Tensor] = []
+    for i in range(num_experts):
+        if is_gated:
+            w13_interleaved.append(reorder_rows_for_gated_act_gemm(w13[i]))
+            w13_scale_interleaved.append(
+                reorder_rows_for_gated_act_gemm(
+                    w13_scale[i].reshape(2 * intermediate_size, -1)
+                ).reshape(2 * intermediate_size)
+            )
+        else:
+            w13_interleaved.append(w13[i])
+            w13_scale_interleaved.append(w13_scale[i])
+
+    w13_shuffled: list[torch.Tensor] = []
+    w2_shuffled: list[torch.Tensor] = []
+    for i in range(num_experts):
+        w13_shuffled.append(
+            shuffle_matrix_a(w13_interleaved[i].view(torch.uint8), epilogue_tile_m)
+        )
+        w2_shuffled.append(shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m))
+
+    w13_out = torch.stack(w13_shuffled).reshape(
+        num_experts, (2 if is_gated else 1) * intermediate_size, hidden_size
+    )
+    w2_out = torch.stack(w2_shuffled).reshape(w2.shape)
+
+    return (
+        w13_out.view(torch.float8_e4m3fn),
+        w2_out.view(torch.float8_e4m3fn),
+        torch.stack(w13_scale_interleaved),
+        w2_scale,
+    )
+
+
 def prepare_fp8_moe_layer_for_fi(
     layer: torch.nn.Module,
     w13: torch.Tensor,
@@ -433,6 +496,7 @@ def prepare_fp8_moe_layer_for_fi(
     w13_input_scale: torch.Tensor | None,
     w2_scale: torch.Tensor,
     w2_input_scale: torch.Tensor | None,
+    per_out_ch_quant: bool,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -452,6 +516,7 @@ def prepare_fp8_moe_layer_for_fi(
     is_mxfp8 = block_quant and w13_scale.dtype == torch.uint8
     is_deepseek_fp8 = block_quant and not is_mxfp8
     is_gated = layer.activation.is_gated
+    is_per_channel_weight = not block_quant and per_out_ch_quant
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
@@ -485,21 +550,39 @@ def prepare_fp8_moe_layer_for_fi(
             layer.moe_config.is_act_and_mul,
             min_alignment,
         )
+        if is_per_channel_weight:
+            scale_intermediate = w13_scale.shape[1] // (2 if is_gated else 1)
+            if new_intermediate != scale_intermediate:
+                w13_scale = _pad_w13_intermediate_dim(
+                    w13_scale,
+                    new_intermediate,
+                    layer.moe_config.is_act_and_mul,
+                )
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
     if layer.moe_config.is_act_and_mul:
         w13 = swap_w13_to_w31(w13)
-        if block_quant:
+        if block_quant or is_per_channel_weight:
             w13_scale = swap_w13_to_w31(w13_scale)
 
     # DeepSeekFp8 TRT-LLM: shuffle weights into BlockMajorK layout.
     if is_deepseek_fp8 and is_trtllm:
         w13, w2 = _shuffle_deepseek_fp8_moe_weights(w13, w2)
 
+    # FI TRT-LLM FP8 PTPC MoE kernel requires interleaved/shuffled weights
+    # and interleaved 2D per-channel scales.
+    if is_trtllm and is_per_channel_weight:
+        w13, w2, w13_scale, w2_scale = _shuffle_fp8_ptpc_moe_weights_for_trtllm(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            is_gated,
+        )
     # FI TRT-LLM FP8 per-tensor MoE kernel requires weight shuffle
     # and registration of alpha scales.
-    if is_trtllm and not block_quant:
+    elif is_trtllm and not block_quant:
         assert w13_input_scale is not None
         assert w2_input_scale is not None
 

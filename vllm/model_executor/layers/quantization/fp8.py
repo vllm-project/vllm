@@ -756,6 +756,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=False,
         )
 
         # Replace parameters with updated versions. Note that this helper

@@ -528,6 +528,7 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+                     Optional FC1 gate per-channel scales (for FP8 PTPC).
                      Optional per-channel scales for w1 (for W4A8 FP8).
                      Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
