@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 
 import torch
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -30,6 +31,26 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+def sparse_indexer_max_logits_bytes(is_sm12x: bool | None = None) -> int:
+    if is_sm12x is None:
+        is_sm12x = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        )
+    if "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB" in os.environ:
+        return envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    default_mb = 256 if is_sm12x else 512
+    return default_mb * 1024 * 1024
+
+
+def _uses_deep_gemm_scheduler_metadata() -> bool:
+    return (
+        current_platform.is_cuda()
+        and has_deep_gemm()
+        and not current_platform.is_device_capability_family(120)
+    )
 
 
 @triton.jit
@@ -481,12 +502,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         seq_lens = common_attn_metadata.seq_lens
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
+        has_prefilling_rows = (
+            common_attn_metadata.is_prefilling is not None
+            and torch.any(common_attn_metadata.is_prefilling).item()
+        )
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=not self.use_flattening,
+                treat_short_extends_as_decodes=not has_prefilling_rows,
             )
         )
 
@@ -522,7 +548,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
-            max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            max_logits_bytes = sparse_indexer_max_logits_bytes()
             # Upper bound is exact for prefill rows (the `[num_decodes:]`
             # slice below).
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
@@ -612,8 +638,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _uses_deep_gemm_scheduler_metadata():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,

@@ -37,6 +37,14 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 logger = init_logger(__name__)
 
 
+def _clear_mxfp4_moe_weight_loading_cache() -> None:
+    # WORKAROUND: SM12x/GB10 can hit driver instability while loading MXFP4
+    # MoE weights under tight VRAM pressure. Release PyTorch's staging cache
+    # after the backend kernel has taken ownership of the converted weights.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 class Mxfp4Config(QuantizationConfig):
     """Canonical base config for MXFP4 quantization.
 
@@ -389,6 +397,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+        del w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
+        _clear_mxfp4_moe_weight_loading_cache()
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -733,6 +743,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+        del w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
+        _clear_mxfp4_moe_weight_loading_cache()
 
     def get_fused_moe_quant_config(
         self,

@@ -4,10 +4,70 @@
 import pytest
 import torch
 
+import vllm.v1.attention.backends.mla.indexer as indexer_module
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+
+@pytest.mark.parametrize(
+    ("is_prefilling", "expected_treat_short_extends_as_decodes"),
+    [
+        (torch.tensor([False, False]), True),
+        (torch.tensor([False, True]), False),
+    ],
+)
+def test_indexer_builder_keeps_short_prefill_continuations_as_prefills(
+    monkeypatch,
+    is_prefilling,
+    expected_treat_short_extends_as_decodes,
+):
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.reorder_batch_threshold = 1
+    builder.use_flattening = False
+
+    captured = {}
+
+    def fake_split_decodes_and_prefills(
+        common_attn_metadata,
+        *,
+        decode_threshold=1,
+        require_uniform=False,
+        treat_short_extends_as_decodes=True,
+    ):
+        captured["treat_short_extends_as_decodes"] = (
+            treat_short_extends_as_decodes
+        )
+        raise RuntimeError("stop after split_decodes_and_prefills")
+
+    monkeypatch.setattr(
+        indexer_module,
+        "split_decodes_and_prefills",
+        fake_split_decodes_and_prefills,
+    )
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.clone(),
+        seq_lens=torch.tensor([128, 129], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=129,
+        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(2, dtype=torch.int64),
+        is_prefilling=is_prefilling,
+        seq_lens_cpu_upper_bound=torch.tensor([128, 129], dtype=torch.int32),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after"):
+        builder.build(common_prefix_len=0, common_attn_metadata=metadata)
+
+    assert (
+        captured["treat_short_extends_as_decodes"]
+        is expected_treat_short_extends_as_decodes
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

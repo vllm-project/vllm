@@ -64,6 +64,7 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import deep_gemm
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -298,10 +299,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
             2 * self.intermediate_size,
@@ -334,10 +331,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -423,10 +416,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
@@ -563,6 +552,7 @@ class DeepseekV4MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.n_shared_experts = config.n_shared_experts or 0
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
@@ -581,7 +571,6 @@ class DeepseekV4MoE(nn.Module):
         eplb_config = vllm_config.parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_routed_experts = config.n_routed_experts
-        self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         assert self.n_physical_experts % self.ep_size == 0, (
@@ -655,6 +644,44 @@ class DeepseekV4MoE(nn.Module):
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
         )
+        self._sync_fused_moe_metadata()
+
+    def _sync_fused_moe_metadata(self) -> None:
+        experts = self.experts
+        moe_config = getattr(experts, "moe_config", None)
+        routed_experts = getattr(experts, "routed_experts", experts)
+
+        def get_optional_attr(obj, name: str):
+            return None if obj is None else getattr(obj, name, None)
+
+        def first_defined(*values):
+            return next((value for value in values if value is not None), None)
+
+        self.n_logical_experts = first_defined(
+            get_optional_attr(experts, "logical_num_experts"),
+            get_optional_attr(moe_config, "num_logical_experts"),
+        )
+        self.n_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "global_num_experts"),
+            get_optional_attr(experts, "global_num_experts"),
+            get_optional_attr(moe_config, "num_experts"),
+        )
+        self.n_local_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "local_num_experts"),
+            get_optional_attr(experts, "local_num_experts"),
+            get_optional_attr(moe_config, "num_local_experts"),
+        )
+        if (
+            self.n_logical_experts is None
+            or self.n_physical_experts is None
+            or self.n_local_physical_experts is None
+        ):
+            raise AttributeError(
+                "DeepseekV4MoE FusedMoE metadata is incomplete after "
+                "construction."
+            )
+        self.n_local_experts = self.n_local_physical_experts
+        self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -1329,6 +1356,10 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def skip_weight_name_before_load(self, name: str) -> bool:
+        mapped = self.hf_to_vllm_mapper._map_name(name)
+        return mapped is None or "mtp." in mapped
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
