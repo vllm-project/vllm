@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MoE activation function enum and utilities."""
 
+from collections.abc import Callable
 from enum import Enum
 
 import torch
@@ -101,6 +102,45 @@ def activation_without_mul(activation: str) -> str:
     return MoEActivation.from_str(activation).without_mul().value
 
 
+def _swiglustep(output: torch.Tensor, input: torch.Tensor) -> None:
+    from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
+
+    swiglustep_and_mul_triton(output, input)
+
+
+def _relu2_no_mul(output: torch.Tensor, input: torch.Tensor) -> None:
+    F.relu(input, inplace=True)
+    torch.square(input, out=output)
+
+
+# Dispatch table mapping each activation to its implementation. This is the
+# source of truth for which activations apply_moe_activation supports;
+# experts that delegate their activation to apply_moe_activation should report
+# apply_moe_activation_supported() rather than maintaining their own list.
+_MOE_ACTIVATION_FNS: dict[
+    MoEActivation, Callable[[torch.Tensor, torch.Tensor], None]
+] = {
+    # Activations with gated multiplication (gate × activation(up))
+    MoEActivation.SILU: torch.ops._C.silu_and_mul,
+    MoEActivation.GELU: torch.ops._C.gelu_and_mul,
+    MoEActivation.GELU_TANH: torch.ops._C.gelu_tanh_and_mul,
+    MoEActivation.SWIGLUOAI: torch.ops._C.swigluoai_and_mul,
+    MoEActivation.SWIGLUSTEP: _swiglustep,
+    # Activations without gated multiplication
+    MoEActivation.SILU_NO_MUL: lambda output, input: output.copy_(F.silu(input)),
+    MoEActivation.GELU_NO_MUL: lambda output, input: output.copy_(F.gelu(input)),
+    MoEActivation.GELU_TANH_NO_MUL: lambda output, input: output.copy_(
+        F.gelu(input, approximate="tanh")
+    ),
+    MoEActivation.RELU2_NO_MUL: _relu2_no_mul,
+}
+
+
+def apply_moe_activation_supported(activation: MoEActivation) -> bool:
+    """Whether apply_moe_activation can apply the given activation function."""
+    return activation in _MOE_ACTIVATION_FNS
+
+
 def apply_moe_activation(
     activation: MoEActivation,
     output: torch.Tensor,
@@ -120,31 +160,9 @@ def apply_moe_activation(
             f"{output.size(-1)} vs {input.size(-1)}"
         )
 
-    # Activations with gated multiplication (gate × activation(up))
-    if activation == MoEActivation.SILU:
-        torch.ops._C.silu_and_mul(output, input)
-    elif activation == MoEActivation.GELU:
-        torch.ops._C.gelu_and_mul(output, input)
-    elif activation == MoEActivation.GELU_TANH:
-        torch.ops._C.gelu_tanh_and_mul(output, input)
-    elif activation == MoEActivation.SWIGLUOAI:
-        torch.ops._C.swigluoai_and_mul(output, input)
-    elif activation == MoEActivation.SWIGLUSTEP:
-        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
-
-        swiglustep_and_mul_triton(output, input)
-
-    # Activations without gated multiplication
-    elif activation == MoEActivation.SILU_NO_MUL:
-        output.copy_(F.silu(input))
-    elif activation == MoEActivation.GELU_NO_MUL:
-        output.copy_(F.gelu(input))
-    elif activation == MoEActivation.GELU_TANH_NO_MUL:
-        output.copy_(F.gelu(input, approximate="tanh"))
-    elif activation == MoEActivation.RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
-    else:
+    fn = _MOE_ACTIVATION_FNS.get(activation)
+    if fn is None:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+    fn(output, input)
 
     return output
