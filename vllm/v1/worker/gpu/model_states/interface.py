@@ -59,8 +59,22 @@ class ModelState(ABC):
     def apply_staged_writes(self) -> None:
         return None
 
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        return None
+
     def postprocess_state(
-        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         return None
 
