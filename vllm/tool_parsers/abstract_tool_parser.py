@@ -69,6 +69,23 @@ class ToolParser:
         ):
             cls.supports_required_and_named = False
 
+    # The literal tokens that wrap a tool-call block, when the model's format
+    # uses them. Optional: only parsers whose grammar has explicit start/end
+    # markers set these. Declared here so generic composition code (e.g.
+    # DelegatingParser) can reference them through the interface instead of
+    # sniffing subclass internals.
+    tool_call_start_token: str | None = None
+    tool_call_end_token: str | None = None
+
+    # Opt in to dangling-reasoning recovery. Some models occasionally emit a
+    # complete tool-call block without first closing the reasoning channel
+    # (e.g. a missing </think>), which would otherwise trap the block in the
+    # reasoning output and lose the tool call. When True, DelegatingParser is
+    # allowed to treat tool_call_start_token as an implicit reasoning boundary
+    # and route the block to this parser. Requires tool_call_start_token and
+    # tool_call_end_token to be set.
+    recovers_tool_calls_in_reasoning: bool = False
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
