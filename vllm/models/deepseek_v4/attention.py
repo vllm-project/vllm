@@ -20,6 +20,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.deepseek_v4.common.ops import (
@@ -380,11 +381,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
+                # Non-UnquantizedLinearMethod implementations (FP8, AWQ,
+                # GPTQ, compressed-tensors, ...) must execute their
+                # method/module path to honor quantization or transforms.
+                # The unquantized path keeps the fused FP32-accumulator
+                # torch.mm so compressor.forward still receives a genuine
+                # FP32 result (a BF16 accumulator + .to(float32) afterward
+                # would round the intermediate matmul).
+                wkv_wgate = compressor.fused_wkv_wgate
+                if isinstance(wkv_wgate.quant_method, UnquantizedLinearMethod):
+                    return torch.mm(
+                        hidden_states,
+                        wkv_wgate.weight.T,
+                        out_dtype=torch.float32,
+                    )
+                # return_bias=False, so forward returns a bare tensor.
+                return wkv_wgate(hidden_states).to(torch.float32)
 
             aux_fns[0] = compressor_kv_score
 
@@ -397,11 +409,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
-                    hidden_states,
-                    indexer.compressor.fused_wkv_wgate.weight.T,
-                    out_dtype=torch.float32,
-                )
+                # Same conditional dispatch as compressor_kv_score above.
+                wkv_wgate = indexer.compressor.fused_wkv_wgate
+                if isinstance(wkv_wgate.quant_method, UnquantizedLinearMethod):
+                    return torch.mm(
+                        hidden_states,
+                        wkv_wgate.weight.T,
+                        out_dtype=torch.float32,
+                    )
+                return wkv_wgate(hidden_states).to(torch.float32)
 
             aux_fns[1] = indexer_weights_proj
             aux_fns[2] = indexer_compressor_kv_score
@@ -701,7 +717,7 @@ class DeepseekV4Indexer(nn.Module):
             hidden_size,
             self.n_head,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.weights_proj",
         )
         self.softmax_scale = self.head_dim**-0.5
