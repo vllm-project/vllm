@@ -54,6 +54,11 @@ def create_fp4_scale_tensor(
 
     block_size = 16
     if is_sf_swizzled_layout:
+        # Swizzled (non-TRTLLM) path: `cvt_fp16_to_fp4` iterates to the
+        # padded `sf_m` so every padded address is initialized; however
+        # the int32 packing (4 fp8 scales per int32) means partial-int32
+        # writes would mix tile-undefined bytes if the buffer were
+        # uninitialized. Keep zero-init here for safety.
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
@@ -61,7 +66,17 @@ def create_fp4_scale_tensor(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+        # Non-swizzled (sf_major / FlashInfer-TRTLLM) path: the
+        # `cvt_fp16_to_fp4_sf_major` kernel writes every scale-factor
+        # address (see csrc/libtorch_stable/quantization/fp4/
+        # nvfp4_quant_kernels.cu:132-134), so the FillFunctor pre-zero
+        # is redundant. This elides the launch when the
+        # VLLM_MOE_FP4_PREAMBLE_FUSION gate is set.
+        if envs.VLLM_MOE_FP4_PREAMBLE_FUSION:
+            return torch.empty(
+                (m, n // block_size), device=device, dtype=torch.uint8
+            )
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
