@@ -747,9 +747,10 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
-            # A boundary delta may carry both reasoning and tool call,
-            # save it before the tool parser overwrites delta_message.
-            reasoning = delta_message.reasoning if delta_message else None
+            # Preserve any reasoning extracted in the same delta where
+            # reasoning ended and tool calls began (single-delta batching).
+            saved_reasoning = delta_message.reasoning if delta_message else None
+
             delta_message, state.function_name_returned = (
                 self._extract_tool_calls_streaming(
                     previous_text=state.previous_text,
@@ -764,11 +765,11 @@ class DelegatingParser(Parser):
                     function_name_returned=state.function_name_returned,
                 )
             )
-            if reasoning:
-                if not delta_message:
-                    delta_message = DeltaMessage()
-                delta_message.reasoning = reasoning
-
+            if saved_reasoning is not None:
+                if delta_message is None:
+                    delta_message = DeltaMessage(reasoning=saved_reasoning)
+                else:
+                    delta_message.reasoning = saved_reasoning
             if (
                 delta_message
                 and delta_message.tool_calls

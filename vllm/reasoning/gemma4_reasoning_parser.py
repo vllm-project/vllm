@@ -55,6 +55,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
+        # End-of-tool-response marker (closes <|tool_response>...<tool_response|>).
+        # May be None if not in vocabulary.
+        self.tool_response_end_token_id = self.vocab.get("<tool_response|>")
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
@@ -79,6 +82,12 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         new_turn_token_id = self.new_turn_token_id
         tool_call_token_id = self.tool_call_token_id
         tool_response_token_id = self.tool_response_token_id
+        tool_response_end_token_id = self.tool_response_end_token_id
+
+        # Tracks whether we passed a <tool_response|> end marker (which only
+        # appears in prompt context when the tool exchange is complete) before
+        # reaching <|tool_response> start token while searching backward.
+        saw_tool_response_end = False
 
         # Search from the end of input_ids to find the last match.
         for i in range(len(input_ids) - 1, -1, -1):
@@ -87,12 +96,28 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == tool_call_token_id:
                 # We're generating a tool call, so reasoning must be ended.
                 return True
-            if input_ids[i] in (new_turn_token_id, tool_response_token_id):
-                # We found a new turn or tool response token so don't consider
-                # reasoning ended yet, since the model starts new reasoning
-                # after these tokens.
+            if input_ids[i] == new_turn_token_id:
+                # A new conversation turn is starting; new reasoning may follow.
                 return False
-            if input_ids[i] == end_token_id:
+            if (
+                tool_response_end_token_id is not None
+                and input_ids[i] == tool_response_end_token_id
+            ):
+                # <tool_response|> closes a tool-response block in the prompt.
+                # Set a flag so we know the next <|tool_response> we encounter
+                # is part of a completed exchange, not a bare stop token.
+                saw_tool_response_end = True
+            elif input_ids[i] == tool_response_token_id:
+                if saw_tool_response_end:
+                    # Completed tool exchange in the prompt: the model is in a
+                    # fresh state and may start new reasoning in this turn.
+                    # Returning False prevents a prior <|tool_call> from being
+                    # found further back and incorrectly triggering return True.
+                    return False
+                # else: <|tool_response> is a bare stop token appended to the
+                # delta after a tool call — keep searching backward to find the
+                # preceding <|tool_call> token and correctly return True.
+            elif input_ids[i] == end_token_id:
                 return True
         return False
 
@@ -113,7 +138,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
 
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
-            reasoning = _strip_thought_label(reasoning)
+            reasoning = _strip_thought_label(reasoning) or None
         return reasoning, content
 
     # ------------------------------------------------------------------
@@ -194,8 +219,14 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                 else:
                     if len(self._reasoning_text) >= prefix_len:
                         self._prefix_stripped = True
-                        result.reasoning = ""
-                        return result
+                        # The entire delta was the stripped prefix —
+                        # suppress the empty reasoning delta.  If the base
+                        # parser extracted post-reasoning text (e.g. tool
+                        # call markup), forward that content so the
+                        # DelegatingParser can hand it to the tool parser.
+                        if result.content:
+                            return DeltaMessage(content=result.content)
+                        return None
                     return None
 
         # Case 2: Accumulated text is a strict prefix of

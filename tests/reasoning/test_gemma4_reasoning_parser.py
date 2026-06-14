@@ -111,7 +111,7 @@ THOUGHT_PREFIX = {
 }
 THOUGHT_PREFIX_ONLY = {
     "output": "<|channel>thought\n<channel|>",
-    "reasoning": "",
+    "reasoning": None,  # empty thinking block → no reasoning_content emitted
     "content": None,
     "is_reasoning_end": True,
 }
@@ -273,3 +273,38 @@ def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert not is_reasoning_end
+
+
+def test_gemma4_tool_response_does_not_block_reasoning_end(generic_tokenizer):
+    """<|tool_response> in the same delta must not mask a preceding <|tool_call>.
+
+    When --stream-interval batches all generated tokens into one chunk the
+    sequence is:
+
+        <|channel>thought\\n<channel|><|tool_call>...<tool_call|><|tool_response>
+
+    The old is_reasoning_end returned False immediately on <|tool_response>
+    (searching backwards), never reaching the <|tool_call> token.  That kept
+    state.reasoning_ended=False, so DelegatingParser.parse_delta never entered
+    the tool-call phase and the raw Gemma4 format leaked as content.
+    """
+    vocab = generic_tokenizer.get_vocab()
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+
+    # Exact token sequence produced by gemma4-26b with stream-interval 20:
+    # thought\n<channel|><|tool_call>call:exec{...}<tool_call|><|tool_response>
+    output_tokens = (
+        [vocab["<|channel>"]]  # chunk N-1: reasoning start
+        + gemma4_encode_output(  # chunk N: everything else in one batch
+            generic_tokenizer,
+            "thought\n<channel|><|tool_call>done<tool_call|>",
+        )
+        + [vocab["<|tool_response>"]]  # stop token
+    )
+
+    assert parser.is_reasoning_end(output_tokens), (
+        "is_reasoning_end must return True when <|tool_call> precedes "
+        "<|tool_response> in the same delta"
+    )

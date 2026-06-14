@@ -810,3 +810,221 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+    def test_complete_tool_call_in_single_delta(self, parser, mock_request):
+        """Entire tool call arrives in one streaming chunk (stream-interval batching).
+
+        When --stream-interval batches all tokens into one SSE event, start and
+        end tokens arrive in the same delta.  Case 2 in _extract_streaming must
+        initialise tool state even when start_count == end_count, and
+        _handle_tool_call_end must emit both the function name and arguments.
+        """
+        full_call = '<|tool_call>call:exec{command:<|"|>echo hello<|"|>}<tool_call|>'
+        results = self._simulate_streaming(parser, mock_request, [full_call])
+
+        name = self._collect_function_name(results)
+        args_text = self._collect_arguments(results)
+
+        assert name == "exec", f"expected 'exec', got {name!r}"
+        assert args_text, "no arguments were streamed"
+        parsed = json.loads(args_text)
+        assert parsed == {"command": "echo hello"}
+
+        # Exactly one tool call header must have been emitted.
+        headers = [
+            delta
+            for delta, _ in results
+            if delta and delta.tool_calls and delta.tool_calls[0].id is not None
+        ]
+        assert len(headers) == 1
+
+    def test_multiple_tool_calls_in_single_delta(self, parser, mock_request):
+        """Multiple complete tool calls arriving in one streaming chunk.
+
+        When N tool calls all arrive in the same batched delta,
+        Case 2 must initialise N entries (not just one) and
+        _handle_tool_call_end must emit all N tool calls whose
+        names have not been individually streamed yet.
+        """
+        full_delta = (
+            '<|tool_call>call:read{path:<|"|>a.py<|"|>}<tool_call|>'
+            '<|tool_call>call:write{path:<|"|>b.py<|"|>,content:<|"|>hello<|"|>}<tool_call|>'
+        )
+        results = self._simulate_streaming(parser, mock_request, [full_delta])
+
+        all_tcs = [
+            tc
+            for delta, _ in results
+            if delta and delta.tool_calls
+            for tc in delta.tool_calls
+        ]
+        assert len(all_tcs) == 2, (
+            f"expected 2 tool calls, got {len(all_tcs)}: {all_tcs}"
+        )
+
+        names = [
+            (
+                tc.function.name
+                if hasattr(tc.function, "name")
+                else tc.function.get("name")
+            )
+            for tc in all_tcs
+        ]
+        assert "read" in names
+        assert "write" in names
+
+    def test_streaming_mixed_partial_and_complete_in_one_delta(
+        self, parser, mock_request
+    ):
+        """Mixed scenario: partially-streamed call finishes in same delta
+        as a new complete call arrives.
+
+        Simulates:
+        1. Delta 1: starts first call, sends name, streams partial args
+        2. Delta 2: continues streaming args (call still in middle)
+        3. Delta 3: first call ends + second call begins and ends in one chunk
+
+        This exercises the fix for PR #42875: the old _handle_tool_call_end
+        used a single current_tool_name_sent flag to branch between
+        'single-delta' and 'normal' paths, causing partially-streamed calls
+        to be skipped when new complete calls arrived in the same delta.
+        """
+        chunks = [
+            # Delta 1: start first tool call, send name, partial args
+            '<|tool_call>call:search{query:<|"|>hel',
+            # Delta 2: continue streaming args (still in middle of call)
+            "lo",
+            # Delta 3: first call finishes + second complete call arrives
+            # in the same delta (mixed scenario)
+            '<|"|>}<tool_call|><|tool_call>call:read{path:<|"|>/foo<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Collect all deltas by tool index
+        deltas_by_index: dict[int, dict] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in deltas_by_index:
+                        deltas_by_index[idx] = {"name": None, "arguments": ""}
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        if func.get("name"):
+                            deltas_by_index[idx]["name"] = func["name"]
+                        if func.get("arguments"):
+                            deltas_by_index[idx]["arguments"] += func["arguments"]
+                    else:
+                        if getattr(func, "name", None):
+                            deltas_by_index[idx]["name"] = func.name
+                        if getattr(func, "arguments", None):
+                            deltas_by_index[idx]["arguments"] += func.arguments
+
+        # We should have two tool calls
+        assert 0 in deltas_by_index, "Missing tool call 0"
+        assert 1 in deltas_by_index, "Missing tool call 1"
+
+        # Both should have valid JSON arguments
+        for idx in [0, 1]:
+            args_str = deltas_by_index[idx]["arguments"]
+            assert args_str, f"Tool call {idx} has no arguments"
+            try:
+                parsed = json.loads(args_str)
+                assert isinstance(parsed, dict), f"Tool call {idx} args not a dict"
+            except json.JSONDecodeError as e:
+                pytest.fail(
+                    f"Tool call {idx} arguments not valid JSON: '{args_str}' - {e}"
+                )
+
+        # Verify specific values
+        # call 0 (search): name may or may not be present depending on
+        # whether delta 1 emitted it; args should be complete
+        assert json.loads(deltas_by_index[0]["arguments"]) == {"query": "hello"}, (
+            f'Expected {{"query": "hello"}}, got {deltas_by_index[0]["arguments"]}'
+        )
+
+        # call 1 (read): should have name + full args
+        assert deltas_by_index[1]["name"] == "read", (
+            f'Expected name "read", got {deltas_by_index[1]["name"]}'
+        )
+        assert json.loads(deltas_by_index[1]["arguments"]) == {"path": "/foo"}, (
+            f'Expected {{"path": "/foo"}}, got {deltas_by_index[1]["arguments"]}'
+        )
+
+    def _collect_content(self, results):
+        """Concatenate all content deltas from streaming results."""
+        out = ""
+        for delta, _ in results:
+            if delta and getattr(delta, "content", None):
+                out += delta.content
+        return out
+
+    def test_streaming_inter_call_text_preserved_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Plain text between two tool calls in one delta must be preserved.
+
+        When stream-interval batching produces
+        ``<|tool_call>...<tool_call|>X<|tool_call>...<tool_call|>``,
+        the inter-call text ``X`` must appear in the streamed content.
+        """
+        delta = (
+            '<|tool_call>call:read{path:<|"|>a.py<|"|>}<tool_call|>'
+            " and then "
+            '<|tool_call>call:read{path:<|"|>b.py<|"|>}<tool_call|>'
+        )
+        results = self._simulate_streaming(parser, mock_request, [delta])
+
+        content = self._collect_content(results)
+        assert "and then" in content, f"inter-call text lost; content={content!r}"
+        # No raw tool call markers should leak.
+        assert TOOL_CALL_START not in content
+        assert TOOL_CALL_END not in content
+
+    def test_streaming_no_arg_fragment_leak_when_started_inside(
+        self, parser, mock_request
+    ):
+        """A delta that starts inside a tool call must not leak arg fragments.
+
+        Chunk 1 opens the tool call and streams partial args. Chunk 2
+        contains the rest of the args plus the closing end token plus a
+        new complete tool call: the leftover argument bytes (e.g. ``}``,
+        ``"``) before the end token must NOT be emitted as content.
+        """
+        chunks = [
+            '<|tool_call>call:search{query:<|"|>hel',
+            'lo<|"|>}<tool_call|> result: <|tool_call>call:noop{}<tool_call|>',
+        ]
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        content = self._collect_content(results)
+        # The legitimate text between calls IS content.
+        assert "result:" in content, f"inter-call text dropped; content={content!r}"
+        # No tool call markers must leak into content.
+        assert TOOL_CALL_START not in content
+        assert TOOL_CALL_END not in content
+        # No raw argument fragments must leak (e.g. the closing brace
+        # or quote delimiter from the still-streaming first call).
+        assert "}" not in content, f"raw arg fragment leaked into content: {content!r}"
+        assert '<|"|>' not in content
+
+    def test_streaming_end_then_start_no_duplication(self, parser, mock_request):
+        """End-then-start in one delta must not duplicate inter-call text.
+
+        Regression for the ``last_end < first_start`` slicing edge case
+        flagged in review: the text between the two markers must appear
+        exactly once in content.
+        """
+        chunks = [
+            '<|tool_call>call:a{x:<|"|>1<|"|>',
+            '}<tool_call|> middle <|tool_call>call:b{y:<|"|>2<|"|>}<tool_call|>',
+        ]
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        content = self._collect_content(results)
+        assert content.count("middle") == 1, (
+            f"inter-call text duplicated; content={content!r}"
+        )
+        assert TOOL_CALL_START not in content
+        assert TOOL_CALL_END not in content
