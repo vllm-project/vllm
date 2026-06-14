@@ -345,6 +345,7 @@ class BlockPool:
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret.sort(key=lambda block: block.block_id)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
