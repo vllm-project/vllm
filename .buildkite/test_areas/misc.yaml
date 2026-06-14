@@ -52,18 +52,9 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       depends_on:
       - image-build-amd
-      commands:
-      # TODO(@micah-wil): Remove after PyTorch ROCm hipBLASLt accuracy regression.
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export TORCH_BLAS_PREFER_HIPBLASLT=0
-      - pytest -v -s v1/sample
-      - pytest -v -s v1/logits_processors
-      - pytest -v -s v1/test_oracle.py
-      - pytest -v -s v1/test_request.py
-      - pytest -v -s v1/test_outputs.py
 
 - label: V1 Core + KV + Metrics
   key: v1-core-kv-metrics
