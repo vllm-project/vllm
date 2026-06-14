@@ -6,8 +6,11 @@ import torch
 
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import (
+    make_kv_sharing_fast_prefill_common_attn_metadata,
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -379,6 +382,247 @@ def test_prefill_split_across_ubatches(
         # Map to original request index
         orig_idx = split_req_idx + j
         assert int(second_meta.seq_lens[j]) == seq_lens[orig_idx]
+
+
+# ---------------------------------------------------------------------------
+# Tests for split_decodes_prefills_and_extends (6-tuple version)
+# ---------------------------------------------------------------------------
+
+
+def apply_split_decodes_prefills_and_extends(
+    query_lens: list[int],
+    seq_lens: list[int] | None = None,
+    decode_threshold: int = 1,
+):
+    """Helper: build CommonAttentionMetadata and call the 6-tuple split."""
+    device = torch.device("cpu")
+    if seq_lens is None:
+        seq_lens = [10 * (i + 1) for i in range(len(query_lens))]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=device,
+    )
+    return split_decodes_prefills_and_extends(common, decode_threshold=decode_threshold)
+
+
+def test_split_decodes_prefills_and_extends_returns_ints():
+    """All 6 return values must be Python ints, not tensors."""
+    result = apply_split_decodes_prefills_and_extends([1, 3, 8])
+    assert len(result) == 6
+    for i, val in enumerate(result):
+        assert isinstance(val, int), (
+            f"Return value at position {i} is {type(val).__name__}, expected int: {val}"
+        )
+
+
+def test_split_decodes_prefills_and_extends_all_decodes():
+    """All single-token requests → all decodes, no extends, no prefills."""
+    query_lens = [1, 1, 1]
+    seq_lens = [10, 20, 30]  # seq_len > query_len so not prefills
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens
+    )
+    assert nd == 3
+    assert ne == 0
+    assert np_ == 0
+    assert ndt == 3
+    assert net == 0
+    assert npt == 0
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_all_prefills():
+    """All first-token requests (seq_len == query_len) → all prefills."""
+    query_lens = [5, 6, 7]
+    seq_lens = [5, 6, 7]  # seq_len == query_len → prefill
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 0
+    assert ne == 0
+    assert np_ == 3
+    assert ndt == 0
+    assert net == 0
+    assert npt == sum(query_lens)
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_all_extends():
+    """Multi-token requests where seq_len > query_len → all extends."""
+    query_lens = [3, 4, 5]
+    seq_lens = [10, 20, 30]  # seq_len > query_len, query_len > 1 → extends
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 0
+    assert ne == 3
+    assert np_ == 0
+    assert ndt == 0
+    assert net == sum(query_lens)
+    assert npt == 0
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_mixed():
+    """Mixed batch: decodes first, then extends, then prefills."""
+    # decodes: query_len=1, seq_len > query_len
+    # extends: query_len > 1, seq_len > query_len
+    # prefills: query_len == seq_len (fresh prompts)
+    query_lens = [1, 1, 3, 4, 6, 8]
+    seq_lens = [20, 30, 10, 15, 6, 8]
+    # requests 0,1: decode (query=1, seq>1)
+    # requests 2,3: extend (query>1, seq>query)
+    # requests 4,5: prefill (query==seq)
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 2
+    assert ne == 2
+    assert np_ == 2
+    assert ndt == 2  # 1 + 1
+    assert net == 7  # 3 + 4
+    assert npt == 14  # 6 + 8
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_token_counts_sum():
+    """Token counts across all three groups always sum to total tokens."""
+    test_cases = [
+        ([1, 1, 1], [10, 20, 30]),
+        ([5, 5, 5], [5, 5, 5]),
+        ([1, 3, 8], None),
+        ([1, 1, 4, 6, 10, 10], [20, 30, 4, 6, 10, 10]),
+    ]
+    for query_lens, seq_lens in test_cases:
+        result = apply_split_decodes_prefills_and_extends(query_lens, seq_lens=seq_lens)
+        nd, ne, np_, ndt, net, npt = result
+        assert ndt + net + npt == sum(query_lens), (
+            f"Token count mismatch for query_lens={query_lens}: "
+            f"{ndt}+{net}+{npt} != {sum(query_lens)}"
+        )
+        assert nd + ne + np_ == len(query_lens), (
+            f"Request count mismatch: {nd}+{ne}+{np_} != {len(query_lens)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests for make_kv_sharing_fast_prefill_common_attn_metadata
+# ---------------------------------------------------------------------------
+
+
+def _make_fast_prefill_input(
+    query_lens: list[int],
+    seq_lens: list[int],
+    logits_indices: list[int],
+) -> CommonAttentionMetadata:
+    """Build a minimal CommonAttentionMetadata for fast-prefill metadata tests.
+
+    All tensors are kept on CPU so no GPU is required.
+    """
+    n = len(query_lens)
+    qsl = [0] + list(__import__("itertools").accumulate(query_lens))
+    query_start_loc = torch.tensor(qsl, dtype=torch.int32)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32)
+    li = torch.tensor(logits_indices, dtype=torch.int32)
+    dummy = torch.zeros(0, dtype=torch.int32)
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.clone(),
+        seq_lens=seq_lens_t,
+        num_reqs=n,
+        num_actual_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=max(seq_lens),
+        block_table_tensor=dummy,
+        slot_mapping=dummy,
+        seq_lens_cpu_upper_bound=seq_lens_t.clone(),
+        logits_indices_padded=li,
+        num_logits_indices=len(logits_indices),
+    )
+
+
+def test_make_kv_sharing_fast_prefill_pure_decode_shortcircuit():
+    """max_query_len == 1 → function returns the input unchanged."""
+    meta = _make_fast_prefill_input(
+        query_lens=[1, 1, 1],
+        seq_lens=[10, 20, 30],
+        logits_indices=[0, 1, 2],
+    )
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+    assert result is meta
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,logits_indices,exp_total,exp_max",
+    [
+        # 3 requests: 3/2/1 decode tokens each
+        # query_start_loc = [0, 5, 10, 15]; valid range for each req:
+        #   req0=[0,4], req1=[5,9], req2=[10,14]
+        (
+            [5, 5, 5],
+            [41, 31, 40],
+            [0, 1, 2, 5, 8, 12],
+            6,
+            3,
+        ),
+        # 2 requests: 1 decode token each (equal distribution)
+        # query_start_loc = [0, 3, 6]; req0=[0,2], req1=[3,5]
+        (
+            [3, 3],
+            [20, 30],
+            [0, 3],
+            2,
+            1,
+        ),
+        # 1 request: all tokens are decode
+        # query_start_loc = [0, 4]; req0=[0,3]
+        (
+            [4],
+            [10],
+            [0, 1, 2, 3],
+            4,
+            4,
+        ),
+    ],
+)
+def test_make_kv_sharing_fast_prefill_scalar_values(
+    query_lens, seq_lens, logits_indices, exp_total, exp_max
+):
+    """num_actual_tokens and max_query_len are correct Python ints."""
+    meta = _make_fast_prefill_input(query_lens, seq_lens, logits_indices)
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+
+    assert isinstance(result.num_actual_tokens, int), (
+        f"num_actual_tokens should be int, got {type(result.num_actual_tokens)}"
+    )
+    assert isinstance(result.max_query_len, int), (
+        f"max_query_len should be int, got {type(result.max_query_len)}"
+    )
+    assert result.num_actual_tokens == exp_total, (
+        f"Expected num_actual_tokens={exp_total}, got {result.num_actual_tokens}"
+    )
+    assert result.max_query_len == exp_max, (
+        f"Expected max_query_len={exp_max}, got {result.max_query_len}"
+    )
+
+
+def test_make_kv_sharing_fast_prefill_query_start_loc_consistent():
+    """query_start_loc_cpu last element equals num_actual_tokens."""
+    # query_start_loc=[0,5,10,15]; valid idx: req0=[0,4], req1=[5,9], req2=[10,14]
+    meta = _make_fast_prefill_input(
+        query_lens=[5, 5, 5],
+        seq_lens=[41, 31, 40],
+        logits_indices=[0, 1, 2, 5, 8, 12],
+    )
+    result = make_kv_sharing_fast_prefill_common_attn_metadata(meta)
+
+    cpu = result.query_start_loc_cpu
+    assert cpu.device.type == "cpu"
+    assert int(cpu[-1]) == result.num_actual_tokens
+    # Adjacent differences must be non-negative
+    diffs = cpu[1:] - cpu[:-1]
+    assert (diffs >= 0).all()
 
 
 def test_build_attention_metadata_zeros_stale_is_prefilling():
