@@ -266,6 +266,7 @@ from vllm.v1.attention.backends.mla.prefill import (
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    get_empty_req_mask,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -485,11 +486,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         _vllm_config = get_current_vllm_config_or_none()
-        self.dcp_a2a = (
+        dcp_a2a = (
             _vllm_config is not None
             and _vllm_config.parallel_config.decode_context_parallel_size > 1
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+
+        if dcp_a2a:
+            self._dcp_combine = functools.partial(
+                dcp_a2a_lse_reduce,
+                is_lse_base_on_e=True,
+            )
+        else:
+            self._dcp_combine = functools.partial(
+                cp_lse_ag_out_rs,
+                is_lse_base_on_e=True,
+            )
 
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -775,20 +787,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
-                if self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
-                else:
-                    attn_out = cp_lse_ag_out_rs(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
+                assert attn_metadata.decode is not None
+                attn_out = self._dcp_combine(
+                    attn_out,
+                    lse,
+                    get_dcp_group(),
+                    empty_req_mask=attn_metadata.decode.empty_req_mask,
+                )
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -1241,6 +1246,7 @@ class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
     dcp_tot_seq_lens: torch.Tensor | None
+    empty_req_mask: torch.Tensor | None
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -1548,11 +1554,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        empty_req_mask: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            empty_req_mask=empty_req_mask,
         )
 
     def build_for_cudagraph_capture(
@@ -1808,9 +1816,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         decode_metadata = None
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
+            empty_req_mask = None
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
+                assert seq_lens is not None
 
                 # After DCP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
@@ -1821,6 +1831,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 max_seq_len = (
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size
+                empty_req_mask = get_empty_req_mask(
+                    seq_lens[:num_decodes],
+                    query_start_loc[: num_decodes + 1],
+                    num_tokens=num_decode_tokens,
+                )
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
@@ -1830,6 +1845,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
+                empty_req_mask=empty_req_mask,
             )
 
         attn_metadata = self.metadata_cls(

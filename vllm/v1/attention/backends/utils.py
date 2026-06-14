@@ -899,6 +899,35 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens.squeeze(1)
 
 
+def get_empty_req_mask(
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_tokens: int | None = None,
+) -> torch.Tensor | None:
+    """Calculate empty request mask by expanding request-level seq lens
+    to token-level and checking for zero-length (empty) sequences.
+    Returns None if no seq_lens are zero, avoiding unnecessary masking."""
+    if seq_lens.min() > 0:
+        return None
+
+    if num_tokens is None:
+        num_tokens = query_start_loc[-1].item()
+
+    if seq_lens.shape[0] == num_tokens:
+        return seq_lens.eq(0)
+
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    assert query_lens.shape[0] == seq_lens.shape[0], (
+        "query_start_loc and seq_lens must have matching request dimension: "
+        f"{query_lens.shape[0]} vs {seq_lens.shape[0]}"
+    )
+    return torch.repeat_interleave(
+        seq_lens,
+        query_lens.to(torch.long),
+        output_size=num_tokens,
+    ).eq(0)
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
