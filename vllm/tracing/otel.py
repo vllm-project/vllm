@@ -131,6 +131,25 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     return None
 
 
+def inject_current_trace_headers() -> Mapping[str, str] | None:
+    """Injects the current active span context into W3C trace headers.
+
+    This captures the current span (e.g., the FastAPI server span) so that
+    spans created later in a different async context can correctly become
+    children of it, rather than siblings.
+    """
+    if not _IS_OTEL_AVAILABLE:
+        return None
+
+    current_span = trace.get_current_span()
+    if not current_span.get_span_context().is_valid:
+        return None
+
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    return carrier if carrier else None
+
+
 def instrument_otel(func, span_name, attributes, record_exception):
     """Internal wrapper logic for sync and async functions."""
 

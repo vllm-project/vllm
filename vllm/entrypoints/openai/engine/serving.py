@@ -59,6 +59,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
+    inject_current_trace_headers,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
@@ -376,7 +377,12 @@ class OpenAIServing(BeamSearchOnlineMixin):
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
-            return extract_trace_headers(headers)
+            # Prefer injecting the current span context (e.g. the FastAPI
+            # server span) so that downstream spans become children of it
+            # rather than siblings. Fall back to the raw incoming headers
+            # when no active span is available (e.g. OTel auto-instrumentation
+            # is not installed).
+            return inject_current_trace_headers() or extract_trace_headers(headers)
 
         if contains_trace_headers(headers):
             log_tracing_disabled_warning()
