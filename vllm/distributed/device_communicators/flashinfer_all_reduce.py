@@ -233,6 +233,7 @@ class FlashInferAllReduce:
         self,
         group: ProcessGroup,
         device: int | str | torch.device,
+        max_size_override: int | None = None,
     ):
         self.disabled = True
 
@@ -255,20 +256,26 @@ class FlashInferAllReduce:
         if self.world_size == 1:
             return
 
-        # Use the same threshold as the allreduce-rms fusion pass
-        # TODO: tune the threshold
-        MiB = 1024 * 1024
-        max_workspace_size = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
-            self.world_size, None
-        )
-        if not max_workspace_size:
-            logger.warning(
-                "FlashInfer All Reduce is disabled because it "
-                "is not supported for world_size=%d.",
-                self.world_size,
+        # Use override max_size if provided, otherwise use default
+        if max_size_override is not None:
+            self.max_workspace_size = max_size_override
+        else:
+            # Use the same threshold as the allreduce-rms fusion pass
+            # TODO: tune the threshold
+            MiB = 1024 * 1024
+            max_workspace_size = (
+                PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+                    self.world_size, None
+                )
             )
-            return
-        self.max_workspace_size = max_workspace_size * MiB
+            if not max_workspace_size:
+                logger.warning(
+                    "FlashInfer All Reduce is disabled because it "
+                    "is not supported for world_size=%d.",
+                    self.world_size,
+                )
+                return
+            self.max_workspace_size = int(max_workspace_size * MiB)
         self.max_num_tokens = 0
         self.disabled = False
 
