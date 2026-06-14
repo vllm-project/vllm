@@ -136,19 +136,16 @@ class Scheduler(SchedulerInterface):
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
-            async_scheduling = self.scheduler_config.async_scheduling
-            if async_scheduling and kv_transfer_config.is_kv_consumer:
-                # When async scheduling with a consumer KV Connector, KV loads are not
-                # necessarily serialized on the worker's CUDA stream. They can target
-                # kv blocks reallocated from a request that has finished on the CPU
-                # side but whose final GPU forward pass is still writing to them.
-                # In these cases we defer freeing the blocks until receiving final
-                # output. Bookkeeping (req_to_blocks etc.) is still cleared
-                # immediately so preempted requests can be rescheduled safely.
+            # With overlapping batches (async scheduling or PP), a step may
+            # still be writing a freed request's KV blocks. A consumer KV
+            # Connector can reallocate and fill those blocks via a load that
+            # isn't ordered against that write, so defer freeing them.
+            multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
+            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
                 logger.info(
-                    "Deferred block freeing enabled (async scheduling + KV-consumer "
-                    "connector)."
+                    "Deferred block freeing enabled (overlapping batches + "
+                    "KV-consumer connector)."
                 )
 
         self.kv_event_publisher = EventPublisherFactory.create(
@@ -1059,6 +1056,9 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+            if self.defer_block_free:
+                # Record the in-flight step, to fence deferred block freeing.
+                request.last_sched_seq = self.sched_step_seq
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
             )
@@ -1977,7 +1977,11 @@ class Scheduler(SchedulerInterface):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
-        if not self.defer_block_free or not request.has_inflight_step:
+        if not self.defer_block_free or (
+            # Last scheduled step already processed: no in-flight write remains
+            # (always the case for a normal finish), so free now.
+            request.last_sched_seq <= self.processed_step_seq
+        ):
             self.kv_cache_manager.free(request)
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)

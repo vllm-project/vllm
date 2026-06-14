@@ -366,3 +366,40 @@ def test_abort_mid_prefill_defers_free():
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
+
+
+def test_non_async_abort_defers_via_last_sched_seq():
+    """Without async (e.g. PP filling the pipeline) there are no placeholders
+    and a full prefill isn't a partial chunk, yet an abort with a step in flight
+    must defer. Only the last-scheduled-step fence catches this.
+
+    PP=2 can't be built on a single-GPU host, so force the flag and exercise the
+    mechanism; the gate itself is covered by test_gate_enabled_for_async_consumer.
+    """
+    scheduler = create_scheduler(model=MODEL, async_scheduling=False)
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_initially = pool.get_num_free_blocks()
+
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, max_tokens=5
+    )[0]
+    scheduler.add_request(request)
+
+    out0 = scheduler.schedule()
+    # Neither async-only signal marks this request as in flight.
+    assert request.num_output_placeholders == 0
+    assert not request.is_prefill_chunk
+    # Only the last-scheduled-step fence does.
+    assert request.last_sched_seq > scheduler.processed_step_seq
+    num_free_running = pool.get_num_free_blocks()
+    assert num_free_running < num_free_initially
+
+    # Abort while out0 is in flight: blocks must be withheld.
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert len(scheduler.deferred_frees) == 1
+    assert pool.get_num_free_blocks() == num_free_running
+
+    scheduler.update_from_output(out0, _make_model_runner_output(out0))
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_initially
