@@ -387,7 +387,7 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
             prompt += thinking_end_token if thinking_mode != "thinking" else thinking_start_token
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"]:
+    elif messages[index].get("role") in ["user", "developer", "system"]:
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
         if not drop_thinking and thinking_mode == "thinking":
