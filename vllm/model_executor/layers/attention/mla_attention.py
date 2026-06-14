@@ -775,19 +775,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
+                # The decode LSE base is a property of the decode backend that
+                # produced `lse`: FlashInfer's MLA decode returns base-2, the
+                # other MLA decode backends return natural-log.
+                is_lse_base_on_e = getattr(self.impl, "lse_decode_base_on_e", True)
                 if self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=is_lse_base_on_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=is_lse_base_on_e,
                     )
 
             # v_up projection
