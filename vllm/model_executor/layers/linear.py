@@ -665,6 +665,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
+        # If param is a BasevLLMParameter, delegate to weight_loader_v2
+        if isinstance(param, BasevLLMParameter):
+            return self.weight_loader_v2(param, loaded_weight, loaded_shard_id)
+
         self.validate_shard_id(loaded_shard_id)
 
         param_data = param.data
@@ -1127,6 +1131,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ):
+        # If param is a BasevLLMParameter, delegate to weight_loader_v2
+        if isinstance(param, BasevLLMParameter):
+            return self.weight_loader_v2(param, loaded_weight, loaded_shard_id)
+
         self.validate_shard_id(loaded_shard_id)
 
         param_data = param.data

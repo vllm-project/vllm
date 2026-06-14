@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
+
 else:
     try:
         from torch.library import register_fake
@@ -1669,9 +1670,10 @@ def scaled_fp4_quant(
     block_size = 16
 
     assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
-    assert input.dtype in (torch.float16, torch.bfloat16), (
-        f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
-    )
+    assert input.dtype in (
+        torch.float16,
+        torch.bfloat16,
+    ), f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     if padded_n is not None:
         assert padded_n >= n, f"padded_n must be >= n, got padded_n={padded_n}, n={n}."
         assert padded_n % block_size == 0, (
@@ -3806,7 +3808,10 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    out1, out2 = torch.ops._qutlass_C.fusedQuantizeNv(
+        a, b, xh_e2m1, xh_e4m3, global_scale
+    )
+    return out1, out2
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:

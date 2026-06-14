@@ -52,7 +52,6 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
             return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
 
         # hadacore or dense gemm is selected by Transform module
-
         return cls(quant_method, input_tfms, output_tfms)
 
     def __init__(

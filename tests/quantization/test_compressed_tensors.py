@@ -446,6 +446,11 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
             "Flat is better than nested.\nSparse is better than dense.",
             150.0,
         ),
+        (
+            "nm-testing/Llama-3.2-1B-Instruct-quipv16-nvfp4",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+        ),
     ],
 )
 def test_compressed_tensors_transforms_perplexity(
