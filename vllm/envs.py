@@ -1377,9 +1377,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEPLL_NVFP4_DISPATCH": lambda: bool(
         int(os.getenv("VLLM_DEEPEPLL_NVFP4_DISPATCH", "0"))
     ),
-    # Whether to turn on the outlines cache for V1
-    # This cache is unbounded and on disk, so it's not safe to use in
-    # an environment with potentially malicious users.
+    # Whether to turn on the optional outlines disk cache for V1.
+    # This cache requires the `diskcache` package, is unbounded and on disk,
+    # and should only be used when the cache directory is writable by trusted
+    # users.
     "VLLM_V1_USE_OUTLINES_CACHE": lambda: (
         os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1"
     ),
