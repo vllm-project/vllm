@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
@@ -20,9 +21,14 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    unpack_quantized_values_into_int32,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
+    ChannelQuantScaleParameter,
     GroupQuantScaleParameter,
+    PackedColumnParameter,
     PackedvLLMParameter,
     RowvLLMParameter,
 )
@@ -341,6 +347,25 @@ class INCConfig(QuantizationConfig):
             group_size,
             sym,
         )
+        if isinstance(layer, LinearBase):
+            input_size_per_partition = getattr(
+                layer, "input_size_per_partition", layer.input_size
+            )
+            is_row_parallel = input_size_per_partition != layer.input_size
+            if (
+                is_row_parallel
+                and group_size > 0
+                and input_size_per_partition % group_size != 0
+            ):
+                # Gemma4 AutoRound row-parallel linears can produce TP shards
+                # that straddle a GPTQ group boundary. Fall back to a
+                # correctness-first path in that case instead of using
+                # Marlin/GPTQ kernels that assume group-aligned input shards.
+                return INCGPTQRowParallelTailLinearMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
         if backend == "auto" or "marlin" in backend:
             GPTQ_TYPE_MAP = {
                 (4, True): scalar_types.uint4b8,
@@ -691,6 +716,140 @@ class INCXPULinearMethod(INCXPULinearBase):
             None,  # g_idx not needed: desc_act is always False for INC models
         )
         return out.reshape(out_shape)
+
+
+class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
+    """Fallback for row-parallel GPTQ-family linears with group-tail shards."""
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        self.weight_bits = weight_bits
+        self.group_size = group_size
+        self.sym = sym
+        self.pack_factor = Fraction(32, weight_bits)
+        self.weight_type = {
+            2: scalar_types.uint2b2,
+            3: scalar_types.uint3b4,
+            4: scalar_types.uint4b8,
+            8: scalar_types.uint8b128,
+        }[weight_bits]
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del output_size  # Unused.
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        full_num_groups = (input_size + self.group_size - 1) // self.group_size
+
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // self.pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+        scales = ChannelQuantScaleParameter(
+            data=torch.empty(
+                full_num_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+        qzeros = PackedColumnParameter(
+            data=torch.empty(
+                full_num_groups,
+                output_size_per_partition // self.pack_factor,
+                dtype=torch.int32,
+            ),
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("scales", scales)
+        layer.register_parameter("qzeros", qzeros)
+
+        is_row_parallel = input_size != input_size_per_partition
+        shard_offset = (
+            layer.tp_rank * input_size_per_partition if is_row_parallel else 0
+        )
+        g_idx = RowvLLMParameter(
+            data=(
+                torch.arange(input_size_per_partition, dtype=torch.int32) + shard_offset
+            )
+            // self.group_size,
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("g_idx", g_idx)
+        layer._inc_tail_dequant_weight = None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.sym:
+            # The tail-shard fallback dequantizes weights on demand and handles
+            # the symmetric zero point via weight_type.bias in
+            # _get_dequantized_weight(), so the large packed qzeros tensor is
+            # replaced with a tiny placeholder after loading.
+            layer.qzeros = Parameter(
+                torch.tensor([8], dtype=torch.int8, device=layer.qweight.device),
+                requires_grad=False,
+            )
+        else:
+            layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
+        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
+        layer.scales = Parameter(layer.scales.data, requires_grad=False)
+
+    def _get_dequantized_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        cached = layer._inc_tail_dequant_weight
+        if cached is not None:
+            return cached
+
+        if not self.sym:
+            raise NotImplementedError(
+                "INCGPTQRowParallelTailLinearMethod currently supports only "
+                "symmetric checkpoints."
+            )
+
+        qweight = unpack_quantized_values_into_int32(
+            layer.qweight.data, self.weight_type, packed_dim=0
+        ).to(torch.float32)
+        qweight = qweight - float(self.weight_type.bias)
+
+        g_idx = layer.g_idx.data.to(torch.long)
+        scales = layer.scales.data.to(torch.float32)
+        dequant = qweight * scales.index_select(0, g_idx)
+        weight = dequant.t().contiguous()
+        # Cache the dequantized tail-shard weight after the first fallback use.
+        layer._inc_tail_dequant_weight = weight
+        return weight
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out_shape = x.shape[:-1] + (layer.qweight.shape[1],)
+        x_2d = x.reshape(-1, x.shape[-1]).to(torch.float32)
+        bias_2d = bias.to(torch.float32) if bias is not None else None
+        output = F.linear(x_2d, self._get_dequantized_weight(layer), bias_2d)
+        return output.to(x.dtype).reshape(out_shape)
 
 
 class INCARKLinearMethod(INCXPULinearBase):
