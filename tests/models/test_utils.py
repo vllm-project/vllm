@@ -182,8 +182,10 @@ def test_merge_multimodal_embeddings_no_sync():
     multimodal_embeddings = [
         torch.ones([3, 10], dtype=torch.bfloat16, device=f"{DEVICE_TYPE}:0")
     ]
-    is_multimodal = torch.tensor([True, False, True, True, False], device="cpu")
+    is_multimodal = torch.tensor(
+        [True, False, True, True, False], device=f"{DEVICE_TYPE}:0"
+    )
     with raise_if_cuda_sync():
-        _merge_multimodal_embeddings(
+        inputs_embeds = _merge_multimodal_embeddings(
             inputs_embeds, multimodal_embeddings, is_multimodal
         )
