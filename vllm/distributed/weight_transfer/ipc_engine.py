@@ -195,7 +195,10 @@ class IPCWeightTransferEngine(
 
         return super().parse_update_info(update_dict)
 
-    def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
+    def init_transfer_engine(
+        self,
+        init_info: IPCWeightTransferInitInfo,
+    ) -> None:
         """
         Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
@@ -204,7 +207,6 @@ class IPCWeightTransferEngine(
         Args:
             init_info: IPC initialization info (empty)
         """
-        pass
 
     def receive_weights(
         self,
