@@ -74,7 +74,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             if error_check_ret is not None:
                 return error_check_ret
 
-        tool_parser = render.tool_parser
+        parser = render.parser
         tool_dicts: list[dict] | None = None
 
         all_conversations: list[list[ConversationMessage]] = []
@@ -94,7 +94,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     default_template_content_format=render.chat_template_content_format,
                     default_template_kwargs=render.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
+                    parser=parser,
                 )
             all_conversations.append(conversation)
             all_engine_prompts.append(engine_prompts[0])
