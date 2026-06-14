@@ -508,12 +508,27 @@ class RayExecutorV2(MultiprocExecutor):
 
         self._join_monitor_thread()
 
-        for handle in getattr(self, "ray_worker_handles", []):
-            try:
-                ray.kill(handle.actor)
-                logger.debug("Killed actor rank=%d", handle.rank)
-            except Exception:
-                logger.exception("Failed to kill actor rank=%d", handle.rank)
+        if ray.is_initialized():
+            for handle in getattr(self, "ray_worker_handles", []):
+                try:
+                    ray.kill(handle.actor)
+                    logger.debug("Killed actor rank=%d", handle.rank)
+                except Exception:
+                    logger.exception("Failed to kill actor rank=%d", handle.rank)
+        else:
+            # Ray's atexit hook already disconnected this driver (e.g. this
+            # shutdown is running via weakref.finalize during interpreter
+            # exit after an EngineCore init failure). The worker actors are
+            # fate-shared with the disconnected job and are reclaimed by
+            # Ray; calling ray.kill() here would auto-init a NEW Ray job
+            # and fail with ActorHandleNotFoundError, burying the original
+            # error (https://github.com/vllm-project/vllm/issues/45318).
+            # Unlike most ray APIs, ray.is_initialized() does not auto-init.
+            logger.debug(
+                "Ray is no longer initialized; skipping actor kill "
+                "(workers are reclaimed by Ray with the owning job)."
+            )
+        self.ray_worker_handles = []
 
         if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
             rpc_broadcast_mq.shutdown()
