@@ -4,6 +4,7 @@
 import argparse
 import gc
 import json
+import logging
 import os
 import time
 from contextlib import nullcontext
@@ -35,6 +36,8 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
+
+logger = logging.getLogger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -627,7 +630,9 @@ class BenchmarkWorker:
             # Ray restricts each worker to one GPU; use local index 0
             torch.accelerator.device_index(0) if need_device_guard else nullcontext()
         ):
-            for idx, config in enumerate(tqdm(search_space)):
+            for idx, config in enumerate(
+                tqdm(search_space, desc=f"batch_size={num_tokens}", unit="cfg")
+            ):
                 try:
                     kernel_time = benchmark_config(
                         config,
@@ -646,7 +651,21 @@ class BenchmarkWorker:
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
+                    logger.debug(
+                        "OutOfResources exception for config %s, skip this config.",
+                        config,
+                    )
                     continue
+                except RuntimeError as e:
+                    if "PassManager::run failed" in str(e):
+                        logger.debug(
+                            "RuntimeError for config %s, skip this config. "
+                            "Error is: %s",
+                            config,
+                            e,
+                        )
+                        continue
+                    raise
 
                 if kernel_time < best_time:
                     best_time = kernel_time
