@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     VLLM_LOGGING_COLOR: str = "auto"
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
+    VLLM_DECODE_LIVENESS_STALL_SECONDS: float = 60.0
+    VLLM_PREFILL_LIVENESS_STALL_SECONDS: float = 120.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
@@ -781,6 +783,33 @@ environment_variables: dict[str, Callable[[], Any]] = {
         val
         if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
         else 10.0
+    ),
+    # Threshold (in seconds) used by the GET /health/decode endpoint to decide
+    # whether the engine has stalled. The endpoint returns 503 when there is at
+    # least one Running request AND no decoded token has been observed by the
+    # stat-logger for more than this many seconds. Defaults to 60 seconds.
+    # Values <= 0 fall back to the default. Set this lower for tighter
+    # orchestrator liveness probing, or higher if you legitimately serve very
+    # long-prefill workloads where first-token latency may exceed 60s.
+    "VLLM_DECODE_LIVENESS_STALL_SECONDS": lambda: (
+        val
+        if (val := float(os.getenv("VLLM_DECODE_LIVENESS_STALL_SECONDS", "60."))) > 0.0
+        else 60.0
+    ),
+    # Threshold (in seconds) used by GET /health/decode to disambiguate
+    # decode-stalled from prefill-in-flight. When the engine has been
+    # observed actively prefilling within this window, the endpoint
+    # returns 200 with status="prefilling" even if the decode-stall
+    # threshold has elapsed. This avoids false-positive 503s for
+    # legitimate long-prefill workloads (e.g. multi-hundred-K-token
+    # contexts whose prefill compute can take well over a minute).
+    # Defaults to 120 seconds (2x VLLM_DECODE_LIVENESS_STALL_SECONDS).
+    # Values <= 0 fall back to the default. Set higher if your prefill
+    # phase is even longer; set lower if you want faster failover.
+    "VLLM_PREFILL_LIVENESS_STALL_SECONDS": lambda: (
+        val
+        if (val := float(os.getenv("VLLM_PREFILL_LIVENESS_STALL_SECONDS", "120."))) > 0.0
+        else 120.0
     ),
     # Trace function calls
     # If set to 1, vllm will trace function calls
@@ -2001,6 +2030,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_DECODE_LIVENESS_STALL_SECONDS",
+        "VLLM_PREFILL_LIVENESS_STALL_SECONDS",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
