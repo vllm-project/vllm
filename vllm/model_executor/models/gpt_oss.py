@@ -359,12 +359,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
         use_ep = self.parallel_config.enable_expert_parallel
         num_experts = self.config.num_local_experts
 
-        # In MoE, we need to flatten the tensor parallel size across the data
-        # parallel size when EP is disabled.
+        # In non-EP mode, DP ranks hold replicated MoE weights, so DP must
+        # not be folded into the flattened TP-like rank space.
         tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size=get_tensor_model_parallel_world_size(),
-            dp_size=get_dp_group().world_size,
-            dp_rank=get_dp_group().rank_in_group,
+            dp_size=get_dp_group().world_size if use_ep else 1,
+            dp_rank=get_dp_group().rank_in_group if use_ep else 0,
             pcp_size=get_pcp_group().world_size,
             pcp_rank=get_pcp_group().rank_in_group,
         )
@@ -556,10 +556,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
         else:
+            # DP ranks hold replicated MoE weights in non-EP mode, so DP
+            # must not be folded into the flattened TP-like rank space.
             tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
                 tp_size=get_tensor_model_parallel_world_size(),
-                dp_size=get_dp_group().world_size,
-                dp_rank=get_dp_group().rank_in_group,
+                dp_size=1,
+                dp_rank=0,
                 pcp_size=get_pcp_group().world_size,
                 pcp_rank=get_pcp_group().rank_in_group,
             )
@@ -963,12 +965,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
         use_ep = self.parallel_config.enable_expert_parallel
 
-        # In MoE, we need to flatten the tensor parallel size across the data
-        # parallel size when EP is disabled.
+        # In non-EP mode, DP ranks hold replicated MoE weights, so DP must
+        # not be folded into the flattened TP-like rank space.
         tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size=get_tensor_model_parallel_world_size(),
-            dp_size=get_dp_group().world_size,
-            dp_rank=get_dp_group().rank_in_group,
+            dp_size=get_dp_group().world_size if use_ep else 1,
+            dp_rank=get_dp_group().rank_in_group if use_ep else 0,
             pcp_size=get_pcp_group().world_size,
             pcp_rank=get_pcp_group().rank_in_group,
         )
