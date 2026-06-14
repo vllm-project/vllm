@@ -444,6 +444,21 @@ async def test_chat_completion_stream_options(
 
     assert last_completion_tokens == 10
 
+    # Test stream=True, stream_options={"include_usage": False}, min_characters=10
+    stream = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        extra_body=dict(min_characters=10),
+        temperature=0.0,
+        stream=True,
+        stream_options={"include_usage": False},
+    )
+    completion = ""
+    async for chunk in stream:
+        completion += chunk.choices[0].delta.content
+    assert len(completion) >= 10
+
 
 @pytest.mark.asyncio
 async def test_structured_outputs_choice_chat(
