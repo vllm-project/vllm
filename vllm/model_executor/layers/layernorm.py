@@ -61,9 +61,14 @@ class RMSNorm(CustomOp):
         )
         weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
-        self.weight = torch.ones(hidden_size, dtype=weight_dtype)
+        weight_data = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
-            self.weight = nn.Parameter(self.weight)
+            self.weight = nn.Parameter(weight_data)
+        else:
+            # When weightless, register as a buffer (not a plain attribute) so
+            # the tensor moves with the module under .to(device). Non-persistent
+            # so it does not appear in state_dict (the value is always ones).
+            self.register_buffer("weight", weight_data, persistent=False)
 
         # Do not pass identity weight to native implementation (causes issue on TPU).
         # Other implementations require weight to be passed even if all ones.

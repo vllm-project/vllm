@@ -305,9 +305,16 @@ class LlamaDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        flashnorm_folded = getattr(config, "flashnorm_folded", False)
+        self.input_layernorm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            has_weight=not flashnorm_folded,
+        )
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            has_weight=not flashnorm_folded,
         )
 
     def forward(
@@ -378,7 +385,11 @@ class LlamaModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+                has_weight=not getattr(config, "flashnorm_folded", False),
+            )
         else:
             self.norm = PPMissingLayer()
 
@@ -471,6 +482,19 @@ class LlamaModel(nn.Module, EagleModelMixin):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                # Skip the per-layer / model-level RMSNorm weights that the
+                # FlashNorm-folded HF checkpoint still carries as all-ones
+                # tensors for HF compatibility. With has_weight=False set,
+                # these layers do not register the weight as a Parameter, so
+                # `name not in params_dict`. Gating on flashnorm_folded keeps
+                # the skip from masking unrelated missing-tensor bugs.
+                if (
+                    name.endswith("norm.weight")
+                    and name not in params_dict
+                    and getattr(self.config, "flashnorm_folded", False)
+                ):
                     continue
 
                 if is_pp_missing_parameter(name, self):
