@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from prometheus_client import Counter, Gauge, Histogram
 import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
@@ -20,7 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorStats,
@@ -66,6 +70,14 @@ class MockConnector(KVConnectorBase_V1):
         cls, data: dict[str, Any] | None = None
     ) -> KVConnectorStats | None:
         return MockConnectorStats(data=data) if data is not None else None
+
+    @classmethod
+    def build_prom_metrics(
+        cls, vllm_config, metric_types, labelnames, per_engine_labelvalues
+    ) -> KVConnectorPromMetrics | None:
+        return MockConnectorPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     def start_load_kv(self, forward_context, **kwargs):
         pass
@@ -120,6 +132,19 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
 
     def request_finished_all_groups(self, request, block_ids):
         return (False, None)
+
+
+class MockConnectorPromMetrics(KVConnectorPromMetrics):
+    def __init__(
+        self, vllm_config, metric_types, labelnames, per_engine_labelvalues
+    ):
+        super().__init__(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
+        self.observations: list[tuple[dict[str, Any], int]] = []
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        self.observations.append((transfer_stats_data, engine_idx))
 
 
 # Register mock connectors
@@ -812,6 +837,48 @@ class TestMultiConnectorStats:
         # One non-empty
         stats.data["NixlConnector"].data["transfer_duration"].append(1.0)
         assert not stats.is_empty()
+
+
+class TestMultiConnectorPromMetrics:
+    def test_observe_ignores_connectors_without_prom_metrics(self):
+        vllm_config = create_vllm_config()
+        vllm_config.kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MockConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+                    },
+                    {
+                        "kv_connector": "MooncakeConnector",
+                        "kv_role": "kv_both",
+                    },
+                ]
+            },
+        )
+
+        prom_metrics = MultiConnector.build_prom_metrics(
+            vllm_config,
+            metric_types={Gauge: Gauge, Counter: Counter, Histogram: Histogram},
+            labelnames=[],
+            per_engine_labelvalues={0: []},
+        )
+
+        assert prom_metrics is not None
+        prom_metrics.observe(
+            {
+                "MockConnector": {"data": {"mock_field": [1, 2, 3]}},
+                "MooncakeConnector": {"data": {"ignored_field": [4, 5, 6]}},
+            },
+            engine_idx=7,
+        )
+
+        mock_prom_metrics = prom_metrics._prom_metrics["MockConnector"]
+        assert isinstance(mock_prom_metrics, MockConnectorPromMetrics)
+        assert mock_prom_metrics.observations == [({"mock_field": [1, 2, 3]}, 7)]
 
 
 def test_multi_connector_overrides_all_base_methods():
