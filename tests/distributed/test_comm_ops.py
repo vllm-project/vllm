@@ -221,6 +221,16 @@ class _DummyAllGatherGroup:
         return torch.cat([t for _ in range(self.world_size)], dim=0)
 
 
+class _DummyDeviceCommunicator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def all_to_all(self, output: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
+        self.calls.append((output, input_))
+        output.copy_(input_)
+        return output
+
+
 def _make_group_for_unit_test(
     rank_in_group: int = 0, world_size: int = 2
 ) -> GroupCoordinator:
@@ -233,6 +243,23 @@ def _make_group_for_unit_test(
     g.device_group = None
     g.cpu_group = None
     return g
+
+
+def test_all_to_all_uses_device_communicator() -> None:
+    g = _make_group_for_unit_test(rank_in_group=0, world_size=2)
+    g.device_communicator = _DummyDeviceCommunicator()
+
+    input_ = torch.arange(8, dtype=torch.float32).reshape(2, 4).contiguous()
+    output = torch.empty_like(input_)
+
+    result = g.all_to_all(output, input_)
+
+    assert result is output
+    assert len(g.device_communicator.calls) == 1
+    called_output, called_input = g.device_communicator.calls[0]
+    assert called_output is output
+    assert called_input is input_
+    torch.testing.assert_close(output, input_)
 
 
 def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(

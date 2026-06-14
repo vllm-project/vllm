@@ -369,5 +369,8 @@ class DeviceCommunicatorBase:
         """
         return hidden_states
 
+    def all_to_all(self, output_: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
     def batch_isend_irecv(self, p2p_ops: list):
         raise NotImplementedError

@@ -471,6 +471,29 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         return output_list
 
+    def all_to_all(self, output_: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None and not pynccl_comm.disabled
+
+        chunk_size = input_.numel() // self.world_size
+        if chunk_size == 0:
+            return output_
+
+        input_chunks = input_.view(self.world_size, chunk_size)
+        output_chunks = output_.view(self.world_size, chunk_size)
+        pynccl_comm.group_start()
+        try:
+            for peer in range(self.world_size):
+                if peer == self.rank_in_group:
+                    continue
+                pynccl_comm.recv(output_chunks[peer], peer)
+                pynccl_comm.send(input_chunks[peer], peer)
+        finally:
+            pynccl_comm.group_end()
+
+        output_chunks[self.rank_in_group].copy_(input_chunks[self.rank_in_group])
+        return output_
+
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,

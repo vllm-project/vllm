@@ -28,6 +28,16 @@ class _FakeCPGroup:
         self.world_size = world_size
         self.device_group = device_group
 
+    def all_to_all(self, output: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
+        work = dist.all_to_all_single(
+            output.view(-1),
+            input_.view(-1),
+            group=self.device_group,
+            async_op=True,
+        )
+        work.wait()
+        return output
+
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
     return {

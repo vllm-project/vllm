@@ -23,7 +23,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.workspace import (
@@ -445,13 +444,7 @@ def dcp_a2a_lse_reduce(
         lse_pack_dim,
     )
 
-    work = dist.all_to_all_single(
-        recv_buffer.view(-1),
-        send_buffer.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work.wait()
+    cp_group.all_to_all(recv_buffer, send_buffer)
 
     return _dcp_a2a_unpack_combine(
         recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
