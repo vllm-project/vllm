@@ -47,9 +47,12 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
     normalize_mxfp8_e4m3fn_to_e4m3fnuz,
 )
-from vllm.models.minimax_m3.amd.ops import swiglu_oai_quantize_mxfp8
+from vllm.models.minimax_m3.amd.ops import (
+    swiglu_oai_quantize_mxfp8,
+    swiglu_oai_split,
+)
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -59,19 +62,33 @@ class Profile:
     global_experts: int
     hidden_size: int
     intermediate_size: int
+    shared_intermediate_size: int
 
 
 PROFILES = {
-    "smoke": Profile(8, 8, 256, 512),
-    "tp": Profile(128, 128, 6144, 384),
-    "ep": Profile(16, 128, 6144, 3072),
+    "smoke": Profile(8, 8, 256, 512, 512),
+    "tp": Profile(128, 128, 6144, 384, 384),
+    "ep": Profile(16, 128, 6144, 3072, 384),
 }
 
 
-def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
+def _accuracy_metrics(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+) -> dict[str, float]:
     actual_f = actual.float()
     expected_f = expected.float()
-    return ((actual_f - expected_f).norm() / (expected_f.norm() + 1e-8)).item()
+    error = actual_f - expected_f
+    return {
+        "relative_error": (error.norm() / (expected_f.norm() + 1e-8)).item(),
+        "mean_abs_error": error.abs().mean().item(),
+        "max_abs_error": error.abs().max().item(),
+        "cosine_similarity": torch.nn.functional.cosine_similarity(
+            actual_f.flatten(),
+            expected_f.flatten(),
+            dim=0,
+        ).item(),
+    }
 
 
 def _make_routing(
@@ -111,6 +128,257 @@ def _reduce_moe_output(
     output: torch.Tensor,
 ) -> torch.Tensor:
     ops.moe_sum(routed_output, output)
+    return output
+
+
+def _overlap_with_shared_expert(
+    routed_fn,
+    shared_fn,
+    shared_stream: torch.cuda.Stream,
+) -> torch.Tensor:
+    current = torch.cuda.current_stream()
+    shared_stream.wait_stream(current)
+    routed_output = routed_fn()
+    with torch.cuda.stream(shared_stream):
+        shared_output = shared_fn()
+    current.wait_stream(shared_stream)
+    return routed_output + shared_output
+
+
+@triton.jit
+def _mxfp8_grouped_gemm_w8a16_kernel(
+    a_ptr,
+    b_ptr,
+    b_scale_ptr,
+    c_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    N,
+    K,
+    num_valid_tokens,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bn,
+    stride_bk,
+    stride_bse,
+    stride_bsn,
+    stride_bsk,
+    stride_cm,
+    stride_cn,
+    A_DIV: tl.constexpr,
+    MUL_WEIGHT: tl.constexpr,
+    SCALE_BITCAST: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Experimental Marlin-style W8A16 grouped GEMM for gfx94x.
+
+    MXFP8 weights remain compressed in HBM. Each weight tile is expanded and
+    scaled to BF16 in registers immediately before the BF16 matrix multiply.
+    """
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    num_post = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_M >= num_post:
+        return
+
+    offs_tid = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_token = tl.load(sorted_token_ids_ptr + offs_tid).to(tl.int64)
+    token_mask = offs_token < num_valid_tokens
+    off_e = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+    a_row = offs_token // A_DIV
+    a_ptrs = a_ptr + a_row[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = (
+        b_ptr
+        + off_e * stride_be
+        + offs_n[:, None] * stride_bn
+        + offs_k[None, :] * stride_bk
+    )
+    bs_ptrs = (
+        b_scale_ptr
+        + off_e * stride_bse
+        + offs_n[:, None] * stride_bsn
+        + (offs_k[None, :] // 32) * stride_bsk
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    n_mask = offs_n < N
+    for _ in range(0, tl.cdiv(K, BLOCK_K)):
+        a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+        bq = tl.load(b_ptrs, mask=n_mask[:, None], other=0.0)
+        bsc = tl.load(bs_ptrs, mask=n_mask[:, None], other=0)
+        if SCALE_BITCAST:
+            # E8M0 is exactly a biased IEEE exponent. BF16 has the same
+            # eight-bit exponent, so shifting into its exponent field avoids
+            # a transcendental exp2 instruction.
+            scale_bits = bsc.to(tl.uint16) << 7
+            scale = scale_bits.to(tl.bfloat16, bitcast=True)
+            b = (bq.to(tl.bfloat16) * scale).to(tl.bfloat16)
+        else:
+            scale = tl.exp2(bsc.to(tl.float32) - 127.0)
+            b = (bq.to(tl.float32) * scale).to(tl.bfloat16)
+        acc += tl.dot(a, b.T)
+
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+        bs_ptrs += (BLOCK_K // 32) * stride_bsk
+
+    if MUL_WEIGHT:
+        w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
+        acc = acc * w[:, None]
+
+    c_ptrs = c_ptr + offs_token[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs,
+        acc.to(c_ptr.dtype.element_ty),
+        mask=token_mask[:, None] & n_mask[None, :],
+    )
+
+
+def _grouped_gemm_mxfp8_w8a16(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    num_valid_tokens: int,
+    block_m: int,
+    a_div: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    scale_bitcast: bool,
+    mul_weight_by: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+) -> torch.Tensor:
+    _, N, K = w.shape
+    assert a.dtype == torch.bfloat16
+    assert w.dtype == torch.float8_e4m3fnuz
+    assert K % block_k == 0 and block_k % 32 == 0
+    max_post_padded = min(sorted_token_ids.shape[0], num_valid_tokens * block_m)
+    m_blocks = triton.cdiv(max_post_padded, block_m)
+    n_blocks = triton.cdiv(N, block_n)
+    alloc = torch.zeros if expert_map is not None else torch.empty
+    out = alloc((num_valid_tokens, N), dtype=a.dtype, device=a.device)
+    _mxfp8_grouped_gemm_w8a16_kernel[(m_blocks, n_blocks)](
+        a,
+        w,
+        w_scale,
+        out,
+        mul_weight_by if mul_weight_by is not None else a,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        N,
+        K,
+        num_valid_tokens,
+        a.stride(0),
+        a.stride(1),
+        w.stride(0),
+        w.stride(1),
+        w.stride(2),
+        w_scale.stride(0),
+        w_scale.stride(1),
+        w_scale.stride(2),
+        out.stride(0),
+        out.stride(1),
+        A_DIV=a_div,
+        MUL_WEIGHT=mul_weight_by is not None,
+        SCALE_BITCAST=scale_bitcast,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        num_warps=num_warps,
+    )
+    return out
+
+
+def _fused_moe_mxfp8_w8a16(
+    hidden_states: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    *,
+    alpha: float,
+    beta: float,
+    limit: float | None,
+    global_num_experts: int,
+    expert_map: torch.Tensor | None,
+    output: torch.Tensor,
+    block_m_override: int,
+    block_n: int,
+    block_k: int,
+    num_warps: int,
+    scale_bitcast: bool,
+) -> torch.Tensor:
+    T, H = hidden_states.shape
+    top_k = topk_ids.shape[1]
+    M = T * top_k
+    tokens_per_expert = max(1, M // global_num_experts)
+    block_m = (
+        block_m_override
+        if block_m_override > 0
+        else max(16, min(1 << (tokens_per_expert - 1).bit_length(), 64))
+    )
+    sorted_ids, expert_ids, num_post = moe_align_block_size(
+        topk_ids,
+        block_m,
+        global_num_experts,
+        expert_map,
+        ignore_invalid_experts=expert_map is not None,
+    )
+    g1 = _grouped_gemm_mxfp8_w8a16(
+        hidden_states,
+        w13,
+        w13_scale,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        M,
+        block_m,
+        top_k,
+        block_n,
+        block_k,
+        num_warps,
+        scale_bitcast,
+        expert_map=expert_map,
+    )
+    act = swiglu_oai_split(
+        g1,
+        alpha=alpha,
+        beta=beta,
+        limit=limit,
+        out_dtype=hidden_states.dtype,
+    )
+    g2 = _grouped_gemm_mxfp8_w8a16(
+        act,
+        w2,
+        w2_scale,
+        sorted_ids,
+        expert_ids,
+        num_post,
+        M,
+        block_m,
+        1,
+        block_n,
+        block_k,
+        num_warps,
+        scale_bitcast,
+        mul_weight_by=topk_weights.reshape(-1),
+        expert_map=expert_map,
+    )
+    ops.moe_sum(g2.view(T, top_k, H), output)
     return output
 
 
@@ -177,6 +445,21 @@ def run(args: argparse.Namespace) -> None:
         ),
         TritonExperts(moe_config, bf16_config),
     )
+    shared_stream = torch.cuda.Stream() if args.shared_expert_overlap else None
+    if args.shared_expert_overlap:
+        shared_inter = profile.shared_intermediate_size
+        shared_w13 = torch.randn(
+            2 * shared_inter,
+            H,
+            device=device,
+            dtype=torch.bfloat16,
+        ).mul_(args.weight_scale)
+        shared_w2 = torch.randn(
+            H,
+            shared_inter,
+            device=device,
+            dtype=torch.bfloat16,
+        ).mul_(args.weight_scale)
 
     for tokens in args.tokens:
         hidden_states = torch.randn(
@@ -215,15 +498,105 @@ def run(args: argparse.Namespace) -> None:
             expert_map=expert_map,
             apply_router_weight_on_input=False,
         )
+        if args.shared_expert_overlap:
+            assert shared_stream is not None
+
+            def run_shared(
+                hidden_states=hidden_states,
+                shared_w13=shared_w13,
+                shared_w2=shared_w2,
+            ):
+                gate_up = torch.nn.functional.linear(hidden_states, shared_w13)
+                act = swiglu_oai_split(
+                    gate_up,
+                    alpha=args.alpha,
+                    beta=args.beta,
+                    limit=args.limit,
+                    out_dtype=hidden_states.dtype,
+                )
+                return torch.nn.functional.linear(act, shared_w2)
+
+            run_mxfp8_timed = partial(
+                _overlap_with_shared_expert,
+                run_mxfp8,
+                run_shared,
+                shared_stream,
+            )
+            run_bf16_timed = partial(
+                _overlap_with_shared_expert,
+                run_bf16,
+                run_shared,
+                shared_stream,
+            )
+        else:
+            run_mxfp8_timed = run_mxfp8
+            run_bf16_timed = run_bf16
+        routed_tokens = tokens * args.top_k
+        tokens_per_expert = max(1, routed_tokens // profile.global_experts)
+        w8a16_block_m = (
+            args.w8a16_block_m
+            if args.w8a16_block_m > 0
+            else max(16, min(1 << (tokens_per_expert - 1).bit_length(), 64))
+        )
+        run_w8a16 = partial(
+            _fused_moe_mxfp8_w8a16,
+            hidden_states,
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            topk_weights,
+            topk_ids,
+            alpha=args.alpha,
+            beta=args.beta,
+            limit=args.limit,
+            global_num_experts=profile.global_experts,
+            expert_map=expert_map,
+            output=torch.empty_like(hidden_states),
+            block_m_override=args.w8a16_block_m,
+            block_n=args.w8a16_block_n,
+            block_k=args.w8a16_block_k,
+            num_warps=args.w8a16_num_warps,
+            scale_bitcast=args.w8a16_scale_mode == "bitcast",
+        )
+        if args.shared_expert_overlap:
+            assert shared_stream is not None
+            run_w8a16_timed = partial(
+                _overlap_with_shared_expert,
+                run_w8a16,
+                run_shared,
+                shared_stream,
+            )
+        else:
+            run_w8a16_timed = run_w8a16
 
         actual = run_mxfp8()
         expected = run_bf16()
+        w8a16_actual = run_w8a16() if args.w8a16 else None
         torch.accelerator.synchronize()
-        relative_error = _relative_error(actual, expected)
+        native_accuracy = _accuracy_metrics(actual, expected)
+        relative_error = native_accuracy["relative_error"]
         if relative_error >= args.max_relative_error:
             raise AssertionError(
                 f"tokens={tokens}: relative error {relative_error:.6f} exceeds "
                 f"{args.max_relative_error:.6f}"
+            )
+        w8a16_accuracy = (
+            _accuracy_metrics(w8a16_actual, expected)
+            if w8a16_actual is not None
+            else None
+        )
+        w8a16_relative_error = (
+            w8a16_accuracy["relative_error"] if w8a16_accuracy is not None else None
+        )
+        if (
+            w8a16_relative_error is not None
+            and w8a16_relative_error >= args.w8a16_max_relative_error
+        ):
+            raise AssertionError(
+                f"tokens={tokens}: W8A16 relative error "
+                f"{w8a16_relative_error:.6f} exceeds "
+                f"{args.w8a16_max_relative_error:.6f}"
             )
 
         if args.breakdown:
@@ -312,8 +685,11 @@ def run(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-        mxfp8_ms, mxfp8_low, mxfp8_high = _bench(run_mxfp8, args.warmup, args.rep)
-        bf16_ms, bf16_low, bf16_high = _bench(run_bf16, args.warmup, args.rep)
+        mxfp8_ms, mxfp8_low, mxfp8_high = _bench(run_mxfp8_timed, args.warmup, args.rep)
+        bf16_ms, bf16_low, bf16_high = _bench(run_bf16_timed, args.warmup, args.rep)
+        w8a16_result = (
+            _bench(run_w8a16_timed, args.warmup, args.rep) if args.w8a16 else None
+        )
         record = {
             "profile": args.profile,
             "arch": arch,
@@ -323,7 +699,9 @@ def run(args: argparse.Namespace) -> None:
             "hidden_size": H,
             "intermediate_size": inter,
             "top_k": args.top_k,
-            "relative_error": relative_error,
+            "seed": args.seed,
+            "shared_expert_overlap": args.shared_expert_overlap,
+            **native_accuracy,
             "mxfp8_ms": mxfp8_ms,
             "mxfp8_p20_ms": mxfp8_low,
             "mxfp8_p80_ms": mxfp8_high,
@@ -332,6 +710,26 @@ def run(args: argparse.Namespace) -> None:
             "bf16_p80_ms": bf16_high,
             "speedup": bf16_ms / mxfp8_ms,
         }
+        if w8a16_result is not None:
+            w8a16_ms, w8a16_low, w8a16_high = w8a16_result
+            assert w8a16_accuracy is not None
+            record.update(
+                {
+                    **{
+                        f"w8a16_{name}": value for name, value in w8a16_accuracy.items()
+                    },
+                    "w8a16_ms": w8a16_ms,
+                    "w8a16_p20_ms": w8a16_low,
+                    "w8a16_p80_ms": w8a16_high,
+                    "w8a16_vs_native": mxfp8_ms / w8a16_ms,
+                    "w8a16_vs_bf16": bf16_ms / w8a16_ms,
+                    "w8a16_scale_mode": args.w8a16_scale_mode,
+                    "w8a16_block_m": w8a16_block_m,
+                    "w8a16_block_n": args.w8a16_block_n,
+                    "w8a16_block_k": args.w8a16_block_k,
+                    "w8a16_num_warps": args.w8a16_num_warps,
+                }
+            )
         print(json.dumps(record, sort_keys=True), flush=True)
 
 
@@ -349,7 +747,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-scale", type=float, default=0.02)
     parser.add_argument("--activation-scale", type=float, default=0.5)
     parser.add_argument("--max-relative-error", type=float, default=0.05)
+    parser.add_argument("--w8a16-max-relative-error", type=float, default=0.01)
     parser.add_argument("--breakdown", action="store_true")
+    parser.add_argument("--shared-expert-overlap", action="store_true")
+    parser.add_argument("--w8a16", action="store_true")
+    parser.add_argument(
+        "--w8a16-block-m",
+        type=int,
+        default=0,
+        help="Override the routed-token M tile; 0 uses the native heuristic.",
+    )
+    parser.add_argument("--w8a16-block-n", type=int, default=32)
+    parser.add_argument("--w8a16-block-k", type=int, default=64)
+    parser.add_argument("--w8a16-num-warps", type=int, default=1)
+    parser.add_argument(
+        "--w8a16-scale-mode",
+        choices=["bitcast", "exp2"],
+        default="bitcast",
+    )
     return parser.parse_args()
 
 

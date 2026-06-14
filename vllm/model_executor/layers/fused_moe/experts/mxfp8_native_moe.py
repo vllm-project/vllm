@@ -21,9 +21,15 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+    biased_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -34,6 +40,21 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+
+_BF16_DECODE_TOKEN_THRESHOLD = 16
+
+
+def _should_use_bf16_decode_fallback(moe_config: FusedMoEConfig) -> bool:
+    """Limit duplicate BF16 weights to the short-context MiniMax-M3 TP case."""
+    return (
+        moe_config.ep_size == 1
+        and moe_config.has_shared_experts
+        and moe_config.num_experts == 128
+        and moe_config.experts_per_token == 4
+        and moe_config.hidden_dim == 6144
+        and moe_config.intermediate_size == 3072
+        and 0 < moe_config.max_model_len <= 4096
+    )
 
 
 @triton.jit
@@ -202,13 +223,21 @@ def _mxfp8_grouped_gemm_fnuz_kernel(
                 as_ptrs + (k_offset // 32) * stride_ask,
                 mask=token_mask,
                 other=0,
-            ).to(tl.float32)
+            ).to(tl.uint16)
             bsc = tl.load(
                 bs_ptrs + (k_offset // 32) * stride_bsk,
                 mask=n_mask,
                 other=0,
-            ).to(tl.float32)
-            block_scale = tl.exp2(asc[:, None] + bsc[None, :] - 254.0)
+            ).to(tl.uint16)
+
+            # E8M0 and BF16 use the same eight-bit biased exponent. Shift each
+            # scale byte into a BF16 exponent field, as Marlin does, then form
+            # the per-token/per-output scale product around the FP8 dot.
+            asc_scale = (asc << 7).to(tl.bfloat16, bitcast=True)
+            bsc_scale = (bsc << 7).to(tl.bfloat16, bitcast=True)
+            block_scale = asc_scale[:, None].to(tl.float32) * bsc_scale[None, :].to(
+                tl.float32
+            )
             acc += tl.dot(a, b.T) * block_scale
 
         a_ptrs += BLOCK_K * stride_ak
@@ -431,6 +460,41 @@ def fused_moe_mxfp8_native(
 class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
     """Fused MXFP8 MoE on gfx94x/gfx95x."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.w1_bf16: torch.Tensor | None = None
+        self.w2_bf16: torch.Tensor | None = None
+        self.bf16_experts: TritonExperts | None = None
+        if current_platform.is_fp8_fnuz() and _should_use_bf16_decode_fallback(
+            moe_config
+        ):
+            bf16_config = biased_moe_quant_config(
+                None,
+                None,
+                gemm1_alpha=quant_config.gemm1_alpha,
+                gemm1_beta=quant_config.gemm1_beta,
+                gemm1_clamp_limit=quant_config.gemm1_clamp_limit,
+            )
+            self.bf16_experts = TritonExperts(moe_config, bf16_config)
+
+    @property
+    def requires_bf16_decode_weights(self) -> bool:
+        return self.bf16_experts is not None
+
+    def bind_bf16_weights(
+        self,
+        w1_bf16: torch.Tensor,
+        w2_bf16: torch.Tensor,
+    ) -> None:
+        if self.bf16_experts is None:
+            raise RuntimeError("BF16 decode experts are not enabled for this config.")
+        self.w1_bf16 = w1_bf16
+        self.w2_bf16 = w2_bf16
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
@@ -468,6 +532,31 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if (
+            self.bf16_experts is not None
+            and hidden_states.shape[0] <= _BF16_DECODE_TOKEN_THRESHOLD
+        ):
+            if self.w1_bf16 is None or self.w2_bf16 is None:
+                raise RuntimeError("BF16 decode weights were not bound after loading.")
+            self.bf16_experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=self.w1_bf16,
+                w2=self.w2_bf16,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=None,
+                a2_scale=None,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            return
+
         alpha = self.quant_config.gemm1_alpha
         alpha = 1.702 if alpha is None else float(alpha)
         beta = self.quant_config.gemm1_beta

@@ -76,8 +76,22 @@ def _select_kernel_cls(
     )
 
 
-def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
+def _select_rocm_mxfp8_backend(
+    config: FusedMoEConfig,
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """ROCm fallback when vendor MXFP8 backends are unavailable."""
+
+    if current_platform.is_fp8_fnuz() and config.ep_size > 1:
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+            Mxfp8EmulationTritonExperts,
+        )
+
+        logger.info_once(
+            "Using BF16 MXFP8 emulation for gfx94x expert parallelism; the "
+            "native CDNA3 path is optimized for decode-sized TP workloads and "
+            "is slower for the large local batches reached during EP prefill."
+        )
+        return Fp8MoeBackend.EMULATION, Mxfp8EmulationTritonExperts
 
     if current_platform.supports_mx() or current_platform.is_fp8_fnuz():
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
@@ -142,6 +156,6 @@ def select_mxfp8_moe_backend(
 
     # simplify the logic for rocm, refactor later when more backends are supported
     if current_platform.is_rocm():
-        return _select_rocm_mxfp8_backend()
+        return _select_rocm_mxfp8_backend(config)
 
     raise ValueError("No MXFP8 MoE backends available.")

@@ -23,6 +23,8 @@ CDNA4 gfx95x; native MXFP8 linear tests remain CDNA4-only.
 Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -76,6 +78,36 @@ def test_mxfp8_fused_moe_backend_supported():
     )
 
     assert Mxfp8NativeTritonExperts._supports_current_device()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"max_model_len": 10240}, False),
+        ({"max_model_len": 0}, False),
+        ({"ep_size": 8}, False),
+        ({"has_shared_experts": False}, False),
+        ({"experts_per_token": 8}, False),
+        ({"hidden_dim": 4096}, False),
+    ],
+)
+def test_mxfp8_bf16_decode_fallback_scope(overrides, expected):
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        _should_use_bf16_decode_fallback,
+    )
+
+    values = {
+        "ep_size": 1,
+        "has_shared_experts": True,
+        "num_experts": 128,
+        "experts_per_token": 4,
+        "hidden_dim": 6144,
+        "intermediate_size": 3072,
+        "max_model_len": 2304,
+    }
+    values.update(overrides)
+    assert _should_use_bf16_decode_fallback(SimpleNamespace(**values)) is expected
 
 
 @pytest.mark.skipif(
