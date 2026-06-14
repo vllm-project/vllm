@@ -1064,10 +1064,26 @@ class EngineCoreProc(EngineCore):
             bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
-            addresses = self.startup_handshake(
-                handshake_socket, local_client, headless, parallel_config_to_update
-            )
-            yield addresses
+            try:
+                addresses = self.startup_handshake(
+                    handshake_socket, local_client, headless,
+                    parallel_config_to_update
+                )
+                yield addresses
+            except Exception as e:
+                # Send failure notification to frontend (best-effort).
+                try:
+                    handshake_socket.send(
+                        msgspec.msgpack.encode({
+                            "status": "FAILED",
+                            "local": local_client,
+                            "headless": headless,
+                            "error_msg": str(e),
+                        })
+                    )
+                except Exception:
+                    pass
+                raise
 
             # Send ready message.
             ready_msg = {

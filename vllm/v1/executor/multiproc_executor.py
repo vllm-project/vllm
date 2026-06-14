@@ -555,6 +555,7 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    FAILED_INIT_STR = "FAILED_INIT"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
 
@@ -750,7 +751,15 @@ class WorkerProc:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)
                     response: dict[str, Any] = pipe.recv()
-                    if response["status"] != "READY":
+                    status = response["status"]
+                    if status == WorkerProc.FAILED_INIT_STR:
+                        raise Exception(
+                            "WorkerProc initialization failed due to "
+                            "an exception in a background process: "
+                            f"{response['error_msg']}. "
+                            "See stack trace for root cause."
+                        )
+                    if status != WorkerProc.READY_STR:
                         raise e
 
                     idx = unready_proc_handle.rank % len(ready_proc_handles)
@@ -878,13 +887,20 @@ class WorkerProc:
 
             worker.worker_busy_loop()
 
-        except Exception:
+        except Exception as e:
             # NOTE: if an Exception arises in busy_loop, we send
             # a FAILURE message over the MQ RPC to notify the Executor,
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
             if ready_writer is not None:
+                try:
+                    ready_writer.send({
+                        "status": WorkerProc.FAILED_INIT_STR,
+                        "error_msg": str(e),
+                    })
+                except Exception:
+                    pass
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_requested.is_set():
                 logger.debug_once(
