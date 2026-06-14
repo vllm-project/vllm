@@ -35,9 +35,9 @@ logger = init_logger(__name__)
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
-        self.disable_any_whitespace = (
-            self.vllm_config.structured_outputs_config.disable_any_whitespace
-        )
+        so_config = self.vllm_config.structured_outputs_config
+        self.disable_any_whitespace = so_config.disable_any_whitespace
+        self.max_whitespace_cnt = so_config.max_whitespace_cnt
 
         if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
@@ -75,16 +75,35 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.vllm_config.speculative_config.num_speculative_tokens
             )
 
+    def _resolve_whitespace(self) -> tuple[bool, int | None]:
+        """Resolve whitespace parameters for xgrammar.
+
+        disable_any_whitespace=True is syntactic sugar for max_whitespace_cnt=0,
+        so both parameters can be unified here.
+
+        Returns:
+            (any_whitespace, max_whitespace_cnt)
+        """
+        if self.disable_any_whitespace:
+            return False, 0
+        return True, self.max_whitespace_cnt
+
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
+        any_whitespace, max_whitespace_cnt = self._resolve_whitespace()
+
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
-                grammar_spec, any_whitespace=not self.disable_any_whitespace
+                grammar_spec,
+                any_whitespace=any_whitespace,
+                max_whitespace_cnt=max_whitespace_cnt,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
-                '{"type": "object"}', any_whitespace=not self.disable_any_whitespace
+                '{"type": "object"}',
+                any_whitespace=any_whitespace,
+                max_whitespace_cnt=max_whitespace_cnt,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)

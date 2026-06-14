@@ -1557,3 +1557,42 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+# --- StructuredOutputsConfig tests ---
+
+def test_structured_outputs_config_max_whitespace_cnt_default():
+    """Test that max_whitespace_cnt defaults to 2."""
+    from vllm.config import StructuredOutputsConfig
+
+    config = StructuredOutputsConfig()
+    assert config.max_whitespace_cnt == 2
+
+
+def test_structured_outputs_config_max_whitespace_cnt_custom():
+    """Test that max_whitespace_cnt accepts int and None."""
+    from vllm.config import StructuredOutputsConfig
+
+    # int value
+    config = StructuredOutputsConfig(max_whitespace_cnt=1)
+    assert config.max_whitespace_cnt == 1
+
+    # None value
+    config = StructuredOutputsConfig(max_whitespace_cnt=None)
+    assert config.max_whitespace_cnt is None
+
+
+def test_structured_outputs_config_disable_any_whitespace_backends():
+    """Test that disable_any_whitespace only works with xgrammar/guidance."""
+    from vllm.config import StructuredOutputsConfig
+
+    # Should pass
+    StructuredOutputsConfig(disable_any_whitespace=True, backend="xgrammar")
+    StructuredOutputsConfig(disable_any_whitespace=True, backend="guidance")
+
+    # Should raise ValueError
+    with pytest.raises(ValueError, match="disable_any_whitespace is only supported"):
+        StructuredOutputsConfig(disable_any_whitespace=True, backend="outlines")
+
+    with pytest.raises(ValueError, match="disable_any_whitespace is only supported"):
+        StructuredOutputsConfig(disable_any_whitespace=True, backend="lm-format-enforcer")
