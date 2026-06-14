@@ -612,6 +612,29 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class IquestMoeSinkAttentionConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Disable cascade attention for Iquest MoE models that use sink
+        attention.
+
+        These models rely on a custom sink-token merge
+        (``_forward_with_sink_tokens`` in the FlashAttention backend) which the
+        cascade attention path bypasses entirely. With cascade enabled the sink
+        K/V never participate and the attention output is wrong (e.g. GSM8K
+        collapses to near-random). This must be set during config setup because
+        the model runner caches ``cascade_attn_enabled`` before the model is
+        built.
+        """
+        hf_config = vllm_config.model_config.hf_config
+        if getattr(hf_config, "enable_sink_attention", False):
+            vllm_config.model_config.disable_cascade_attn = True
+            logger.info(
+                "Disabling cascade attention for Iquest MoE model with sink "
+                "attention enabled."
+            )
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -638,4 +661,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
+    "IquestMoeV13ForCausalLM": IquestMoeSinkAttentionConfig,
+    "IquestMoeV11ForCausalLM": IquestMoeSinkAttentionConfig,
 }
