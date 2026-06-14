@@ -7,9 +7,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.kv_offload.worker.worker import TransferType
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend, DmaCopyEvent
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
@@ -46,9 +51,10 @@ class SimpleCPUOffloadWorker:
 
         self._backend = DmaCopyBackend()
 
-        # Ordered (event_idx, Event). Events pre-allocated on main thread.
-        self._load_events: list[tuple[int, torch.Event]] = []
-        self._store_events: list[tuple[int, torch.Event]] = []
+        # Ordered completed-copy events. Events are pre-allocated in the copy
+        # thread and polled here from the worker path.
+        self._load_events: list[DmaCopyEvent] = []
+        self._store_events: list[DmaCopyEvent] = []
         # High-water marks: highest event_idx completed per stream.
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
@@ -62,6 +68,7 @@ class SimpleCPUOffloadWorker:
         self._pending_store_event_indices: set[int] = set()
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
+        self.kv_connector_stats = OffloadingConnectorStats()
 
     def register_kv_caches(
         self,
@@ -268,6 +275,13 @@ class SimpleCPUOffloadWorker:
         self._completed_store_events = {}
         return meta
 
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.kv_connector_stats.is_empty():
+            return None
+        kv_connector_stats = self.kv_connector_stats
+        self.kv_connector_stats = OffloadingConnectorStats()
+        return kv_connector_stats
+
     def handle_preemptions(
         self, kv_connector_metadata: SimpleCPUOffloadMetadata
     ) -> None:
@@ -278,14 +292,18 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
-        for event_idx, event in self._load_events:
-            event.synchronize()
-            self._load_hwm = event_idx
+        for copy_event in self._load_events:
+            copy_event.end_event.synchronize()
+            self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
+            self._load_hwm = copy_event.event_idx
         self._load_events.clear()
 
-        for event_idx, event in self._store_events:
-            event.synchronize()
-            self._store_hwm = event_idx
+        for copy_event in self._store_events:
+            copy_event.end_event.synchronize()
+            self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
+            self._store_hwm = copy_event.event_idx
         self._store_events.clear()
 
     def _poll_stream_events(self, is_store: bool) -> int:
@@ -293,13 +311,30 @@ class SimpleCPUOffloadWorker:
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
-            event_idx, event = events[0]
-            if not event.query():
+            copy_event = events[0]
+            if not copy_event.end_event.query():
                 break
-            hwm = event_idx
+            self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
+            hwm = copy_event.event_idx
             events.pop(0)
         if is_store:
             self._store_hwm = hwm
         else:
             self._load_hwm = hwm
         return hwm
+
+    @staticmethod
+    def _release_copy_event(copy_event: DmaCopyEvent) -> None:
+        if copy_event.release is not None:
+            copy_event.release()
+            copy_event.release = None
+
+    def _record_copy_event(self, copy_event: DmaCopyEvent) -> None:
+        transfer_type: TransferType = (
+            ("GPU", "CPU") if copy_event.is_store else ("CPU", "GPU")
+        )
+        transfer_time = copy_event.start_event.elapsed_time(copy_event.end_event) * 1e-3
+        self.kv_connector_stats.record_transfer(
+            copy_event.num_bytes, transfer_time, transfer_type
+        )
