@@ -33,6 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
@@ -50,7 +51,11 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -790,25 +795,86 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return metadata
 
+    @staticmethod
+    def _select_packed_by_indices(
+        tensor: torch.Tensor,
+        grid_thw_list: list[list[int]],
+        keep_indices: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Select patches from a packed tensor according to keep_indices."""
+        selected = []
+        offset = 0
+        for seq_idx, (t, h, w) in enumerate(grid_thw_list):
+            seq_length = int(t) * int(h) * int(w)
+            indices = keep_indices[seq_idx].to(tensor.device)
+            selected.append(tensor[offset : offset + seq_length][indices])
+            offset += seq_length
+        return torch.cat(selected)
+
     def forward(
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
+        keep_indices: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
-        if encoder_metadata is None:
-            if isinstance(grid_thw, list):
-                grid_thw_list = grid_thw
-            else:
-                grid_thw_list = grid_thw.tolist()
-            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
+        grid_thw_list = grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
 
-        pos_embeds = encoder_metadata["pos_embeds"]
-        hidden_states = hidden_states + pos_embeds
+        if keep_indices is not None:
+            # PixelPrune: build encoder metadata manually after pruning.
+            pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+            rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw_list)
+
+            hidden_states = self._select_packed_by_indices(
+                hidden_states, grid_thw_list, keep_indices
+            )
+            pos_embeds = self._select_packed_by_indices(
+                pos_embeds, grid_thw_list, keep_indices
+            )
+            rotary_cos = self._select_packed_by_indices(
+                rotary_cos, grid_thw_list, keep_indices
+            )
+            rotary_sin = self._select_packed_by_indices(
+                rotary_sin, grid_thw_list, keep_indices
+            )
+            hidden_states = hidden_states + pos_embeds
+
+            per_image_kept = [len(idx) for idx in keep_indices]
+            cu_seqlens = np.array([0] + list(np.cumsum(per_image_kept)), dtype=np.int32)
+
+            sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+                self.attn_backend, cu_seqlens, self.device
+            )
+            max_seqlen = torch.tensor(
+                MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
+                dtype=torch.int32,
+            )
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens,
+                self.hidden_size,
+                self.tp_size,
+                self.device,
+            )
+
+            encoder_metadata = {
+                "pos_embeds": pos_embeds,
+                "rotary_pos_emb_cos": rotary_cos,
+                "rotary_pos_emb_sin": rotary_sin,
+                "cu_seqlens": cu_seqlens,
+                "max_seqlen": max_seqlen,
+                "sequence_lengths": sequence_lengths,
+            }
+        else:
+            if encoder_metadata is None:
+                encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
+            pos_embeds = encoder_metadata["pos_embeds"]
+            hidden_states = hidden_states + pos_embeds
+
         hidden_states = hidden_states.unsqueeze(1)
 
         deepstack_feature_lists = []
@@ -1168,6 +1234,37 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             ),
         }
 
+    def _get_dummy_images(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_images: int,
+        overrides: ImageDummyOptions | None = None,
+    ) -> list[Image.Image]:
+        images = super()._get_dummy_images(
+            width=width,
+            height=height,
+            num_images=num_images,
+            overrides=overrides,
+        )
+        if not images or self.info.ctx.get_mm_config().pixel_prune_threshold is None:
+            return images
+        # PixelPrune would collapse a uniform image to one token, severely
+        # under-profiling encoder memory. A checkerboard at merged-token
+        # granularity gives every adjacent pair max distance 1.0 (> any
+        # threshold in [0, 1)), so all tokens are kept.
+        vision_config = self.info.get_hf_config().vision_config
+        block_px = vision_config.patch_size * vision_config.spatial_merge_size
+        target_w, target_h = images[0].size
+        snapped_w = max(target_w // block_px, 1) * block_px
+        snapped_h = max(target_h // block_px, 1) * block_px
+        rows = np.arange(snapped_h)[:, None] // block_px
+        cols = np.arange(snapped_w)[None, :] // block_px
+        plane = (((rows + cols) % 2) * 255).astype(np.uint8)
+        rgb = np.repeat(plane[:, :, None], 3, axis=2)
+        return [Image.fromarray(rgb) for _ in range(num_images)]
+
     def _get_dummy_videos(
         self,
         *,
@@ -1335,6 +1432,69 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
+
+        pixel_prune_threshold = self.info.ctx.get_mm_config().pixel_prune_threshold
+        if pixel_prune_threshold is not None:
+            pixel_values = processed_outputs.get("pixel_values")
+            image_grid_thw = processed_outputs.get("image_grid_thw")
+            if pixel_values is not None and image_grid_thw is not None:
+                from vllm.multimodal.pixelprune import (
+                    compute_pixel_prune_keep_indices,
+                )
+
+                vision_config = self.info.get_hf_config().vision_config
+                C = vision_config.in_channels
+                T = vision_config.temporal_patch_size
+                P = vision_config.patch_size
+
+                # Static images get T identical temporal copies; keep one
+                # frame to halve the PixelPrune feature dim with the same
+                # keep set.
+                frame0 = pixel_values.view(-1, C, T, P, P)[:, :, 0]
+
+                # Keep ``prepared_pv`` and ``effective_threshold`` in the
+                # same numerical space:
+                #   threshold == 0        : space doesn't matter (byte-hash)
+                #   threshold > 0, uniform std : rescale threshold by std,
+                #       skip the reverse-normalize multiply-add
+                #   threshold > 0, otherwise : reverse-normalize into pixel
+                #       space
+                if pixel_prune_threshold > 0:
+                    image_processor = self.info.get_image_processor()
+                    std = image_processor.image_std
+                    if all(s == std[0] for s in std):
+                        prepared_pv = frame0.reshape(
+                            frame0.shape[0], C * P * P
+                        ).contiguous()
+                        effective_threshold = pixel_prune_threshold / float(std[0])
+                    else:
+                        mean_t = torch.tensor(
+                            image_processor.image_mean,
+                            dtype=pixel_values.dtype,
+                        ).view(1, C, 1, 1)
+                        std_t = torch.tensor(
+                            std,
+                            dtype=pixel_values.dtype,
+                        ).view(1, C, 1, 1)
+                        prepared_pv = (
+                            (frame0 * std_t + mean_t)
+                            .reshape(frame0.shape[0], C * P * P)
+                            .contiguous()
+                        )
+                        effective_threshold = pixel_prune_threshold
+                else:
+                    prepared_pv = frame0.reshape(
+                        frame0.shape[0], C * P * P
+                    ).contiguous()
+                    effective_threshold = pixel_prune_threshold
+
+                processed_outputs["keep_indices"] = compute_pixel_prune_keep_indices(
+                    prepared_pv,
+                    image_grid_thw,
+                    vision_config.spatial_merge_size,
+                    threshold=effective_threshold,
+                )
+
         combined_outputs = dict(
             processed_outputs,
             **video_outputs,
@@ -1346,9 +1506,14 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _create_qwen2vl_field_factory(
+        cfg = _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
+        # PixelPrune: register keep_indices field when present.
+        if "keep_indices" in hf_inputs:
+            cfg = dict(cfg)
+            cfg["keep_indices"] = MultiModalFieldConfig.batched("image")
+        return cfg
 
     def _get_prompt_updates(
         self,
@@ -1369,10 +1534,15 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
         def get_image_replacement_qwen3vl(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
-            grid_thw = out_item["image_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            num_tokens = int(grid_thw.prod()) // merge_length
+            # PixelPrune: if keep_indices is present, the kept token
+            # count replaces the full grid count.
+            keep_indices = out_item.get("keep_indices")
+            if keep_indices is not None:
+                num_tokens = len(keep_indices.data) // merge_length
+            else:
+                grid_thw = out_item["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                num_tokens = int(grid_thw.prod()) // merge_length
             return [hf_processor.image_token_id] * num_tokens
 
         def get_video_replacement_qwen3vl(item_idx: int):
@@ -1658,6 +1828,7 @@ class Qwen3VLForConditionalGeneration(
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+        self.is_pixel_prune_enabled = multimodal_config.is_pixel_prune_enabled()
 
         self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
         self.deepstack_num_level = (
@@ -1772,12 +1943,15 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        # When EVS pruning is enabled, embed_multimodal post-processes both
-        # image and video embeddings (mrope positions are appended for image,
-        # prune+append for video). The encoder CUDA graph path bypasses that
-        # post-process, producing inconsistent embedding formats vs eager. So
-        # disable CUDA graph for all modalities when pruning is on.
-        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
+        # NOTE: For both EVS (video) and PixelPrune (image), the number of
+        # retained tokens is data-dependent and therefore cannot be captured
+        # by CUDA Graphs. We only enable CUDA Graphs for a modality when its
+        # corresponding pruning strategy is off.
+        modalities = []
+        if not self.is_pixel_prune_enabled:
+            modalities.append("image")
+        if not self.is_multimodal_pruning_enabled:
+            modalities.append("video")
 
         # Compute max_frames_per_video for budget sizing.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
@@ -2042,23 +2216,30 @@ class Qwen3VLForConditionalGeneration(
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
+        keep_indices = kwargs.pop("keep_indices", None)
 
         if pixel_values is None and image_embeds is None:
             return None
 
         if pixel_values is not None:
-            return Qwen2_5_VLImagePixelInputs(
+            result = Qwen2_5_VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
             )
+            if keep_indices is not None:
+                result.keep_indices = keep_indices
+            return result
 
         if image_embeds is not None:
-            return Qwen2_5_VLImageEmbeddingInputs(
+            result = Qwen2_5_VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
                 image_grid_thw=image_grid_thw,
             )
+            if keep_indices is not None:
+                result.keep_indices = keep_indices
+            return result
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -2095,20 +2276,37 @@ class Qwen3VLForConditionalGeneration(
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
+        keep_indices = image_input.get("keep_indices")
+
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
+                if keep_indices is not None:
+                    raise RuntimeError(
+                        "PixelPrune (keep_indices) is not supported "
+                        "with data parallel ViT."
+                    )
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                    self.visual,
+                    pixel_values,
+                    grid_thw.tolist(),
+                    rope_type="rope_3d",
                 )
-            else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            image_embeds = self.visual(
+                pixel_values,
+                grid_thw=grid_thw,
+                keep_indices=keep_indices,
+            )
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        merge_length = merge_size * merge_size
+        if keep_indices is None:
+            sizes = (grid_thw.prod(-1) // merge_length).tolist()
+        else:
+            sizes = [len(idx) // merge_length for idx in keep_indices]
         return image_embeds.split(sizes)
 
     def _process_video_input(
@@ -2158,13 +2356,27 @@ class Qwen3VLForConditionalGeneration(
         """
         if self.is_multimodal_pruning_enabled:
             merge_size = self.visual.spatial_merge_size
+            merge_length = merge_size * merge_size
             grid_thw = image_input["image_grid_thw"]
             grid_thw_list = grid_thw.tolist()
+            keep_indices_all = image_input.get("keep_indices")
             image_embeds_out = []
-            for emb, size in zip(image_embeds_split, grid_thw_list):
+            for i, (emb, size) in enumerate(zip(image_embeds_split, grid_thw_list)):
                 positions = compute_mrope_for_media(size, merge_size).to(
                     emb.device, non_blocking=True
                 )
+                # When PixelPrune is also active, the corresponding image
+                # embedding has been reduced to len(keep_indices)//merge_length
+                # rows. Index `positions` by the kept merged-token rows so
+                # the cat below aligns on dim 0.
+                if keep_indices_all is not None:
+                    keep_idx = keep_indices_all[i]
+                    if not isinstance(keep_idx, torch.Tensor):
+                        keep_idx = torch.as_tensor(keep_idx)
+                    merged_idx = (keep_idx[::merge_length] // merge_length).to(
+                        positions.device
+                    )
+                    positions = positions[merged_idx]
                 positions = torch.cat(
                     [
                         positions,
@@ -2461,7 +2673,15 @@ class Qwen3VLForConditionalGeneration(
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
-                yield offset, llm_grid_h, llm_grid_w, llm_grid_h * llm_grid_w
+                # PixelPrune: use reduced token count when keep_indices
+                # is present.
+                merge_length = spatial_merge_size**2
+                keep_indices = mm_feature.data.get("keep_indices")
+                if keep_indices is not None:
+                    actual_num_tokens = len(keep_indices.data) // merge_length
+                else:
+                    actual_num_tokens = llm_grid_h * llm_grid_w
+                yield offset, llm_grid_h, llm_grid_w, actual_num_tokens
             elif mm_feature.modality == "video":
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
                 llm_grid_h = h // spatial_merge_size
@@ -2518,6 +2738,16 @@ class Qwen3VLForConditionalGeneration(
         mm_features: list[MultiModalFeatureSpec],
         config: Qwen3VLConfig,
     ):
+        spatial_merge_size = config.vision_config.spatial_merge_size
+        merge_length = spatial_merge_size**2
+
+        # Build a map from offset → mm_feature for PixelPrune lookup.
+        image_features = sorted(
+            [f for f in mm_features if f.modality == "image"],
+            key=lambda f: f.mm_position.offset,
+        )
+        mm_feature_map = {f.mm_position.offset: f for f in image_features}
+
         llm_pos_ids_list = []
         st = 0
         for (
@@ -2531,7 +2761,7 @@ class Qwen3VLForConditionalGeneration(
             video_token_id=config.video_token_id,
             vision_start_token_id=config.vision_start_token_id,
             vision_end_token_id=config.vision_end_token_id,
-            spatial_merge_size=config.vision_config.spatial_merge_size,
+            spatial_merge_size=spatial_merge_size,
         ):
             # Skip frames with 0 tokens (EVS placeholder with tokens lumped elsewhere)
             if actual_num_tokens == 0:
@@ -2543,35 +2773,59 @@ class Qwen3VLForConditionalGeneration(
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
 
-            # Check if this is a "lumped placeholder" (all tokens from multiple frames
-            # assigned to the 0-th frame - see
-            # `Qwen3VLMultiModalProcessor.get_video_repl`.
             expected_tokens_per_frame = llm_grid_h * llm_grid_w
-            if actual_num_tokens > expected_tokens_per_frame:
-                # Lumped placeholder: create grid positions for all "logical" frames
-                # represented.
+
+            # PixelPrune: recover spatial coordinates from keep_indices.
+            mm_feature = mm_feature_map.get(offset)
+            keep_indices_tensor = None
+            if mm_feature is not None:
+                raw_keep = mm_feature.data.get("keep_indices")
+                if raw_keep is not None:
+                    keep_indices_tensor = raw_keep.data
+
+            if keep_indices_tensor is not None:
+                # Convert patch-level keep_indices to merged-token indices.
+                if isinstance(keep_indices_tensor, torch.Tensor):
+                    keep_indices_np = keep_indices_tensor.cpu().numpy()
+                else:
+                    keep_indices_np = np.array(keep_indices_tensor)
+                merged_token_indices = keep_indices_np[::merge_length] // merge_length
+
+                # Recover (t, h, w) spatial coordinates from the flattened
+                # merged-token index, and shift them so the image starts
+                # right after the preceding text run.
+                tokens_per_frame = llm_grid_h * llm_grid_w
+                token_t = merged_token_indices // tokens_per_frame
+                token_hw = merged_token_indices % tokens_per_frame
+                token_h = token_hw // llm_grid_w
+                token_w = token_hw % llm_grid_w
+
+                base = text_len + st_idx
+                frame_positions = np.stack(
+                    [token_t + base, token_h + base, token_w + base],
+                    axis=0,
+                )
+                llm_pos_ids_list.append(frame_positions)
+            elif actual_num_tokens > expected_tokens_per_frame:
+                # Lumped placeholder: create grid positions for all "logical"
+                # frames represented.
                 num_logical_frames = actual_num_tokens // expected_tokens_per_frame
                 remainder = actual_num_tokens % expected_tokens_per_frame
 
-                # Create positions for complete frames.
                 for _ in range(num_logical_frames):
                     grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(
                         3, -1
                     )
                     llm_pos_ids_list.append(grid_indices + text_len + st_idx)
                     st_idx = llm_pos_ids_list[-1].max() + 1
-                    text_len = 0  # No text between frames within the lump
+                    text_len = 0
 
-                # Handle remainder tokens if any (partial frame).
-                # NOTE: this should never be the case. Should we have an assert?
                 if remainder > 0:
-                    # Create a partial grid - take first 'remainder' positions
                     full_grid = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
                     grid_indices = full_grid[:, :remainder]
                     llm_pos_ids_list.append(grid_indices + text_len + st_idx)
             else:
-                # Normal case: frame has exactly the expected tokens (after actual EVS
-                # pruning).
+                # Normal case: frame has exactly the expected tokens.
                 grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
                 llm_pos_ids_list.append(grid_indices + text_len + st_idx)
 
