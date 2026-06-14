@@ -252,6 +252,13 @@ class Request:
         return len(self._output_token_ids)
 
     @property
+    def has_inflight_step(self) -> bool:
+        """Whether a scheduled-but-unprocessed step may still write this
+        request's KV blocks.
+        """
+        return self.num_output_placeholders > 0 or self.is_prefill_chunk
+
+    @property
     def num_encoder_inputs(self) -> int:
         return len(self.mm_features)
 
