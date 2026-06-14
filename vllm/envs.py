@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
-    VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
+    VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = False
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
@@ -908,9 +908,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
     ),
     # Whether to allow HTTP redirects when fetching from media URLs.
-    # Default to True
+    # Default to False
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
-        int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))
+        int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "0"))
     ),
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
