@@ -203,7 +203,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
-                spec_sequence_masks = spec_sequence_masks_cpu.to(
+                spec_sequence_masks = spec_sequence_masks_cpu.pin_memory().to(
                     query_start_loc.device, non_blocking=True
                 )
 
@@ -376,12 +376,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
                 assert prefill_query_start_loc_cpu is not None
-                chunk_indices = prepare_chunk_indices(
-                    prefill_query_start_loc_cpu, FLA_CHUNK_SIZE
-                ).to(device=gpu_device, non_blocking=True)
-                chunk_offsets = prepare_chunk_offsets(
-                    prefill_query_start_loc_cpu, FLA_CHUNK_SIZE
-                ).to(device=gpu_device, non_blocking=True)
+                chunk_indices = (
+                    prepare_chunk_indices(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE)
+                    .pin_memory()
+                    .to(device=gpu_device, non_blocking=True)
+                )
+                chunk_offsets = (
+                    prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE)
+                    .pin_memory()
+                    .to(device=gpu_device, non_blocking=True)
+                )
 
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
