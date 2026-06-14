@@ -210,6 +210,22 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
+    """Return ``True`` if FlashInfer's official SM120 packed sparse-MLA decode
+    kernel (``trtllm_batch_decode_sparse_mla_dsv4``, PR3395, merged in
+    flashinfer >= 0.6.13) is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.mla import (  # noqa: F401
+            trtllm_batch_decode_sparse_mla_dsv4,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
