@@ -11,6 +11,7 @@ The fix streams string values incrementally as they arrive, providing a true
 streaming experience for long content.
 """
 
+import ast
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -76,7 +77,7 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+            r"<tool_call>([^\n<]*)\n?(.*)</tool_call>", re.DOTALL
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
@@ -319,6 +320,24 @@ class Glm4MoeModelToolParser(ToolParser):
         name = inner_text[:cut].strip()
         return name if name else None
 
+    @staticmethod
+    def _format_nonstring_value(raw: str) -> str:
+        """Format a non-string value, preserving raw JSON when valid.
+
+        If *raw* parses as valid JSON, return it as-is (preserving the
+        model's original formatting).  Otherwise fall back to
+        ``_deserialize`` + ``json.dumps`` to produce valid JSON.
+        """
+        try:
+            json.loads(raw)
+            return raw
+        except (json.JSONDecodeError, ValueError):
+            pass
+        try:
+            return json.dumps(ast.literal_eval(raw), ensure_ascii=False)
+        except (ValueError, SyntaxError):
+            return json.dumps(raw, ensure_ascii=False)
+
     def _build_args_json_so_far(
         self,
         tool_name: str,
@@ -347,9 +366,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 # and must match the partial-value path for diffing.
                 val_json = json.dumps(value, ensure_ascii=False)
             else:
-                val_json = json.dumps(
-                    self._deserialize(value.strip()), ensure_ascii=False
-                )
+                val_json = self._format_nonstring_value(value.strip())
             parts.append(f"{key_json}: {val_json}")
 
         # Check for a partial (incomplete) arg value
@@ -385,10 +402,7 @@ class Glm4MoeModelToolParser(ToolParser):
                     if self._is_string_type(tool_name, partial_key):
                         val_json = json.dumps(partial_content, ensure_ascii=False)
                     else:
-                        val_json = json.dumps(
-                            self._deserialize(partial_content.strip()),
-                            ensure_ascii=False,
-                        )
+                        val_json = self._format_nonstring_value(partial_content.strip())
                     parts.append(f"{key_json}: {val_json}")
                 elif self._is_string_type(tool_name, partial_key):
                     escaped = self._json_escape_string_content(partial_content)
@@ -412,7 +426,21 @@ class Glm4MoeModelToolParser(ToolParser):
             self.streamed_args_for_tool[index]
         ):
             return None
-        diff = args_so_far[len(self.streamed_args_for_tool[index]) :]
+
+        streamed = self.streamed_args_for_tool[index]
+        # Safety net: if the new render doesn't extend what was previously
+        # streamed (e.g. model emitted Python-literal True instead of JSON
+        # true), skip the delta to avoid emitting corrupt JSON.
+        if streamed and not args_so_far.startswith(streamed):
+            logger.warning(
+                "args_so_far does not extend previously streamed content; "
+                "skipping delta to avoid corruption. streamed=%r, new=%r",
+                streamed,
+                args_so_far,
+            )
+            return None
+
+        diff = args_so_far[len(streamed) :]
         self.streamed_args_for_tool[index] = args_so_far
         self.prev_tool_call_arr[index]["arguments"] = args_so_far
         return diff

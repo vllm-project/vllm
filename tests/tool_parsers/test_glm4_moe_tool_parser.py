@@ -1483,3 +1483,222 @@ def test_streaming_with_function_tool(
     assert len(glm4_moe_parser_function_tools.prev_tool_call_arr) == 1
     args = json.loads(glm4_moe_parser_function_tools.prev_tool_call_arr[0]["arguments"])
     assert args["city"] == "Beijing"
+
+
+# ── Unit tests for PR #42979 bugfixes ─────────────────────────────────────
+
+
+def test_extract_tool_call_without_newline_after_name(glm4_moe_tokenizer):
+    """Test that tool calls without newline after function name are parsed correctly.
+
+    This is the bug described in PR #42979: GLM-4.7 outputs tool calls
+    without a newline between the function name and the first argument tag.
+    Example: get_weather<obs>... instead of get_weather\n<obs>...
+
+    This test fails before the fix (regex requires \n) and passes after.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="get_weather",
+                parameters={
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    # Format: function name immediately followed by <obs> tag, no \n
+    model_output = 'get_weather<obs><parameter name="city">Seattle</parameter></obs>'
+
+    extracted = parser.extract_tool_calls(model_output, request=request)
+
+    # Before the fix: this would fail to parse (regex requires \n)
+    # After the fix: should successfully extract the tool call
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "get_weather"
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["city"] == "Seattle"
+
+
+def test_string_type_detection_with_anyof(glm4_moe_tokenizer):
+    """Test that string values with anyOf schema are correctly handled in streaming.
+
+    Covers Pydantic Optional[str] which generates schema with anyOf including null.
+    Issue #40195.
+
+    This test fails before the fix and passes after.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="configure",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        # Pydantic Optional[str] generates this schema:
+                        "api_key": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    _reset_streaming_state(parser)
+
+    chunks = [
+        "configure<obs>",
+        '<parameter name="api_key">sk-',
+        "12345678",
+        "</parameter>",
+        "</obs>",
+    ]
+
+    current_text = ""
+    for chunk in chunks:
+        current_text += chunk
+        parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=current_text,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+    # Before the fix: api_key would be incorrectly deserialized (treated as non-string)
+    # After the fix: api_key is recognized as string type and streamed correctly
+    assert len(parser.streamed_args_for_tool) == 1
+    args = json.loads(parser.streamed_args_for_tool[0])
+    assert args["api_key"] == "sk-12345678"
+    assert isinstance(args["api_key"], str)
+
+
+def test_string_type_detection_with_list_types(glm4_moe_tokenizer):
+    """Test that string values with list type schema are correctly handled.
+
+    This test fails before the fix when type is a list like ["string", "null"]
+    and passes after the fix.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="log",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        # Schema with type as list:
+                        "message": {"type": ["string", "null"]}
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    model_output = 'log<obs><parameter name="message">test message</parameter></obs>'
+
+    extracted = parser.extract_tool_calls(model_output, request=request)
+
+    # Before the fix: message would be incorrectly deserialized
+    # After the fix: message is recognized as string type
+    assert extracted.tools_called
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["message"] == "test message"
+    assert isinstance(args["message"], str)
+
+
+def test_streaming_no_corruption_for_boolean_values(glm4_moe_tokenizer):
+    """Test that streaming handles format changes without corrupting JSON.
+
+    This tests the fix added to _format_nonstring_value and _compute_args_diff.
+    When the model emits Python literal 'True' in partial but JSON 'true' in
+    complete, the old code would produce corrupt JSON.
+
+    This test fails before the fix and passes after.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="configure",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean"},
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    _reset_streaming_state(parser)
+
+    # Simulate a scenario where the model's format changes:
+    chunks = [
+        "configure<obs>",
+        '<parameter name="enabled">true</parameter>',
+        "</obs>",
+    ]
+
+    for chunk in chunks:
+        parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=chunk,
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+    # Before the fix: This could produce corrupt JSON in the delta
+    # After the fix: The safety guard in _compute_args_diff prevents corruption
+    assert len(parser.streamed_args_for_tool) == 1
+    args = json.loads(parser.streamed_args_for_tool[0])
+    assert args["enabled"] is True
+
+    # Also verify the args_so_far is valid JSON
+    assert json.loads(parser.streamed_args_for_tool[0])  # should not raise
+
+
+def test_format_nonstring_value_preserves_json(glm4_moe_tokenizer):
+    """Test that _format_nonstring_value preserves JSON when already valid.
+
+    This test verifies the new _format_nonstring_value method added in PR #42979.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="test",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "boolean"}},
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+
+    # When input is already valid JSON, it should be preserved as-is
+    assert parser._format_nonstring_value("true") == "true"
+    assert parser._format_nonstring_value("false") == "false"
+    assert parser._format_nonstring_value("null") == "null"
+    assert parser._format_nonstring_value("42") == "42"
+    assert parser._format_nonstring_value("3.14") == "3.14"
+
+    # When input is not valid JSON but is a valid Python literal,
+    # it should be formatted to JSON
+    assert parser._format_nonstring_value("True") == "true"  # Python -> JSON
+    assert parser._format_nonstring_value("False") == "false"
+
+    # When input is not valid JSON or Python literal, it becomes a string
+    result = parser._format_nonstring_value("random text")
+    assert json.loads(result) == "random text"
