@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import logging
 import threading
 import time
@@ -172,6 +173,75 @@ def _compute_sender_transfer_plan(
         0,
         remote_kv_block_len,
     )
+
+
+def split_transfer_descriptors(
+    src_ptrs: list[int],
+    dst_ptrs: list[int],
+    lengths: list[int],
+    max_bytes: int,
+) -> tuple[list[int], list[int], list[int]]:
+    """Split descriptors longer than ``max_bytes`` into contiguous chunks.
+
+    Mitigates Mooncake transfer-engine issues with very large single
+    descriptors under concurrent PD load (see vllm #42395).
+    """
+    if max_bytes <= 0:
+        return src_ptrs, dst_ptrs, lengths
+    out_src: list[int] = []
+    out_dst: list[int] = []
+    out_len: list[int] = []
+    for src, dst, length in zip(src_ptrs, dst_ptrs, lengths):
+        offset = 0
+        while offset < length:
+            chunk = min(max_bytes, length - offset)
+            out_src.append(src + offset)
+            out_dst.append(dst + offset)
+            out_len.append(chunk)
+            offset += chunk
+    return out_src, out_dst, out_len
+
+
+def _digest_gpu_memory_region(ptr: int, length: int, device_id: int) -> bytes:
+    """Return SHA-256 digest of a CUDA memory region (debug / verify mode)."""
+    if length == 0:
+        return hashlib.sha256(b"").digest()
+    if not torch.cuda.is_available():
+        raise RuntimeError("GPU memory digest requires CUDA.")
+    from torch.cuda import cudart
+
+    host = torch.empty(length, dtype=torch.uint8, device="cpu", pin_memory=True)
+    with torch.cuda.device(device_id):
+        err = cudart.cudaMemcpy(
+            host.data_ptr(),
+            ptr,
+            length,
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+        )[0]
+        if err != 0:
+            raise RuntimeError(f"cudaMemcpy D2H failed with error {err}")
+    return hashlib.sha256(host.numpy().tobytes()).digest()
+
+
+def _resolve_mooncake_transfer_tuning(
+    extra_config: dict[str, Any],
+) -> tuple[int | None, bool, bool]:
+    """Merge kv_connector_extra_config with Mooncake env overrides."""
+    max_bytes: int | None = None
+    if envs.VLLM_MOONCAKE_MAX_TRANSFER_BYTES > 0:
+        max_bytes = envs.VLLM_MOONCAKE_MAX_TRANSFER_BYTES
+    cfg_max = extra_config.get("max_transfer_bytes")
+    if cfg_max is not None:
+        max_bytes = int(cfg_max)
+
+    sync_after = envs.VLLM_MOONCAKE_SYNC_AFTER_TRANSFER
+    if "sync_after_transfer" in extra_config:
+        sync_after = bool(extra_config["sync_after_transfer"])
+
+    verify = envs.VLLM_MOONCAKE_VERIFY_TRANSFER_INTEGRITY
+    if "verify_transfer_integrity" in extra_config:
+        verify = bool(extra_config["verify_transfer_integrity"])
+    return max_bytes, sync_after, verify
 
 
 def _can_coalesce_block_transfers(
@@ -756,12 +826,25 @@ class MooncakeConnectorWorker:
         # Tasks can await async events, so a surplus (2x is a robust heuristic)
         # prevents workers from idling.
         self.num_sender_tasks = self.num_sender_workers * 2
-        protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
-            "mooncake_protocol", "rdma"
-        )
+        extra_config = kv_transfer_config.kv_connector_extra_config  # type: ignore[union-attr]
+        protocol = extra_config.get("mooncake_protocol", "rdma")
+        (
+            self._max_transfer_bytes,
+            self._sync_after_transfer,
+            self._verify_transfer_integrity,
+        ) = _resolve_mooncake_transfer_tuning(extra_config)
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
+        if self._max_transfer_bytes:
+            logger.info(
+                "MooncakeConnector will split transfer descriptors above %d bytes",
+                self._max_transfer_bytes,
+            )
+        if self._sync_after_transfer:
+            logger.info("MooncakeConnector sync_after_transfer is enabled")
+        if self._verify_transfer_integrity:
+            logger.info("MooncakeConnector verify_transfer_integrity is enabled")
         ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
@@ -1361,12 +1444,49 @@ class MooncakeConnectorWorker:
         dst_ptrs: list[int],
         lengths: list[int],
     ) -> int:
+        if self._max_transfer_bytes:
+            src_ptrs, dst_ptrs, lengths = split_transfer_descriptors(
+                src_ptrs, dst_ptrs, lengths, self._max_transfer_bytes
+            )
+
+        pre_hashes: list[bytes] | None = None
+        if self._verify_transfer_integrity:
+            try:
+                pre_hashes = [
+                    _digest_gpu_memory_region(src, length, self.device_id)
+                    for src, length in zip(src_ptrs, lengths)
+                ]
+            except Exception as e:
+                logger.error("Mooncake transfer integrity pre-hash failed: %s", e)
+                return -1
+
         start_time = time.perf_counter()
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
         )
         duration = time.perf_counter() - start_time
         if ret_value == 0:
+            if self._sync_after_transfer and torch.cuda.is_available():
+                torch.cuda.synchronize(device=self.device_id)
+            if pre_hashes is not None:
+                for idx, (src, length) in enumerate(zip(src_ptrs, lengths)):
+                    try:
+                        post_hash = _digest_gpu_memory_region(
+                            src, length, self.device_id
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Mooncake transfer integrity post-hash failed: %s", e
+                        )
+                        return -1
+                    if post_hash != pre_hashes[idx]:
+                        logger.error(
+                            "Mooncake source memory changed after transfer "
+                            "(descriptor_idx=%d length=%d)",
+                            idx,
+                            length,
+                        )
+                        return -1
             self.xfer_stats.record_transfer(
                 duration_s=duration,
                 total_bytes=sum(lengths),
@@ -1603,6 +1723,8 @@ class MooncakeConnectorWorker:
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
+            if self._sync_after_transfer and torch.cuda.is_available():
+                torch.cuda.synchronize(device=self.device_id)
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
         if response.err_reqs:

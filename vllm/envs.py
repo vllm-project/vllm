@@ -216,6 +216,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_MAX_TRANSFER_BYTES: int = 0
+    VLLM_MOONCAKE_SYNC_AFTER_TRANSFER: bool = False
+    VLLM_MOONCAKE_VERIFY_TRANSFER_INTEGRITY: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1591,6 +1594,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Split Mooncake transfer descriptors larger than this many bytes.
+    # Mitigates data-integrity issues with very large coalesced copies under
+    # concurrent PD load (vllm #42395). 0 disables splitting.
+    "VLLM_MOONCAKE_MAX_TRANSFER_BYTES": lambda: int(
+        os.getenv("VLLM_MOONCAKE_MAX_TRANSFER_BYTES", "0")
+    ),
+    # CUDA synchronize after each Mooncake batch transfer (producer and
+    # consumer). May reduce dst/src mismatches at the cost of throughput.
+    "VLLM_MOONCAKE_SYNC_AFTER_TRANSFER": lambda: (
+        os.getenv("VLLM_MOONCAKE_SYNC_AFTER_TRANSFER", "0").lower() in ("1", "true")
+    ),
+    # Hash GPU source regions before/after Mooncake writes (debug only).
+    "VLLM_MOONCAKE_VERIFY_TRANSFER_INTEGRITY": lambda: (
+        os.getenv("VLLM_MOONCAKE_VERIFY_TRANSFER_INTEGRITY", "0").lower()
+        in ("1", "true")
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.

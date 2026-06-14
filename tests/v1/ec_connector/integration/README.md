@@ -124,6 +124,18 @@ Quick sanity check:
 - Safe to run multiple times (idempotent)
 - We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/disaggregated/disaggregated_encoder/README.md`
 
+## ECMooncakeConnector (TransferEngine) smoke test
+
+Two-process transfer over Mooncake (no full vLLM serve, no HF model download):
+
+```bash
+cd vllm
+PYTHONPATH=. python tests/v1/ec_connector/integration/test_ec_mooncake_transfer_e2e.py
+```
+
+Requires: **2+ CUDA GPUs**, `mooncake-transfer-engine`, `pyzmq`, `httpx`, `fastapi`, `uvicorn`.
+Optional: `MOONCAKE_EC_PROTOCOL=rdma` or `=tcp` (default in test mocks is `tcp`) to match your cluster.
+
 ## Requirements
 
 - Multiple GPUs (3 for 1E+1P+1D, 2 for 1E+1PD, 1 for baseline)
