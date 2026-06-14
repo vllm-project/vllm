@@ -24,10 +24,10 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-#ifndef USE_ROCM
 torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
                                    torch::stable::Tensor const& perm);
 
+#ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
@@ -162,11 +162,12 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // AllSpark ops: declarations are in the source files
 // (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
-#endif
-
-// CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
+// TODO: Move this out once ROCm upgrade their torch to 2.11.
+// CPU tensor -> CUDA UVA view (shared CUDA)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
+
+#endif
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
@@ -402,35 +403,6 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
 
 void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
                   int64_t bit);
-
-// GGML kernels (shared CUDA/ROCm)
-torch::stable::Tensor ggml_dequantize(
-    torch::stable::Tensor W, int64_t type, int64_t m, int64_t n,
-    std::optional<torch::headeronly::ScalarType> const& dtype);
-
-torch::stable::Tensor ggml_mul_mat_vec_a8(torch::stable::Tensor W,
-                                          torch::stable::Tensor X, int64_t type,
-                                          int64_t row);
-
-torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,
-                                      torch::stable::Tensor X, int64_t type,
-                                      int64_t row);
-
-torch::stable::Tensor ggml_moe_a8(torch::stable::Tensor X,
-                                  torch::stable::Tensor W,
-                                  torch::stable::Tensor sorted_token_ids,
-                                  torch::stable::Tensor expert_ids,
-                                  torch::stable::Tensor num_tokens_post_padded,
-                                  int64_t type, int64_t row, int64_t top_k,
-                                  int64_t tokens);
-
-torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
-                                      torch::stable::Tensor W,
-                                      torch::stable::Tensor topk_ids,
-                                      int64_t top_k, int64_t type, int64_t row,
-                                      int64_t tokens);
-
-int64_t ggml_moe_get_block_size(int64_t type);
 
 void paged_attention_v1(
     torch::stable::Tensor& out, torch::stable::Tensor& query,

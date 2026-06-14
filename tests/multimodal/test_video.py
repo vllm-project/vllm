@@ -11,8 +11,11 @@ from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
+    GLM46VVideoBackend,
     Molmo2VideoBackend,
     VideoLoader,
+    VideoSourceMetadata,
+    VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
@@ -75,6 +78,11 @@ def test_video_loader_type_doesnt_exist():
             "zai-org/GLM-4.1V-9B-Thinking",
             DynamicVideoBackend,
             id="glm4v",
+        ),
+        pytest.param(
+            "zai-org/GLM-4.6V-Flash",
+            GLM46VVideoBackend,
+            id="glm46v",
         ),
     ],
 )
@@ -527,6 +535,20 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             60,
             id="pyav_dynamic-exceeds_max_duration",
         ),
+        # glm46v dynamic FPS (1800 frames @ 30fps = 60s)
+        # 60s falls in (30, 300] → target_fps=1.0, extract_t = 60*1.0*2 = 120
+        pytest.param(
+            "glm46v",
+            {"backend": "opencv"},
+            120,
+            id="glm46v-60s",
+        ),
+        pytest.param(
+            "glm46v",
+            {"backend": "pyav"},
+            120,
+            id="glm46v-pyav-60s",
+        ),
     ],
 )
 def test_video_loader_frames_sampling(
@@ -548,3 +570,114 @@ def test_video_loader_frames_sampling(
     assert frames.ndim == 4
     assert frames.shape[3] == 3  # RGB
     assert frames.shape[0] == expected_num_frames
+
+
+# ============================================================================
+# GLM-4.6V Dynamic FPS Threshold Tests
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "duration, original_fps, total_frames, temporal_patch_size, expected_extract_t",
+    [
+        # Short video ≤30s → target_fps=3.0
+        # extract_t = 10 * 3.0 * 2 = 60
+        pytest.param(10, 30, 300, 2, 60, id="short-10s"),
+        # Exactly at boundary → target_fps=3.0
+        # extract_t = 30 * 3.0 * 2 = 180
+        pytest.param(30, 30, 900, 2, 180, id="boundary-30s"),
+        # Medium video → target_fps=1.0
+        # extract_t = 60 * 1.0 * 2 = 120
+        pytest.param(60, 30, 1800, 2, 120, id="medium-60s"),
+        # Medium boundary → target_fps=1.0
+        # extract_t = 300 * 1.0 * 2 = 600
+        pytest.param(300, 30, 9000, 2, 600, id="boundary-300s"),
+        # Long video → target_fps=0.5
+        # extract_t = 600 * 0.5 * 2 = 600
+        pytest.param(600, 30, 18000, 2, 600, id="long-600s"),
+        # Very long video, capped by _MAX_FRAME_COUNT_DYNAMIC=640
+        # extract_t = min(2400 * 0.5 * 2, 640) = min(2400, 640) = 640
+        pytest.param(2400, 30, 72000, 2, 640, id="long-capped-640"),
+        # Duration exceeds _MAX_DURATION=2400
+        # effective_duration = min(5000, 2400) = 2400, target_fps=0.5
+        # extract_t = min(2400 * 0.5 * 2, 640) = 640
+        pytest.param(5000, 30, 150000, 2, 640, id="exceeds-max-duration"),
+        # temporal_patch_size=4
+        # extract_t = 60 * 1.0 * 4 = 240
+        pytest.param(60, 30, 1800, 4, 240, id="medium-patch-size-4"),
+        # temporal_patch_size=1
+        # extract_t = 60 * 1.0 * 1 = 60
+        pytest.param(60, 30, 1800, 1, 60, id="medium-patch-size-1"),
+    ],
+)
+def test_glm46v_dynamic_fps_thresholds(
+    duration: int,
+    original_fps: int,
+    total_frames: int,
+    temporal_patch_size: int,
+    expected_extract_t: int,
+):
+    """Test GLM-4.6V dynamic FPS threshold selection and frame count."""
+    source = VideoSourceMetadata(
+        total_frames_num=total_frames,
+        original_fps=original_fps,
+        duration=duration,
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+
+    indices = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source, target, temporal_patch_size=temporal_patch_size
+    )
+
+    # Frame count should match expected (may be +1 from even padding)
+    assert len(indices) in (expected_extract_t, expected_extract_t + 1), (
+        f"Expected ~{expected_extract_t} frames, got {len(indices)}"
+    )
+
+    # Frame count must be even
+    assert len(indices) % 2 == 0, f"Frame count must be even, got {len(indices)}"
+
+    # All indices must be valid
+    assert all(0 <= idx < total_frames for idx in indices), (
+        f"Indices out of range [0, {total_frames})"
+    )
+
+    # Indices must be sorted and deduplicated
+    assert indices == sorted(set(indices)), "Indices must be sorted and deduplicated"
+
+
+def test_glm46v_even_frame_count_enforcement():
+    """Test that GLM-4.6V always returns an even number of frames."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+    # 5-second video at 30fps → 150 frames
+    # extract_t = 5 * 3.0 * 2 = 30 (even, no padding needed)
+    source_even = VideoSourceMetadata(total_frames_num=150, original_fps=30, duration=5)
+    indices_even = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_even, target
+    )
+    assert len(indices_even) % 2 == 0
+
+    # 3-second video at 30fps → 90 frames
+    # extract_t = 3 * 3.0 * 2 = 18 (even, no padding needed)
+    source_even2 = VideoSourceMetadata(total_frames_num=90, original_fps=30, duration=3)
+    indices_even2 = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_even2, target
+    )
+    assert len(indices_even2) % 2 == 0
+
+
+def test_glm46v_duration_estimation_from_fps():
+    """Test GLM-4.6V handles missing duration by estimating from fps."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+    # duration=0 → estimated from total_frames / fps
+    # (89 / 30) + 1 ≈ 4s → target_fps=3.0, extract_t = 4 * 3.0 * 2 = 24
+    source_no_duration = VideoSourceMetadata(
+        total_frames_num=90, original_fps=30, duration=0
+    )
+    indices = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_no_duration, target
+    )
+
+    assert len(indices) > 0
+    assert len(indices) % 2 == 0
+    assert all(0 <= idx < 90 for idx in indices)
