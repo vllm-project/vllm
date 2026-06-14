@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator
 
@@ -13,10 +13,8 @@ DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 else:
-    LoadFormats = Any
     TensorizerConfig = Any
 
 logger = init_logger(__name__)
@@ -26,7 +24,7 @@ logger = init_logger(__name__)
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: str | LoadFormats = "auto"
+    load_format: str = "auto"
     """
     The format of the model weights to load.
 
@@ -59,7 +57,9 @@ class LoadConfig:
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str | None = None
+    safetensors_load_strategy: (
+        Literal["lazy", "eager", "prefetch", "torchao"] | None
+    ) = None
     """
     Specifies the loading strategy for safetensors weights.
 
