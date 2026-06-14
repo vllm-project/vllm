@@ -1,19 +1,140 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Software fp8e4nv (E4M3) <-> bf16 conversion for Triton kernels on pre-SM89.
+"""Software fp8e4m3 (E4M3FN / fp8e4nv) <-> bf16 conversion for Triton on pre-SM89.
 
-SM80/SM86 have no native fp8e4nv cast, so a Triton fp8 KV-cache store/load would
-emit an unsupported `cvt`. These helpers do the conversion explicitly via
-``tl.inline_asm_elementwise`` (PTX) inside the kernel, requiring NO change to
-triton-lang. Pack-4: element counts must be a multiple of 4.
-
-PTX lifted verbatim from the validated pack-4 routines (denorm-aware exact
-decoder; 2-ULP saturating encoder).
+SM80/SM86 have no native fp8e4nv cast; these helpers implement it explicitly via
+tl.inline_asm_elementwise (PTX), requiring NO change to triton-lang.
 """
+
+# ---------------------------------------------------------------------------
+# Encode: bf16 -> fp8e4m3  (write path — KV-cache store)
+#
+# Two variants; exactly one is wired into bf16_to_fp8e4m3:
+#
+#   TRUNC — truncation (round-toward-zero), 2-ULP error on normal values.
+#           ~24 PTX instructions per lane (pack-4: ~96 total per call).
+#
+#   RNE   — round-to-nearest-even, fully accurate for all bf16 inputs.
+#           Source: cudagym s8-bf16-to-fp8-e4m3/champion-1-inline4-rne.py.
+#           Adds 6 instructions per lane (~120 total per pack-4 call).
+#
+# Cost sensitivity: encode fires once per new KV position written — O(new_tokens)
+# per forward pass, NOT in the attention inner loop.  The ~25% extra instruction
+# count for RNE is negligible; RNE is the better default.
+#
+# To switch to TRUNC: comment out the RNE line below and uncomment TRUNC.
+#
+# ---------------------------------------------------------------------------
+# Decode: fp8e4m3 -> bf16  (read path — KV-cache load, inner attention loop)
+#
+# fp8->bf16 is an exact expansion; no rounding choice.  PRMT-as-LUT decoder
+# is exact for all 256 byte values (NaN bytes 0x7F/0xFF produce large-finite,
+# matching SM80 hardware behaviour).
+#
+# Cost sensitivity: fp8e4m3_to_bf16 runs inside kernel_unified_attention on
+# every KV tile load — O(seq_len^2 * num_kv_heads) per decode step (SASS inner
+# loop).  pack=4 is already 2x the native SM89 cvt width (2 elems/instruction);
+# pack=8 would double per-call throughput but doubles register pressure and
+# reduces occupancy — wrong tradeoff for an L2-bandwidth-bound inner loop.
+# ---------------------------------------------------------------------------
 
 from vllm.triton_utils import tl, triton
 
-_FP8E4NV_TO_BF16_ASM = "\n".join(
+
+def _lane_code_encode(i: int, *, rne: bool) -> str:
+    """PTX body for one bf16 lane of the bf16->fp8e4m3 encoder."""
+    if rne:
+        normal_round = f"""
+    add.u32  r{i}, m{i}, 8;
+    shr.u32  r{i}, r{i}, 4;"""
+        sub_round = f"""
+    sub.u32  sh2{i}, sh{i}, 1;
+    mov.u32  rnd{i}, 1;
+    shl.b32  rnd{i}, rnd{i}, sh2{i};
+    or.b32   tmp{i}, m{i}, 0x80;
+    add.u32  sub{i}, tmp{i}, rnd{i};
+    shr.u32  sub{i}, sub{i}, sh{i};"""
+    else:
+        normal_round = f"""
+    shr.u32  r{i}, m{i}, 4;"""
+        sub_round = f"""
+    or.b32   tmp{i}, m{i}, 0x80;
+    shr.u32  sub{i}, tmp{i}, sh{i};"""
+
+    return f"""
+    and.b32  a{i}, raw{i}, 0x7fff;
+    and.b32  sgn{i}, raw{i}, 0x8000;
+    shr.u32  sgn{i}, sgn{i}, 8;
+    shr.u32  e{i}, a{i}, 7;
+    and.b32  m{i}, a{i}, 0x7f;{normal_round}
+    sub.u32  norm{i}, e{i}, 120;
+    shl.b32  norm{i}, norm{i}, 3;
+    add.u32  norm{i}, norm{i}, r{i};
+    min.u32  norm{i}, norm{i}, 0x7e;
+    max.u32  ec{i}, e{i}, 117;
+    sub.u32  sh{i}, 125, ec{i};{sub_round}
+    min.u32  sub{i}, sub{i}, 8;
+    setp.lt.u32 p_tiny{i}, e{i}, 117;
+    selp.u32 sub{i}, 0, sub{i}, p_tiny{i};
+    setp.gt.u32 p_norm{i}, e{i}, 120;
+    selp.u32 o{i}, norm{i}, sub{i}, p_norm{i};
+    setp.ge.u32 p_hi{i}, a{i}, 0x43e0;
+    selp.u32 o{i}, 0x7e, o{i}, p_hi{i};
+    or.b32 o{i}, o{i}, sgn{i};
+"""
+
+
+def _make_encode_asm(*, rne: bool) -> str:
+    """Build the pack-4 bf16->fp8e4m3 PTX string (RNE or TRUNC variant)."""
+    regs = [
+        f"    .reg .u32 a{i}, e{i}, m{i}, r{i}, norm{i}, sub{i}, "
+        f"sh{i}, sh2{i}, rnd{i}, ec{i}, sgn{i}, tmp{i}, o{i};"
+        for i in range(4)
+    ]
+    preds = [f"    .reg .pred p_hi{i}, p_norm{i}, p_tiny{i};" for i in range(4)]
+    lanes = "".join(_lane_code_encode(i, rne=rne) for i in range(4))
+    return "\n".join(
+        [
+            "{",
+            "    .reg .u16 b<4>;",
+            "    .reg .u32 raw<4>;",
+            *regs,
+            "    .reg .u32 out;",
+            *preds,
+            "",
+            "    mov.b32 {b0, b1}, $1;",
+            "    mov.b32 {b2, b3}, $2;",
+            "    cvt.u32.u16 raw0, b0;",
+            "    cvt.u32.u16 raw1, b1;",
+            "    cvt.u32.u16 raw2, b2;",
+            "    cvt.u32.u16 raw3, b3;",
+            lanes,
+            "    shl.b32 o1, o1, 8;",
+            "    shl.b32 o2, o2, 16;",
+            "    shl.b32 o3, o3, 24;",
+            "    or.b32  out, o0, o1;",
+            "    or.b32  out, out, o2;",
+            "    or.b32  $0, out, o3;",
+            "}",
+        ]
+    )
+
+
+# Encode ASM variants — select one (the other is commented out).
+# RNE: fully accurate, ~120 PTX instructions per pack-4 call.
+# TRUNC: truncation / round-toward-zero, ~96 PTX instructions per pack-4 call.
+# Write path cost sensitivity is LOW (fires once per new KV token, not in the
+# inner loop); RNE preferred.
+_BF16_TO_FP8E4M3_RNE_ASM = _make_encode_asm(rne=True)  # fully accurate
+_BF16_TO_FP8E4M3_TRUNC_ASM = _make_encode_asm(rne=False)  # 2-ULP, faster
+
+# Wire in RNE (comment this line and uncomment the next to use TRUNC):
+_BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_RNE_ASM
+# _BF16_TO_FP8E4M3_ASM = _BF16_TO_FP8E4M3_TRUNC_ASM
+
+# Decode ASM — exact PRMT-as-LUT fp8e4m3→bf16 expansion (denorm-aware).
+# NaN byte values (0x7F, 0xFF) produce large-finite outputs matching SM80 hw.
+_FP8E4M3_TO_BF16_ASM = "\n".join(
     [
         "{",
         (
@@ -148,126 +269,16 @@ _FP8E4NV_TO_BF16_ASM = "\n".join(
     ]
 )
 
-_BF16_TO_FP8E4NV_ASM = "\n".join(
-    [
-        "{",
-        "    .reg .u16 b<4>;",
-        "    .reg .u32 raw<4>;",
-        "    .reg .u32 a0, e0, m0, r0, norm0, sub0, sh0, ec0, sgn0, tmp0, o0;",
-        "    .reg .u32 a1, e1, m1, r1, norm1, sub1, sh1, ec1, sgn1, tmp1, o1;",
-        "    .reg .u32 a2, e2, m2, r2, norm2, sub2, sh2, ec2, sgn2, tmp2, o2;",
-        "    .reg .u32 a3, e3, m3, r3, norm3, sub3, sh3, ec3, sgn3, tmp3, o3;",
-        "    .reg .u32 out;",
-        "    .reg .pred p_hi0, p_norm0;",
-        "    .reg .pred p_hi1, p_norm1;",
-        "    .reg .pred p_hi2, p_norm2;",
-        "    .reg .pred p_hi3, p_norm3;",
-        "",
-        "    mov.b32 {b0, b1}, $1;",
-        "    mov.b32 {b2, b3}, $2;",
-        "    cvt.u32.u16 raw0, b0;",
-        "    cvt.u32.u16 raw1, b1;",
-        "    cvt.u32.u16 raw2, b2;",
-        "    cvt.u32.u16 raw3, b3;",
-        "",
-        "    and.b32  a0, raw0, 0x7fff;",
-        "    and.b32  sgn0, raw0, 0x8000;",
-        "    shr.u32  sgn0, sgn0, 8;",
-        "    shr.u32  e0, a0, 7;",
-        "    and.b32  m0, a0, 0x7f;",
-        "    shr.u32  r0, m0, 4;",
-        "    sub.u32  norm0, e0, 120;",
-        "    shl.b32  norm0, norm0, 3;",
-        "    add.u32  norm0, norm0, r0;",
-        "    max.u32  ec0, e0, 117;",
-        "    sub.u32  sh0, 125, ec0;",
-        "    or.b32   tmp0, m0, 0x80;",
-        "    shr.u32  sub0, tmp0, sh0;",
-        "    setp.gt.u32 p_norm0, e0, 120;",
-        "    selp.u32 o0, norm0, sub0, p_norm0;",
-        "    setp.ge.u32 p_hi0, a0, 0x43e0;",
-        "    selp.u32 o0, 0x7e, o0, p_hi0;",
-        "    or.b32 o0, o0, sgn0;",
-        "",
-        "    and.b32  a1, raw1, 0x7fff;",
-        "    and.b32  sgn1, raw1, 0x8000;",
-        "    shr.u32  sgn1, sgn1, 8;",
-        "    shr.u32  e1, a1, 7;",
-        "    and.b32  m1, a1, 0x7f;",
-        "    shr.u32  r1, m1, 4;",
-        "    sub.u32  norm1, e1, 120;",
-        "    shl.b32  norm1, norm1, 3;",
-        "    add.u32  norm1, norm1, r1;",
-        "    max.u32  ec1, e1, 117;",
-        "    sub.u32  sh1, 125, ec1;",
-        "    or.b32   tmp1, m1, 0x80;",
-        "    shr.u32  sub1, tmp1, sh1;",
-        "    setp.gt.u32 p_norm1, e1, 120;",
-        "    selp.u32 o1, norm1, sub1, p_norm1;",
-        "    setp.ge.u32 p_hi1, a1, 0x43e0;",
-        "    selp.u32 o1, 0x7e, o1, p_hi1;",
-        "    or.b32 o1, o1, sgn1;",
-        "",
-        "    and.b32  a2, raw2, 0x7fff;",
-        "    and.b32  sgn2, raw2, 0x8000;",
-        "    shr.u32  sgn2, sgn2, 8;",
-        "    shr.u32  e2, a2, 7;",
-        "    and.b32  m2, a2, 0x7f;",
-        "    shr.u32  r2, m2, 4;",
-        "    sub.u32  norm2, e2, 120;",
-        "    shl.b32  norm2, norm2, 3;",
-        "    add.u32  norm2, norm2, r2;",
-        "    max.u32  ec2, e2, 117;",
-        "    sub.u32  sh2, 125, ec2;",
-        "    or.b32   tmp2, m2, 0x80;",
-        "    shr.u32  sub2, tmp2, sh2;",
-        "    setp.gt.u32 p_norm2, e2, 120;",
-        "    selp.u32 o2, norm2, sub2, p_norm2;",
-        "    setp.ge.u32 p_hi2, a2, 0x43e0;",
-        "    selp.u32 o2, 0x7e, o2, p_hi2;",
-        "    or.b32 o2, o2, sgn2;",
-        "",
-        "    and.b32  a3, raw3, 0x7fff;",
-        "    and.b32  sgn3, raw3, 0x8000;",
-        "    shr.u32  sgn3, sgn3, 8;",
-        "    shr.u32  e3, a3, 7;",
-        "    and.b32  m3, a3, 0x7f;",
-        "    shr.u32  r3, m3, 4;",
-        "    sub.u32  norm3, e3, 120;",
-        "    shl.b32  norm3, norm3, 3;",
-        "    add.u32  norm3, norm3, r3;",
-        "    max.u32  ec3, e3, 117;",
-        "    sub.u32  sh3, 125, ec3;",
-        "    or.b32   tmp3, m3, 0x80;",
-        "    shr.u32  sub3, tmp3, sh3;",
-        "    setp.gt.u32 p_norm3, e3, 120;",
-        "    selp.u32 o3, norm3, sub3, p_norm3;",
-        "    setp.ge.u32 p_hi3, a3, 0x43e0;",
-        "    selp.u32 o3, 0x7e, o3, p_hi3;",
-        "    or.b32 o3, o3, sgn3;",
-        "",
-        "    shl.b32 o1, o1, 8;",
-        "    shl.b32 o2, o2, 16;",
-        "    shl.b32 o3, o3, 24;",
-        "    or.b32  out, o0, o1;",
-        "    or.b32  out, out, o2;",
-        "    or.b32  $0, out, o3;",
-        "}",
-    ]
-)
-
-
-# Triton @jit functions may only reference globals that are constexpr, so wrap
-# the PTX strings (instantiation form, not annotation -- see Triton's NameError).
-_FP8E4NV_TO_BF16_ASM = tl.constexpr(_FP8E4NV_TO_BF16_ASM)
-_BF16_TO_FP8E4NV_ASM = tl.constexpr(_BF16_TO_FP8E4NV_ASM)
+# Triton @jit functions may only reference globals that are constexpr.
+_FP8E4M3_TO_BF16_ASM = tl.constexpr(_FP8E4M3_TO_BF16_ASM)
+_BF16_TO_FP8E4M3_ASM = tl.constexpr(_BF16_TO_FP8E4M3_ASM)
 
 
 @triton.jit
-def fp8e4nv_bits_to_bf16(x):
-    """4 packed uint8 fp8e4nv bytes -> 4 bf16 (pack-4)."""
+def fp8e4m3_to_bf16(x):
+    """4 packed uint8 fp8e4m3 bytes -> 4 bf16 (pack-4, exact PRMT-as-LUT)."""
     return tl.inline_asm_elementwise(
-        _FP8E4NV_TO_BF16_ASM,
+        _FP8E4M3_TO_BF16_ASM,
         "=r,=r,r",
         [x],
         dtype=tl.bfloat16,
@@ -277,10 +288,10 @@ def fp8e4nv_bits_to_bf16(x):
 
 
 @triton.jit
-def bf16_to_fp8e4nv_bits(x):
-    """4 bf16 -> 4 packed uint8 fp8e4nv bytes (pack-4, 2-ULP, saturating)."""
+def bf16_to_fp8e4m3(x):
+    """4 bf16 -> 4 packed uint8 fp8e4m3 bytes (pack-4, RNE by default)."""
     return tl.inline_asm_elementwise(
-        _BF16_TO_FP8E4NV_ASM,
+        _BF16_TO_FP8E4M3_ASM,
         "=r,r,r",
         [x],
         dtype=tl.uint8,
