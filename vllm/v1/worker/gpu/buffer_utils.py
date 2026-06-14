@@ -44,11 +44,15 @@ def async_copy_to_gpu(
 
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        if is_uva_available():
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        else:
+            # Fallback: no UVA, use regular CPU tensor
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = self.cpu
 
 
 class UvaBufferPool:
@@ -97,18 +101,31 @@ class UvaBackedTensor:
         max_concurrency: int | None = None,
     ):
         self.dtype = dtype
+        self._uva_available = is_uva_available()
 
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)
         self.np = self.cpu.numpy()
 
-        # Buffers for concurrency
-        self.pool = UvaBufferPool(size, dtype, max_concurrency)
-        self.gpu = self.pool.copy_to_uva(self.np)
+        self.pool: UvaBufferPool | None = None
+        if self._uva_available:
+            # Buffers for concurrency
+            self.pool = UvaBufferPool(size, dtype, max_concurrency)
+            self.gpu = self.pool.copy_to_uva(self.np)
+        else:
+            # Fallback: maintain a real GPU tensor, sync via normal H2D copy
+            self.gpu = torch.zeros(size, dtype=dtype, device="cuda")
 
     def copy_to_uva(self, n: int | None = None) -> torch.Tensor:
-        # CPU-to-CPU copy
-        self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        if self._uva_available:
+            assert self.pool is not None
+            # CPU-to-CPU copy
+            self.gpu = self.pool.copy_to_uva(self.np[:n] if n is not None else self.np)
+        else:
+            # Fallback: normal CPU-to-GPU copy
+            src = self.cpu if n is None else self.cpu[:n]
+            dst = self.gpu if n is None else self.gpu[:n]
+            dst.copy_(src, non_blocking=True)
         return self.gpu
 
 
