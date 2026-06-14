@@ -12,8 +12,54 @@ use vllm_text::{
 use super::pb;
 
 // ========================================================================================
+// Validation constants (mirror GPU sampler hard caps)
+// ========================================================================================
+
+/// Maximum `logprob_token_ids` per request (matches Python
+/// `MAX_LOGPROB_TOKEN_IDS` and GPU `LogprobTokenIdsState` row width).
+const MAX_LOGPROB_TOKEN_IDS: usize = 128;
+
+/// Maximum `allowed_token_ids` per request (matches GPU
+/// `MAX_NUM_ALLOWED_TOKEN_IDS`).
+const MAX_NUM_ALLOWED_TOKEN_IDS: usize = 1024;
+
+/// Maximum `logit_bias` entries per request (matches GPU
+/// `MAX_NUM_LOGIT_BIAS_TOKENS`).
+const MAX_NUM_LOGIT_BIAS_TOKENS: usize = 1024;
+
+/// Maximum `stop_token_ids` per request (matches GPU
+/// `MAX_NUM_STOP_TOKEN_IDS` and Python `VLLM_MAX_STOP_TOKEN_IDS` default).
+const MAX_NUM_STOP_TOKEN_IDS: usize = 128;
+
+// ========================================================================================
 // Request conversion
 // ========================================================================================
+
+/// Vocabulary and configuration bounds used to validate gRPC request fields
+/// before they reach the engine.
+pub struct ValidationBounds {
+    pub tokenizer_vocab_size: usize,
+    pub model_vocab_size: Option<usize>,
+    pub max_logprobs: i32,
+}
+
+impl ValidationBounds {
+    /// Upper bound for token IDs that the engine embedding table can accept:
+    /// `max(tokenizer_vocab_size, model_vocab_size)`.
+    fn prompt_token_bound(&self) -> usize {
+        self.tokenizer_vocab_size.max(self.model_vocab_size.unwrap_or(0))
+    }
+
+    /// Effective max logprobs count after resolving `-1` (unlimited) to
+    /// `model_vocab_size`.
+    fn effective_max_logprobs(&self) -> i32 {
+        if self.max_logprobs == -1 {
+            self.model_vocab_size.unwrap_or(usize::MAX) as i32
+        } else {
+            self.max_logprobs
+        }
+    }
+}
 
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
@@ -24,6 +70,7 @@ pub fn to_text_request(
     req: pb::GenerateRequest,
     stream: bool,
     served_model_names: &[String],
+    bounds: &ValidationBounds,
 ) -> Result<TextRequest, Status> {
     if !req.model.is_empty() && !served_model_names.iter().any(|n| n == &req.model) {
         return Err(Status::not_found(format!(
@@ -40,7 +87,10 @@ pub fn to_text_request(
 
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
-        Some(pb::generate_request::Prompt::TokenIds(ids)) => Prompt::TokenIds(ids.ids),
+        Some(pb::generate_request::Prompt::TokenIds(ids)) => {
+            validate_prompt_token_ids(&ids.ids, bounds)?;
+            Prompt::TokenIds(ids.ids)
+        }
         None => return Err(Status::invalid_argument("prompt is required")),
     };
 
@@ -56,8 +106,14 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
-    let mut sampling_params =
-        build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    let mut sampling_params = build_sampling_params(
+        req.temperature,
+        sampling,
+        decoding,
+        stopping,
+        response,
+        bounds,
+    )?;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -101,6 +157,7 @@ fn build_sampling_params(
     decoding: Option<&pb::DecodingParameters>,
     stopping: Option<&pb::StoppingCriteria>,
     response: Option<&pb::ResponseOptions>,
+    bounds: &ValidationBounds,
 ) -> Result<SamplingParams, Status> {
     // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
     // the gRPC API when the caller does not specify a value. This differs from
@@ -149,9 +206,11 @@ fn build_sampling_params(
             params.repetition_penalty = Some(d.repetition_penalty);
         }
         if !d.logit_bias.is_empty() {
+            validate_logit_bias(&d.logit_bias, bounds)?;
             params.logit_bias = Some(d.logit_bias.clone());
         }
         if !d.allowed_token_ids.is_empty() {
+            validate_allowed_token_ids(&d.allowed_token_ids, bounds)?;
             params.allowed_token_ids = Some(d.allowed_token_ids.clone());
         }
         params.structured_outputs = convert_structured_output(d)?;
@@ -166,6 +225,7 @@ fn build_sampling_params(
             params.min_tokens = Some(s.min_new_tokens);
         }
         if !s.stop_token_ids.is_empty() {
+            validate_stop_token_ids(&s.stop_token_ids, bounds)?;
             params.stop_token_ids = Some(s.stop_token_ids.clone());
         }
         params.ignore_eos = s.ignore_eos;
@@ -174,7 +234,8 @@ fn build_sampling_params(
     // ResponseOptions → logprobs
     if let Some(r) = response {
         if r.output_logprobs {
-            let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
+            let (count, token_ids) =
+                validated_candidate_logprob_spec(r.output_candidates.as_ref(), bounds)?;
             params.logprobs = Some(count);
             params.logprob_token_ids = token_ids;
         }
@@ -191,7 +252,8 @@ fn build_sampling_params(
                     "prompt_candidates token_ids selector is not supported",
                 ));
             }
-            let (count, _) = candidate_logprob_spec(r.prompt_candidates.as_ref());
+            let (count, _) =
+                validated_candidate_logprob_spec(r.prompt_candidates.as_ref(), bounds)?;
             params.prompt_logprobs = Some(count);
         }
     }
@@ -199,21 +261,120 @@ fn build_sampling_params(
     Ok(params)
 }
 
+// ========================================================================================
+// Input validation helpers
+// ========================================================================================
+
+fn validate_prompt_token_ids(ids: &[u32], bounds: &ValidationBounds) -> Result<(), Status> {
+    let bound = bounds.prompt_token_bound();
+    if let Some(&bad) = ids.iter().find(|&&id| id as usize >= bound) {
+        return Err(Status::invalid_argument(format!(
+            "prompt contains out-of-vocab token id {bad}; vocabulary size is {bound}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stop_token_ids(ids: &[u32], bounds: &ValidationBounds) -> Result<(), Status> {
+    if ids.len() > MAX_NUM_STOP_TOKEN_IDS {
+        return Err(Status::invalid_argument(format!(
+            "stop_token_ids has {} entries; maximum is {MAX_NUM_STOP_TOKEN_IDS}",
+            ids.len()
+        )));
+    }
+    let bound = bounds.prompt_token_bound();
+    if let Some(&bad) = ids.iter().find(|&&id| id as usize >= bound) {
+        return Err(Status::invalid_argument(format!(
+            "stop_token_ids contains out-of-vocab token id {bad}; vocabulary size is {bound}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_allowed_token_ids(ids: &[u32], bounds: &ValidationBounds) -> Result<(), Status> {
+    if ids.len() > MAX_NUM_ALLOWED_TOKEN_IDS {
+        return Err(Status::invalid_argument(format!(
+            "allowed_token_ids has {} entries; maximum is {MAX_NUM_ALLOWED_TOKEN_IDS}",
+            ids.len()
+        )));
+    }
+    let bound = bounds.tokenizer_vocab_size;
+    if let Some(&bad) = ids.iter().find(|&&id| id as usize >= bound) {
+        return Err(Status::invalid_argument(format!(
+            "allowed_token_ids contains out-of-vocab token id {bad}; vocabulary size is {bound}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_logit_bias(
+    bias: &std::collections::HashMap<u32, f32>,
+    bounds: &ValidationBounds,
+) -> Result<(), Status> {
+    if bias.len() > MAX_NUM_LOGIT_BIAS_TOKENS {
+        return Err(Status::invalid_argument(format!(
+            "logit_bias has {} entries; maximum is {MAX_NUM_LOGIT_BIAS_TOKENS}",
+            bias.len()
+        )));
+    }
+    if let Some(model_vocab) = bounds.model_vocab_size
+        && let Some(&bad) = bias.keys().find(|&&id| id as usize >= model_vocab)
+    {
+        return Err(Status::invalid_argument(format!(
+            "logit_bias contains out-of-vocab token id {bad}; vocabulary size is {model_vocab}"
+        )));
+    }
+    Ok(())
+}
+
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
-/// logprob_token_ids)` pair.
+/// logprob_token_ids)` pair, validating counts and token IDs.
 ///
 /// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
 /// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
-///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
-///   are carried via `logprob_token_ids` on `SamplingParams`)
+/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens
 /// - absent → `(1, None)` — just the sampled/scored token
-fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
+fn validated_candidate_logprob_spec(
+    candidates: Option<&pb::CandidateTokens>,
+    bounds: &ValidationBounds,
+) -> Result<(i32, Option<Vec<u32>>), Status> {
     match candidates.and_then(|c| c.select.as_ref()) {
-        Some(pb::candidate_tokens::Select::TopN(n)) => (*n as i32, None),
-        Some(pb::candidate_tokens::Select::All(true)) => (-1, None),
-        Some(pb::candidate_tokens::Select::TokenIds(ids)) => (1, Some(ids.ids.clone())),
-        _ => (1, None),
+        Some(pb::candidate_tokens::Select::TopN(n)) => {
+            let n = *n;
+            // Guard the u32 → i32 cast: values above i32::MAX would wrap negative.
+            if n > i32::MAX as u32 {
+                return Err(Status::invalid_argument(format!(
+                    "top_n value {n} overflows signed 32-bit integer"
+                )));
+            }
+            let count = n as i32;
+            let max = bounds.effective_max_logprobs();
+            if count > max {
+                return Err(Status::invalid_argument(format!(
+                    "top_n ({count}) exceeds max_logprobs ({max})"
+                )));
+            }
+            Ok((count, None))
+        }
+        Some(pb::candidate_tokens::Select::All(true)) => Ok((-1, None)),
+        Some(pb::candidate_tokens::Select::TokenIds(ids)) => {
+            if ids.ids.len() > MAX_LOGPROB_TOKEN_IDS {
+                return Err(Status::invalid_argument(format!(
+                    "logprob_token_ids has {} entries; maximum is {MAX_LOGPROB_TOKEN_IDS}",
+                    ids.ids.len()
+                )));
+            }
+            if let Some(model_vocab) = bounds.model_vocab_size
+                && let Some(&bad) = ids.ids.iter().find(|&&id| id as usize >= model_vocab)
+            {
+                return Err(Status::invalid_argument(format!(
+                    "logprob_token_ids contains out-of-vocab token id {bad}; \
+                     vocabulary size is {model_vocab}"
+                )));
+            }
+            Ok((1, Some(ids.ids.clone())))
+        }
+        _ => Ok((1, None)),
     }
 }
 
@@ -505,7 +666,19 @@ mod tests {
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
+    use super::{
+        MAX_LOGPROB_TOKEN_IDS, MAX_NUM_ALLOWED_TOKEN_IDS, MAX_NUM_LOGIT_BIAS_TOKENS,
+        MAX_NUM_STOP_TOKEN_IDS, ResponseOpts, ValidationBounds, pb, to_finish_info,
+        to_sequence_output, to_text_request,
+    };
+
+    fn default_bounds() -> ValidationBounds {
+        ValidationBounds {
+            tokenizer_vocab_size: 32000,
+            model_vocab_size: Some(32000),
+            max_logprobs: 20,
+        }
+    }
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -516,21 +689,24 @@ mod tests {
         }
     }
 
+    fn served() -> Vec<String> {
+        vec!["test-model".to_string()]
+    }
+
     #[test]
     fn temperature_propagates_from_top_level_request_field() {
         let req = pb::GenerateRequest {
             temperature: Some(0.7),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("convert ok");
         assert_eq!(text.sampling_params.temperature, Some(0.7));
     }
 
     #[test]
     fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &["test-model".to_string()])
+        let text = to_text_request(base_request(), false, &served(), &default_bounds())
             .expect("convert ok");
-        // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
     }
 
@@ -543,7 +719,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, None);
     }
 
@@ -556,7 +732,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
     }
 
@@ -569,7 +745,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(true));
     }
 
@@ -582,11 +758,263 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
-        // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
     }
+
+    // ---- Validation tests ----
+
+    #[test]
+    fn rejects_out_of_vocab_prompt_token_ids() {
+        let req = pb::GenerateRequest {
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![5, 99999],
+            })),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("out-of-vocab"));
+        assert!(err.message().contains("99999"));
+    }
+
+    #[test]
+    fn accepts_in_vocab_prompt_token_ids() {
+        let req = pb::GenerateRequest {
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![0, 100, 31999],
+            })),
+            ..base_request()
+        };
+        assert!(to_text_request(req, false, &served(), &default_bounds()).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_stop_token_ids() {
+        let ids: Vec<u32> = (0..MAX_NUM_STOP_TOKEN_IDS as u32 + 1).collect();
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                stop_token_ids: ids,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("stop_token_ids"));
+        assert!(err.message().contains("maximum"));
+    }
+
+    #[test]
+    fn rejects_out_of_vocab_stop_token_ids() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                stop_token_ids: vec![5, 99999],
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("stop_token_ids"));
+        assert!(err.message().contains("out-of-vocab"));
+    }
+
+    #[test]
+    fn accepts_valid_stop_token_ids() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                stop_token_ids: vec![5, 100],
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        assert!(to_text_request(req, false, &served(), &default_bounds()).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_allowed_token_ids() {
+        let ids: Vec<u32> = (0..MAX_NUM_ALLOWED_TOKEN_IDS as u32 + 1).collect();
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                allowed_token_ids: ids,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("allowed_token_ids"));
+    }
+
+    #[test]
+    fn rejects_out_of_vocab_allowed_token_ids() {
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                allowed_token_ids: vec![5, 99999],
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("allowed_token_ids"));
+        assert!(err.message().contains("out-of-vocab"));
+    }
+
+    #[test]
+    fn rejects_oversized_logit_bias() {
+        let bias: std::collections::HashMap<u32, f32> =
+            (0..MAX_NUM_LOGIT_BIAS_TOKENS as u32 + 1).map(|i| (i, 1.0)).collect();
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                logit_bias: bias,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("logit_bias"));
+    }
+
+    #[test]
+    fn rejects_out_of_vocab_logit_bias() {
+        let bias = std::collections::HashMap::from([(99999_u32, 1.0)]);
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                logit_bias: bias,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("logit_bias"));
+        assert!(err.message().contains("out-of-vocab"));
+    }
+
+    #[test]
+    fn rejects_top_n_exceeding_max_logprobs() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(100)),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("top_n"));
+        assert!(err.message().contains("max_logprobs"));
+    }
+
+    #[test]
+    fn rejects_top_n_u32_max_overflow() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(u32::MAX)),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("overflows"));
+    }
+
+    #[test]
+    fn accepts_top_n_within_max_logprobs() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(5)),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        assert!(to_text_request(req, false, &served(), &default_bounds()).is_ok());
+    }
+
+    #[test]
+    fn rejects_oversized_logprob_token_ids() {
+        let ids: Vec<u32> = (0..MAX_LOGPROB_TOKEN_IDS as u32 + 1).collect();
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TokenIds(pb::TokenIds { ids })),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("logprob_token_ids"));
+    }
+
+    #[test]
+    fn rejects_out_of_vocab_logprob_token_ids() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TokenIds(pb::TokenIds {
+                        ids: vec![5, 99999],
+                    })),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &served(), &default_bounds()).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("logprob_token_ids"));
+        assert!(err.message().contains("out-of-vocab"));
+    }
+
+    #[test]
+    fn valid_request_passes_through_unchanged() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                stop_token_ids: vec![1, 2],
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            decoding: Some(pb::DecodingParameters {
+                allowed_token_ids: vec![10, 20, 30],
+                logit_bias: std::collections::HashMap::from([(5_u32, 1.0)]),
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(5)),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &served(), &default_bounds()).expect("should pass");
+        assert_eq!(text.sampling_params.stop_token_ids, Some(vec![1, 2]));
+        assert_eq!(
+            text.sampling_params.allowed_token_ids,
+            Some(vec![10, 20, 30])
+        );
+        assert_eq!(text.sampling_params.logprobs, Some(5));
+    }
+
+    // ---- Response conversion tests (unchanged) ----
 
     fn finished(reason: FinishReason) -> Finished {
         Finished {
@@ -624,8 +1052,6 @@ mod tests {
     #[test]
     fn explicit_stop_token_id_is_preserved() {
         let fin = finished(FinishReason::Stop(Some(StopReason::TokenId(42))));
-        // Terminal token list should be ignored when an explicit stop reason is
-        // present.
         let info = to_finish_info(&fin, &[7, 42]);
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);

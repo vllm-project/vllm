@@ -150,6 +150,11 @@ impl ChatLlm {
         self.text.model_vocab_size()
     }
 
+    /// Maximum number of logprobs a single request may ask for.
+    pub fn max_logprobs(&self) -> i32 {
+        self.text.max_logprobs()
+    }
+
     /// Expose the underlying text facade for raw text-generation routes such as
     /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {

@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 use vllm_text::{DecodedTextEvent, TextOutputStreamExt as _};
 
-use self::convert::ResponseOpts;
+use self::convert::{ResponseOpts, ValidationBounds};
 use crate::state::AppState;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
@@ -35,6 +35,14 @@ impl GenerateServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }
+
+    fn validation_bounds(&self) -> ValidationBounds {
+        ValidationBounds {
+            tokenizer_vocab_size: self.state.tokenizer_vocab_size(),
+            model_vocab_size: self.state.model_vocab_size(),
+            max_logprobs: self.state.max_logprobs(),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -49,8 +57,9 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+        let bounds = self.validation_bounds();
         let text_request =
-            convert::to_text_request(proto_req, false, self.state.served_model_names())?;
+            convert::to_text_request(proto_req, false, self.state.served_model_names(), &bounds)?;
 
         let request_id = text_request.request_id.clone();
         info!(%request_id, "grpc generate (unary)");
@@ -97,8 +106,9 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+        let bounds = self.validation_bounds();
         let text_request =
-            convert::to_text_request(proto_req, true, self.state.served_model_names())?;
+            convert::to_text_request(proto_req, true, self.state.served_model_names(), &bounds)?;
 
         let request_id = text_request.request_id.clone();
         info!(%request_id, "grpc generate (stream)");

@@ -103,6 +103,11 @@ impl TextLlm {
         self.backend.model_vocab_size()
     }
 
+    /// Maximum number of logprobs a single request may ask for.
+    pub fn max_logprobs(&self) -> i32 {
+        self.backend.max_logprobs()
+    }
+
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {

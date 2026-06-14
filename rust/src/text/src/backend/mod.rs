@@ -53,7 +53,18 @@ pub trait TextBackend: Send + Sync {
     fn tokenizer_vocab_size(&self) -> usize {
         self.tokenizer().vocab_size()
     }
+
+    /// Maximum number of logprobs a single request may ask for.
+    ///
+    /// Mirrors Python `model_config.max_logprobs` (default 20, CLI
+    /// `--max-logprobs`). `-1` means no cap (allows up to `vocab_size`).
+    fn max_logprobs(&self) -> i32 {
+        DEFAULT_MAX_LOGPROBS
+    }
 }
+
+/// Default `max_logprobs` cap matching the Python `ModelConfig` default.
+pub const DEFAULT_MAX_LOGPROBS: i32 = 20;
 
 /// Shared trait-object form of [`TextBackend`].
 pub type DynTextBackend = Arc<dyn TextBackend>;

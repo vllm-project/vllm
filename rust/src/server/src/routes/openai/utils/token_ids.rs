@@ -34,6 +34,22 @@ pub(crate) fn validate_allowed_token_ids(
     Ok(())
 }
 
+/// Reject `stop_token_ids` entries at or above `bound`.
+pub(crate) fn validate_stop_token_ids(
+    stop_token_ids: Option<&[u32]>,
+    bound: usize,
+) -> Result<(), ApiError> {
+    if let Some(ids) = stop_token_ids
+        && let Some(&bad) = ids.iter().find(|&&id| id as usize >= bound)
+    {
+        bail_invalid_request!(
+            param = "stop_token_ids",
+            "stop_token_ids contains out-of-vocab token id {bad}; vocabulary size is {bound}."
+        );
+    }
+    Ok(())
+}
+
 /// Reject `logit_bias` keys at or above `bound`.
 pub(crate) fn validate_logit_bias(
     logit_bias: Option<&HashMap<String, f32>>,
