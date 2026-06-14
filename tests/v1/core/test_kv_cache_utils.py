@@ -534,9 +534,9 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # salt is added for the first token
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
 
     # no salt added for other tokens
     extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
@@ -557,7 +557,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), "salt")
+    assert extra_keys == (("hash1", 0), ("cache_salt", "salt"))
     assert next_mm_idx == 1
 
 
@@ -645,11 +645,37 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == (("lora", "test_lora_adapter"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys is None
+
+
+def test_generate_block_hash_extra_keys_lora_cache_salt_no_collision():
+    """A LoRA adapter name must not collide with an identically valued
+    ``cache_salt`` from a base-model request (see issue #44701)."""
+    shared = "COLLIDE"
+
+    lora_request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+    )
+    lora_request.lora_request = LoRARequest(
+        lora_name=shared, lora_int_id=1, lora_path="/path/to/lora"
+    )
+    lora_keys, _ = generate_block_hash_extra_keys(lora_request, 0, 3, 0)
+
+    salt_request = make_request(
+        request_id="1",
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=None,
+        mm_hashes=None,
+        cache_salt=shared,
+    )
+    salt_keys, _ = generate_block_hash_extra_keys(salt_request, 0, 3, 0)
+
+    assert lora_keys != salt_keys
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
