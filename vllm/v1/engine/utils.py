@@ -42,6 +42,17 @@ logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
 
+# Emitted once per process when something other than a valid engine handshake
+# message hits the DP handshake port (e.g. a k8s liveness probe). Defined at
+# module scope so logger.warning_once dedupes across the different branches
+# that spot this in wait_for_engine_startup.
+_INVALID_HANDSHAKE_TRAFFIC_MSG = (
+    "Received invalid traffic on the DP handshake port "
+    "(suppressing further warnings; enable DEBUG for per-packet detail). "
+    "This usually means a health check or unrelated service is polling the "
+    "port."
+)
+
 
 class CoreEngineState(Enum):
     NEW = auto()
@@ -1253,13 +1264,42 @@ def wait_for_engine_startup(
             )
 
         # Receive HELLO and READY messages from the input socket.
-        eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        # The handshake port may receive non-engine traffic (e.g. HTTP
+        # health checks or metrics scrapers in K8s).  Rather than
+        # crashing, log the unexpected frame and keep waiting. A k8s
+        # liveness probe polling this port would otherwise spam the logs,
+        # so we surface one WARNING for each invalid-traffic path and keep
+        # the per-packet detail at DEBUG.
+        try:
+            frames = handshake_socket.recv_multipart()
+        except zmq.ZMQError as exc:
+            logger.warning_once(_INVALID_HANDSHAKE_TRAFFIC_MSG)
+            logger.debug(
+                "ZMQ recv error on handshake port: %s (errno=%s, type=%s)",
+                exc,
+                getattr(exc, "errno", None),
+                type(exc).__name__,
+            )
+            continue
+        if len(frames) != 2:
+            logger.warning_once(_INVALID_HANDSHAKE_TRAFFIC_MSG)
+            logger.debug(
+                "Ignoring malformed message with %d frame(s) on "
+                "handshake port (expected 2).",
+                len(frames),
+            )
+            continue
+        eng_identity, ready_msg_bytes = frames
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
-            raise RuntimeError(
-                f"Message from engine with unexpected data parallel rank: {eng_index}"
+            logger.warning_once(_INVALID_HANDSHAKE_TRAFFIC_MSG)
+            logger.debug(
+                "Ignoring message from unknown identity on handshake "
+                "port (identity %d bytes).",
+                len(eng_identity),
             )
+            continue
         msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
