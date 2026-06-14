@@ -269,12 +269,13 @@ class TestCudagraphDispatcher:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.device_type(DEVICE_TYPE)
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
-        self.model = SimpleMLP().to(DEVICE_TYPE)
-        self.persistent_input_buffer = torch.zeros(1, 10, device=DEVICE_TYPE)
-        self.input_tensor = torch.randn(1, 10, device=DEVICE_TYPE)
+        self.model = SimpleMLP()
+        self.persistent_input_buffer = torch.zeros(1, 10)
+        self.input_tensor = torch.randn(1, 10)
 
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
