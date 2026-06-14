@@ -44,6 +44,27 @@ steps:
         VLLM_XPU_FUSED_MOE_USE_REF=1 python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --enforce-eager -tp 2 --max-model-len 8192 &&
         python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
+  - label: "XPU W8A8 FP8 Linear Examples"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    device: intel_gpu
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL=1 ZE_AFFINITY_MASK=0 python3 examples/basic/offline_inference/generate.py --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --dtype bfloat16 --block-size 64 --gpu-memory-utilization 0.9 --enforce-eager --max-model-len 4096 &&
+        VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL=1 ZE_AFFINITY_MASK=0,1 python3 examples/basic/offline_inference/generate.py --model RedHatAI/Qwen3-32B-FP8-dynamic --dtype bfloat16 -tp 2 --block-size 64 --gpu-memory-utilization 0.9 --enforce-eager --max-model-len 4096 &&
+        VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL=1 ZE_AFFINITY_MASK=0 python3 examples/basic/offline_inference/generate.py --model neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic --dtype bfloat16 --block-size 64 --gpu-memory-utilization 0.9 --enforce-eager --max-model-len 4096 &&
+        VLLM_XPU_USE_W8A8_FP8_LINEAR_KERNEL=1 ZE_AFFINITY_MASK=0 python3 examples/basic/offline_inference/generate.py --model meta-llama/Llama-3.2-1B-Instruct --dtype bfloat16 --quantization fp8 --block-size 64 --gpu-memory-utilization 0.9 --enforce-eager --max-model-len 4096
+        '
   - label: "XPU V1 test"
     depends_on:
       - image-build-xpu
