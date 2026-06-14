@@ -7,7 +7,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm import PoolingParams, SamplingParams
+from vllm.pooling_params import PoolingParams
+from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import (
     CachedRequestData,

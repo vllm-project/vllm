@@ -15,8 +15,8 @@ from typing import Literal, TypeAlias
 import pybase64 as base64
 from pydantic import BaseModel, Field
 
-from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from ..base.protocol import (

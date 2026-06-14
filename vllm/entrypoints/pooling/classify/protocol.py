@@ -6,9 +6,9 @@ from typing import TypeAlias
 
 from pydantic import Field
 
-from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.logger import init_logger
+from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from ..base.protocol import (
