@@ -258,3 +258,128 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_should_advance_with_new_token_ids_detects_end(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """new_token_ids parameter is used as delta instead of index arithmetic.
+
+        Regression test for MTP speculative decoding: when a spec token is
+        accepted, num_computed_tokens is pre-incremented past the main token,
+        making the index-based delta skip </think>.  Passing new_token_ids
+        directly bypasses that off-by-one.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        # Configure the reasoner to return True only when the delta contains
+        # the synthetic </think> token id (999).
+        THINK_END_ID = 999
+
+        class EndTokenReasoner:
+            def __init__(self, tokenizer):
+                pass
+
+            def is_reasoning_end(self, input_ids):
+                return False
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return THINK_END_ID in list(delta_ids)
+
+        manager_with_reasoner.reasoner_cls = EndTokenReasoner
+        structured_req.reasoner = None  # force lazy rebuild
+
+        # Simulate MTP: num_computed_tokens has been pre-incremented past the
+        # main token so the index-based delta would be [spec_token], not
+        # [think_end, spec_token].  new_token_ids carries both tokens correctly.
+        all_tokens = list(range(10)) + [THINK_END_ID, 42]  # think_end at -2
+        mock_request_with_structured_output.all_token_ids = all_tokens
+        # Index-based delta would start here (past think_end):
+        mock_request_with_structured_output.num_computed_tokens = len(all_tokens) - 1
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        new_token_ids = [THINK_END_ID, 42]  # main=think_end, spec=42
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids
+        )
+
+        # reasoning_ended must be set and advance deferred until next step
+        assert structured_req.reasoning_ended is True
+        assert result is False
+
+    def test_should_advance_new_token_ids_no_end_token(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When new_token_ids does not contain </think>, reasoning stays open."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        THINK_END_ID = 999
+
+        class EndTokenReasoner:
+            def __init__(self, tokenizer):
+                pass
+
+            def is_reasoning_end(self, input_ids):
+                return False
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return THINK_END_ID in list(delta_ids)
+
+        manager_with_reasoner.reasoner_cls = EndTokenReasoner
+        structured_req.reasoner = None
+
+        mock_request_with_structured_output.all_token_ids = list(range(10))
+        mock_request_with_structured_output.num_computed_tokens = 10
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, new_token_ids=[7, 8]
+        )
+
+        assert structured_req.reasoning_ended is False
+        assert result is False
+
+    def test_should_advance_fallback_delta_without_new_token_ids(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Without new_token_ids, the index-based delta is used (existing path)."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        THINK_END_ID = 999
+
+        class EndTokenReasoner:
+            def __init__(self, tokenizer):
+                pass
+
+            def is_reasoning_end(self, input_ids):
+                return False
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return THINK_END_ID in list(delta_ids)
+
+        manager_with_reasoner.reasoner_cls = EndTokenReasoner
+        structured_req.reasoner = None
+
+        # Place think_end exactly where the index-based delta would start.
+        all_tokens = list(range(5)) + [THINK_END_ID]
+        mock_request_with_structured_output.all_token_ids = all_tokens
+        # delta_from = num_computed_tokens - num_output_placeholders = 5 - 0 = 5
+        # all_token_ids[5:] = [THINK_END_ID]
+        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output  # no new_token_ids
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is False
