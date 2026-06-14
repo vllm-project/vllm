@@ -255,14 +255,16 @@ def test_producer_alloc_succeeds_when_pool_has_space(producer):
 
 def test_producer_alloc_evicts_oldest_unpinned(producer):
     region = producer._memory_context.region
-    producer._producer._local_encodings["old"] = region.alloc(4)
-    producer._producer._local_encodings["new"] = region.alloc(4)
+    producer._blocks["old"] = region.alloc(4)
+    producer._local_encodings["old"] = None
+    producer._blocks["new"] = region.alloc(4)
+    producer._local_encodings["new"] = None
 
     result = producer._producer._fifo_alloc(3)
 
     assert len(result) == 3
-    assert "old" not in producer._producer._local_encodings
-    assert "new" in producer._producer._local_encodings
+    assert "old" not in producer._local_encodings
+    assert "new" in producer._local_encodings
 
 
 def test_producer_alloc_skips_pinned_blocks(producer):
@@ -270,14 +272,16 @@ def test_producer_alloc_skips_pinned_blocks(producer):
     pinned = region.alloc(4)
     not_pinned = region.alloc(4)
     region.pin(pinned)
-    producer._producer._local_encodings["pinned"] = pinned
-    producer._producer._local_encodings["not_pinned"] = not_pinned
+    producer._blocks["pinned"] = pinned
+    producer._local_encodings["pinned"] = None
+    producer._blocks["not_pinned"] = not_pinned
+    producer._local_encodings["not_pinned"] = None
 
     result = producer._producer._fifo_alloc(3)
 
     assert len(result) == 3
-    assert "pinned" in producer._producer._local_encodings
-    assert "not_pinned" not in producer._producer._local_encodings
+    assert "pinned" in producer._local_encodings
+    assert "not_pinned" not in producer._local_encodings
     region.unpin(pinned)
 
 
@@ -285,7 +289,8 @@ def test_producer_alloc_raises_when_all_encodings_pinned(producer):
     region = producer._memory_context.region
     all_idx = region.alloc(_NUM_BLOCKS)
     region.pin(all_idx)
-    producer._producer._local_encodings["only"] = all_idx
+    producer._blocks["only"] = all_idx
+    producer._local_encodings["only"] = None
     with pytest.raises(AllocationError):
         producer._producer._fifo_alloc(1)
     region.unpin(all_idx)
@@ -305,11 +310,12 @@ def test_producer_ensure_probes_and_returns_blocks(producer):
 def test_producer_ensure_evicts_unpinned_to_make_room(producer):
     """When the region is full the probe evicts unpinned encodings to make room."""
     region = producer._memory_context.region
-    producer._producer._local_encodings["old"] = region.alloc(_NUM_BLOCKS)
+    producer._blocks["old"] = region.alloc(_NUM_BLOCKS)
+    producer._local_encodings["old"] = None
 
     req = _request_for(_feature("h", length=1))
     assert producer.ensure_cache_available(req, num_computed_tokens=0) is True
-    assert "old" not in producer._producer._local_encodings
+    assert "old" not in producer._local_encodings
 
 
 def test_producer_ensure_returns_false_when_all_blocks_pinned(producer):
@@ -317,7 +323,8 @@ def test_producer_ensure_returns_false_when_all_blocks_pinned(producer):
     region = producer._memory_context.region
     all_idx = region.alloc(_NUM_BLOCKS)
     region.pin(all_idx)
-    producer._producer._local_encodings["pinned"] = all_idx
+    producer._blocks["pinned"] = all_idx
+    producer._local_encodings["pinned"] = None
 
     req = _request_for(_feature("h", length=1))
     assert producer.ensure_cache_available(req, num_computed_tokens=0) is False
@@ -326,7 +333,7 @@ def test_producer_ensure_returns_false_when_all_blocks_pinned(producer):
 
 def test_producer_ensure_skips_feature_in_local_encodings(producer):
     """mm_hash already stored — no probe, region free count unchanged."""
-    producer._producer._local_encodings["h"] = [0]
+    producer._local_encodings["h"] = None
     free_before = len(producer._memory_context.region._free)
     assert producer.ensure_cache_available(_request_for(_feature("h")), 0) is True
     assert len(producer._memory_context.region._free) == free_before
@@ -334,7 +341,7 @@ def test_producer_ensure_skips_feature_in_local_encodings(producer):
 
 def test_producer_ensure_skips_feature_in_pending_save(producer):
     """mm_hash already allocated last step — no probe."""
-    producer._producer._pending_save["h"] = [0]
+    producer._producer._pending_save.add("h")
     free_before = len(producer._memory_context.region._free)
     assert producer.ensure_cache_available(_request_for(_feature("h")), 0) is True
     assert len(producer._memory_context.region._free) == free_before
@@ -361,7 +368,8 @@ def test_scheduler_ensure_false_when_producer_blocked(make_scheduler):
     region = sched._memory_context.region
     all_idx = region.alloc(_NUM_BLOCKS)
     region.pin(all_idx)
-    sched._producer._local_encodings["pinned"] = all_idx
+    sched._blocks["pinned"] = all_idx
+    sched._local_encodings["pinned"] = None
 
     req = _request_for(_feature("h"))
     assert sched.ensure_cache_available(req, num_computed_tokens=0) is False
@@ -379,13 +387,13 @@ def test_update_state_queues_size_bytes(producer):
 
 
 def test_update_state_dedups_against_pending_save(producer):
-    producer._producer._pending_save["h1"] = [0]
+    producer._producer._pending_save.add("h1")
     producer.update_state_after_alloc(_request_for(_feature("h1")), index=0)
     assert "h1" not in producer._producer._pending_new_encodings
 
 
 def test_update_state_dedups_against_local_encodings(producer):
-    producer._producer._local_encodings["h1"] = [0]
+    producer._local_encodings["h1"] = None
     producer.update_state_after_alloc(_request_for(_feature("h1")), index=0)
     assert "h1" not in producer._producer._pending_new_encodings
 
@@ -394,10 +402,13 @@ def test_update_state_dedups_against_local_encodings(producer):
 
 
 def test_build_meta_promotes_pending_save(producer):
-    producer._producer._pending_save["h1"] = [0, 1]
+    producer._blocks["h1"] = [0, 1]
+    producer._producer._pending_save.add("h1")
     producer.build_connector_meta(Mock(spec=SchedulerOutput))
-    assert producer._producer._local_encodings["h1"] == [0, 1]
-    assert producer._producer._pending_save == {}
+    assert "h1" in producer._local_encodings
+    assert producer._local_encodings["h1"] is None
+    assert producer._blocks["h1"] == [0, 1]
+    assert producer._producer._pending_save == set()
 
 
 def test_build_meta_allocates_for_pending_new_encodings(producer):
@@ -442,7 +453,8 @@ def test_handle_xfer_req_unknown_mm_hash_nacks(producer):
 
 def test_handle_xfer_req_success_pins_and_returns_grant(producer):
     indices = producer._memory_context.region.alloc(2)
-    producer._producer._local_encodings["h"] = indices
+    producer._blocks["h"] = indices
+    producer._local_encodings["h"] = None
     req = _make_xfer_req(mm_hash="h", compatibility_hash=producer._compat_hash)
 
     ack = producer._producer.handle_xfer_req(b"peer-id", req)
@@ -460,7 +472,8 @@ def test_handle_xfer_req_success_pins_and_returns_grant(producer):
 def test_handle_xfer_req_concurrent_reads_refcount(producer):
     """Two grants for the same mm_hash nest the pin (two deadlines)."""
     indices = producer._memory_context.region.alloc(1)
-    producer._producer._local_encodings["h"] = indices
+    producer._blocks["h"] = indices
+    producer._local_encodings["h"] = None
     req = _make_xfer_req(mm_hash="h", compatibility_hash=producer._compat_hash)
 
     producer._producer.handle_xfer_req(b"c1", req)
@@ -475,7 +488,8 @@ def test_handle_xfer_req_concurrent_reads_refcount(producer):
 
 def _grant(producer, mm_hash="h", n=1):
     indices = producer._memory_context.region.alloc(n)
-    producer._producer._local_encodings[mm_hash] = indices
+    producer._blocks[mm_hash] = indices
+    producer._local_encodings[mm_hash] = None
     req = _make_xfer_req(mm_hash=mm_hash, compatibility_hash=producer._compat_hash)
     producer._producer.handle_xfer_req(b"peer-id", req)
     return indices
@@ -552,7 +566,7 @@ def test_request_finished_returns_no_params_when_nothing_known(producer):
 
 
 def test_request_finished_emits_address_and_size_only(producer):
-    producer._producer._local_encodings["h"] = [0]
+    producer._local_encodings["h"] = None
     done, params = producer.request_finished(_request_for(_feature("h", length=1)))
 
     assert done is False
@@ -566,7 +580,7 @@ def test_request_finished_emits_address_and_size_only(producer):
 
 
 def test_request_finished_emits_for_pending_save_hits(producer):
-    producer._producer._pending_save["h"] = [0]
+    producer._producer._pending_save.add("h")
     _, params = producer.request_finished(_request_for(_feature("h")))
     assert params is not None and "h" in params
 
@@ -574,7 +588,7 @@ def test_request_finished_emits_for_pending_save_hits(producer):
 def test_request_finished_uses_identifier_when_mm_hash_falsy(producer):
     feat = _feature("ident-only")
     feat.mm_hash = None
-    producer._producer._local_encodings["ident-only"] = [0]
+    producer._local_encodings["ident-only"] = None
     _, params = producer.request_finished(_request_for(feat))
     assert "ident-only" in params
 
@@ -862,37 +876,38 @@ def test_register_source_metadata_change_reregisters(consumer):
 # ── consumer _fifo_alloc ──────────────────────────────────────────────────────
 
 
-def test_consumer_fifo_alloc_evicts_loaded_in_insertion_order(consumer):
+def test_consumer_fifo_alloc_evicts_local_encodings_in_insertion_order(consumer):
     region = consumer._memory_context.region
     cold_blocks = region.alloc(_NUM_BLOCKS // 2)
     consumer._consumer._blocks["cold"] = cold_blocks
-    consumer._consumer._loaded["cold"] = None
+    consumer._consumer._local_encodings["cold"] = None
     hot_blocks = region.alloc(_NUM_BLOCKS // 2)
     consumer._consumer._blocks["hot"] = hot_blocks
-    consumer._consumer._loaded["hot"] = None
+    consumer._consumer._local_encodings["hot"] = None
 
     indices = consumer._consumer._fifo_alloc(1)
 
     assert len(indices) == 1
-    assert "cold" not in consumer._consumer._loaded
+    assert "cold" not in consumer._consumer._local_encodings
     assert "cold" not in consumer._consumer._blocks
-    assert "hot" in consumer._consumer._loaded
+    assert "hot" in consumer._consumer._local_encodings
 
 
 def test_consumer_fifo_alloc_protects_pending_reload(consumer):
     region = consumer._memory_context.region
-    consumer._consumer._blocks["A"] = region.alloc(_NUM_BLOCKS)
-    consumer._consumer._loaded["A"] = None
+    consumer._blocks["A"] = region.alloc(_NUM_BLOCKS)
+    consumer._local_encodings["A"] = None
+    region.pin(consumer._blocks["A"])
     consumer._consumer._pending_reload.add("A")
     with pytest.raises(AllocationError):
         consumer._consumer._fifo_alloc(1)
-    assert "A" in consumer._consumer._loaded
+    assert "A" in consumer._local_encodings
 
 
 # ── build_connector_meta (consumer) ───────────────────────────────────────────
 
 
-def test_consumer_build_meta_promotes_completed_to_loads_and_loaded(consumer):
+def test_consumer_build_meta_promotes_completed_to_loads_and_local_encodings(consumer):
     addr = ("host", 1234)
     _put_peer(consumer, addr)
     indices = consumer._memory_context.region.alloc(2)
@@ -903,23 +918,25 @@ def test_consumer_build_meta_promotes_completed_to_loads_and_loaded(consumer):
     meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert meta.loads["h"] == indices
-    assert "h" in consumer._consumer._loaded
+    assert "h" in consumer._consumer._local_encodings
     assert consumer._consumer._blocks["h"] == indices
     assert "h" not in consumer._consumer._remote_encodings
 
 
 def test_consumer_build_meta_re_emits_pending_reload(consumer):
-    indices = consumer._memory_context.region.alloc(1)
+    region = consumer._memory_context.region
+    indices = region.alloc(1)
     consumer._consumer._blocks["h"] = indices
-    consumer._consumer._loaded["h"] = None
+    consumer._consumer._local_encodings["h"] = None
+    region.pin(indices)
     consumer._consumer._pending_reload.add("h")
-    free_before = len(consumer._memory_context.region._free)
+    free_before = len(region._free)
 
     meta = consumer.build_connector_meta(Mock(spec=SchedulerOutput))
 
     assert meta.loads["h"] is consumer._consumer._blocks["h"]
     assert consumer._consumer._pending_reload == set()
-    assert len(consumer._memory_context.region._free) == free_before
+    assert len(region._free) == free_before
 
 
 # ── ensure_cache_available (consumer) ─────────────────────────────────────────
@@ -964,9 +981,9 @@ def test_ensure_consumes_nack_tombstone(consumer):
     assert "h" not in consumer._consumer._remote_encodings  # consumed
 
 
-def test_ensure_admits_when_already_loaded_and_marks_pending_reload(consumer):
+def test_ensure_admits_when_already_local_encodings_and_marks_pending_reload(consumer):
     consumer._consumer._blocks["h"] = [0]
-    consumer._consumer._loaded["h"] = None
+    consumer._consumer._local_encodings["h"] = None
     req = _request_for(_feature("h"), params={"h": _info()})
     assert consumer.ensure_cache_available(req, num_computed_tokens=0) is True
     assert "h" in consumer._consumer._pending_reload
@@ -985,9 +1002,11 @@ def test_ensure_starts_read_for_uncached_announced_feature(consumer):
 
 
 def test_ensure_alloc_failure_falls_through_to_local_encode(consumer, caplog_vllm):
-    consumer._consumer._loaded["protected"] = consumer._memory_context.region.alloc(
-        _NUM_BLOCKS
-    )
+    _region = consumer._memory_context.region
+    _protected = _region.alloc(_NUM_BLOCKS)
+    consumer._local_encodings["protected"] = None
+    consumer._blocks["protected"] = _protected
+    _region.pin(_protected)
     consumer._consumer._pending_reload.add("protected")
     _put_peer(consumer)
     req = _request_for(_feature("new"), params={"new": _info()})
@@ -1005,8 +1024,8 @@ def test_ensure_alloc_failure_falls_through_to_local_encode(consumer, caplog_vll
 # ── has_cache_item ────────────────────────────────────────────────────────────
 
 
-def test_has_cache_item_true_for_loaded(consumer):
-    consumer._consumer._loaded["h"] = None
+def test_has_cache_item_true_for_local_encodings(consumer):
+    consumer._consumer._local_encodings["h"] = None
     assert consumer.has_cache_item("h") is True
 
 
@@ -1052,20 +1071,20 @@ def test_on_peer_down_in_flight_quarantines_and_retries(consumer):
     assert len(consumer._consumer._quarantine) == 1
 
 
-def test_on_peer_down_does_not_affect_loaded_entries(consumer):
-    """Entries already promoted to _loaded are not in _remote_encodings and
+def test_on_peer_down_does_not_affect_local_encodings_entries(consumer):
+    """Entries already promoted to _local_encodings are not in _remote_encodings and
     are therefore unaffected by on_peer_down."""
     addr = ("host", 1234)
     indices = consumer._memory_context.region.alloc(2)
     consumer._consumer._blocks["h"] = indices
-    consumer._consumer._loaded["h"] = None
+    consumer._consumer._local_encodings["h"] = None
     _put_peer(consumer, addr, nixl_agent_name="agent")
     free_before = len(consumer._memory_context.region._free)
 
     consumer._consumer.on_peer_down(addr)
 
     assert len(consumer._memory_context.region._free) == free_before  # not freed
-    assert "h" in consumer._consumer._loaded
+    assert "h" in consumer._consumer._local_encodings
     assert consumer._consumer._blocks["h"] == indices
 
 

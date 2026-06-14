@@ -10,28 +10,31 @@ from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
 
 def evict_and_alloc(
     n_blocks: int,
-    cache: dict[str, list[int]],
+    cache: dict[str, None],
+    blocks: dict[str, list[int]],
     region: ECSharedRegion,
     *,
     skip_pinned: bool = False,
-    protected: set[str] | None = None,
 ) -> list[int] | None:
     """Evict `cache` entries in insertion order until `alloc` succeeds.
 
-    skip_pinned=True uses try_free (producer path; caller must hold lock).
-    protected entries are skipped — their blocks are promised this step.
-    Returns allocated block list, or None if exhausted.
+    ``cache`` is the ordered set of cached mm_hashes (``dict[str, None]``);
+    ``blocks`` maps each mm_hash to its allocated block indices.
+
+    ``skip_pinned=True`` uses ``try_free`` so that blocks held by an active
+    NIXL READ pin or a ``_pending_reload`` pin are transparently skipped.
+    Caller must hold the shared lock when calling this function.
+    Returns allocated block list, or None if all candidates were exhausted.
     """
     for mm_hash in list(cache.keys()):
-        if protected is not None and mm_hash in protected:
-            continue
-        indices = cache[mm_hash]
+        indices = blocks[mm_hash]
         if skip_pinned:
             if not region.try_free(indices):
                 continue
         else:
             region.free(indices)
         del cache[mm_hash]
+        del blocks[mm_hash]
         try:
             return region.alloc(n_blocks)
         except AllocationError:

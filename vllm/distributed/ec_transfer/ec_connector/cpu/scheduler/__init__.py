@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ECCPUScheduler — composition shell."""
 
+import threading
 from typing import TYPE_CHECKING, Any
 
 from vllm import envs
@@ -76,6 +77,12 @@ class ECCPUScheduler:
         )
 
         self._engine = engine
+
+        # Shared state owned here; both producer and consumer hold references.
+        self._local_encodings: dict[str, None] = {}
+        self._blocks: dict[str, list[int]] = {}
+        self._shared_lock = threading.Lock()
+
         self._producer: ECCPUProducer | None = None
         self._consumer: ECCPUConsumer | None = None
         self._producer_transport: ZmqProducerTransport | None = None
@@ -92,8 +99,10 @@ class ECCPUScheduler:
                 memory_context=self._memory_context,
                 engine=engine,
                 compat_hash=self._compat_hash,
-                peer_host=self._peer_host,
-                peer_port=self._peer_port,
+                addr=(self._peer_host, self._peer_port),
+                local_encodings=self._local_encodings,
+                blocks=self._blocks,
+                lock=self._shared_lock,
             )
             self._producer_transport.start(
                 self._producer.handle_xfer_req,
@@ -110,6 +119,9 @@ class ECCPUScheduler:
                 transport=consumer_transport,
                 engine=engine,
                 compat_hash=self._compat_hash,
+                local_encodings=self._local_encodings,
+                blocks=self._blocks,
+                lock=self._shared_lock,
             )
 
     # ── public API ────────────────────────────────────────────────────────────

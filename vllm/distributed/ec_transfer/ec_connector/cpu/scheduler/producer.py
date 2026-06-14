@@ -25,7 +25,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferReq,
     XferStatus,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PinnedEncoding
+from vllm.distributed.ec_transfer.ec_connector.cpu.utils import PeerAddr, PinnedEncoding
 from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
     AllocationError,
 )
@@ -49,8 +49,9 @@ class ECCPUProducer:
 
     The encode pipeline (``update_state_after_alloc`` → ``build_saves``) runs on
     the main thread; ``handle_xfer_req`` and ``poll`` run on the transport's
-    router thread. ``_local_encodings`` (mm_hash → mmap block indices) is shared
-    across both threads and guarded by ``_lock``; ``_pinned_encodings`` is
+    router thread. ``_local_encodings`` (mm_hash → None ordered set) and
+    ``_blocks`` (mm_hash → mmap block indices) are shared with the consumer role
+    on the same node (ec_both) and guarded by ``_lock``; ``_pinned_encodings`` is
     touched only by the router thread and so needs none.
     """
 
@@ -59,20 +60,25 @@ class ECCPUProducer:
         memory_context: ECRegionContext,
         engine: Any,
         compat_hash: str,
-        peer_host: str,
-        peer_port: int,
+        addr: PeerAddr,
+        local_encodings: dict[str, None],
+        blocks: dict[str, list[int]],
+        lock: threading.Lock,
     ) -> None:
         self._memory_context = memory_context
         self._engine = engine
         self._compat_hash = compat_hash
-        self._peer_host = peer_host
-        self._peer_port = peer_port
+        self._addr = addr
 
         self._pending_new_encodings: dict[str, int] = {}
-        self._pending_save: dict[str, list[int]] = {}
+        # Set of mm_hashes whose blocks have been allocated this step but not
+        # yet promoted to _local_encodings. Block indices live in _blocks.
+        self._pending_save: set[str] = set()
 
-        self._lock = threading.Lock()
-        self._local_encodings: dict[str, list[int]] = {}
+        # Shared with the consumer role (both owned by ECCPUScheduler).
+        self._lock = lock
+        self._local_encodings: dict[str, None] = local_encodings
+        self._blocks: dict[str, list[int]] = blocks
 
         # Router-thread-only state. No lock needed.
         self._pinned_encodings: dict[str, PinnedEncoding] = {}
@@ -119,8 +125,7 @@ class ECCPUProducer:
         # concurrent eviction on the main thread cannot reclaim the blocks
         # between the lookup and the pin.
         with self._lock:
-            block_indices = self._local_encodings.get(req.mm_hash)
-            if block_indices is None:
+            if req.mm_hash not in self._local_encodings:
                 logger.warning(
                     "EC: XferReq mm_hash=%s not in local cache (evicted or "
                     "never produced — likely a producer restart); NACKing, "
@@ -128,6 +133,7 @@ class ECCPUProducer:
                     req.mm_hash,
                 )
                 return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_MISSING)
+            block_indices = self._blocks[req.mm_hash]
             self._memory_context.region.pin(block_indices)
 
         deadline = time.monotonic() + PRODUCER_PIN_LEASE_S
@@ -186,7 +192,7 @@ class ECCPUProducer:
         if pin is None:
             return
         with self._lock:
-            blocks = self._local_encodings.get(mm_hash)
+            blocks = self._blocks.get(mm_hash)
             if blocks is not None:
                 self._memory_context.region.unpin(blocks)
         pin.deadlines.pop(0)
@@ -283,6 +289,7 @@ class ECCPUProducer:
         params: dict[str, dict[str, Any]] = {}
         with self._lock:
             local_snapshot = set(self._local_encodings)
+        peer_host, peer_port = self._addr
         for feature in request.mm_features:
             mm_hash = feature.mm_hash or feature.identifier
             if mm_hash not in local_snapshot and mm_hash not in self._pending_save:
@@ -293,8 +300,8 @@ class ECCPUProducer:
                 * self._memory_context.element_size
             )
             params[mm_hash] = {
-                "peer_host": self._peer_host,
-                "peer_port": self._peer_port,
+                "peer_host": peer_host,
+                "peer_port": peer_port,
                 "size_bytes": size_bytes,
             }
         logger.debug(
@@ -313,6 +320,7 @@ class ECCPUProducer:
             result = evict_and_alloc(
                 n_blocks,
                 self._local_encodings,
+                self._blocks,
                 self._memory_context.region,
                 skip_pinned=True,
             )
@@ -327,9 +335,10 @@ class ECCPUProducer:
     def build_saves(self) -> dict[str, list[int]]:
         """Advance encode pipeline; return {mm_hash: block_indices} for worker."""
         to_promote = self._pending_save
-        self._pending_save = {}
+        self._pending_save = set()
         with self._lock:
-            self._local_encodings.update(to_promote)
+            for mm_hash in to_promote:
+                self._local_encodings[mm_hash] = None
 
         pending_new = list(self._pending_new_encodings.items())
         self._pending_new_encodings = {}
@@ -342,7 +351,8 @@ class ECCPUProducer:
                     continue
             n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
             indices = self._fifo_alloc(n_blocks)
-            self._pending_save[mm_hash] = indices
+            self._blocks[mm_hash] = indices
+            self._pending_save.add(mm_hash)
             saves[mm_hash] = indices
             logger.debug(
                 "EC: save allocated mm_hash=%s n_blocks=%d",
@@ -356,7 +366,7 @@ class ECCPUProducer:
         # this is single-threaded. Release any still-held source pins so the
         # region's free-pool accounting is balanced before teardown.
         for mm_hash, pin in list(self._pinned_encodings.items()):
-            blocks = self._local_encodings.get(mm_hash)
+            blocks = self._blocks.get(mm_hash)
             if blocks is not None:
                 for _ in pin.deadlines:
                     self._memory_context.region.unpin(blocks)

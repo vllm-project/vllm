@@ -9,11 +9,15 @@ pulls the encoding into its mmap. A request is deferred until every feature it
 needs is either locally cached or has finished reading.
 """
 
+import threading
 import time
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
+    evict_and_alloc,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
     XferAck,
     XferReq,
@@ -48,9 +52,10 @@ CONSUMER_READ_TIMEOUT_S = 20.0
 class ECCPUConsumer:
     """Consumer state machine over a duck-typed transport and transfer engine.
 
-    Block ownership lives in ``_blocks`` (``mm_hash → list[int]``), populated
-    the moment blocks are allocated in ``_start_read`` and cleared when they
-    are freed, quarantined, or evicted.
+    ``_local_encodings`` and ``_blocks`` are shared with the producer role on
+    the same node (ec_both) and guarded by ``_lock``.  ``_remote_encodings``,
+    ``_pending_reload``, and ``_quarantine`` are touched only by the main
+    thread and need none.
 
     Per-``mm_hash`` progress is tracked separately:
 
@@ -59,8 +64,8 @@ class ECCPUConsumer:
       NACK that ``ensure_cache_available`` consumes to fall through to local
       encode). Completed reads are removed from this dict immediately by
       ``_poll_read``, so every entry represents a read that is still pending.
-    * ``_loaded``: ordered set (``dict[str, None]``) of mm_hashes already
-      handed to the worker. Insertion order drives FIFO eviction.
+    * ``_local_encodings``: ordered set (``dict[str, None]``) of mm_hashes
+      already handed to the worker. Insertion order drives FIFO eviction.
     """
 
     def __init__(
@@ -69,22 +74,26 @@ class ECCPUConsumer:
         transport: Any,
         engine: Any,
         compat_hash: str,
+        local_encodings: dict[str, None],
+        blocks: dict[str, list[int]],
+        lock: threading.Lock,
     ) -> None:
         self._memory_context = memory_context
         self._transport = transport
         self._engine = engine
         self._compat_hash = compat_hash
 
+        # Shared with the producer role (both owned by ECCPUScheduler).
+        self._lock = lock
+        self._local_encodings: dict[str, None] = local_encodings
+        self._blocks: dict[str, list[int]] = blocks
+
         # In-flight encodings: mm_hash → PendingRead | None (tombstone)
         self._remote_encodings: dict[str, PendingRead | None] = {}
 
-        # Single source of truth for block ownership.
-        # Populated in _start_read; removed on free / quarantine / eviction.
-        self._blocks: dict[str, list[int]] = {}
-
-        # mm_hashes whose bytes are in our local mmap, kept alive for re-serves.
-        # dict[str, None] preserves insertion order for FIFO eviction.
-        self._loaded: dict[str, None] = {}
+        # mm_hashes queued for a local mmap→GPU re-copy this step. Each entry
+        # has its blocks pinned (via region.pin) until build_loads unpins them,
+        # so evict_and_alloc with skip_pinned=True cannot reclaim them.
         self._pending_reload: set[str] = set()
 
         # Reads given up on while possibly still DMA-ing; blocks held until
@@ -93,14 +102,14 @@ class ECCPUConsumer:
 
     def has_cache_item(self, identifier: str) -> bool:
         """True iff the bytes for `identifier` are in our local mmap."""
-        return identifier in self._loaded
+        return identifier in self._local_encodings
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         """Ensure the mm_hash will be (re-)loaded into encoder_cache this step.
 
         Called by the scheduler after routing an EC-cached mm_hash to
         ``external_load_encoder_input``. The encoding is in the local mmap
-        (``_loaded``), but ``encoder_cache`` may have been evicted by
+        (``_local_encodings``), but ``encoder_cache`` may have been evicted by
         ``free_encoder_mm_hashes`` since it was last copied. Adding the
         mm_hash to ``_pending_reload`` makes ``build_loads`` include it in
         ``meta.loads`` so ``start_load_caches`` reloads mmap→GPU this step.
@@ -109,8 +118,11 @@ class ECCPUConsumer:
         mm_hash = (
             request.mm_features[index].mm_hash or request.mm_features[index].identifier
         )
-        if mm_hash in self._loaded:
-            self._pending_reload.add(mm_hash)
+        with self._lock:
+            if mm_hash in self._local_encodings:
+                if mm_hash not in self._pending_reload:
+                    self._memory_context.region.pin(self._blocks[mm_hash])
+                self._pending_reload.add(mm_hash)
 
     def ensure_cache_available(
         self, request: "Request", num_computed_tokens: int
@@ -145,8 +157,16 @@ class ECCPUConsumer:
             if pos.offset + pos.length <= num_computed_tokens:
                 continue
             mm_hash = feature.mm_hash or feature.identifier
-            if mm_hash in self._loaded:
-                self._pending_reload.add(mm_hash)
+            # Check + pin + add to _pending_reload atomically under the shared
+            # lock so a concurrent producer eviction cannot reclaim the blocks
+            # between the local-cache check and the pin.
+            with self._lock:
+                is_local = mm_hash in self._local_encodings
+                if is_local:
+                    if mm_hash not in self._pending_reload:
+                        self._memory_context.region.pin(self._blocks[mm_hash])
+                    self._pending_reload.add(mm_hash)
+            if is_local:
                 logger.debug(
                     "EC: mm_hash=%s locally loaded, queued for reload",
                     mm_hash,
@@ -224,16 +244,16 @@ class ECCPUConsumer:
             return self._memory_context.region.alloc(n_blocks)
         except AllocationError:
             pass
-        region = self._memory_context.region
-        for mm_hash in list(self._loaded):
-            if mm_hash in self._pending_reload:
-                continue
-            region.free(self._blocks.pop(mm_hash))
-            del self._loaded[mm_hash]
-            try:
-                return region.alloc(n_blocks)
-            except AllocationError:
-                continue
+        with self._lock:
+            result = evict_and_alloc(
+                n_blocks,
+                self._local_encodings,
+                self._blocks,
+                self._memory_context.region,
+                skip_pinned=True,
+            )
+        if result is not None:
+            return result
         raise AllocationError(
             f"ECSharedRegion exhausted: cannot satisfy {n_blocks} blocks "
             f"even after evicting all evictable cache entries — operator "
@@ -516,21 +536,31 @@ class ECCPUConsumer:
                 # be present here; guard against unexpected edge cases.
                 continue
             loads[mm_hash] = self._blocks[mm_hash]
-            self._loaded[mm_hash] = None
+            with self._lock:
+                self._local_encodings[mm_hash] = None
             logger.debug("EC: load issued mm_hash=%s", mm_hash)
         # (c) Re-serve cached entries requested this step via a local
-        #     mmap→GPU re-copy.
+        #     mmap→GPU re-copy, then release the pin acquired when they were
+        #     added to _pending_reload.
         for mm_hash in self._pending_reload:
-            if mm_hash not in loads and mm_hash in self._loaded:
+            if mm_hash not in loads and mm_hash in self._local_encodings:
                 loads[mm_hash] = self._blocks[mm_hash]
                 logger.debug(
                     "EC: Local mmap cache hit mm_hash=%s",
                     mm_hash,
                 )
+            self._memory_context.region.unpin(self._blocks[mm_hash])
         self._pending_reload = set()
         return loads
 
     def shutdown(self) -> None:
+        # Release any blocks still pinned for a pending reload; the router
+        # thread is already stopped by the time shutdown runs.
+        for mm_hash in self._pending_reload:
+            blocks = self._blocks.get(mm_hash)
+            if blocks is not None:
+                self._memory_context.region.unpin(blocks)
+        self._pending_reload = set()
         # on_peer_down may move in-flight reads into quarantine, so drain the
         # peers first and release every quarantined handle afterwards. The
         # region is torn down by the scheduler, so blocks need no freeing here.
