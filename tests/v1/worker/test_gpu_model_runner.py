@@ -312,6 +312,29 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
+def test_init_fp8_kv_scales_zeroes_nested_kv_cache_tensors():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+
+    attn_cache = torch.ones(2)
+    mamba_conv_cache = torch.ones(3)
+    mamba_ssm_cache = torch.ones(4)
+    shared_cache = torch.ones(5)
+    runner.kv_caches = [
+        attn_cache,
+        [mamba_conv_cache, None, (mamba_ssm_cache,)],
+        {"shared": shared_cache},
+    ]
+
+    GPUModelRunner.init_fp8_kv_scales(runner)
+
+    assert torch.equal(attn_cache, torch.zeros_like(attn_cache))
+    assert torch.equal(mamba_conv_cache, torch.zeros_like(mamba_conv_cache))
+    assert torch.equal(mamba_ssm_cache, torch.zeros_like(mamba_ssm_cache))
+    assert torch.equal(shared_cache, torch.zeros_like(shared_cache))
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
