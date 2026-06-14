@@ -45,6 +45,19 @@ from vllm import LLM
 llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
 ```
 
+When using automatic context fitting, you can cap the fitted context length so
+vLLM uses the largest length that fits in memory, but never exceeds your
+deployment limit e.g.:
+
+```bash
+vllm serve <model> --max-model-len auto --max-model-len-cap 131072
+```
+
+The effective context length is `min(auto_fit_len, max_model_len_cap)`.
+If `--max-model-len-cap` is omitted, the existing `--max-model-len auto`
+path is unchanged and no implicit cap is applied. The cap is only valid
+together with `max_model_len=-1` or `--max-model-len auto`.
+
 ## Reduce CUDA Graphs
 
 By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
