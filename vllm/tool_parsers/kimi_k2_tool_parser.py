@@ -109,6 +109,14 @@ class KimiK2ToolParser(ToolParser):
                     )
 
                 content = model_output[: model_output.find(self.tool_calls_start_token)]
+                if not tool_calls:
+                    # Section marker present but nothing parsed (e.g. a special
+                    # token literal inside an argument value broke the call
+                    # boundary). Surface the raw output as content instead of an
+                    # empty message with tools_called=True and no calls.
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
