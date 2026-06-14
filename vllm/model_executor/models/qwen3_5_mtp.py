@@ -64,6 +64,22 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         model_config = vllm_config.model_config
         quant_config = vllm_config.quant_config
 
+        # MTP weights are stored unquantized in GPTQ/AWQ checkpoints
+        # (quantization tools like AutoGPTQ/AutoAWQ exclude MTP layers).
+        # When the main model uses MoE quantization (e.g., moe_wna16),
+        # the drafter inherits this config, causing FusedMoE to register
+        # quantized parameter names (w13_qweight, etc.) that don't match
+        # the unquantized checkpoint weights, and LinearBase layers to use
+        # GPTQ/AWQ quantization that also mismatches. Fix: add the MTP
+        # prefix to the quantization exclusion list so all MTP layers use
+        # unquantized parameters.
+        modules_to_not_convert = getattr(
+            quant_config, "modules_to_not_convert", None)
+        if (modules_to_not_convert is not None
+                and prefix
+                and prefix not in modules_to_not_convert):
+            modules_to_not_convert.append(prefix)
+
         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig = model_config.hf_text_config
 
         self.config = config
