@@ -991,6 +991,10 @@ class MooncakeStoreWorker:
             if vllm_config.kv_transfer_config
             else {}
         )
+        store_config.device_name = rdma_utils.get_configured_worker_rnic(
+            protocol=store_config.protocol,
+            configured_device=store_config.device_name,
+        )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
