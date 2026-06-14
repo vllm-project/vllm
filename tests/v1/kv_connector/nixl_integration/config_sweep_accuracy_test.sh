@@ -9,17 +9,20 @@ echo "=== Running NIXL import canary ==="
 python3 -m pytest -s -x "${IMPORT_CANARY}"
 
 # Define test configurations
+mla_model="deepseek-ai/DeepSeek-V2-Lite-Chat"
+mla_serve_args="--max-model-len,2048,--max-num-seqs,16"
 tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1"
-  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
-  "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
-  "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
+  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=${mla_model} VLLM_SERVE_EXTRA_ARGS=${mla_serve_args}" # MLA case
+  "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=${mla_model} VLLM_SERVE_EXTRA_ARGS=${mla_serve_args}"
+  "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=${mla_model} VLLM_SERVE_EXTRA_ARGS=${mla_serve_args}"
 )
+
 dp_ep_configs=(
-"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1)
-"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP2, D-DPEP=2 (TP=1)
+"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=${mla_model} VLLM_SERVE_EXTRA_ARGS=${mla_serve_args}" # MLA+P-TP1, D-DPEP=2 (TP=1)
+"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 MODEL_NAMES=${mla_model} VLLM_SERVE_EXTRA_ARGS=${mla_serve_args}" # MLA+P-TP2, D-DPEP=2 (TP=1)
 )
 # We assume HMA enabled by default.
 hybrid_ssm_configs=(
@@ -59,15 +62,26 @@ run_tests() {
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
+    local cfg_extra_args="${extra_args}"
     local -a cfg_parts extra_args_parts
     read -r -a cfg_parts <<< "$cfg"
-    read -r -a extra_args_parts <<< "$extra_args"
 
-    echo "-> Running with ${cfg} ${extra_args:+and ${extra_args}}"
+    if [[ "$cfg" == *"MODEL_NAMES=${mla_model}"* ]]; then
+      case " ${extra_args} " in
+        *" --attention-backend TRITON_ATTN "*|*" --attention-backend FLASHINFER "*|*" --attention-backend ROCM_ATTN "*)
+          echo "MLA config uses the platform-selected MLA backend instead of ${extra_args}."
+          cfg_extra_args=""
+          ;;
+      esac
+    fi
+
+    read -r -a extra_args_parts <<< "$cfg_extra_args"
+
+    echo "-> Running with ${cfg} ${cfg_extra_args:+and ${cfg_extra_args}}"
     # Use 'env' to safely set variables without eval
     # keep argv splitting safe and SC2086-clean via arrays.
     if ! env "${cfg_parts[@]}" bash "${SCRIPT}" "${extra_args_parts[@]}"; then
-      echo "❌ Test failed for config: ${cfg} ${extra_args:+(${extra_args})}"
+      echo "❌ Test failed for config: ${cfg} ${cfg_extra_args:+(${cfg_extra_args})}"
       exit 1
     fi
   done

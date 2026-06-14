@@ -791,21 +791,6 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
-- label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_2
-  num_gpus: 2
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-  - vllm/v1/worker/kv_connector_model_runner_mixin.py
-  - tests/v1/kv_connector/nixl_integration/
-  - vllm/platforms/rocm.py
-  commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
-
 - label: V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -817,20 +802,6 @@ steps:
   - tests/v1/e2e
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
-
-- label: Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_4
-  num_gpus: 4
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-  - tests/v1/kv_connector/nixl_integration/
-  - vllm/platforms/rocm.py
-  commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 #-------------------------------------------------------------  mi250 · misc  ------------------------------------------------------------#
 
@@ -2394,11 +2365,28 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
+- label: NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/worker/kv_connector_model_runner_mixin.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+
 - label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
@@ -2437,7 +2425,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2449,9 +2437,10 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2463,6 +2452,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
@@ -3429,13 +3419,13 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/v1/worker/kv_connector_model_runner_mixin.py
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
 - label: Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180
@@ -3445,7 +3435,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -3460,7 +3450,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:

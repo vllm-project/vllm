@@ -58,9 +58,12 @@ class ModelArchConfigConvertorBase:
                 if qk_rope_head_dim and qk_nope_head_dim:
                     return qk_rope_head_dim + qk_nope_head_dim
 
-        # NOTE: Some configs may set head_dim=None in the config
-        if getattr(self.hf_text_config, "head_dim", None) is not None:
-            return self.hf_text_config.head_dim
+        # NOTE: Some config classes may set head_dim=None or materialize a missing
+        # head_dim as 0 (for example, DeepseekVLV2TextConfig).
+        if (
+            head_dim := getattr(self.hf_text_config, "head_dim", None)
+        ) is not None and head_dim > 0:
+            return head_dim
 
         # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
         if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
