@@ -49,7 +49,12 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import (
+    get_ip,
+    get_non_loopback_ip_addresses,
+    make_zmq_path,
+    make_zmq_socket,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -745,6 +750,30 @@ class MooncakeConnectorWorker:
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
+        if envs.VLLM_HOST_IP:
+            logger.info(
+                "Mooncake Transfer Engine using VLLM_HOST_IP=%s as its "
+                "advertised host IP for KV transfer.",
+                self.hostname,
+            )
+        else:
+            candidate_ips = get_non_loopback_ip_addresses()
+            if len(candidate_ips) > 1:
+                logger.warning(
+                    "VLLM_HOST_IP is not set and multiple non-loopback IP "
+                    "addresses were detected: %s. Mooncake Transfer Engine "
+                    "selected %s as its advertised host IP for KV transfer. "
+                    "Set VLLM_HOST_IP to the address reachable by remote "
+                    "prefill/decode workers if this is incorrect.",
+                    ", ".join(candidate_ips),
+                    self.hostname,
+                )
+            else:
+                logger.info(
+                    "Mooncake Transfer Engine selected %s as its advertised "
+                    "host IP for KV transfer. Set VLLM_HOST_IP to override.",
+                    self.hostname,
+                )
 
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
@@ -1138,7 +1167,13 @@ class MooncakeConnectorWorker:
                 )
 
                 if ret_value != 0:
-                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
+                    transfer_err_msg = (
+                        f"Mooncake transfer engine returned {ret_value} "
+                        f"while sending to remote session {remote_session} "
+                        f"from local advertised address "
+                        f"{self.hostname}:{self.rpc_port}. Set VLLM_HOST_IP "
+                        "if remote workers cannot reach this address."
+                    )
                     err_msg = (
                         transfer_err_msg
                         if err_msg is None
