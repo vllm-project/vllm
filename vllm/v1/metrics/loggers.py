@@ -1295,6 +1295,16 @@ class StatLoggerManager:
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
+        # Forward-progress tracking for the /health/decode liveness endpoint.
+        # Updated on every record() call (i.e. on every engine step that
+        # produces an OutputProcessor result). last_token_emit_time is None
+        # until at least one decoded token has ever been observed; once set,
+        # it monotonically advances. last_num_running_reqs is overwritten
+        # with each record() so it decays naturally as requests finish.
+        # This intentionally lives at the manager rather than per logger so
+        # the data is available even with 0 stat loggers attached.
+        self._last_token_emit_time: float | None = None
+        self._last_num_running_reqs: int = 0
         stat_logger_factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
@@ -1344,6 +1354,25 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
+        # Update forward-progress tracking for /health/decode. Done BEFORE
+        # delegating to stat loggers so the data reflects the most recent
+        # step even if a downstream logger raises.
+        #
+        # We overwrite (not max-accumulate) num_running_reqs so the counter
+        # naturally decays as requests finish — otherwise an engine that
+        # peaked at N running and then drained would forever appear to
+        # have N in flight, and any future stall comparison would falsely
+        # trip a 503. With DP this means we report whichever engine spoke
+        # last; that's still useful because a stalled engine will keep
+        # reporting non-zero running, so its record() calls will dominate
+        # in any reasonable polling window.
+        if scheduler_stats is not None:
+            self._last_num_running_reqs = scheduler_stats.num_running_reqs
+        if (
+            iteration_stats is not None
+            and iteration_stats.num_generation_tokens > 0
+        ):
+            self._last_token_emit_time = time.monotonic()
         for stat_logger in self.stat_loggers:
             stat_logger.record(
                 scheduler_stats,
@@ -1355,6 +1384,32 @@ class StatLoggerManager:
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
+
+    def get_decode_liveness(self) -> tuple[int, float | None]:
+        """Return a snapshot of engine forward-progress liveness.
+
+        Returns a tuple of ``(num_running_reqs, last_token_age_seconds)``:
+
+        * ``num_running_reqs`` is the most-recently-observed count of
+          requests in the Running state. With DP, this is whichever
+          engine called ``record()`` last; that's still a useful signal
+          because a stalled engine will keep reporting non-zero.
+        * ``last_token_age_seconds`` is ``None`` if no decoded token has
+          ever been observed (e.g. server just started, never served a
+          request); otherwise it is the wall-clock seconds since the
+          most-recent decoded token was reported through ``record()``.
+
+        Used by the ``GET /health/decode`` endpoint to detect engine
+        forward-progress stalls (e.g. NCCL P2P deadlocks where the
+        standard ``/health`` endpoint still returns 200 because the
+        engine task is alive but the GPU step is hung).
+        """
+        if self._last_token_emit_time is None:
+            return self._last_num_running_reqs, None
+        return (
+            self._last_num_running_reqs,
+            max(0.0, time.monotonic() - self._last_token_emit_time),
+        )
 
     def log(self):
         for logger in self.stat_loggers:

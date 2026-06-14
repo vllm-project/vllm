@@ -902,6 +902,19 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def get_decode_liveness(self) -> tuple[int, float | None]:
+        """Snapshot of (num_running_reqs, last_token_age_seconds).
+
+        Sourced from the StatLoggerManager's per-step bookkeeping. When
+        log_stats is disabled (no logger_manager exists), reports as idle
+        (``(0, None)``) — callers (specifically the /health/decode route)
+        treat that as healthy "idle" rather than stalled, so disabling
+        stats does not generate false-positive 503s.
+        """
+        if self.logger_manager is None:
+            return 0, None
+        return self.logger_manager.get_decode_liveness()
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
