@@ -593,6 +593,40 @@ def expand_batch_to_tokens(
     """
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
+
+    # CPU fallback: the ``@triton.jit`` ``expand_kernel`` below is a Triton
+    # kernel with no CPU dispatch. On CPU-only builds (no active Triton
+    # driver), the kernel launch is a silent no-op, leaving ``expanded_x``
+    # uninitialised. That uninitialised data is consumed downstream as
+    # per-token ``top_k`` / ``top_p`` / ``temperature`` tensors and crashes
+    # ``apply_top_k_top_p_pytorch`` with
+    # ``"index <garbage> is out of bounds for dimension 1 with size <vocab>"``
+    # on the first stochastic-sampling request. Use ``torch.repeat_interleave``
+    # — which matches the kernel's documented semantics exactly — on CPU.
+    if x.device.type == "cpu":
+        counts = cu_num_tokens.clone()
+        counts[1:] -= cu_num_tokens[:-1]
+        x_ = x
+        if replace_from != replace_to:
+            x_ = torch.where(
+                x == replace_from,
+                torch.full_like(x, replace_to),
+                x,
+            )
+        expanded_x = torch.repeat_interleave(x_, counts.to(torch.long))
+        # Pad or truncate if the caller requested ``num_tokens`` that doesn't
+        # match the last cumulative count (mirrors the kernel path, which is
+        # bounded by ``MAX_NUM_TOKENS``). The pad fills with ``replace_to``
+        # so that an empty ``x`` plus ``num_tokens > 0`` returns initialised
+        # memory rather than garbage.
+        if expanded_x.numel() < num_tokens:
+            pad = x.new_empty(num_tokens - expanded_x.numel())
+            pad.fill_(replace_to)
+            expanded_x = torch.cat([expanded_x, pad])
+        elif expanded_x.numel() > num_tokens:
+            expanded_x = expanded_x[:num_tokens]
+        return expanded_x
+
     expanded_x = x.new_empty(num_tokens)
     expand_kernel[(batch_size,)](
         expanded_x,

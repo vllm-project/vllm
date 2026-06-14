@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    expand_batch_to_tokens,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -1150,3 +1151,81 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+# Pin torch.device("cpu") so this regression test fires on any CI runner,
+# including GPU-only CI. The bug being tested is a silent-no-op of the
+# ``@triton.jit`` kernel on CPU; without this explicit device pin the
+# regression could slip past if CI defaults to GPU.
+_CPU = torch.device("cpu")
+
+
+def test_expand_batch_to_tokens_cpu_matches_docstring_example():
+    """Regression test for CPU silent-no-op of ``expand_kernel``.
+
+    Validates the docstring example on CPU: ``x=[a, b, c]``,
+    ``cu_num_tokens=[2, 5, 6]`` -> ``[a, a, b, b, b, c]``. Before the fix,
+    ``expanded_x`` was uninitialised because the Triton kernel silently
+    no-ops when no active driver is present.
+    """
+    x = torch.tensor([10, 20, 30], dtype=torch.int64, device=_CPU)
+    cu_num_tokens = torch.tensor([2, 5, 6], dtype=torch.int64, device=_CPU)
+    out = expand_batch_to_tokens(x, cu_num_tokens, num_tokens=6)
+    expected = torch.tensor([10, 10, 20, 20, 20, 30], dtype=torch.int64, device=_CPU)
+    assert out.device.type == "cpu"
+    assert out.dtype == torch.int64
+    torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.float32])
+def test_expand_batch_to_tokens_cpu_dtypes(dtype: torch.dtype):
+    """``expand_batch_to_tokens`` must preserve input dtype on CPU across
+    the dtypes actually used by the rejection sampler: ``int32``/``int64``
+    for ``top_k`` and ``float32`` for ``top_p`` and ``temperature``.
+    """
+    x = torch.tensor([7, 3, 5], dtype=dtype, device=_CPU)
+    cu_num_tokens = torch.tensor([1, 3, 6], dtype=torch.int64, device=_CPU)
+    out = expand_batch_to_tokens(x, cu_num_tokens, num_tokens=6)
+    expected = torch.tensor([7, 3, 3, 5, 5, 5], dtype=dtype, device=_CPU)
+    assert out.dtype == dtype
+    torch.testing.assert_close(out, expected)
+
+
+def test_expand_batch_to_tokens_cpu_replace_from_to():
+    """``replace_from`` -> ``replace_to`` substitution on CPU.
+
+    Used by ``apply_sampling_constraints`` to map ``GREEDY_TEMPERATURE`` (-1)
+    to 1 before dividing logits by the expanded temperature tensor.
+    """
+    x = torch.tensor([-1, 2, -1], dtype=torch.float32, device=_CPU)
+    cu_num_tokens = torch.tensor([2, 3, 5], dtype=torch.int64, device=_CPU)
+    out = expand_batch_to_tokens(
+        x, cu_num_tokens, num_tokens=5, replace_from=-1, replace_to=1
+    )
+    expected = torch.tensor([1.0, 1.0, 2.0, 1.0, 1.0], dtype=torch.float32, device=_CPU)
+    torch.testing.assert_close(out, expected)
+
+
+def test_expand_batch_to_tokens_cpu_empty_batch():
+    """An empty batch must return initialised memory.
+
+    Two cases:
+      - ``num_tokens == 0``: an empty output.
+      - ``num_tokens > 0``: an output filled with ``replace_to`` (never
+        uninitialised ``x.new_empty``).
+    """
+    x = torch.empty(0, dtype=torch.int64, device=_CPU)
+    cu_num_tokens = torch.empty(0, dtype=torch.int64, device=_CPU)
+
+    out_empty = expand_batch_to_tokens(x, cu_num_tokens, num_tokens=0)
+    assert out_empty.numel() == 0
+    assert out_empty.dtype == torch.int64
+    assert out_empty.device.type == "cpu"
+
+    out_padded = expand_batch_to_tokens(
+        x, cu_num_tokens, num_tokens=3, replace_from=0, replace_to=7
+    )
+    assert out_padded.numel() == 3
+    torch.testing.assert_close(
+        out_padded, torch.tensor([7, 7, 7], dtype=torch.int64, device=_CPU)
+    )
