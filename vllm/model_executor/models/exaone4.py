@@ -168,8 +168,6 @@ class Exaone4Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
 
         layer_idx = extract_layer_index(prefix)
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
