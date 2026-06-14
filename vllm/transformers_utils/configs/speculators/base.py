@@ -62,6 +62,19 @@ class SpeculatorsConfig(PretrainedConfig):
         # Apply anything specific to the supported algorithm
         algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, pre_trained_config=pre_trained_config)
+        # Forward the draft's declared speculative_tokens onto the draft config so
+        # that loading the draft directly (e.g.
+        # --speculative-config '{"model": <speculators repo>}') can default
+        # num_speculative_tokens without the user restating it. See #40382.
+        proposal_methods = config_dict.get("speculators_config", {}).get(
+            "proposal_methods"
+        )
+        if proposal_methods:
+            speculative_tokens = proposal_methods[0].get("speculative_tokens")
+            if speculative_tokens is not None:
+                pre_trained_config.setdefault(
+                    "num_lookahead_tokens", speculative_tokens
+                )
         return pre_trained_config
 
     @classmethod

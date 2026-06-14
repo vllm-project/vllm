@@ -780,6 +780,16 @@ class SpeculativeConfig:
                         )
 
                 if self.num_speculative_tokens is None:
+                    # speculators-format drafts (e.g. DFlash) carry the proposal
+                    # count on the draft config; default to it so it does not
+                    # have to be restated on --speculative-config. See #40382.
+                    self.num_speculative_tokens = getattr(
+                        self.draft_model_config.hf_config,
+                        "num_lookahead_tokens",
+                        None,
+                    )
+
+                if self.num_speculative_tokens is None:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
