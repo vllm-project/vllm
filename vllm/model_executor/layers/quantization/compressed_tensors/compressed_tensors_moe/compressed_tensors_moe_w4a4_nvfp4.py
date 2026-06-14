@@ -229,6 +229,18 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
+        # The scale Parameters below are cached by reference in
+        # FusedMoEQuantConfig (see get_fused_moe_quant_config). The UVA
+        # offloader's non-UVA fallback path swaps the layer's state_dict
+        # via functional_call at forward time, which does not update the
+        # cached external references. If we let those scale Parameters
+        # get moved to CPU, the cached refs still point at the original
+        # Parameter object (now backed by CPU storage), and Marlin NVFP4
+        # asserts "b_scales is not on GPU". Mark them so the offloader
+        # leaves them on their original device.
+        layer.w13_weight_scale._vllm_skip_offload = True
+        layer.w2_weight_scale._vllm_skip_offload = True
+
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None

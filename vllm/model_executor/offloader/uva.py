@@ -18,6 +18,25 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
+# Attribute that quantization configs may set on a Parameter to opt out of
+# CPU offload. Follows vLLM's existing `_vllm_*` marker convention
+# (e.g. `_vllm_is_uva_offloaded` in this module, `_vllm_patched` for
+# function-level patch idempotency).
+#
+# When a quant config caches a tensor reference outside the module's
+# named_parameters() (typical for per-tensor scales held in a
+# FusedMoEQuantConfig dataclass), the non-UVA fallback path desyncs the
+# cached reference from the layer attribute and kernels that assert
+# `tensor.is_cuda` start failing ("b_scales is not on GPU" in Marlin
+# NVFP4 MoE, for example). Setting `_vllm_skip_offload = True` on such a
+# Parameter tells this offloader to leave it on its original device.
+#
+# Opt-in only — there is no name-based fallback. A quant config that
+# caches Parameter references outside `named_parameters()` must set this
+# attribute explicitly on every Parameter it caches.
+_VLLM_SKIP_OFFLOAD_ATTR = "_vllm_skip_offload"
+
+
 class UVAOffloader(BaseOffloader):
     """Offloader using Unified Virtual Addressing (UVA) for zero-copy access.
 
@@ -82,6 +101,17 @@ class UVAOffloader(BaseOffloader):
                 # we use per-parameter offloading
                 # one module might have some parameters offloaded and some not
                 break
+
+            # In non-UVA fallback mode the forward wrapper swaps the module's
+            # state_dict via functional_call. Quant configs that cache
+            # Parameter references outside the module (e.g. FusedMoEQuant
+            # Config) keep pointing to the CPU-redirected Parameter, which
+            # breaks kernels like Marlin ("b_scales is not on GPU"). In
+            # UVA mode the cached ref still resolves to a UVA-mapped tensor
+            # that reports .is_cuda, so the bug does not manifest there.
+            # Opt-in skip via the `_vllm_skip_offload` Parameter marker.
+            if not self.uva_offloading and getattr(p, _VLLM_SKIP_OFFLOAD_ATTR, False):
+                continue
 
             if self.cpu_offload_params:
                 # Check if parameter belongs to the offloading set
