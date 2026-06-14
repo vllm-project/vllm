@@ -887,18 +887,19 @@ class VllmConfig:
                     "pipeline parallelism (PP > 1)."
                 )
 
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
+            # KV connectors for P/D disaggregation are allowed: the decode
+            # replica pulls the prompt KV and never forwards the prompt, so its
+            # prompt-region routing is invalid, but a P/D-aware router/proxy can
+            # splice the prefill replica's routing back in. kv_role cannot tell
+            # P/D transfer from single-instance KV offload (NixlConnector P/D
+            # runs as kv_both), so this is a warning rather than an error.
             if (
                 self.kv_transfer_config is not None
                 and self.kv_transfer_config.is_kv_transfer_instance
             ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
+                logger.warning(
+                    "You are using P/D disaggregation with routed_experts capture, "
+                    "for this to work your router/proxy needs to support it"
                 )
 
         if self.lora_config is not None:
