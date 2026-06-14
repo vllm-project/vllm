@@ -1427,20 +1427,28 @@ class MooncakeStoreWorker:
         return []
 
     def close(self) -> None:
-        """Release the MooncakeDistributedStore handle on teardown.
+        """Release worker resources on teardown.
 
-        Closing the store frees its TransferEngine, the registered RDMA
-        buffers, and the connection to the master server. Idempotent so it is
-        safe to call from both the explicit shutdown path and ``__del__``.
+        Closes the MooncakeDistributedStore (TransferEngine, RDMA buffers,
+        master-server connection) and the LookupKeyServer (ZMQ socket, IPC
+        file). Idempotent so it is safe to call from both the explicit
+        shutdown path and ``__del__``.
         """
         store = getattr(self, "store", None)
-        if store is None:
-            return
-        self.store = None
-        try:
-            store.close()
-        except Exception as e:
-            logger.warning("Error closing MooncakeDistributedStore: %s", e)
+        if store is not None:
+            self.store = None
+            try:
+                store.close()
+            except Exception as e:
+                logger.warning("Error closing MooncakeDistributedStore: %s", e)
+
+        lookup_server = getattr(self, "lookup_server", None)
+        if lookup_server is not None:
+            self.lookup_server = None
+            try:
+                lookup_server.close()
+            except Exception as e:
+                logger.warning("Error closing LookupKeyServer: %s", e)
 
 
 # ============================================================
@@ -1518,6 +1526,7 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
         self.socket.close(linger=0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)

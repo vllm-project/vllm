@@ -659,7 +659,7 @@ def test_del_invokes_shutdown_and_closes_store():
     worker.close.assert_called_once_with()
 
 
-def test_shutdown_scheduler_role_is_noop():
+def test_shutdown_scheduler_role_closes_lookup_client():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
 
@@ -668,12 +668,41 @@ def test_shutdown_scheduler_role_is_noop():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
             "connector.MooncakeStoreScheduler"
-        ),
+        ) as mock_scheduler_cls,
     ):
         connector = mooncake_store_connector.MooncakeStoreConnector(
             vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
         )
 
-    # Scheduler role holds no store handle, so shutdown must be a safe no-op.
     assert connector.connector_worker is None
+    scheduler = mock_scheduler_cls.return_value
+    mock_client = MagicMock()
+    scheduler.client = mock_client
+
+    connector.shutdown()
+
+    mock_client.close.assert_called_once_with()
+
+
+def test_shutdown_scheduler_role_swallows_client_errors():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    scheduler = mock_scheduler_cls.return_value
+    mock_client = MagicMock()
+    mock_client.close.side_effect = RuntimeError("boom")
+    scheduler.client = mock_client
+
+    # Must not propagate.
     connector.shutdown()
