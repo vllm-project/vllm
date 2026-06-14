@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import itertools
 import time
 from collections import defaultdict, deque
@@ -50,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -177,6 +183,16 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Streaming sessions finished from inside schedule()/add_request() (e.g.
+        # a resumable realtime session that reached max_model_len). finish_requests
+        # frees them scheduler-side but, outside update_from_output, has no
+        # `outputs` dict to emit an EngineCoreOutput on -- and finished_req_ids is
+        # worker-facing only, so the client would never receive a finish_reason
+        # and the websocket would hang. Buffer (client_index, req_id, reason) here
+        # and drain it in the next update_from_output, mirroring the failed-KV-load
+        # finish path. Flushed each step.
+        self._streaming_finish_outputs: list[tuple[int, str, FinishReason]] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -371,6 +387,8 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        # [EXPERIMENTAL] unbounded realtime: req_id -> D to re-anchor this step.
+        reanchor_reqs: dict[str, int] = {}
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -425,6 +443,12 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+
+            # NOTE: realtime sessions advance their position clock through the
+            # WAITING loop (each audio chunk resumes the session with WAITING
+            # status), so the unbounded-realtime re-anchor trigger lives there,
+            # not here. The re-anchor margin keeps the running-loop decode clear
+            # of max_model_len between chunks.
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -746,6 +770,35 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    # [EXPERIMENTAL] Unbounded realtime: before the position clock
+                    # would reach max_model_len, re-anchor it down instead of
+                    # length-capping, then schedule this chunk's new tokens at the
+                    # rebased positions (FUSED: the session is re-added this step
+                    # and the worker re-rotates its live keys by R(-D)).
+                    # num_new_tokens is invariant under re-anchor: the clock and
+                    # the accumulated token count both drop by D.
+                    if (
+                        request.reanchor_stream
+                        and num_computed_tokens + num_new_tokens
+                        >= self.max_model_len
+                        - self.scheduler_config.realtime_reanchor_margin_tokens
+                        and self._reanchor_session(request)
+                    ):
+                        num_computed_tokens = request.num_computed_tokens
+                    # Clamp to max_model_len. Mirrors the RUNNING-path guard
+                    # above, but ONLY for streaming/resumable sessions whose
+                    # accumulated token count can grow past max_model_len across
+                    # successive `_update_request_as_session` resumes (continuous
+                    # Voxtral realtime audio). Classic one-shot prefills must NOT
+                    # be clamped here: a pooling/embedding request with
+                    # prompt_len == max_model_len would otherwise lose its last
+                    # token and hang (generate rejects that length at validation,
+                    # pooling does not). They keep the upstream invariant below.
+                    if request.resumable:
+                        num_new_tokens = min(
+                            num_new_tokens,
+                            self.max_model_len - 1 - num_computed_tokens,
+                        )
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -761,7 +814,26 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    assert num_new_tokens > 0
+                    if not request.resumable:
+                        # Classic one-shot prefill: preserve the upstream
+                        # invariant. A non-resumable request is never clamped
+                        # above, so it always has tokens to schedule here.
+                        assert num_new_tokens > 0
+                    elif num_new_tokens <= 0:
+                        # Resumable streaming session has reached max_model_len
+                        # and can never make progress. Finish it gracefully
+                        # (finish_requests removes it from the waiting queues)
+                        # instead of asserting and crashing the engine, and
+                        # avoid head-of-line blocking the waiting queue. Buffer a
+                        # client-facing finish output so the websocket does not
+                        # hang waiting for a finish_reason that never arrives.
+                        finished = self.finish_requests(
+                            request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        self._buffer_streaming_finish(
+                            finished, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        continue
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -946,6 +1018,19 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
+        # [EXPERIMENTAL] Ship each owed R(-D) key re-rotation to the worker, but
+        # only for requests that actually scheduled this step. A request whose
+        # rebase committed yet broke out unscheduled keeps its pending rotation
+        # (on request.pending_reanchor_d) and ships it on a later step it does
+        # schedule, so the rotation is never silently dropped.
+        if self.scheduler_config.enable_realtime_unbounded:
+            for req in (
+                scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
+            ):
+                if req.pending_reanchor_d:
+                    reanchor_reqs[req.request_id] = req.pending_reanchor_d
+                    req.pending_reanchor_d = 0
+
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
@@ -1011,6 +1096,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            reanchor_reqs=reanchor_reqs or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1147,6 +1233,143 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+    @functools.cached_property
+    def _reanchor_sliding_window(self) -> int | None:
+        """The decoder (largest) sliding window across KV groups, or None if the
+        model is not a pure sliding-window model. Cached after first lookup."""
+        sw = None
+        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+            mgr_sw = getattr(mgr, "sliding_window", None)
+            if mgr_sw is None:
+                return None  # a non-sliding (full-attention) group is present
+            sw = mgr_sw if sw is None else max(sw, mgr_sw)
+        return sw
+
+    def _reanchor_session(self, request: Request) -> bool:
+        """[EXPERIMENTAL] Re-anchor a streaming session's RoPE clock down by D
+        tokens so it never reaches max_model_len (unbounded duration).
+
+        Drops the oldest D tokens (already evicted past the sliding window),
+        rebases the token/position bookkeeping and per-group block lists, and
+        accumulates the owed R(-D) key re-rotation on request.pending_reanchor_d.
+        The clock/block rebase commits here (allocation needs the rebased
+        positions); the worker applies the rotation once the request is in the
+        persistent batch (see schedule()'s reanchor_reqs build).
+
+        Returns True if a re-anchor was performed. Sliding-window models only,
+        with prefix caching disabled (no block hashes to rebase).
+        """
+        sw = self._reanchor_sliding_window
+        if sw is None or self.cache_config.enable_prefix_caching:
+            return False
+        # ``d`` is block-aligned to the scheduler block size = LCM of every KV
+        # group's block size, so it is also a whole multiple of EACH group's own
+        # block size. The number of leading blocks to drop is therefore computed
+        # PER manager as ``d // mgr.block_size``, not one shared count: with
+        # unequal text/audio sliding windows the decoder and encoder land in
+        # separate groups with DIFFERENT block sizes (the encoder's is enlarged to
+        # equalize page size), so a single ``d // self.block_size`` would
+        # under-drop the smaller-block group and leave its block table misaligned
+        # against the re-rotated keys.
+        bs = self.block_size
+        # Drop everything older than the (largest) window, block-aligned.
+        d = ((request.num_computed_tokens - sw) // bs) * bs
+        if d <= 0:
+            return False
+        # Safety tripwire: the leading (d // mgr.block_size) blocks of every group
+        # must already be null (evicted past the window by remove_skipped_blocks,
+        # run from allocate_slots every prior step). If any is not, deleting it
+        # would corrupt block accounting, so fail safe (no re-anchor, no mutation).
+        managers = self.kv_cache_manager.coordinator.single_type_managers
+        for mgr in managers:
+            blocks = mgr.req_to_blocks.get(request.request_id)
+            if not blocks:
+                continue
+            null_block = getattr(mgr, "_null_block", None)
+            if null_block is None:
+                # Fail safe: without a null block to compare against, the
+                # tripwire cannot prove the leading blocks are evicted, and the
+                # deletion pass below would drop live blocks unchecked.
+                logger.warning_once(
+                    "Re-anchor disabled: KV cache manager %s has no _null_block "
+                    "to validate evicted leading blocks against.",
+                    type(mgr).__name__,
+                )
+                return False
+            mgr_shift = d // mgr.block_size
+            for i in range(min(mgr_shift, len(blocks))):
+                if blocks[i] is not null_block:
+                    logger.warning(
+                        "Re-anchor aborted for %s: leading block %d not null "
+                        "in a KV group (window=%d, clock=%d).",
+                        request.request_id,
+                        i,
+                        sw,
+                        request.num_computed_tokens,
+                    )
+                    return False
+        # (1) token / position bookkeeping
+        request.num_computed_tokens -= d
+        del request._all_token_ids[:d]
+        if request.prompt_token_ids is not None and len(request.prompt_token_ids) >= d:
+            del request.prompt_token_ids[:d]
+            request.num_prompt_tokens -= d
+        # (2) multimodal features: drop the dead leading features (those fully
+        # before the new origin -> beyond the window, audio long since
+        # transcribed and evicted) and shift the rest down by d. Dropping is
+        # required for unbounded duration: each audio chunk appends a feature
+        # whose ``data`` payload is non-trivial, so keeping them all leaks host
+        # RAM without bound. Features are referenced by LIST INDEX (input_id) by
+        # the encoder cache (request_cached_ids) and the per-step scheduler
+        # (get_mm_features_in_window binary-searches the monotonic offsets), so
+        # we release any still-cached dead input and reindex the survivors.
+        n_drop = 0
+        if request.mm_features:
+            for mm_feature in request.mm_features:
+                pos = mm_feature.mm_position
+                if pos.offset + pos.length <= d:
+                    n_drop += 1
+                else:
+                    break
+            if n_drop:
+                ecm = self.encoder_cache_manager
+                for i in list(ecm.get_cached_input_ids(request)):
+                    if i < n_drop:
+                        ecm.free_encoder_input(request, i)
+                rid = request.request_id
+                if rid in ecm.request_cached_ids:
+                    ecm.request_cached_ids[rid] = {
+                        i - n_drop for i in ecm.request_cached_ids[rid]
+                    }
+                del request.mm_features[:n_drop]
+            for mm_feature in request.mm_features:
+                pos = mm_feature.mm_position
+                mm_feature.mm_position = replace(pos, offset=pos.offset - d)
+        # (3) per-group block lists: drop the leading (d // mgr.block_size)
+        # already-null / evicted blocks. The count is PER manager (groups may have
+        # different block sizes under unequal windows), not one shared count.
+        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+            blocks = mgr.req_to_blocks.get(request.request_id)
+            if blocks:
+                mgr_shift = d // mgr.block_size
+                del blocks[: min(mgr_shift, len(blocks))]
+        # (4) Owe the worker an R(-D) key re-rotation; accumulate on the request
+        # so it survives an unscheduled step (shipped from schedule()).
+        request.pending_reanchor_d += d
+        request.reanchor_offset += d
+        logger.info(
+            "Re-anchored realtime session %s by D=%d (clock now %d, total folded "
+            "%d; mm_features=%d dropped=%d all_tokens=%d).",
+            request.request_id,
+            d,
+            request.num_computed_tokens,
+            request.reanchor_offset,
+            len(request.mm_features) if request.mm_features else 0,
+            n_drop,
+            len(request._all_token_ids),
+        )
+        return True
 
     def _make_cached_request_data(
         self,
@@ -1654,6 +1877,22 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
+        # Emit client-facing finish outputs for streaming sessions finished from
+        # inside schedule()/add_request() (the request is already freed, so this
+        # is the only place the client learns it ended). Mirrors the failed-KV
+        # path above; without it the websocket hangs on a finish_reason that
+        # never comes.
+        if self._streaming_finish_outputs:
+            for client_index, req_id, reason in self._streaming_finish_outputs:
+                outputs[client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=reason,
+                    )
+                )
+            self._streaming_finish_outputs.clear()
+
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
@@ -1764,6 +2003,21 @@ class Scheduler(SchedulerInterface):
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
+            # After extending the session with new streaming input, check if
+            # the accumulated tokens (prompt + encoder + output) reached
+            # max_model_len. Without this guard a fatal assertion fires in
+            # gpu_model_runner._bookkeeping_sync once the streaming input pushes
+            # the total past the limit (continuous Voxtral realtime sessions).
+            if request.num_tokens >= self.max_model_len and not request.reanchor_stream:
+                logger.warning(
+                    "Streaming session %s reached max_model_len (%d >= %d) "
+                    "after session update. Finishing request gracefully.",
+                    request.request_id,
+                    request.num_tokens,
+                    self.max_model_len,
+                )
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -1893,12 +2147,40 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
+                # If the session reached max_model_len after the update (e.g.
+                # continuous audio streaming accumulating encoder tokens past
+                # the limit), finish gracefully here instead of letting it
+                # crash later in the model runner.
+                if (
+                    existing.num_tokens >= self.max_model_len
+                    and not existing.reanchor_stream
+                ):
+                    logger.warning(
+                        "Streaming session %s reached max_model_len "
+                        "(%d >= %d) after session update. Finishing request "
+                        "gracefully.",
+                        existing.request_id,
+                        existing.num_tokens,
+                        self.max_model_len,
+                    )
+                    finished = self.finish_requests(
+                        existing.request_id,
+                        RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
+                    self._buffer_streaming_finish(
+                        finished, RequestStatus.FINISHED_LENGTH_CAPPED
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+                # [EXPERIMENTAL] mark resumable realtime sessions for unbounded
+                # re-anchoring (only effective for sliding-window models with
+                # prefix caching off; gated in _reanchor_session).
+                if self.scheduler_config.enable_realtime_unbounded:
+                    request.reanchor_stream = True
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.connector is not None:
@@ -1968,6 +2250,22 @@ class Scheduler(SchedulerInterface):
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         return [(r.request_id, r.client_index) for r in valid_requests]
+
+    def _buffer_streaming_finish(
+        self,
+        finished: list[tuple[str, int]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Queue client-facing finish outputs for sessions finished from inside
+        schedule()/add_request() (where there is no `outputs` dict). Drained in
+        the next update_from_output so the client receives a finish_reason
+        instead of hanging. ``finished`` is the (req_id, client_index) list
+        returned by finish_requests."""
+        reason = RequestStatus.get_finished_reason(finished_status)
+        if reason is None:
+            return
+        for req_id, client_index in finished:
+            self._streaming_finish_outputs.append((client_index, req_id, reason))
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False

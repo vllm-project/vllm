@@ -240,6 +240,12 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # [EXPERIMENTAL] Unbounded realtime: req_id -> D (a multiple of block_size).
+    # The worker re-rotates the request's live cached keys by R(-D) so the RoPE
+    # clock can drop without reaching max_model_len. See
+    # Scheduler._reanchor_session / GPUModelRunner._reanchor_requests.
+    reanchor_reqs: dict[str, int] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
