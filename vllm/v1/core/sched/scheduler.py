@@ -1997,7 +1997,11 @@ class Scheduler(SchedulerInterface):
         num_in_queues = (
             len(self.waiting) + len(self.skipped_waiting) + len(self.running)
         )
-        return len(self.requests) > num_in_queues
+        if len(self.requests) > num_in_queues:
+            return True
+        # Keep stepping while the connector has in-flight transfers to drain
+        # (e.g. offload stores after the last request finished).
+        return self.connector.has_pending_work()
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

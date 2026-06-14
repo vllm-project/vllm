@@ -578,6 +578,11 @@ class TieringOffloadingManager(OffloadingManager):
             tier.on_schedule_end()
 
     @override
+    def has_pending_work(self) -> bool:
+        # In-flight tier transfers and not-yet-submitted promotions.
+        return bool(self._transfer_jobs) or bool(self._pending_load_submissions)
+
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield offloading events collected since the last call.
 

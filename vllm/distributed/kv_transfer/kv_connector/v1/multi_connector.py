@@ -341,6 +341,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
 
+    def has_pending_work(self) -> bool:
+        return any(c.has_pending_work() for c in self._connectors)
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""
         for c in self._connectors:
