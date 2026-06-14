@@ -2190,6 +2190,42 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def wvSplitK_int4_g(
+    weight: torch.Tensor,
+    activation: torch.Tensor,
+    scale: torch.Tensor,
+    cu_count: int,
+    group_size: int,
+    zero_points: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # NOTE: the kernel is weight-major; `weight` is the packed int4 operand
+    # (in_a, [out_features, K/2]) and `activation` is in_b ([num_tokens, K]).
+    return torch.ops._rocm_C.wvSplitK_int4_g(
+        weight, activation, scale, zero_points, bias, cu_count, group_size
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"):
+
+    @register_fake("_rocm_C::wvSplitK_int4_g")
+    def _wvSplitK_int4_g_fake(
+        in_a: torch.Tensor,  # packed int4 weight [out_features, K/2]
+        in_b: torch.Tensor,  # activation [num_tokens, K]
+        in_scale: torch.Tensor,
+        in_zero_points: torch.Tensor | None,
+        in_bias: torch.Tensor | None,
+        CuCount: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        # Kernel returns {in_b.size(0), in_a.size(0)} = [num_tokens, out_features].
+        num_tokens = in_b.size(0)
+        out_features = in_a.size(0)
+        return torch.empty(
+            (num_tokens, out_features), dtype=in_b.dtype, device=in_b.device
+        )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:

@@ -1351,6 +1351,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
+    "csrc/rocm/skinny_gemms_int4.cu"
     "csrc/rocm/attention.cu")
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
