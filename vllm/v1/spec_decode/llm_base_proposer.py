@@ -78,6 +78,12 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
+        # Dynamic Speculative Lookahead (DSL) support
+        self.draft_confidence_threshold = (
+            self.speculative_config.draft_confidence_threshold
+        )
+        self.use_dsl = self.draft_confidence_threshold is not None
+
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -432,6 +438,24 @@ class SpecDecodeBaseProposer:
     def take_last_draft_probs(self) -> torch.Tensor | None:
         return self._last_draft_probs
 
+    def _greedy_sample_with_confidence(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Greedy-sample draft tokens from hidden states with confidence scores.
+
+        Returns:
+            tuple: (token_ids, confidences) where confidences are max probabilities
+        """
+        if self.use_local_argmax_reduction:
+            token_ids = self.model.get_top_tokens(hidden_states)
+            confidences = torch.ones_like(token_ids, dtype=torch.float32)
+            return token_ids, confidences
+
+        logits = self.model.compute_logits(hidden_states)
+        probs = torch.softmax(logits, dim=-1)
+        confidences, token_ids = torch.max(probs, dim=-1)
+        return token_ids, confidences
+
     def propose(
         self,
         num_speculative_tokens,
@@ -557,9 +581,18 @@ class SpecDecodeBaseProposer:
             # (which read via _get_positions) use the correct values.
             self.positions[:batch_size] = positions
 
-        draft_token_ids, draft_probs = self._sample_draft_tokens(
-            sample_hidden_states, sampling_metadata
-        )
+        if self.use_dsl:
+            draft_token_ids, confidences = self._greedy_sample_with_confidence(
+                sample_hidden_states
+            )
+            min_confidence = confidences.min()
+            should_continue_all = min_confidence >= self.draft_confidence_threshold
+            draft_probs = None
+        else:
+            draft_token_ids, draft_probs = self._sample_draft_tokens(
+                sample_hidden_states, sampling_metadata
+            )
+            should_continue_all = True
         draft_probs_list = None if draft_probs is None else [draft_probs]
 
         if self.allowed_attn_types is not None:
@@ -660,15 +693,41 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids, draft_probs = self._sample_draft_tokens(
-                last_hidden_states[:batch_size], sampling_metadata
-            )
-            if draft_probs is not None:
-                assert draft_probs_list is not None
-                draft_probs_list.append(draft_probs)
+            if self.use_dsl:
+                draft_token_ids, confidences = self._greedy_sample_with_confidence(
+                    last_hidden_states[:batch_size]
+                )
+                min_confidence = confidences.min()
+                should_continue_all = (
+                    should_continue_all
+                    and min_confidence >= self.draft_confidence_threshold
+                )
+                if not should_continue_all:
+                    break
+            else:
+                draft_token_ids, draft_probs = self._sample_draft_tokens(
+                    last_hidden_states[:batch_size], sampling_metadata
+                )
+                if draft_probs is not None:
+                    assert draft_probs_list is not None
+                    draft_probs_list.append(draft_probs)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
+        # With DSL, we might have fewer than num_speculative_tokens tokens
+        # Pad with zeros (rejection sampler will ignore these since they'll have 0 probability)
+        actual_k = len(draft_token_ids_list)
+        if actual_k < self.num_speculative_tokens:
+            # Pad with zeros to match expected shape
+            padding_needed = self.num_speculative_tokens - actual_k
+            for _ in range(padding_needed):
+                pad_tokens = torch.zeros(
+                    batch_size,
+                    dtype=draft_token_ids_list[0].dtype,
+                    device=self.device,
+                )
+                draft_token_ids_list.append(pad_tokens)
+
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
