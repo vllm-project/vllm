@@ -19,7 +19,6 @@ from typing import Any, Literal
 
 import numpy as np
 import regex as re
-import requests
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -228,24 +227,37 @@ def _transform_single(
     return _standardize(out).squeeze(0), w_bar, h_bar
 
 
-def _fetch_image(src: Any) -> Image.Image:
+def _normalize_media_str(src: str) -> str:
+    """Prepend ``file://`` to bare local paths so MediaConnector can route them.
+
+    Preserves backward-compat with offline ``LLM.generate`` callers that pass
+    raw filesystem paths (e.g. ``/data/img.jpg``). ``file://`` strings traverse
+    MediaConnector's ``_load_file_url`` which still enforces the deployer's
+    ``allowed_local_media_path`` policy, so the security guarantee is intact.
+    Pass-through for ``http://`` / ``https://`` / ``file://`` / ``data:``.
+    """
+    lo = src[:8].lower()
+    if (
+        lo.startswith("http://")
+        or lo.startswith("https://")
+        or lo.startswith("file://")
+        or src[:5].lower() == "data:"
+    ):
+        return src
+    return "file://" + src
+
+
+def _fetch_image(src: Any, media_connector: Any) -> Image.Image:
+    """Fetch an image, routing ``str`` inputs through MediaConnector.
+
+    See ``MiMoVLProcessor`` for the SSRF/LFI hardening rationale.
+    """
     if isinstance(src, Image.Image):
         return _to_rgb(src)
     if isinstance(src, bytes):
         return _to_rgb(copy.deepcopy(Image.open(BytesIO(src))))
     if isinstance(src, str):
-        if src.startswith(("http://", "https://")):
-            r = requests.get(src, timeout=30)
-            r.raise_for_status()
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(r.content))))
-        if src.startswith("file://"):
-            return _to_rgb(Image.open(src[7:]))
-        if src.startswith("data:image"):
-            import pybase64 as _b64
-
-            _, b64 = src.split("base64,", 1)
-            return _to_rgb(copy.deepcopy(Image.open(BytesIO(_b64.b64decode(b64)))))
-        return _to_rgb(Image.open(src))
+        return _to_rgb(media_connector.fetch_image(_normalize_media_str(src)))
     raise ValueError(f"Unrecognized image source: {type(src)}")
 
 
@@ -259,6 +271,13 @@ class MiMoVLProcessor:
 
     Handles image/video/audio preprocessing and token sequence construction.
     Ported from SGLang's MiMoVLProcessor.
+
+    Security: caller-supplied media strings (image / audio) are routed through
+    a single cached :class:`MediaConnector` so this surface inherits the
+    ``allowed_media_domains`` URL allowlist and the ``allowed_local_media_path``
+    policy that already harden the OpenAI chat path via ``chat_utils.py``.
+    Both settings are threaded in from ``ModelConfig`` by
+    :meth:`MiMoV2OmniProcessingInfo.get_hf_processor`.
     """
 
     def __init__(
@@ -307,11 +326,27 @@ class MiMoVLProcessor:
         rope_type: str = "rope",
         video_process_num_threads: int = 16,
         device: Any | None = None,
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.tokenizer = tokenizer
         self.video_process_num_threads = video_process_num_threads
         self.device = torch.device(device) if isinstance(device, str) else device
+        # MediaConnector expects allowed_local_media_path as a non-None str
+        # (empty string = no-op policy); ModelConfig surfaces it as str | None.
+        self._allowed_media_domains = allowed_media_domains
+        self._allowed_local_media_path: str = allowed_local_media_path or ""
+        # Cache one MediaConnector instance — per-call construction defeats
+        # the connector's internal LRU byte cache for repeated URLs in a batch.
+        # Local import keeps the dependency confined and avoids a top-of-module
+        # cycle if a future refactor moves things around.
+        from vllm.multimodal.media.connector import MediaConnector
+
+        self._media_connector = MediaConnector(
+            allowed_local_media_path=self._allowed_local_media_path,
+            allowed_media_domains=self._allowed_media_domains,
+        )
 
         self.rope_type = "rope" if rope_type == "1d" else rope_type
         assert self.rope_type in ("rope", "mrope"), (
@@ -462,22 +497,26 @@ class MiMoVLProcessor:
                 )
             if isinstance(audio, bytes):
                 file_obj: Any = io.BytesIO(audio)
+                samples = AudioDecoder(file_obj).get_all_samples()
+                waveform = samples.data
+                original_sr = samples.sample_rate
             elif isinstance(audio, str):
                 if audio.startswith("data:"):
                     import pybase64 as _b64
 
                     file_obj = io.BytesIO(_b64.b64decode(audio.split(",")[1]))
-                elif audio.startswith(("http://", "https://")):
-                    r = requests.get(audio, timeout=30)
-                    r.raise_for_status()
-                    file_obj = io.BytesIO(r.content)
+                    samples = AudioDecoder(file_obj).get_all_samples()
+                    waveform = samples.data
+                    original_sr = samples.sample_rate
                 else:
-                    file_obj = audio
+                    # URL or local-path strings go through the cached
+                    # MediaConnector — see class docstring for rationale.
+                    waveform_np, original_sr = self._media_connector.fetch_audio(
+                        _normalize_media_str(audio)
+                    )
+                    waveform = torch.from_numpy(waveform_np)
             else:
                 raise ValueError(f"Unsupported audio source type: {type(audio)}")
-            samples = AudioDecoder(file_obj).get_all_samples()
-            waveform = samples.data
-            original_sr = samples.sample_rate
 
         if original_sr != self.audio_sampling_rate:
             if original_sr not in self._resamplers:
@@ -505,7 +544,7 @@ class MiMoVLProcessor:
         kw = self._resolve_img_kw(image)
         src = image.image
         if isinstance(src, (str, bytes)):
-            src = _fetch_image(src)
+            src = _fetch_image(src, self._media_connector)
         tensor, _, _ = _transform_single(
             src,
             factor=self.patch_size * self.merge_size,
@@ -961,6 +1000,8 @@ class MiMoOmniProcessor(ProcessorMixin):
         video_start_token_id: int | None = None,
         video_end_token_id: int | None = None,
         rope_type: str = "rope",
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
 
@@ -1008,11 +1049,25 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_end_token_id=video_end_token_id,
             pad_token_id=tokenizer.pad_token_id,
             rope_type=rope_type,
+            allowed_media_domains=allowed_media_domains,
+            allowed_local_media_path=allowed_local_media_path,
         )
 
     @classmethod
-    def from_hf_config(cls, tokenizer: Any, hf_config: Any) -> "MiMoOmniProcessor":
-        """Convenience factory: instantiate directly from an HF model config object."""
+    def from_hf_config(
+        cls,
+        tokenizer: Any,
+        hf_config: Any,
+        *,
+        allowed_media_domains: list[str] | None = None,
+        allowed_local_media_path: str | None = None,
+    ) -> "MiMoOmniProcessor":
+        """Convenience factory: instantiate directly from an HF model config object.
+
+        ``allowed_media_domains`` / ``allowed_local_media_path`` forward the
+        deployer's ModelConfig policy to ``MiMoVLProcessor`` (see its docstring
+        for the SSRF / LFI hardening rationale).
+        """
         vc = hf_config.vision_config
         if isinstance(vc, dict):
             patch_size = vc.get("patch_size", 14)
@@ -1068,6 +1123,8 @@ class MiMoOmniProcessor(ProcessorMixin):
             video_start_token_id=pc.get("video_start_token_id"),
             video_end_token_id=pc.get("video_end_token_id"),
             rope_type=rope_type,
+            allowed_media_domains=allowed_media_domains,
+            allowed_local_media_path=allowed_local_media_path,
         )
 
     @property
