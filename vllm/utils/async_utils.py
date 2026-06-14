@@ -91,6 +91,8 @@ class AsyncMicrobatchTokenizer:
         """Batch incoming encode requests for efficiency."""
         while True:
             prompt, kwargs, result_future = await queue.get()
+            if result_future.done():
+                continue
             prompts = [prompt]
             kwargs_list = [kwargs]
             result_futures = [result_future]
@@ -104,6 +106,8 @@ class AsyncMicrobatchTokenizer:
                     prompt, kwargs, result_future = await asyncio.wait_for(
                         queue.get(), timeout
                     )
+                    if result_future.done():
+                        continue
                     prompts.append(prompt)
                     result_futures.append(result_future)
                     if not can_batch:
@@ -144,6 +148,8 @@ class AsyncMicrobatchTokenizer:
         """Batch incoming decode requests for efficiency."""
         while True:
             token_ids, result_future = await queue.get()
+            if result_future.done():
+                continue
             token_ids_list = [token_ids]
             result_futures = [result_future]
             deadline = self._loop.time() + self.batch_wait_timeout_s
@@ -156,6 +162,8 @@ class AsyncMicrobatchTokenizer:
                     token_ids, result_future = await asyncio.wait_for(
                         queue.get(), timeout
                     )
+                    if result_future.done():
+                        continue
                     token_ids_list.append(token_ids)
                     result_futures.append(result_future)
                 except asyncio.TimeoutError:
