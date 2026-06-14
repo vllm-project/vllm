@@ -4,6 +4,10 @@
 import pytest
 import torch
 
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4AudioInputs,
+    Gemma4ForConditionalGeneration,
+)
 from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
 from vllm.model_executor.models.granite_speech import GraniteSpeechAudioInputs
 from vllm.model_executor.models.hyperclovax_vision import HCXVisionVideoPixelInputs
@@ -201,3 +205,67 @@ def test_invalid_tensor_schema_with_static_last_dim():
             image_embeds=image_embeds,
             image_grid_thw=image_grid_thw,
         )
+
+
+# ---------------------------------------------------------------------------
+# Gemma4 audio batching regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_gemma4_audio_inputs_uniform_batch():
+    """Gemma4AudioInputs accepts a stacked tensor when all s-dims match."""
+    Gemma4AudioInputs(
+        input_features_padded=torch.zeros(2, 215, 128),
+        input_features_mask=torch.ones(2, 215, dtype=torch.bool),
+    )
+
+
+def test_gemma4_audio_inputs_variable_length_raises():
+    """Gemma4AudioInputs rejects a list with inconsistent s-dims directly.
+
+    This documents the raw TensorSchema behaviour — the shape mismatch error
+    that _parse_and_validate_audio_input must prevent by pre-padding.
+    """
+    with pytest.raises(ValueError, match="contains inconsistent shapes"):
+        Gemma4AudioInputs(
+            input_features_padded=[
+                torch.zeros(215, 128),
+                torch.zeros(189, 128),
+            ],
+            input_features_mask=[
+                torch.ones(215, dtype=torch.bool),
+                torch.ones(189, dtype=torch.bool),
+            ],
+        )
+
+
+def test_gemma4_parse_and_validate_audio_pads_variable_lengths():
+    """_parse_and_validate_audio_input pads to the batch-level max s-dim.
+
+    Regression test for concurrent requests carrying audio clips of different
+    durations. Without the fix the method crashes with a TensorSchema shape
+    mismatch; with it the shorter clip is zero-padded and the mask extended
+    with False so the audio tower ignores the extra frames.
+    """
+    # Simulate what MultiModalBatchedField._reduce_data produces when two
+    # requests have audio of different lengths: a plain Python list of 2-D
+    # tensors (one per audio clip) with mismatched first dimensions.
+    feats = [torch.zeros(215, 128), torch.zeros(189, 128)]
+    masks = [torch.ones(215, dtype=torch.bool), torch.ones(189, dtype=torch.bool)]
+
+    # _parse_and_validate_audio_input only reads kwargs — it never touches
+    # any other model state — so object.__new__ is sufficient here.
+    model = object.__new__(Gemma4ForConditionalGeneration)
+    result = model._parse_and_validate_audio_input(
+        input_features_padded=feats,
+        input_features_mask=masks,
+    )
+
+    assert result is not None
+    assert result["input_features_padded"].shape == (2, 215, 128)
+    assert result["input_features_mask"].shape == (2, 215)
+    # The padded frames of the shorter clip must be masked out.
+    assert result["input_features_mask"][1, 189:].sum() == 0
+    # The real frames of both clips must remain unmasked.
+    assert result["input_features_mask"][0, :215].all()
+    assert result["input_features_mask"][1, :189].all()

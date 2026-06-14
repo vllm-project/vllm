@@ -1155,6 +1155,19 @@ class Gemma4ForConditionalGeneration(
         input_features_mask = kwargs.pop("input_features_mask", None)
         if input_features_mask is None:
             return None
+
+        # When requests with different audio durations are batched together,
+        # each audio item may have a different sequence length in the s-dim
+        # (the HF processor pads per-request to that request's max audio
+        # length, not to a global fixed length).  Re-pad everything to the
+        # batch-level maximum before stacking so the audio tower can run in
+        # batched mode and the TensorSchema validation passes.
+        if isinstance(input_features_padded, (list, tuple)):
+            input_features_padded = torch.nn.utils.rnn.pad_sequence(
+                input_features_padded, batch_first=True)
+            input_features_mask = torch.nn.utils.rnn.pad_sequence(
+                input_features_mask, batch_first=True, padding_value=False)
+
         return Gemma4AudioInputs(
             input_features_padded=input_features_padded,
             input_features_mask=input_features_mask,
