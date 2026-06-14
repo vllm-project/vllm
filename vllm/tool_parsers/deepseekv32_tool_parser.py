@@ -54,6 +54,11 @@ class DeepSeekV32ToolParser(ToolParser):
     tool_call_start_token: str = "<｜DSML｜function_calls>"
     tool_call_end_token: str = "</｜DSML｜function_calls>"
     structural_tag_model = "deepseek_v3_2"
+    # Workaround for a model defect: DeepSeek occasionally emits a tool-call
+    # block without first closing reasoning (a missing </think>), which would
+    # otherwise leave the block inside reasoning and lose the call. Opt in so
+    # DelegatingParser can recover it.
+    recovers_tool_calls_in_reasoning: bool = True
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
