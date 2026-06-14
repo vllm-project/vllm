@@ -736,3 +736,83 @@ def test_async_loads_both_admitted_when_pool_fits():
 
     for req in reqs:
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_parked_async_load_not_stranded_by_unschedulable_head():
+    """A request whose async KV load already finished must not be stranded
+    behind an unschedulable queue head when nothing is running (#45388).
+
+    Setup (priority policy):
+    - req_a (low priority) is admitted as an async KV load and parks in
+      WAITING_FOR_REMOTE_KVS holding its blocks.
+    - req_b (high priority) arrives; its full sequence does not fit in the
+      remaining free blocks, so it blocks the head of the waiting queue.
+    - req_a's load finishes, but it is only promoted when the waiting-queue
+      traversal reaches it. With nothing running, stopping the traversal at
+      req_b would deadlock the scheduler permanently: req_a holds the very
+      blocks req_b needs.
+
+    The scheduler must keep scanning past req_b, promote req_a, run it to
+    completion, and then schedule req_b.
+    """
+    vllm_config = create_vllm_config()
+    vllm_config.scheduler_config.policy = "priority"
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_BLOCKS = 12
+    scheduler = create_scheduler(vllm_config, num_blocks=NUM_BLOCKS)
+
+    # req_a: 4 full blocks, fully remote -> parks holding 4 blocks.
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_a.priority = 1
+    scheduler.add_request(req_a)
+    scheduler_output = scheduler.schedule()
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert len(scheduler.running) == 0
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # req_b: higher priority, full sequence cannot fit while req_a's
+    # blocks are held.
+    free_blocks = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    num_b_blocks = free_blocks + 1
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * num_b_blocks,
+        max_tokens=1,
+    )
+    assert req_b.priority == 0
+    scheduler.add_request(req_b)
+
+    # req_b blocks the head; nothing schedulable yet.
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.total_num_scheduled_tokens == 0
+    assert len(scheduler.running) == 0
+
+    # req_a finishes receiving its KV.
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={req_a.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert req_a.request_id in scheduler.finished_recving_kv_req_ids
+
+    # The scheduler must promote and schedule req_a even though req_b
+    # (unschedulable) is ahead of it in the queue.
+    scheduler_output = scheduler.schedule()
+    assert req_a.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[req_a.request_id] == 1
+
+    # req_a finishes, freeing its blocks.
+    model_runner_output = create_model_runner_output([req_a], use_eos=True)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # req_b now fits and gets scheduled.
+    scheduler_output = scheduler.schedule()
+    assert req_b.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[req_b.request_id] > 0
