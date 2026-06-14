@@ -39,6 +39,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    tokenizer_batch_wait_timeout_s: float = 0.002
     hidden_size: int = 768
     dtype: torch.dtype = torch.float32
 
@@ -132,6 +133,12 @@ class TestValidatePrompt:
 
 
 class TestRenderPrompt:
+    @pytest.mark.asyncio
+    async def test_async_tokenizer_uses_configured_batch_wait_timeout(self):
+        renderer = _build_renderer(MockModelConfig(tokenizer_batch_wait_timeout_s=0))
+
+        assert renderer.get_async_tokenizer().batch_wait_timeout_s == 0
+
     def test_tokens_input(self):
         renderer = _build_renderer(MockModelConfig())
 

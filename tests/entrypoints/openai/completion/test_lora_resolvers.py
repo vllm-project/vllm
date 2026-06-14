@@ -55,6 +55,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    tokenizer_batch_wait_timeout_s: float = 0.002
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

@@ -322,6 +322,11 @@ class ModelConfig:
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
+    tokenizer_batch_wait_timeout_s: float = Field(default=0.002, ge=0)
+    """Maximum time in seconds for the async renderer tokenizer to wait for
+    additional encode/decode requests before running a micro-batch. Set to 0
+    to disable the waiting delay for latency-sensitive, low-concurrency
+    serving."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None

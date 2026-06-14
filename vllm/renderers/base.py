@@ -149,7 +149,9 @@ class BaseRenderer(ABC, Generic[_T]):
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
             self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(), executor=self._executor
+                self.get_tokenizer(),
+                batch_wait_timeout_s=self.model_config.tokenizer_batch_wait_timeout_s,
+                executor=self._executor,
             )
 
         return self._async_tokenizer
