@@ -30,7 +30,7 @@ or just on the low or high end.
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
-| [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm → single kernel          | O1 (ROCm/AITER only)           | ~2%                | No        | Always       |
+| [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
 
 ## Support Matrix
 
@@ -381,11 +381,45 @@ q_normed, kv_normed = fused_mla_dual_rms_norm(
 Requires: AMD ROCm with AITER enabled. Enabled by default at optimization level O1 and above
 when AITER is available.
 
+**FP8 attention variant (per-token quant).** When attention is FP8-quantized and
+the `q_b_proj` uses per-output-channel weights with a per-token activation scale
+(Quark / ModelOpt), only the *q* latent is FP8 per-token-quantized — it feeds the
+FP8 `q_b_proj` GEMM — while the *kv* latent is RMS-normed and consumed by
+attention as bf16 (see `vllm/model_executor/layers/mla.py` and AMD's ATOM
+reference). So `RocmAiterRMSNormQuantFusionPass` runs first and folds only the
+q-side `rms_norm → fp8 per-token quant` into a single
+`rocm_aiter_rmsnorm_fused_dynamic_quant` op (a single `(M, 1)` scale), leaving the
+kv side a plain `rms_norm`. This breaks the symmetric BF16 dual pattern above (q
+is no longer a bare `rms_norm`). To restore the dual fusion, the same pass matches
+this asymmetric pair — q's `rocm_aiter_rmsnorm_fused_dynamic_quant` plus kv's
+`rms_norm` (bracketing the splits + `k_pe` passthrough) — and lowers it to
+`fused_mla_dual_rms_norm_per_token_quant`, backed by AITER's
+`fused_qk_rmsnorm_per_token_quant` HIP kernel. That kernel does RMSNorm + FP8
+per-token quant on its `q` slot and RMSNorm only on its `k` slot, so a **single
+launch** replaces the separate q norm+quant and kv norm kernels (q scale is
+`(M, 1)` fp32, matching `rocm_aiter_rmsnorm_fused_dynamic_quant`). This variant
+fires automatically when the installed AITER provides
+`fused_qk_rmsnorm_per_token_quant` (no extra flag).
+
+```text
+# FP8, before MLA dual fusion (q norm+quant fused; kv still plain rms_norm):
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_fp8, q_scale = rocm_aiter_rmsnorm_fused_dynamic_quant(q_c, q_weight, eps, fp8)
+kv_normed      = rms_norm(kv_c, kv_weight, eps)          # bf16
+
+# FP8, fused (single kernel launch):
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
+    q_c, q_weight, kv_c, kv_weight, eps1, eps2)
+```
+
 **Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`)
-- Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`)
-- AITER kernel: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442)
+- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`, `MLADualRMSPerTokenQuantPattern`)
+- Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`, `fused_mla_dual_rms_norm_per_token_quant`)
+- AITER kernels: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442), `fused_qk_rmsnorm_per_token_quant`
 
 ## See Also
 
