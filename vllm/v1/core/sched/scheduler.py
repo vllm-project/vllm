@@ -54,7 +54,12 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1399,6 +1404,20 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
+        # FIX (vllm-project/vllm#38602): Multi-node Ray compiled-DAG channel
+        # cannot transmit numpy ndarrays inside LogprobsLists, so the worker
+        # serialized them as Python lists before crossing the channel. The
+        # downstream msgspec schema for EngineCoreOutput.new_logprobs requires
+        # ndarrays, so reconstruct them here on the driver side.
+        if logprobs is not None and not isinstance(
+            logprobs.logprob_token_ids, np.ndarray
+        ):
+            logprobs = LogprobsLists(
+                np.asarray(logprobs.logprob_token_ids, dtype=np.int32),
+                np.asarray(logprobs.logprobs, dtype=np.float32),
+                np.asarray(logprobs.sampled_token_ranks, dtype=np.int32),
+                logprobs.cu_num_generated_tokens,
+            )
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
