@@ -451,11 +451,12 @@ class SparseAttnIndexer(CustomOp):
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
+        **fusion_kwargs,
     ):
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
-            return self.forward_hip(hidden_states, q_quant, k, weights)
+            return self.forward_hip(hidden_states, q_quant, k, weights, **fusion_kwargs)
         else:
             raise NotImplementedError(
                 "SparseAttnIndexer native forward is only implemented for "
@@ -468,6 +469,7 @@ class SparseAttnIndexer(CustomOp):
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
+        **fusion_kwargs,
     ):
         # FP8 path: single tensor (per-token scale is folded into `weights`).
         # FP4 path: (values, scales) tuple with scales required by the kernel.
@@ -500,6 +502,7 @@ class SparseAttnIndexer(CustomOp):
         q_fp8: torch.Tensor,
         k: torch.Tensor,
         weights: torch.Tensor,
+        **fusion_kwargs,
     ):
         return self.forward_cuda(hidden_states, q_fp8, k, weights)
 
@@ -509,11 +512,21 @@ class SparseAttnIndexer(CustomOp):
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
+        k_norm_weight: torch.Tensor | None = None,
+        k_norm_bias: torch.Tensor | None = None,
+        k_norm_eps: float = 1e-6,
+        positions: torch.Tensor | None = None,
+        cos_cache: torch.Tensor | None = None,
+        sin_cache: torch.Tensor | None = None,
+        weights_scale: float = 1.0,
+        is_neox_style: bool = True,
+        use_qk_rope_cache_fusion: bool = False,
     ):
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
+        # On the fused path q_quant is the pre-quant bf16/fp16 Q instead.
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
@@ -529,7 +542,16 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
+                self.skip_k_cache_insert,
+                k_norm_weight,
+                k_norm_bias,
+                k_norm_eps,
+                positions,
+                cos_cache,
+                sin_cache,
+                weights_scale,
+                is_neox_style,
+                use_qk_rope_cache_fusion,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path is only supported on AITER. "
