@@ -105,7 +105,13 @@ class AfmoeMoE(nn.Module):
         eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
 
-        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
+            else 0
+        )
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size

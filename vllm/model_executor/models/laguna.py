@@ -159,12 +159,13 @@ class LagunaMoE(nn.Module):
         vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
-        eplb_config.num_redundant_experts = (
-            eplb_config.num_redundant_experts
-            if eplb_config.num_redundant_experts is not None
+        self.n_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
             else 0
         )
-        self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -571,7 +572,13 @@ class LagunaModel(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         eplb_config = vllm_config.parallel_config.eplb_config
-        self.num_redundant_experts = eplb_config.num_redundant_experts
+        self.num_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                config.num_experts, get_ep_group().world_size
+            )
+            if enable_eplb
+            else 0
+        )
         self.config = config
         self.quant_config = quant_config
 

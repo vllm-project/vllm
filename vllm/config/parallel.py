@@ -67,8 +67,25 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int | None = Field(default=None, ge=0)
+    """
+    Number of redundant experts to add for expert parallelism load balancing.
+
+    When set to None (the default), the minimum valid value is used
+    automatically: the smallest non-negative integer r such that
+    (num_routed_experts + r) is evenly divisible by the EP size.
+    This avoids the need to manually tune this value when first enabling EPLB.
+    """
+
+    def get_num_redundant_experts(self, num_routed_experts: int, ep_size: int) -> int:
+        """Return the effective number of redundant experts.
+
+        When ``num_redundant_experts`` is None, returns the minimum valid value:
+        the smallest r >= 0 such that (num_routed_experts + r) % ep_size == 0.
+        """
+        if self.num_redundant_experts is None:
+            return (-num_routed_experts) % ep_size
+        return self.num_redundant_experts
 
     log_balancedness: bool = False
     """
@@ -479,7 +496,8 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.eplb_config.num_redundant_experts != 0:
+            if self.eplb_config.num_redundant_experts is not None \
+                    and self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "

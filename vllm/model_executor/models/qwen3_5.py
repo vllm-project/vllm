@@ -33,6 +33,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
 )
 from vllm.logger import init_logger
@@ -218,7 +219,13 @@ class Qwen3_5Model(Qwen3NextModel):
         parallel_config = vllm_config.parallel_config
 
         eplb_config = parallel_config.eplb_config
-        self.num_redundant_experts = eplb_config.num_redundant_experts
+        self.num_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                config.num_experts, get_ep_group().world_size
+            )
+            if parallel_config.enable_eplb and hasattr(config, "num_experts")
+            else 0
+        )
 
         self.config = config
 
