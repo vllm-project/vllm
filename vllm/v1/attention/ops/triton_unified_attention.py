@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.fp8e4nv_sm80 import fp8e4nv_bits_to_bf16
+from vllm.v1.attention.ops.fp8e4nv_sm80 import fp8e4m3_to_bf16
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -55,7 +55,7 @@ def _cast_kv_tile(
         if FP8_SOFTWARE_CONV:
             # SM80/86: the cache holds raw fp8e4nv bytes (uint8). Decode in
             # software (no native fp8 cvt), then dequantize with the scale.
-            deq = fp8e4nv_bits_to_bf16(data).to(tl.float32) * tl.load(tensor_scale)
+            deq = fp8e4m3_to_bf16(data).to(tl.float32) * tl.load(tensor_scale)
             return deq.to(Q.dtype)
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
