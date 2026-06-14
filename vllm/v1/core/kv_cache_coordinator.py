@@ -317,6 +317,7 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_eagle_pop: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
@@ -369,6 +370,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_eagle_pop: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -433,6 +435,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_eagle_pop: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -440,7 +443,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle_block=0 in self.eagle_group_ids,
+            drop_eagle_block=(0 in self.eagle_group_ids) and (not skip_eagle_pop),
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -583,6 +586,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_eagle_pop: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
@@ -641,7 +645,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified
+                drop_eagle_block = (
+                    use_eagle
+                    and (idx not in eagle_verified)
+                    and (not skip_eagle_pop)
+                )
 
                 _max_length = curr_hit_length
                 if drop_eagle_block:
