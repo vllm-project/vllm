@@ -4,6 +4,7 @@
 import asyncio
 import dataclasses
 import functools
+import json
 import os
 from argparse import Namespace
 from logging import Logger
@@ -345,4 +346,15 @@ async def validate_json_request(raw_request: Request):
     if media_type != "application/json":
         raise RequestValidationError(
             errors=["Unsupported Media Type: Only 'application/json' is allowed"]
+        )
+
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError:
+        # Let FastAPI/Pydantic surface JSON parse errors through the normal path.
+        return
+
+    if not isinstance(body, dict):
+        raise RequestValidationError(
+            errors=[f"Request body must be a JSON object, got {type(body).__name__}"]
         )
