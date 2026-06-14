@@ -133,6 +133,7 @@ MoEBackend = Literal[
     "humming",
     "triton_unfused",
     "aiter",
+    "sonic_moe",
     "emulation",
 ]
 
