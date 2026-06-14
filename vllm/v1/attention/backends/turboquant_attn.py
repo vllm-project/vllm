@@ -689,6 +689,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        max_num_kv_splits=self.max_num_kv_splits,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use

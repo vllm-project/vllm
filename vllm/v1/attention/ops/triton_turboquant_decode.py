@@ -40,7 +40,19 @@ def _use_fp8_e4b15(device: int = 0) -> int:
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "stride_qb",
+        "stride_qh",
+        "stride_cache_block",
+        "stride_cache_pos",
+        "stride_cache_head",
+        "stride_bt_b",
+        "stride_mid_b",
+        "stride_mid_h",
+        "stride_mid_s",
+    ]
+)
 def _tq_decode_stage1(
     # Precomputed query projection
     Q_rot_ptr,  # [B, Hq, D] float32
@@ -318,7 +330,20 @@ def _tq_decode_stage1(
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "stride_ko_b",
+        "stride_ko_h",
+        "stride_ko_s",
+        "stride_vo_b",
+        "stride_vo_h",
+        "stride_vo_s",
+        "stride_cache_block",
+        "stride_cache_pos",
+        "stride_cache_head",
+        "stride_bt_b",
+    ]
+)
 def _tq_full_dequant_kv(
     KV_cache_ptr,
     Block_table_ptr,
