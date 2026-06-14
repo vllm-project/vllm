@@ -95,10 +95,9 @@ def init_attn_backend(
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
 
-            # Also split on per-rank num_heads_q so layers with different Q-head
+            # Split on per-rank num_heads_q so layers with different Q-head
             # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders, matching the V1 runner. Non-attention layers
-            # (e.g. Mamba) lack num_heads; fall back to 0.
+            # metadata builders.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
