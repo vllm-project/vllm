@@ -3068,6 +3068,17 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
 
 
+if hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
+
+    @register_fake("_C::dsv3_fused_a_gemm")
+    def dsv3_fused_a_gemm_fake(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        pass
+
+
 if hasattr(torch.ops._C, "weight_packed_linear"):
 
     @register_fake("_C::weight_packed_linear")
