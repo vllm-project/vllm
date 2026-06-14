@@ -308,10 +308,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        block_size = self.kv_cache_spec.block_size
         max_num_blocks_per_req = cdiv(
             self.vllm_config.model_config.max_model_len,
-            self.kv_cache_spec.block_size * get_total_cp_world_size(),
+            block_size * get_total_cp_world_size(),
         )
+        # Match MultiGroupBlockTable padding (block_table.py): without this,
+        # block_table_tensor has more columns than expanded_block_table_buffer
+        # and MTP flatten hits expand errors like [28, 1669] vs [28, 1670].
+        if block_size <= 128:
+            max_num_blocks_per_req = (
+                cdiv(max_num_blocks_per_req, 128 // block_size)
+                * (128 // block_size)
+            )
         self.expanded_block_table_buffer = torch.zeros(
             (
                 scheduler_config.max_num_batched_tokens,
@@ -424,7 +433,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     expanded_offsets + self.arange_buffer[:actual_expanded] + 1
                 )
                 self.decode_seq_lens_buffer[actual_expanded:] = 0
-                seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
 
                 # Give each of the flattened entries the same block table row as the
                 # original request.
@@ -437,6 +445,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.expanded_block_table_buffer[
                         actual_expanded:num_decode_tokens, 0
                     ] = 0
+                # Drop padded decode slots so seq_lens/logits row counts match.
+                num_decode_tokens = actual_expanded
+                seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
                 block_table = self.expanded_block_table_buffer[:num_decode_tokens]
 
                 # All reqs now have decode_len=1
@@ -587,6 +598,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     max_decode_len=max_decode_len,
                 )
             )
+            # Flatten path may drop padded MTP slots; keep metadata in sync.
+            if not use_native and batch_size != num_decode_tokens:
+                num_decode_tokens = batch_size
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
@@ -614,8 +628,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
+                metadata_context_lens = seq_lens.contiguous()
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                    seq_lens,
+                    metadata_context_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                 )
