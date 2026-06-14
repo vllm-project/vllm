@@ -147,6 +147,43 @@ class WorkerLoRAManager:
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
+            # Check that at least some LoRA modules will actually match
+            # the model's module paths. The suffix-based checks above
+            # validate module *names* (e.g., "down_proj"), but the actual
+            # weight application in _create_merged_loras_inplace uses
+            # full path matching. A mismatch can happen when the adapter
+            # was trained on a different model class than what vLLM
+            # serves (e.g., AutoModelForCausalLM vs a multimodal wrapper
+            # like ForConditionalGeneration that nests the language model
+            # under a prefix like "language_model.").
+            model_module_names = set(self._adapter_manager.modules.keys())
+            possible_model_names = model_module_names.copy()
+            if self._adapter_manager.is_pooling_model:
+                possible_model_names.update(
+                    n.removeprefix("model.") for n in model_module_names
+                )
+            effective_modules = [
+                name for name in lora.loras if name in possible_model_names
+            ]
+            if len(effective_modules) == 0 and len(lora.loras) > 0:
+                logger.warning(
+                    "LoRA adapter '%s' (path: '%s') has %d module(s) but "
+                    "NONE match the model's module paths. The adapter "
+                    "will have NO effect on inference. This commonly "
+                    "happens when the adapter was trained on a base "
+                    "model class (e.g., AutoModelForCausalLM) but vLLM "
+                    "serves a multimodal wrapper (e.g., "
+                    "ForConditionalGeneration) that nests the language "
+                    "model under a different prefix. "
+                    "Adapter modules: %s. "
+                    "Model modules (sample): %s.",
+                    lora_request.lora_name,
+                    lora_request.lora_path,
+                    len(lora.loras),
+                    sorted(lora.loras.keys())[:3],
+                    sorted(model_module_names)[:5],
+                )
+
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
             # - No adapter found to download from huggingface (or in
