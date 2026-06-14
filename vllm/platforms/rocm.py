@@ -730,7 +730,6 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.config.compilation import CompilationMode
 
         compilation_config = vllm_config.compilation_config
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
@@ -758,22 +757,6 @@ class RocmPlatform(Platform):
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
-
-        # TODO(@micah-wil): Remove this once resolved in PyTorch's Inductor backend.
-        using_vllm_inductor = compilation_config.backend in (
-            "",
-            "inductor",
-        ) and compilation_config.mode in (None, CompilationMode.VLLM_COMPILE)
-        if (
-            using_vllm_inductor
-            and "+silu_and_mul" not in compilation_config.custom_ops
-            and "-silu_and_mul" not in compilation_config.custom_ops
-        ):
-            # The ROCm Inductor-native SiLU-and-mul path can drift enough to
-            # perturb non-sampled top-k logprobs under ngram speculative decode.
-            # Keep the HIP custom op for vLLM's Inductor backend until the
-            # native lowering is numerically stable there.
-            compilation_config.custom_ops.append("+silu_and_mul")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
