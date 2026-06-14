@@ -7083,11 +7083,25 @@ class GPUModelRunner(
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
                     dtype = kv_cache_spec.dtype
+                    block_dim = group.backend.get_kv_cache_block_dim(
+                        kernel_block_sizes[group.kv_cache_group_id],
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype_str=self.cache_config.cache_dtype,
+                    )
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                    if has_mamba:
+                        kv_cache_stride_order = (
+                            mamba_utils.get_hybrid_attn_stride_order(
+                                logical_kv_cache_shape=kv_cache_shape,
+                                kv_cache_stride_order=kv_cache_stride_order,
+                                block_dim=block_dim,
+                            )
+                        )
                     # The allocation respects the backend-defined stride order
                     # to ensure the semantic remains consistent for each
                     # backend. We first obtain the generic kv cache shape and
@@ -7108,29 +7122,19 @@ class GPUModelRunner(
                         # Use strided view to handle page_size_bytes that
                         # include padding. This follows
                         # the same pattern as MambaSpec handling below.
-                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                        # (i.e. the first physical dimension is the block
-                        # index), which holds for MLA backends but NOT for
-                        # standard attention backends whose shape starts with
-                        # a K/V dimension of size 2.
                         dtype_size = get_dtype_size(dtype)
                         page_stride = kv_cache_spec.page_size_bytes // dtype_size
                         strides = list(torch.empty(kv_cache_shape).stride())
-                        strides[inv_order[0]] = page_stride
+                        strides[inv_order[block_dim]] = page_stride
                         kv_cache_stride = tuple(strides)
                     if has_mamba:
-                        block_dim = group.backend.get_kv_cache_block_dim(
-                            kernel_block_sizes[group.kv_cache_group_id],
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size,
-                            cache_dtype_str=self.cache_config.cache_dtype,
-                        )
                         kv_cache_stride, storage_offset = (
-                            mamba_utils.get_hybrid_attention_mamba_layout(
+                            mamba_utils.get_hybrid_attn_pack_layout(
                                 kv_cache_shape=kv_cache_shape,
                                 kv_cache_stride=kv_cache_stride,
                                 kv_cache_spec=kv_cache_spec,
                                 block_dim=block_dim,
+                                inv_order=inv_order,
                                 layer_idx=layer_idx,
                                 kernel_block_size=kernel_block_size,
                             )

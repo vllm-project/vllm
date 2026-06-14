@@ -3,7 +3,6 @@
 import dataclasses
 import itertools
 from collections.abc import Callable
-from math import prod
 from typing import Any
 
 import torch
@@ -902,55 +901,75 @@ def stage_postprocess_inputs_to_gpu(
     )
 
 
-def get_hybrid_attention_mamba_layout(
+def get_hybrid_attn_stride_order(
+    logical_kv_cache_shape: tuple[int, ...],
+    kv_cache_stride_order: tuple[int, ...],
+    block_dim: int,
+) -> tuple[int, ...]:
+    """
+    Move the logical block dimension to the front of the physical layout.
+
+    Hybrid attention+mamba caches need a block-major physical layout so one
+    block maps to one cache page.
+    """
+    assert len(logical_kv_cache_shape) == len(kv_cache_stride_order)
+    assert block_dim < len(logical_kv_cache_shape)
+
+    # Keep the backend order when the block dimension is already physical dim 0.
+    if kv_cache_stride_order[0] == block_dim:
+        return kv_cache_stride_order
+
+    stride_order = [dim for dim in kv_cache_stride_order if dim != block_dim]
+    stride_order.insert(0, block_dim)
+    return tuple(stride_order)
+
+
+def get_hybrid_attn_pack_layout(
     kv_cache_shape: tuple[int, ...],
     kv_cache_stride: tuple[int, ...],
     kv_cache_spec: AttentionSpec,
     block_dim: int,
+    inv_order: list[int],
     layer_idx: int,
     kernel_block_size: int,
 ) -> tuple[tuple[int, ...], int]:
     """
-    Compute the stride and storage offset for the hybrid attention+mamba layout.
+    Compute the attn-pack block stride and storage offset.
 
     Args:
         kv_cache_shape: The shape of the KV cache tensor.
         kv_cache_stride: The stride of the KV cache tensor.
         kv_cache_spec: The specification of the KV cache.
+        block_dim: The block dimension in the logical KV cache shape.
+        inv_order: Maps each logical KV cache dimension to the current physical
+            KV cache dimension.
         layer_idx: The index of the layer.
-        kernel_num_blocks: The number of kernel blocks.
         kernel_block_size: The size of the kernel block.
     Returns:
         A tuple containing the target stride and storage offset.
     """
+    assert len(inv_order) == len(kv_cache_shape) == len(kv_cache_stride)
     target_stride_list = list(kv_cache_stride)
-    storage_offset = 0
 
     attn_pack_size = kv_cache_spec.pack_size
-    # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
-    if block_dim != 0:
-        # Hybrid attention+mamba uses (2, num_blocks, ...) logical shape but
-        # (num_blocks, 2, ...) physical layout.
-        assert kv_cache_shape[0] == 2, (
-            "Fail to determine whether the layout is "
-            "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-            f"a tensor of shape {kv_cache_shape}"
-        )
-        assert block_dim == 1
-        hidden_size = prod(kv_cache_shape[2:])
-        target_stride_list[0] = hidden_size
-        target_stride_list[1] = 2 * hidden_size
-    # When multiple attention layers share one physical KV cache block
-    # (attn_pack_size > 1), scale the block-dim stride by attn_pack_size
-    # and compute this layer's element offset within the shared block.
-    if attn_pack_size > 1:
-        target_stride_list[block_dim] *= attn_pack_size
-        dtype_size = get_dtype_size(kv_cache_spec.dtype)
-        num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
-        num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-        num_element_per_attn_pack = (
-            num_element_per_page // num_blocks_per_kv_block // attn_pack_size
-        )
-        attn_pack_idx = layer_idx % attn_pack_size
-        storage_offset = attn_pack_idx * num_element_per_attn_pack
+    if attn_pack_size == 1:
+        return tuple(target_stride_list), 0
+
+    physical_block_dim = inv_order[block_dim]
+
+    if kv_cache_spec.page_size_padded is not None:
+        # _reshape_kv_cache_tensors already set this stride from page_size_bytes.
+        block_stride = target_stride_list[physical_block_dim]
+    else:
+        block_stride = target_stride_list[physical_block_dim] * attn_pack_size
+    target_stride_list[physical_block_dim] = block_stride
+
+    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+    num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+    num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+    num_element_per_attn_pack = (
+        num_element_per_page // num_blocks_per_kv_block // attn_pack_size
+    )
+    attn_pack_idx = layer_idx % attn_pack_size
+    storage_offset = attn_pack_idx * num_element_per_attn_pack
     return tuple(target_stride_list), storage_offset

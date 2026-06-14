@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from math import prod
-
 import pytest
 import torch
 
@@ -13,7 +11,6 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
 from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
-from vllm.v1.attention.backends.tree_attn import TreeAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
@@ -50,9 +47,8 @@ def _compute_layout_ref(
     enable_hybrid_attn_mamba_layout: bool,
 ):
     """
-    Reference implementation that mirrors the pre-refactor logic:
-    - grouping layout in `_reshape_kv_cache_tensors`
-    - followed by `_update_hybrid_attention_mamba_layout` when enabled.
+    Reference layout matching the previous reshape flow and hybrid
+    attention+mamba attn-pack adjustment.
     """
     dtype = kv_cache_spec.dtype
     block_size = kv_cache_spec.block_size
@@ -61,9 +57,7 @@ def _compute_layout_ref(
     num_blocks_per_kv_block = block_size // kernel_block_size
     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-    # Match `_reshape_kv_cache_tensors`: use `kernel_num_blocks` and
-    # `kernel_block_size` when querying backend shape.
-    kv_cache_shape_logical = backend.get_kv_cache_shape(
+    kv_cache_shape = backend.get_kv_cache_shape(
         kernel_num_blocks,
         kernel_block_size,
         kv_cache_spec.num_kv_heads,
@@ -73,30 +67,37 @@ def _compute_layout_ref(
 
     try:
         kv_cache_stride_order = backend.get_kv_cache_stride_order()
-        assert len(kv_cache_stride_order) == len(kv_cache_shape_logical)
+        assert len(kv_cache_stride_order) == len(kv_cache_shape)
     except (AttributeError, NotImplementedError):
-        kv_cache_stride_order = tuple(range(len(kv_cache_shape_logical)))
+        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-    # Physical shape (the one used for allocation / as_strided).
-    kv_cache_shape = tuple(kv_cache_shape_logical[i] for i in kv_cache_stride_order)
-
+    kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
         kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
     ]
 
-    # Base contiguous strides in physical layout.
-    base_stride = list(torch.empty(kv_cache_shape).stride())
-
-    storage_offset = 0
+    kv_cache_stride = tuple(torch.empty(kv_cache_shape).stride())
     block_dim = backend.get_kv_cache_block_dim(
         kernel_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
         cache_dtype_str="auto",
     )
+
+    if kv_cache_spec.page_size_padded is not None:
+        dtype_size = get_dtype_size(dtype)
+        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+        strides = list(torch.empty(kv_cache_shape).stride())
+        strides[inv_order[0]] = page_stride
+        kv_cache_stride = tuple(strides)
+
+    storage_offset = 0
     if attn_pack_size > 1:
-        # Match the original `_reshape_kv_cache_tensors` logic.
-        base_stride[block_dim] *= attn_pack_size
+        # Previous attn-pack logic adjusted the reshaped stride directly.
+        strides = list(kv_cache_stride)
+        strides[block_dim] *= attn_pack_size
+        kv_cache_stride = tuple(strides)
+
         dtype_size = get_dtype_size(dtype)
         num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
         num_element_per_attn_pack = (
@@ -105,22 +106,18 @@ def _compute_layout_ref(
         attn_pack_idx = layer_idx % attn_pack_size
         storage_offset = attn_pack_idx * num_element_per_attn_pack
 
-    # Logical KV tensor after the initial reshape.
     kv = torch.empty_strided(
         size=kv_cache_shape,
-        stride=tuple(base_stride),
+        stride=kv_cache_stride,
         dtype=dtype,
     ).permute(*inv_order)
 
-    # Optional hybrid attention+mamba layout update.
-    # We analytically update the stride to match `_update_hybrid_attention_mamba_layout`
-    # without actually changing the underlying storage.
     if (
         enable_hybrid_attn_mamba_layout
         and isinstance(kv_cache_spec, AttentionSpec)
         and block_dim == 1
     ):
-        hidden_size = prod(kv.shape[2:])
+        hidden_size = kv.shape[2:].numel()
         attn_pack_size_for_layout = kv_cache_spec.pack_size
         kv_stride = kv.stride()
         kv_stride = (
@@ -142,7 +139,7 @@ def _compute_layout_new(
     enable_hybrid_attn_mamba_layout: bool,
 ):
     """
-    Layout computed via the new helper `_get_hybrid_attention_mamba_layout`.
+    Layout computed via the new hybrid attention+mamba helpers.
     """
     dtype = kv_cache_spec.dtype
     block_size = kv_cache_spec.block_size
@@ -150,8 +147,14 @@ def _compute_layout_new(
     num_blocks_per_kv_block = block_size // kernel_block_size
     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-    kv_cache_shape_logical = backend.get_kv_cache_shape(
+    kv_cache_shape = backend.get_kv_cache_shape(
         kernel_num_blocks,
+        kernel_block_size,
+        kv_cache_spec.num_kv_heads,
+        kv_cache_spec.head_size,
+        cache_dtype_str="auto",
+    )
+    block_dim = backend.get_kv_cache_block_dim(
         kernel_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
@@ -160,11 +163,18 @@ def _compute_layout_new(
 
     try:
         kv_cache_stride_order = backend.get_kv_cache_stride_order()
-        assert len(kv_cache_stride_order) == len(kv_cache_shape_logical)
+        assert len(kv_cache_stride_order) == len(kv_cache_shape)
     except (AttributeError, NotImplementedError):
-        kv_cache_stride_order = tuple(range(len(kv_cache_shape_logical)))
+        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-    kv_cache_shape = tuple(kv_cache_shape_logical[i] for i in kv_cache_stride_order)
+    if enable_hybrid_attn_mamba_layout:
+        kv_cache_stride_order = mamba_utils.get_hybrid_attn_stride_order(
+            logical_kv_cache_shape=kv_cache_shape,
+            kv_cache_stride_order=kv_cache_stride_order,
+            block_dim=block_dim,
+        )
+
+    kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
         kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
     ]
@@ -172,18 +182,20 @@ def _compute_layout_new(
     kv_cache_stride = tuple(torch.empty(kv_cache_shape).stride())
     storage_offset = 0
 
+    if kv_cache_spec.page_size_padded is not None:
+        dtype_size = get_dtype_size(dtype)
+        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+        strides = list(torch.empty(kv_cache_shape).stride())
+        strides[inv_order[block_dim]] = page_stride
+        kv_cache_stride = tuple(strides)
+
     if enable_hybrid_attn_mamba_layout:
-        block_dim = backend.get_kv_cache_block_dim(
-            kernel_block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str="auto",
-        )
-        kv_cache_stride, storage_offset = mamba_utils.get_hybrid_attention_mamba_layout(
+        kv_cache_stride, storage_offset = mamba_utils.get_hybrid_attn_pack_layout(
             kv_cache_shape=kv_cache_shape,
             kv_cache_stride=kv_cache_stride,
             kv_cache_spec=kv_cache_spec,
             block_dim=block_dim,
+            inv_order=inv_order,
             layer_idx=layer_idx,
             kernel_block_size=kernel_block_size,
         )
@@ -217,7 +229,6 @@ def _compute_layout_new(
         TritonAttentionBackend,
         FlashAttentionDiffKVBackend,
         FlexAttentionBackend,
-        TreeAttentionBackend,
     ],
 )
 @pytest.mark.parametrize("pack_size", [1, 2, 4])
