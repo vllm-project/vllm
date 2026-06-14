@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import KVQuantMode
-from vllm.v1.attention.ops.fp8e4nv_sm80 import bf16_to_fp8e4nv_bits
+from vllm.v1.attention.ops.fp8e4nv_sm80 import bf16_to_fp8e4m3
 
 
 def _fp8_software_conv(kv_cache_dtype: str) -> bool:
@@ -147,12 +147,12 @@ def reshape_and_cache_kernel_flash(
         # software and store into the uint8 cache (no implicit hardware cvt).
         tl.store(
             key_cache_ptr + tgt_idx_k,
-            bf16_to_fp8e4nv_bits(key_tile.to(tl.bfloat16)),
+            bf16_to_fp8e4m3(key_tile.to(tl.bfloat16)),
             mask=tile_pos < (num_heads * head_size),
         )
         tl.store(
             value_cache_ptr + tgt_idx_v,
-            bf16_to_fp8e4nv_bits(value_tile.to(tl.bfloat16)),
+            bf16_to_fp8e4m3(value_tile.to(tl.bfloat16)),
             mask=tile_pos < (num_heads * head_size),
         )
     else:
