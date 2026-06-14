@@ -47,6 +47,7 @@ from vllm.model_executor.models.transformers.utils import recursive_replace_line
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -1247,16 +1248,31 @@ class DiffusionSampler:
             valid_canvas_len_np.astype(np.int64), device=device
         )
 
+        # Per-request top_k/top_p, mirroring the AR sampler. Masked tokens
+        # become -inf and survive the temperature scaling in the compiled
+        # step, so Gumbel sampling, probs, and entropy all see the filtered
+        # distribution. The committed argmax (always the top-1 token) is
+        # unaffected; only the canvas exploration is constrained. Applied
+        # before canvas padding so phantom positions stay uniform.
+        if num_decode > 0:
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                decode_slots.repeat_interleave(valid_canvas_len), decode_slots_np
+            )
+            if top_k is not None or top_p is not None:
+                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+
         # Pad any truncated canvas back to CL so the uniform-CL sampler math
         # holds. Phantom (padded) positions are zeroed → uniform logits → high
         # entropy (no premature convergence) and argmax 0 (stable); they are
-        # never committed (num_sampled == real length).
+        # never committed (num_sampled == real length). masked_fill (not
+        # multiply) so -inf entries from top_k/top_p filtering above don't
+        # turn phantom rows into NaN.
         if num_decode > 0 and valid_canvas_len_np.min() < CL:
             ar = torch.arange(CL, device=device)
             starts = valid_canvas_len.cumsum(0) - valid_canvas_len  # row offset per req
             valid = ar.unsqueeze(0) < valid_canvas_len.unsqueeze(1)  # [num_decode, CL]
             src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
-            logits = logits[src.reshape(-1)] * valid.reshape(-1, 1).to(logits.dtype)
+            logits = logits[src.reshape(-1)].masked_fill_(~valid.reshape(-1, 1), 0)
 
         # Cleared inside _compiled_sample_step so prefill/non-decode slots stay 0.
         sampled = self._sampled[:num_reqs]
