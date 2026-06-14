@@ -483,6 +483,11 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             per_act_token_quant=self.per_act_token_quant,
             per_out_ch_quant=self.per_out_ch_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            # SwiGLU-OAI alpha/beta (e.g. MiniMax-M3: 1.702/1.0). Without these
+            # the online fp8 MoE runs silu_and_mul_with_clamp with the default
+            # alpha=1.0/beta=0.0, producing garbage for SwiGLU-OAI MoEs.
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
 
