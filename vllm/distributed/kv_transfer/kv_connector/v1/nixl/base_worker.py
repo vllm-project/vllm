@@ -62,6 +62,7 @@ from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -117,7 +118,7 @@ class NixlBaseConnectorWorker:
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity), SSM descs have
         # logical_blocks entries per region (no kernel splitting).
-        logical_blocks = num_blocks // physical_blocks_per_logical
+        logical_blocks = dst_num_blocks // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
@@ -328,6 +329,11 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
+        # Pin CUDA device before NIXL agent creation so that UCX worker
+        # threads inherit the correct CUDA primary context.
+        # Without this, cuEventQuery in nixlUcxSharedThread can segfault
+        # under high concurrency (cuda_ipc transport race condition).
+        current_platform.set_device(get_tp_group().local_rank)
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
@@ -1086,24 +1092,22 @@ class NixlBaseConnectorWorker:
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
         """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
-        blocks, enabling the 3-read transfer with DS conv layout."""
-        assert block_size_ratio == 1, (
-            "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
-            f"Got block_size_ratio={block_size_ratio}."
-        )
+        blocks, enabling the 3-read transfer with DS conv layout.
+
+        block_size_ratio is accepted for API consistency but ignored here:
+        mamba state is fixed-size per logical block.
+        """
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
-        num_blocks = self._logical_num_blocks * block_size_ratio
+        num_blocks = self._logical_num_blocks
         physical_per_logical = self._physical_blocks_per_logical_kv_block
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
             # Jump one page_size, but ssm page_size may be bigger when kernel
             # locks block size to a specific value (physical_per_logical scale).
-            page_stride = (
-                self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
-            )
+            page_stride = self.block_len_per_layer[i] * physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append(
@@ -1194,8 +1198,11 @@ class NixlBaseConnectorWorker:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks. (Skipped for key-only REPLICATE.)
-                second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
+                second_split = (
+                    self.get_backend_aware_kv_block_len(
+                        layer_idx=i, first_split=False, mamba_view=False
+                    )
+                    // block_size_ratio
                 )
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_stride
@@ -1253,7 +1260,7 @@ class NixlBaseConnectorWorker:
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
-                second_split = second_split // num_reads
+                second_split = second_split // num_reads // block_size_ratio
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
@@ -1290,7 +1297,12 @@ class NixlBaseConnectorWorker:
             self.device_id,
         )
         if self._has_mamba:
-            assert self.num_descs == len(blocks_data)
+            expected_fa_descs = self.num_regions * (self.num_blocks * block_size_ratio)
+            assert expected_fa_descs == len(blocks_data), (
+                f"FA desc count mismatch: expected {expected_fa_descs} "
+                f"(regions={self.num_regions} * blocks={self.num_blocks} "
+                f"* ratio={block_size_ratio}), got {len(blocks_data)}"
+            )
             # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-descs split
             # is unnecessary — a single conv desc per block suffices.  Consider
             # adding a fast path that falls back to the standard 2-region
@@ -1422,12 +1434,8 @@ class NixlBaseConnectorWorker:
 
         plan = self.tp_mappings[engine_id]
 
-        ### (Optional) Register local agent memory regions. MLA is not split.
-        if (
-            tp_ratio < 0
-            and not self.use_mla
-            and tp_ratio not in self.src_xfer_handles_by_tp_ratio
-        ):
+        ### (Optional) Register local agent memory regions.
+        if tp_ratio < 0 and tp_ratio not in self.src_xfer_handles_by_tp_ratio:
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into |tp_ratio| chunks. Mind that
             # we only do this once per remote tp_size (replica-friendly).
@@ -1486,9 +1494,25 @@ class NixlBaseConnectorWorker:
         if block_size_ratio > 1:
             # when prefill with smaller block_size, we need to init a
             # new handler with same block_len to match
-            self.src_xfer_handles_by_block_size[nixl_agent_meta.block_size] = (
-                self.register_local_xfer_handler(nixl_agent_meta.block_size)[0]
+            new_handle, new_blocks_data = self.register_local_xfer_handler(
+                nixl_agent_meta.block_size
             )
+            self.src_xfer_handles_by_block_size[nixl_agent_meta.block_size] = new_handle
+
+            # Rebuild split handles from re-registered descs so sizes match.
+            if tp_ratio < 0:
+                num_fa_descs = self.num_regions * (self.num_blocks * block_size_ratio)
+                self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
+                for handle_data in self._build_local_splits_from_plan(
+                    plan,
+                    new_blocks_data,
+                    num_fa_descs,
+                ):
+                    descs = self.nixl_wrapper.get_xfer_descs(
+                        handle_data, self.nixl_memory_type
+                    )
+                    handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+                    self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         return remote_agent_name
 
@@ -1535,8 +1559,11 @@ class NixlBaseConnectorWorker:
             )
 
         if self._is_hma_required:
-            assert block_size_ratio == 1, (
-                "HMA does not support different remote block size yet"
+            assert self.block_size % nixl_agent_meta.block_size == 0 or (
+                nixl_agent_meta.block_size % self.block_size == 0
+            ), (
+                f"HMA requires divisible block sizes: "
+                f"local={self.block_size}, remote={nixl_agent_meta.block_size}"
             )
         kv_cache_layout = (
             self.kv_cache_layout
