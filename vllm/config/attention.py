@@ -109,3 +109,42 @@ class AttentionConfig:
         if isinstance(value, str):
             return MLAPrefillBackendEnum[value.upper()]
         return value
+
+    @field_validator("flash_attn_max_num_splits_for_cuda_graph", mode="after")
+    @classmethod
+    def _check_flash_attn_max_num_splits(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(
+                f"flash_attn_max_num_splits_for_cuda_graph must be "
+                f"positive (> 0), got {v}."
+            )
+        return v
+
+    @field_validator("tq_max_kv_splits_for_cuda_graph", mode="after")
+    @classmethod
+    def _check_tq_max_kv_splits(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(
+                f"tq_max_kv_splits_for_cuda_graph must be positive (> 0), got {v}."
+            )
+        return v
+
+    @field_validator("flex_attn_block_m", "flex_attn_block_n", mode="after")
+    @classmethod
+    def _check_flex_attn_block_size(cls, v: int | None) -> int | None:
+        if v is not None:
+            if v < 16:
+                raise ValueError(f"flex_attn block size must be >= 16, got {v}.")
+            # Check if power of 2
+            if v & (v - 1) != 0:
+                raise ValueError(f"flex_attn block size must be a power of 2, got {v}.")
+        return v
+
+    @field_validator("flex_attn_q_block_size", "flex_attn_kv_block_size", mode="after")
+    @classmethod
+    def _check_flex_attn_logical_block_size(cls, v: int | None) -> int | None:
+        if v is not None and v & (v - 1) != 0:
+            raise ValueError(
+                f"flex_attn logical block size must be a power of 2, got {v}."
+            )
+        return v
