@@ -49,7 +49,7 @@ def _fake_rms_norm(
     dtype: torch.dtype,
     variance_size: int | None = None,
 ) -> Tensor:
-    return torch.randn_like(x)
+    return torch.zeros_like(x)
 
 
 def _fake_device_rms_norm(
@@ -58,7 +58,7 @@ def _fake_device_rms_norm(
     dtype: torch.dtype,
     variance_size: int | None = None,
 ) -> Tensor:
-    return torch.randn_like(x)
+    return torch.zeros_like(x)
 
 
 @register_op
@@ -68,12 +68,12 @@ def _fake_rms_norm_1(
     dtype: torch.dtype,
     variance_size: int | None = None,
 ) -> Tensor:
-    return torch.randn_like(x)
+    return torch.zeros_like(x)
 
 
 fake_device_rms_norm = _fake_rms_norm.register_impl(
     "fake_device",
-    supports_args=lambda x, weight, dtype, variance_size: (
+    supports_args=lambda x, weight, dtype, variance_size=None: (
         FAKE_DEVICE_SUPPORTED
         and variance_size is None
         and dtype != torch.float8_e4m3fn
@@ -83,7 +83,7 @@ fake_device_rms_norm = _fake_rms_norm.register_impl(
 
 fake_device_rms_norm_1 = _fake_rms_norm_1.register_impl(
     "fake_device",
-    supports_args=lambda x, weight, dtype, variance_size: (
+    supports_args=lambda x, weight, dtype, variance_size=None: (
         FAKE_DEVICE_SUPPORTED and variance_size is None
     ),
 )(_fake_device_rms_norm)
@@ -152,7 +152,7 @@ def test_lowering(default_vllm_config):
     "op_name, provider, inputs, unbacked_idx",
     LoweringTestConfig.get_test_inputs(),
 )
-def per_op_lowering_test(
+def test_per_op_lowering(
     default_vllm_config,
     op_name,
     provider,
@@ -184,7 +184,7 @@ def per_op_lowering_test(
 
     native_signature = inspect.signature(op.impls["native"].impl_fn)
     arg_pos = {
-        name: idx for name, idx in enumerate(native_signature.parameters.items())
+        name: idx for idx, name in enumerate(native_signature.parameters.keys())
     }
 
     with ir.enable_torch_wrap(True), op.set_priority([provider]):
