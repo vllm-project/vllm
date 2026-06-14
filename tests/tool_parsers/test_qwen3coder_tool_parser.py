@@ -1210,6 +1210,150 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     assert args["unit"] == "fahrenheit"
 
 
+def test_streaming_whole_body_after_start_token(qwen3_tool_parser):
+    """Regression: with stream_interval=N and speculative decoding, the
+    entire <function=...>...</function></tool_call> body can arrive in one
+    delta after is_tool_call_started was flipped on a previous delta. The
+    parser must emit header AND args in that single delta — otherwise
+    prev_tool_call_arr stays at "{}" and the serving layer's remaining_call
+    backfill emits empty arguments.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        # Header + open + param + close all collapsed into one delta.
+        "\n<function=get_current_weather>"
+        "\n<parameter=city>\nDallas\n</parameter>"
+        "\n<parameter=state>\nTX\n</parameter>"
+        "\n<parameter=unit>\nfahrenheit\n</parameter>"
+        "\n</function>"
+        "\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    tc = reconstructor.tool_calls[0]
+    assert tc.function.name == "get_current_weather"
+    args = json.loads(tc.function.arguments)
+    assert args == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+
+    # prev_tool_call_arr must reflect the parsed args, not the initial
+    # "{}" placeholder — the serving layer reads this to compute the
+    # remaining-args backfill at stream end.
+    assert len(qwen3_tool_parser.prev_tool_call_arr) == 1
+    assert json.loads(qwen3_tool_parser.prev_tool_call_arr[0]["arguments"]) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+
+
+def test_streaming_final_param_and_function_close_same_delta(qwen3_tokenizer):
+    """Regression for #45256: stream_interval batching can place the
+    completed parameter, </function>, and </tool_call> in the same delta.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_pdf",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"page": {"type": "integer"}},
+                },
+            },
+        )
+    ]
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=tools,
+        tool_choice="auto",
+    )
+
+    deltas = [
+        "\n\n<tool_call>",
+        "\n<function=read_pdf>\n<",
+        "parameter=page>\n1\n</",
+        "parameter>\n</function>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    tc = reconstructor.tool_calls[0]
+    assert tc.function.name == "read_pdf"
+    assert json.loads(tc.function.arguments) == {"page": 1}
+    assert json.loads(parser.prev_tool_call_arr[0]["arguments"]) == {"page": 1}
+
+
+def test_streaming_collapsed_tool_then_second_tool(qwen3_tool_parser):
+    """A collapsed complete tool call should advance state before parsing
+    the next tool call, even if that next call also arrives as one delta.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>"
+        "\n<parameter=city>\nDallas\n</parameter>"
+        "\n<parameter=state>\nTX\n</parameter>"
+        "\n</function>"
+        "\n</tool_call>",
+        "\n<tool_call>"
+        "\n<function=calculate_area>"
+        "\n<parameter=shape>\ncircle\n</parameter>"
+        "\n<parameter=precision>\n2\n</parameter>"
+        "\n</function>"
+        "\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2
+    weather, area = reconstructor.tool_calls
+    assert weather.function.name == "get_current_weather"
+    assert json.loads(weather.function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+    }
+    assert area.function.name == "calculate_area"
+    assert json.loads(area.function.arguments) == {
+        "shape": "circle",
+        "precision": 2,
+    }
+
+
 def test_no_double_serialization_string_args(qwen3_tool_parser):
     """Regression: string arguments must not be double-serialized (PR #35615)."""
     tools = [

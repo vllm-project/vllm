@@ -288,8 +288,15 @@ class Qwen3CoderToolParser(ToolParser):
                 if self.current_tool_index >= tool_starts:
                     # No more tool calls
                     self.is_tool_call_started = False
-                # Continue processing next tool
-                return None
+                    if self.tool_call_end_token in delta_text:
+                        trailing_content = delta_text.split(
+                            self.tool_call_end_token, 1
+                        )[1]
+                        if not trailing_content.strip():
+                            return None
+                        return DeltaMessage(content=trailing_content)
+                # Continue processing the current delta. It may contain the
+                # next tool call or trailing content after the closed call.
 
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
@@ -350,6 +357,16 @@ class Qwen3CoderToolParser(ToolParser):
                 tool_start_idx : tool_end_idx + len(self.tool_call_end_token)
             ]
 
+        # A single delta can deliver multiple phases at once (header +
+        # opening brace + params + closing brace) when stream_interval is
+        # large or speculative decoding bursts many tokens. We accumulate
+        # all phases into one DeltaMessage instead of returning early
+        # after each phase, so a tool call that arrives in one shot is
+        # still streamed with its arguments populated.
+        pending_header_name: str | None = None
+        pending_header_id: str | None = None
+        pending_args = ""
+
         # Looking for function header
         if not self.header_sent:
             if self.tool_call_prefix in tool_text:
@@ -382,20 +399,11 @@ class Qwen3CoderToolParser(ToolParser):
                     # accesses streamed_args_for_tool[index].
                     self.streamed_args_for_tool.append("")
 
-                    # Send header with function info
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                id=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    name=self.current_function_name, arguments=""
-                                ),
-                                type="function",
-                            )
-                        ]
-                    )
-            return None
+                    pending_header_name = self.current_function_name
+                    pending_header_id = self.current_tool_id
+                    # Fall through to body processing in the same delta.
+            if not self.header_sent:
+                return None
 
         # We've sent header, now handle function body
         if self.in_function:
@@ -404,17 +412,16 @@ class Qwen3CoderToolParser(ToolParser):
             # decoding, a single delta may contain both the opening brace
             # and parameter data; skipping "{" here would desync
             # json_started from what was actually streamed.
-            if not self.json_started:
+            if (
+                not self.json_started
+                and (
+                    self.parameter_prefix in tool_text
+                    or self.function_end_token in tool_text
+                )
+            ):
                 self.json_started = True
                 self.streamed_args_for_tool[self.current_tool_index] += "{"
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="{"),
-                        )
-                    ]
-                )
+                pending_args += "{"
 
             # Find all parameter start positions in current tool_text
             param_starts = []
@@ -518,14 +525,7 @@ class Qwen3CoderToolParser(ToolParser):
                         len(self.streamed_args_for_tool),
                     )
 
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments=combined),
-                        )
-                    ]
-                )
+                pending_args += combined
 
             # Check for function end AFTER processing parameters.
             # This ordering is critical: with speculative decoding a
@@ -568,19 +568,23 @@ class Qwen3CoderToolParser(ToolParser):
                         len(self.streamed_args_for_tool),
                     )
 
-                result = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
-                        )
-                    ]
-                )
+                pending_args += "}"
 
                 self.in_function = False
-                self.json_closed = True
                 self.accumulated_params = {}
 
-                return result
-
+        if pending_header_name is not None or pending_args:
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=self.current_tool_index,
+                        id=pending_header_id,
+                        function=DeltaFunctionCall(
+                            name=pending_header_name,
+                            arguments=pending_args,
+                        ),
+                        type="function" if pending_header_name else None,
+                    )
+                ]
+            )
         return None
