@@ -9,6 +9,7 @@ import threading
 
 import torch
 import torch.distributed as dist
+from torch._dynamo.utils import dynamo_timed
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
@@ -53,15 +54,16 @@ def _create_workspace(
     rng_state = random.getstate()
     try:
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
-        workspace = flashinfer_comm.create_allreduce_fusion_workspace(
-            backend=backend,
-            world_size=world_size,
-            rank=rank,
-            max_token_num=max_token_num,
-            hidden_dim=hidden_dim,
-            dtype=dtype,
-            comm_backend=comm_backend,
-        )
+        with dynamo_timed("vllm_fi_ar_create_allreduce_fusion_workspace"):
+            workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+                backend=backend,
+                world_size=world_size,
+                rank=rank,
+                max_token_num=max_token_num,
+                hidden_dim=hidden_dim,
+                dtype=dtype,
+                comm_backend=comm_backend,
+            )
     except Exception as e:
         if "multicast" in str(e).lower():
             logger.warning_once(
