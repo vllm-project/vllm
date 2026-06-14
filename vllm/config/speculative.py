@@ -130,6 +130,11 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    force_max_spec_tokens: bool = Field(default=False)
+    """Force speculative decoding proposers to produce exactly
+    num_speculative_tokens draft tokens per request per step.
+    When enabled, proposers will pad short drafts with eos_token_id.
+    Currently only applies to method='suffix' (Suffix Decoding)."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
