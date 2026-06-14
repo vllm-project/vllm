@@ -28,6 +28,26 @@ from .ScaledMMLinearKernel import (
 logger = init_logger(__name__)
 
 
+def _is_per_token_act_per_channel_weight(c: "FP8ScaledMMLinearLayerConfig") -> bool:
+    """Whether the layer uses per-token activation + per-output-channel weight FP8.
+
+    The AITER ``gemm_a8w8_bpreshuffle`` path needs a per-token activation scale
+    ([M, 1]) and one fp32 weight scale per output channel ([N, 1]).
+
+    vLLM does not represent a per-output-channel weight scale uniformly: the
+    identical "one scale per weight row" layout is tagged with
+    ``GroupShape.PER_CHANNEL`` ((-1, 1)) by compressed-tensors' CHANNEL
+    strategy, but with ``GroupShape.PER_TOKEN`` ((1, -1)) by Quark / ModelOpt /
+    fbgemm per-channel weights (e.g. ``kFp8StaticTokenSym``). Both encode a
+    length-N scale vector, so accept either group shape for the weight.
+    """
+    act_gs = c.activation_quant_key.scale.group_shape
+    weight_gs = c.weight_quant_key.scale.group_shape
+    return act_gs.is_per_token() and (
+        weight_gs.is_per_channel() or weight_gs.is_per_token()
+    )
+
+
 class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -147,10 +167,7 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        is_ptpc = (
-            c.activation_quant_key.scale.group_shape.is_per_token()
-            and c.weight_quant_key.scale.group_shape.is_per_channel()
-        )
+        is_ptpc = _is_per_token_act_per_channel_weight(c)
         if c.weight_shape is None:
             return False, "weight_shape is required for Aiter kernels"
         N, K = c.weight_shape
@@ -316,10 +333,7 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        is_ptpc = (
-            c.activation_quant_key.scale.group_shape.is_per_token()
-            and c.weight_quant_key.scale.group_shape.is_per_channel()
-        )
+        is_ptpc = _is_per_token_act_per_channel_weight(c)
         if c.weight_shape is None:
             return False, "weight_shape is required for Aiter kernels"
         N, K = c.weight_shape
