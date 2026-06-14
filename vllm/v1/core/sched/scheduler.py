@@ -579,12 +579,61 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        def _preempt_lowest_priority_running(request: Request) -> bool:
+            """Preempt a lower-priority running request for request admission."""
+            nonlocal token_budget, encoder_compute_budget, scheduled_loras
+
+            if self.policy != SchedulingPolicy.PRIORITY or not self.running:
+                return False
+
+            preempted_req = max(
+                self.running,
+                key=lambda r: (r.priority, r.arrival_time),
+            )
+            # Lower numeric values indicate higher priority. Equal-priority
+            # waiting requests should not displace running requests.
+            if request.priority >= preempted_req.priority:
+                return False
+
+            self.running.remove(preempted_req)
+            if preempted_req in scheduled_running_reqs:
+                preempted_req_id = preempted_req.request_id
+                scheduled_running_reqs.remove(preempted_req)
+                if self.lora_config:
+                    lora_request = preempted_req.lora_request
+                    if lora_request and lora_request.lora_int_id > 0:
+                        lora_id = lora_request.lora_int_id
+                        if not any(
+                            req.lora_request and req.lora_request.lora_int_id == lora_id
+                            for req in self.running
+                        ):
+                            scheduled_loras.discard(lora_id)
+                token_budget += num_scheduled_tokens.pop(preempted_req_id)
+                req_to_new_blocks.pop(preempted_req_id)
+                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                    preempted_req_id, None
+                )
+                if preempted_encoder_inputs:
+                    num_embeds_to_restore = sum(
+                        preempted_req.get_num_encoder_embeds(i)
+                        for i in preempted_encoder_inputs
+                    )
+                    encoder_compute_budget += num_embeds_to_restore
+
+            self._preempt_request(preempted_req, scheduled_timestamp)
+            preempted_reqs.append(preempted_req)
+            return True
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if (
+                    self.policy != SchedulingPolicy.PRIORITY
+                    and len(self.running) == self.max_num_running_reqs
+                ):
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -620,6 +669,12 @@ class Scheduler(SchedulerInterface):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
+
+                # If max_num_seqs is the only blocker, a higher-priority
+                # waiting request can make room by preempting a running one.
+                at_capacity = len(self.running) == self.max_num_running_reqs
+                if at_capacity and not _preempt_lowest_priority_running(request):
+                    break
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
