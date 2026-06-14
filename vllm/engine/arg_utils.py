@@ -103,7 +103,6 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -1558,10 +1557,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        # gguf file needs a specific model loader
-        if is_gguf(self.model):
-            self.quantization = self.load_format = "gguf"
-
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
                 "The global random seed is set to %d. Since "
