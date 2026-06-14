@@ -38,6 +38,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    FP4_MARLIN_TILE_N_SIZE,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -94,35 +97,43 @@ def _fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
     clamp_limit: float | None = None,
+    padded_w13_size_n: int | None = None,
+    padded_w2_size_k: int | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
+    if padded_w13_size_n is None:
+        padded_w13_size_n = w13_num_shards * N
+    if padded_w2_size_k is None:
+        padded_w2_size_k = N
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
-            (M * num_topk * max(w13_num_shards * N, K),),
+            (M * num_topk * max(padded_w13_size_n, K),),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
 
     if intermediate_cache2 is None:
         intermediate_cache2 = torch.empty(
-            (M * num_topk, N),
+            (M * num_topk, padded_w2_size_k),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
 
     intermediate_cache1 = _resize_cache(
-        intermediate_cache13, (M * num_topk, w13_num_shards * N)
+        intermediate_cache13, (M * num_topk, padded_w13_size_n)
     )
 
     intermediate_cache3 = _resize_cache(intermediate_cache13, (M * num_topk, K))
 
-    intermediate_cache2 = _resize_cache(intermediate_cache2, (M * num_topk, N))
+    intermediate_cache2 = _resize_cache(
+        intermediate_cache2, (M * num_topk, padded_w2_size_k)
+    )
 
     a_scales1 = None
     gate_up_input = hidden_states
@@ -154,24 +165,27 @@ def _fused_marlin_moe(
         mul_topk_weights=apply_router_weight_on_input,
         b_q_type=quant_type,
         size_m=M,
-        size_n=w13_num_shards * N,
+        size_n=padded_w13_size_n,
         size_k=K,
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+    # Per-shard padding ensures the activation can split the gemm output by
+    # padded_w2_size_k cleanly; padded slots are zero and produce zero through
+    # both element-wise and gated activations.
     if clamp_limit is not None and activation == MoEActivation.SILU:
         swiglu_limit_func(
             intermediate_cache2,
-            intermediate_cache1.view(-1, w13_num_shards * N),
+            intermediate_cache1,
             clamp_limit,
         )
     else:
         activation_func(
             activation,
             intermediate_cache2,
-            intermediate_cache1.view(-1, w13_num_shards * N),
+            intermediate_cache1,
         )
 
     if output is None:
@@ -214,7 +228,7 @@ def _fused_marlin_moe(
         b_q_type=quant_type,
         size_m=M * num_topk,
         size_n=K,
-        size_k=N,
+        size_k=padded_w2_size_k,
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
@@ -260,6 +274,8 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     clamp_limit: float | None = None,
+    padded_w13_size_n: int | None = None,
+    padded_w2_size_k: int | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -282,6 +298,10 @@ def fused_marlin_moe(
     - w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
     - w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
     - num_bits (bool): The number of bits in expert weights quantization.
+    - padded_w13_size_n (int|None): FP4 Marlin only; padded w13 size_n set
+        by ``prepare_*_moe_layer_for_marlin``. None for other backends.
+    - padded_w2_size_k (int|None): FP4 Marlin only; padded w2 size_k
+        (= intermediate dim) set by prepare. None for other backends.
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -373,6 +393,8 @@ def fused_marlin_moe(
         input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
+        padded_w13_size_n=padded_w13_size_n,
+        padded_w2_size_k=padded_w2_size_k,
     ).view(-1, topk, K)
 
     if output is None:
@@ -415,6 +437,8 @@ def batched_fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     clamp_limit: float | None = None,
+    padded_w13_size_n: int | None = None,
+    padded_w2_size_k: int | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -544,6 +568,8 @@ def batched_fused_marlin_moe(
         input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
+        padded_w13_size_n=padded_w13_size_n,
+        padded_w2_size_k=padded_w2_size_k,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -579,6 +605,25 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.marlin_padded_w13_n: int | None = getattr(
+            quant_config, "marlin_padded_w13_n", None
+        )
+        self.marlin_padded_w2_k: int | None = getattr(
+            quant_config, "marlin_padded_w2_k", None
+        )
+        unpadded_n = moe_config.intermediate_size_per_partition
+        padding_active = (
+            self.marlin_padded_w2_k is not None
+            and self.marlin_padded_w2_k != unpadded_n
+        )
+        if padding_active and moe_config.is_lora_enabled:
+            raise NotImplementedError(
+                "LoRA is not supported with FP4 Marlin MoE when the per-rank "
+                f"intermediate dim ({unpadded_n}) is not divisible by "
+                f"{FP4_MARLIN_TILE_N_SIZE} (padded to {self.marlin_padded_w2_k}). "
+                "Use a TP setting where intermediate is tile-aligned, or disable "
+                "LoRA for this MoE."
+            )
 
         super().__init__(
             moe_config=moe_config,
@@ -721,10 +766,14 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         # workspace1 = (M * topk * max(2 * N, K),)
         # workspace2 = (M * topk, N)
 
-        # Workspace/IntermediateCache allocation accounting for output buffer
-        # provisioning
-        workspace1 = (M * topk, max(N, K))
-        workspace2 = (M * topk * max(2 * N, K),)
+        w13_size_n = (
+            self.marlin_padded_w13_n if self.marlin_padded_w13_n is not None else 2 * N
+        )
+        w2_size_k = (
+            self.marlin_padded_w2_k if self.marlin_padded_w2_k is not None else N
+        )
+        workspace1 = (M * topk, max(w2_size_k, K))
+        workspace2 = (M * topk * max(w13_size_n, K),)
         output = (M, K)
 
         return (workspace1, workspace2, output)
@@ -787,6 +836,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
                 clamp_limit=self.gemm1_clamp_limit,
+                padded_w13_size_n=self.marlin_padded_w13_n,
+                padded_w2_size_k=self.marlin_padded_w2_k,
             )
             return
 
@@ -888,6 +939,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
             clamp_limit=self.gemm1_clamp_limit,
+            padded_w13_size_n=self.marlin_padded_w13_n,
+            padded_w2_size_k=self.marlin_padded_w2_k,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
@@ -944,8 +997,17 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
-        workspace13 = (num_experts * max_num_tokens * num_dispatchers, max(K, N * 2))
-        workspace2 = (num_experts * max_num_tokens * num_dispatchers, N)
+        w13_size_n = (
+            self.marlin_padded_w13_n if self.marlin_padded_w13_n is not None else 2 * N
+        )
+        w2_size_k = (
+            self.marlin_padded_w2_k if self.marlin_padded_w2_k is not None else N
+        )
+        workspace13 = (
+            num_experts * max_num_tokens * num_dispatchers,
+            max(K, w13_size_n),
+        )
+        workspace2 = (num_experts * max_num_tokens * num_dispatchers, w2_size_k)
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
 
@@ -996,4 +1058,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             input_dtype=self.input_dtype,
             is_k_full=self.is_k_full,
             clamp_limit=self.gemm1_clamp_limit,
+            padded_w13_size_n=self.marlin_padded_w13_n,
+            padded_w2_size_k=self.marlin_padded_w2_k,
         )
