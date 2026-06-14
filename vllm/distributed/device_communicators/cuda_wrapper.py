@@ -104,6 +104,11 @@ class CudaRTLibrary:
 
     def __init__(self, so_file: str | None = None):
         if so_file is None:
+            # ``find_loaded_library`` skips known-broken stubs (e.g.
+            # tilelang's ``libcudart_stub.so`` on aarch64) and continues
+            # iterating /proc/self/maps for a real libcudart.so.* — see
+            # ``vllm/utils/system_utils.py``. The ROCm probe + env-var
+            # fallback below remain the next layers of resolution.
             so_file = find_loaded_library("libcudart")
             if so_file is None:
                 # libcudart is not loaded in the current process, try hip
