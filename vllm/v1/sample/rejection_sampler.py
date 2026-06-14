@@ -13,7 +13,10 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
-from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
+from vllm.v1.sample.logits_processor.builtin import (
+    MinPLogitsProcessor,
+    MinTokensLogitsProcessor,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -337,6 +340,17 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
+
+        # Argmax-invariant logits processors (e.g. min_p) also need to run
+        # on verified target tokens; otherwise they would only affect the
+        # bonus token via the regular Sampler path and be silently dropped
+        # for the rest of the speculative window.
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            if isinstance(processor, MinPLogitsProcessor):
+                logits = processor.apply_with_spec_decode(
+                    logits, metadata.num_draft_tokens
+                )
+
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,
