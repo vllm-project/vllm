@@ -460,6 +460,7 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        self.scheduler.prefetch_waiting_requests()
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -517,6 +518,7 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
+            self.scheduler.prefetch_waiting_requests()
             scheduler_output = self.scheduler.schedule()
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -525,33 +527,33 @@ class EngineCore:
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
-                future = cast(Future[ModelRunnerOutput], exec_future)
-            else:
-                if not scheduler_output.pending_structured_output_tokens:
-                    # We aren't waiting for any tokens, get any grammar output
-                    # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
+                if self.is_pooling_model or not model_executed:
+                    # No sampling required (no requests scheduled).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
                 else:
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
+                    if not scheduler_output.pending_structured_output_tokens:
+                        # We aren't waiting for any tokens, get any grammar output
+                        # and sample immediately.
+                        grammar_output = self.scheduler.get_grammar_bitmask(
+                            scheduler_output
+                        )
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                    else:
+                        # We need to defer sampling until we have processed the model output
+                        # from the prior step.
+                        deferred_scheduler_output = scheduler_output
 
-            if not deferred_scheduler_output:
-                # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
-                if len(batch_queue) < self.batch_queue_size and (
-                    model_executed or self.scheduler.has_requests()
-                ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
-                    return None, model_executed
+                if not deferred_scheduler_output:
+                    # Add this step's future to the queue.
+                    batch_queue.appendleft((future, scheduler_output, exec_future))
+                    if len(batch_queue) < self.batch_queue_size and (
+                        model_executed or self.scheduler.has_requests()
+                    ):
+                        # Don't block on next worker response unless the queue is full
+                        # or there are no more requests to schedule.
+                        return None, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
