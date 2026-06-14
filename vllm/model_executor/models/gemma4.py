@@ -404,9 +404,10 @@ class Gemma4Attention(nn.Module):
         # Q/K norms with learnable weights handle scaling implicitly.
         self.scaling = 1.0
 
-        # QKVParallelLinear handles GQA correctly for all layer types.
-        # k_eq_v layers load K weights into both K and V slots via
-        # _weight_iterator remapping — no structural difference needed.
+        # For k_eq_v global attention layers the checkpoint has no v_proj —
+        # v_head_size=0 drops the V slot from the packed weight matrix,
+        # saving memory and eliminating the redundant V GEMM.  V is derived
+        # from the K projection output in forward() instead.
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -415,6 +416,7 @@ class Gemma4Attention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            v_head_size=0 if self.use_k_eq_v else None,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -508,29 +510,38 @@ class Gemma4Attention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        # Unified QKV path (works for both k_eq_v and standard layers).
-        # For k_eq_v, K weights are loaded into both K and V slots of
-        # qkv_proj, so V == K automatically.
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Q norm (always applied)
+        q = qkv[..., : self.q_size]
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
         q = self.q_norm(q)
         q = q.flatten(-2, -1)
 
         if not self.is_kv_shared_layer:
-            # Non-shared: apply K norm + RoPE, V norm
-            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            k = self.k_norm(k)
-            k = k.flatten(-2, -1)
-            q, k = self.rotary_emb(positions, q, k)
-
-            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            v = self.v_norm(v)
-            v = v.flatten(-2, -1)
+            if self.use_k_eq_v:
+                # qkv_proj has v_head_size=0: output is [Q, K] only.
+                # Derive V from the pre-norm K tensor via v_norm (no
+                # learnable scale), which is mathematically identical to
+                # the old approach of loading K weights into the V slot.
+                k = qkv[..., self.q_size :]
+                k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                v = self.v_norm(k).flatten(-2, -1)
+                k = self.k_norm(k).flatten(-2, -1)
+                q, k = self.rotary_emb(positions, q, k)
+            else:
+                # Standard path: apply K norm + RoPE, V norm
+                k = qkv[..., self.q_size : self.q_size + self.kv_size]
+                v = qkv[..., self.q_size + self.kv_size :]
+                k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                k = self.k_norm(k).flatten(-2, -1)
+                q, k = self.rotary_emb(positions, q, k)
+                v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                v = self.v_norm(v).flatten(-2, -1)
         else:
-            # Shared: only apply RoPE to Q
+            # KV-shared layers: only apply RoPE to Q; K/V come from cache
+            k = qkv[..., self.q_size : self.q_size + self.kv_size]
+            v = k if self.use_k_eq_v else qkv[..., self.q_size + self.kv_size :]
             q = self.rotary_emb(positions, q, k)[0]
 
         attn_output = self.attn(q, k, v)
@@ -1422,8 +1433,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 if shard_name not in name:
                     continue
                 stacked_name = name.replace(shard_name, param_name)
-                # k_eq_v layers use separate q_proj/k_proj instead of
-                # packed qkv_proj. If the stacked param doesn't exist,
+                # If the stacked param doesn't exist for this layer,
                 # skip this mapping and fall through to direct load.
                 if stacked_name not in params_dict:
                     continue
@@ -1517,9 +1527,9 @@ class Gemma4ForCausalLM(
             ".moe.experts.down_proj": ".moe.down_proj",
         },
     )
-    # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
-    # attention and full attention without k_eq_v). k_eq_v layers use
-    # separate q_proj + k_proj without packing.
+    # Note: k_eq_v global attention layers use qkv_proj with v_head_size=0
+    # (no V slot).  LoRA targeting qkv_proj.v_proj on those layers is
+    # not supported and requires separate handling.
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1615,16 +1625,6 @@ class Gemma4ForCausalLM(
         # Gemma4ForConditionalGeneration wrapper). Strip it to map to our
         # model tree which is just "model.*".
         def _weight_iterator():
-            use_k_eq_v = getattr(self.config, "attention_k_eq_v", False)
-            # Build set of k_eq_v layer indices (full_attention layers
-            # when attention_k_eq_v is enabled). These layers have k_proj
-            # but no v_proj in checkpoint — we duplicate k_proj as v_proj.
-            k_eq_v_layer_indices: set[int] = set()
-            if use_k_eq_v:
-                for idx, lt in enumerate(self.config.layer_types):
-                    if lt == "full_attention":
-                        k_eq_v_layer_indices.add(idx)
-
             for name, weight in weights:
                 # Remap "language_model." → "" to match our model tree.
                 # Checkpoint: model.language_model.layers.X.*
@@ -1686,18 +1686,6 @@ class Gemma4ForCausalLM(
                         expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
                         yield expert_name, weight[expert_id]
                     continue
-
-                # k_eq_v layers: checkpoint has k_proj but no v_proj.
-                # QKVParallelLinear expects both, so duplicate k_proj
-                # as v_proj so V gets identical weights to K.
-                # ONLY for full_attention layers — sliding layers have
-                # their own real v_proj weights.
-                if "self_attn.k_proj" in name and k_eq_v_layer_indices:
-                    m = re.search(r"layers\.(\d+)\.", name)
-                    if m and int(m.group(1)) in k_eq_v_layer_indices:
-                        yield name, weight
-                        yield name.replace("k_proj", "v_proj"), weight.clone()
-                        continue
 
                 yield name, weight
 
