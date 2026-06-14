@@ -679,7 +679,7 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
-        self._requests_priority: dict[str, int] = {}
+        self._requests_priority: dict[str, float] = {}
 
         # TODO(baoloongmao): Internal api server & plugin framework support
         # dp > 1

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from collections.abc import Sequence
 from unittest.mock import Mock
 
 import pytest
@@ -1925,7 +1926,7 @@ _none_hash_initialized = False
 
 def create_requests_with_priority(
     num_requests: int,
-    priorities: list[int],
+    priorities: Sequence[int | float],
     arrival_times: list[float] | None = None,
     num_tokens: int = 10,
     mm_hashes_list: list[list[str]] | None = None,
@@ -2054,6 +2055,46 @@ def test_priority_scheduling_basic_ordering():
     # req_1 (priority 0), req_2 (priority 1), req_0 (priority 2)
     scheduled_req_ids = [req.req_id for req in output.scheduled_new_reqs]
     assert scheduled_req_ids == ["1", "2", "0"]
+
+
+def test_priority_scheduling_float_ordering():
+    """Test that float priorities schedule in correct order."""
+    scheduler = create_scheduler_with_priority()
+
+    priorities = [0.7, 0.3, 0.5]
+    arrival_times = [1.0, 2.0, 3.0]
+    requests = create_requests_with_priority(
+        num_requests=3, priorities=priorities, arrival_times=arrival_times
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 3
+
+    scheduled_req_ids = [req.req_id for req in output.scheduled_new_reqs]
+    assert scheduled_req_ids == ["1", "2", "0"]  # 0.3, 0.5, 0.7
+
+
+def test_priority_scheduling_float_between_integers():
+    """Test that float priority 0.5 schedules between integer 0 and 1."""
+    scheduler = create_scheduler_with_priority()
+
+    priorities = [1, 0.5, 0]
+    arrival_times = [1.0, 2.0, 3.0]
+    requests = create_requests_with_priority(
+        num_requests=3, priorities=priorities, arrival_times=arrival_times
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 3
+
+    scheduled_req_ids = [req.req_id for req in output.scheduled_new_reqs]
+    assert scheduled_req_ids == ["2", "1", "0"]  # 0, 0.5, 1
 
 
 def test_priority_scheduling_arrival_time_tiebreaker():
