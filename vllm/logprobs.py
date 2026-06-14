@@ -119,13 +119,18 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
                 for i in range(self.start_indices[index], self.end_indices[index])
             }
         elif isinstance(index, slice):
-            min_index = self.start_indices[index][0]
-            max_index = self.end_indices[index][-1]
+            sliced_starts = self.start_indices[index]
+            sliced_ends = self.end_indices[index]
+            if not sliced_starts:
+                # Empty slice: return an empty FlatLogprobs
+                return FlatLogprobs()
+            min_index = sliced_starts[0]
+            max_index = sliced_ends[-1]
             return FlatLogprobs(
                 # Shift updated start_indices and end_indices to
                 # be 0-indexed
-                start_indices=[i - min_index for i in self.start_indices[index]],
-                end_indices=[i - min_index for i in self.end_indices[index]],
+                start_indices=[i - min_index for i in sliced_starts],
+                end_indices=[i - min_index for i in sliced_ends],
                 token_ids=self.token_ids[min_index:max_index],
                 logprobs=self.logprobs[min_index:max_index],
                 ranks=self.ranks[min_index:max_index],
