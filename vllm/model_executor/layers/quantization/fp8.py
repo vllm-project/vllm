@@ -220,6 +220,24 @@ class Fp8Config(QuantizationConfig):
             }
         )
 
+    def get_cache_scale(self, name: str) -> str | None:
+        """Per-name compat shim over ``get_cache_scale_mapper``.
+
+        Some models (e.g. MiMo-V2) still call the per-weight ``get_cache_scale``
+        in their custom ``load_weights`` loop; upstream renamed this to the
+        mapper form. Map a compressed-tensors k/v/q-cache scale name to the
+        vLLM param name, or return None if it is not a cache-scale weight.
+        """
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        if name.endswith(".output_scale") and ".q_proj" in name:
+            return name.replace(".q_proj.output_scale", ".attn.q_scale")
+        if name.endswith("self_attn.prob_output_scale"):
+            return name.replace(".prob_output_scale", ".attn.prob_scale")
+        return None
+
 
 class CopyNumelCounter(TorchDispatchMode):
     """

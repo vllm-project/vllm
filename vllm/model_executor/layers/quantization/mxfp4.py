@@ -6,6 +6,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoEParallelConfig,
@@ -470,6 +471,171 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+
+class MiMoV2Mxfp4MoEMethod(GptOssMxfp4MoEMethod):
+    """MiMo MXFP4 MoE packing compatible with its DFlash checkpoint."""
+
+    def __init__(self, moe: FusedMoEConfig, swiglu_limit: float | None = None):
+        FusedMoEMethodBase.__init__(self, moe)
+        self.weight_dtype = "mxfp4"
+        if not hasattr(moe, "max_capture_size"):
+            moe.max_capture_size = 0
+        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
+        self.max_capture_size = moe.max_capture_size
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        self.moe_kernel: mk.FusedMoEKernel | None = None
+        self.w13_precision_config = None
+        self.w2_precision_config = None
+        self._swiglu_limit = swiglu_limit
+
+        # MiMo must use vLLM's externally computed grouped sigmoid routing.
+        # The monolithic TRT-LLM expert path re-routes internally and drops the
+        # MiMo correction-bias routing semantics.
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+            TrtLlmMxfp4ExpertsModular,
+        )
+
+        self.experts_cls = TrtLlmMxfp4ExpertsModular
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        from flashinfer.fp4_quantization import block_scale_interleave
+        from flashinfer.fused_moe.core import (
+            _maybe_get_cached_w3_w1_permute_indices,
+            get_w2_permute_indices_with_cache,
+        )
+
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            reorder_w1w3_to_w3w1,
+        )
+
+        w13_weight, w13_scale = reorder_w1w3_to_w3w1(
+            layer.w13_weight.data, layer.w13_weight_scale.data, dim=-2
+        )
+        w2_weight = layer.w2_weight.data
+        w2_scale = layer.w2_weight_scale.data
+
+        num_experts = w13_weight.shape[0]
+        epilogue_tile_m = 128
+        permute_cache: dict = {}
+        shuffled_w13 = []
+        shuffled_w13_scale = []
+        shuffled_w2 = []
+        shuffled_w2_scale = []
+
+        for expert_idx in range(num_experts):
+            w13_u8 = w13_weight[expert_idx].view(torch.uint8)
+            w13_scale_u8 = w13_scale[expert_idx].view(torch.uint8)
+            w2_u8 = w2_weight[expert_idx].view(torch.uint8)
+            w2_scale_u8 = w2_scale[expert_idx].view(torch.uint8)
+
+            w13_perm = _maybe_get_cached_w3_w1_permute_indices(
+                permute_cache, w13_u8, epilogue_tile_m
+            )
+            shuffled_w13.append(w13_u8[w13_perm.to(w13_u8.device)].contiguous())
+            w13_scale_perm = _maybe_get_cached_w3_w1_permute_indices(
+                permute_cache,
+                w13_scale_u8,
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+            shuffled_w13_scale.append(
+                block_scale_interleave(
+                    w13_scale_u8[w13_scale_perm.to(w13_scale_u8.device)].contiguous()
+                )
+            )
+
+            w2_perm = get_w2_permute_indices_with_cache(
+                permute_cache, w2_u8, epilogue_tile_m
+            )
+            shuffled_w2.append(w2_u8[w2_perm.to(w2_u8.device)].contiguous())
+            w2_scale_perm = get_w2_permute_indices_with_cache(
+                permute_cache,
+                w2_scale_u8,
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+            shuffled_w2_scale.append(
+                block_scale_interleave(
+                    w2_scale_u8[w2_scale_perm.to(w2_scale_u8.device)].contiguous()
+                )
+            )
+
+        replace_parameter(layer, "w13_weight", torch.stack(shuffled_w13))
+        replace_parameter(layer, "w2_weight", torch.stack(shuffled_w2))
+        replace_parameter(
+            layer,
+            "w13_weight_scale",
+            torch.stack(shuffled_w13_scale)
+            .view(torch.float8_e4m3fn)
+            .reshape(num_experts, w13_weight.shape[1], -1),
+        )
+        replace_parameter(
+            layer,
+            "w2_weight_scale",
+            torch.stack(shuffled_w2_scale)
+            .view(torch.float8_e4m3fn)
+            .reshape(num_experts, w2_weight.shape[1], -1),
+        )
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is not None and self.experts_cls is not None:
+            self.moe_kernel = make_mxfp4_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._expert_routing_tables(),
+                layer=layer,
+            )
+
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        w1_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
+
+        if self.mxfp4_backend in TRITON_BACKENDS:
+            assert self.w13_precision_config is not None
+            assert self.w2_precision_config is not None
+            w1_scale = self.w13_precision_config
+            w2_scale = self.w2_precision_config
+
+        return make_mxfp4_moe_quant_config(
+            mxfp4_backend=self.mxfp4_backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            swiglu_limit=self._swiglu_limit,
+            layer=layer,
+        )
+
+
+class MiMoV2Mxfp4Config(Mxfp4Config):
+    """MXFP4 config for MiMo-V2 experts."""
+
+    SWIGLU_LIMIT = 10.0
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        # NOTE: the fused-MoE refactor replaced the `FusedMoE` class with a
+        # `FusedMoE(...)` factory returning a `MoERunner`; the routed-expert
+        # module that reaches quant-method selection is a `RoutedExperts`
+        # (matching the parent `Mxfp4Config.get_quant_method`). Checking the
+        # old `FusedMoE` symbol (now a function) would raise TypeError.
+        if isinstance(layer, RoutedExperts):
+            return MiMoV2Mxfp4MoEMethod(
+                layer.moe_config, swiglu_limit=self.SWIGLU_LIMIT
+            )
+        return super().get_quant_method(layer, prefix)
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):

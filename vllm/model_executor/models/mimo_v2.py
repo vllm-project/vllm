@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -35,6 +36,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.mxfp4 import MiMoV2Mxfp4Config
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_quantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -49,7 +55,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import EagleModelMixin, MixtureOfExperts, SupportsEagle3, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -61,6 +67,13 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+# DFlash draft fidelity: the reference extracts HF output_hidden_states, where
+# the entry after the FINAL target layer is the POST-final-norm hidden state
+# (all earlier entries are raw residual-stream values). Capturing the last aux
+# feature pre-norm degrades draft acceptance. Set this to 1 to restore the old
+# pre-norm behavior for A/B testing.
+_DFLASH_PRENORM_LAST_AUX = os.environ.get("VLLM_DFLASH_PRENORM_LAST_AUX", "0") == "1"
 
 
 class MiMoV2MLP(nn.Module):
@@ -162,13 +175,26 @@ class MiMoV2MoE(nn.Module):
             torch.empty(config.n_routed_experts, dtype=self.gate_dtype)
         )
 
+        # MiMo V2 Pro checkpoints store attention weights as fp8 while MoE
+        # experts are stored as MXFP4. Fp8Config intentionally drops
+        # store_dtype, so inspect the raw HF quantization_config before
+        # constructing the expert module.
+        hf_quant_config = getattr(config, "quantization_config", None)
+        if isinstance(hf_quant_config, dict):
+            store_dtype = hf_quant_config.get("store_dtype")
+        else:
+            store_dtype = getattr(hf_quant_config, "store_dtype", None)
+        expert_quant_config = (
+            MiMoV2Mxfp4Config() if store_dtype == "mxfp4" else quant_config
+        )
+
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
+            quant_config=expert_quant_config,
             prefix=f"{prefix}.experts",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
@@ -455,8 +481,79 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         return self.config.hybrid_layer_pattern[self.layer_id] == 1
 
 
+def _shard_fp8_qkv_proj(
+    w_full: torch.Tensor,
+    s_full: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+    block: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shard Pro-format fp8 fused QKV weights for a tensor-parallel rank.
+
+    The checkpoint stores rows as per-KV-head ``[Q | K | V]`` groups and stores
+    FP8 scales per padded group, not as one flat scale table for the whole fused
+    matrix. When a TP rank owns multiple groups, vLLM expects the local rows
+    de-interleaved as ``[all Q | all K | all V]``. Since K/V boundaries can
+    split 128-row FP8 scale blocks, dequantize each checkpoint group first,
+    reorder in floating point, and quantize back to rank-local FP8 blocks.
+    """
+    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
+        "TP size must evenly split the number of KV heads."
+    )
+
+    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
+    k_rows_per_group = head_dim
+    v_rows_per_group = v_head_dim
+    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
+    assert s_full.shape[0] % num_kv_heads == 0, (
+        "Pro-format qkv_proj scales must be grouped by KV head."
+    )
+    scale_rows_per_group = s_full.shape[0] // num_kv_heads
+    min_scale_rows_per_group = (rows_per_group + block - 1) // block
+    assert scale_rows_per_group >= min_scale_rows_per_group, (
+        "Pro-format qkv_proj scale group is too small for the weight group."
+    )
+    kv_heads_per_rank = num_kv_heads // tp_size
+    if kv_heads_per_rank == 1:
+        return w_full.chunk(tp_size, dim=0)[tp_rank], s_full.chunk(tp_size, dim=0)[
+            tp_rank
+        ]
+
+    qs, ks, vs = [], [], []
+    for group_idx in range(
+        tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank
+    ):
+        row_start = group_idx * rows_per_group
+        scale_row_start = group_idx * scale_rows_per_group
+        w_group = w_full[row_start : row_start + rows_per_group].to(torch.float32)
+        s_group = s_full[
+            scale_row_start : scale_row_start + scale_rows_per_group
+        ].to(torch.float32)
+        s_group = s_group.repeat_interleave(block, dim=0).repeat_interleave(
+            block, dim=1
+        )[:rows_per_group]
+        dequant_group = w_group * s_group
+        qs.append(dequant_group[:q_rows_per_group])
+        ks.append(
+            dequant_group[q_rows_per_group : q_rows_per_group + k_rows_per_group]
+        )
+        vs.append(dequant_group[q_rows_per_group + k_rows_per_group :])
+
+    grouped = torch.cat([torch.cat(qs), torch.cat(ks), torch.cat(vs)], dim=0)
+    return scaled_quantize(
+        grouped,
+        GroupShape(block, block),
+        w_full.dtype,
+        compute_dtype=torch.float32,
+    )
+
+
 @support_torch_compile
-class MiMoV2Model(nn.Module):
+class MiMoV2Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -507,7 +604,7 @@ class MiMoV2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -519,10 +616,26 @@ class MiMoV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        # The DFlash reference uses the post-final-norm hidden state as the last
+        # aux feature (HF output_hidden_states[num_layers]). When that layer id
+        # is requested, skip its pre-norm residual capture in the loop and add
+        # the normed hidden state after self.norm below.
+        num_layers = len(self.layers)
+        post_norm_final_aux = (
+            num_layers in self.aux_hidden_state_layers
+            and not _DFLASH_PRENORM_LAST_AUX
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            if post_norm_final_aux and layer_idx + 1 == num_layers:
+                continue
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -530,6 +643,11 @@ class MiMoV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if post_norm_final_aux:
+            aux_hidden_states.append(hidden_states)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
 
         return hidden_states
 
@@ -561,6 +679,7 @@ class MiMoV2Model(nn.Module):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -568,6 +687,22 @@ class MiMoV2Model(nn.Module):
                 continue
             if "mtp" in name:
                 continue
+
+            if self.quant_config is not None:
+                cache_scale_name = self.quant_config.get_cache_scale(name)
+                if cache_scale_name is not None and cache_scale_name in params_dict:
+                    param = params_dict[cache_scale_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+
+                    kv_scale = loaded_weight
+                    if kv_scale.dim() > 0 and kv_scale.numel() > 1:
+                        kv_scale = kv_scale.view(-1)[0]
+
+                    weight_loader(param, kv_scale)
+                    loaded_params.add(cache_scale_name)
+                    continue
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
@@ -604,11 +739,15 @@ class MiMoV2Model(nn.Module):
             if expert_matched:
                 continue
             # Support fused qkv_proj checkpoint (Pro format)
-            if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+            if self._try_load_fp8_qkv_proj(
+                name,
+                loaded_weight,
+                pending_fp8_qkv_proj,
+                params_dict,
+                loaded_params,
+                tp_rank,
+                tp_size,
+            ):
                 continue
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -666,8 +805,58 @@ class MiMoV2Model(nn.Module):
 
         return loaded_params
 
+    def _try_load_fp8_qkv_proj(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        fp8_qkv_proj_dict: dict[str, dict[str, torch.Tensor]],
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_params: set[str],
+        tp_rank: int,
+        tp_size: int,
+    ) -> bool:
+        is_weight = (
+            name.endswith("qkv_proj.weight") and tensor.dtype == torch.float8_e4m3fn
+        )
+        is_scale = name.endswith("qkv_proj.weight_scale_inv")
+        if not is_weight and not is_scale:
+            return False
 
-class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+        if is_pp_missing_parameter(name, self):
+            return True
+
+        prefix, qkv_kind = name.rsplit(".", 1)
+        entry = fp8_qkv_proj_dict.setdefault(prefix, {})
+        entry[qkv_kind] = tensor
+        if "weight" not in entry or "weight_scale_inv" not in entry:
+            return True
+        del fp8_qkv_proj_dict[prefix]
+
+        attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+        weight, scale = _shard_fp8_qkv_proj(
+            entry["weight"],
+            entry["weight_scale_inv"],
+            num_heads=attn.total_num_heads,
+            num_kv_heads=attn.total_num_kv_heads,
+            head_dim=attn.head_dim,
+            v_head_dim=attn.v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+        )
+        for kind, loaded_weight in {
+            "weight": weight,
+            "weight_scale_inv": scale,
+        }.items():
+            param_name = f"{prefix}.{kind}"
+            param = params_dict[param_name]
+            if loaded_weight.shape[0] > param.shape[0]:
+                loaded_weight = loaded_weight[: param.shape[0]]
+            default_weight_loader(param, loaded_weight)
+            loaded_params.add(param_name)
+        return True
+
+
+class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, SupportsEagle3, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -703,6 +892,13 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

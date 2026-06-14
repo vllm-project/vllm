@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 
 import torch
@@ -11,7 +12,10 @@ from transformers import Qwen3Config
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -46,6 +50,38 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+MASK_EMBEDDING_FILENAME = "mask_embedding.pt"
+
+
+def _find_mask_embedding_file(
+    model_path: str, revision: str | None = None
+) -> str | None:
+    """Locate the DFlash ``mask_embedding.pt`` file for a draft model.
+
+    Args:
+        model_path: Local directory or Hugging Face repo id of the draft model.
+        revision: Optional revision used when the draft lives on the HF Hub.
+
+    Returns:
+        The path to ``mask_embedding.pt`` if it can be found, otherwise None.
+    """
+    if os.path.isdir(model_path):
+        candidate = os.path.join(model_path, MASK_EMBEDDING_FILENAME)
+        return candidate if os.path.isfile(candidate) else None
+
+    # Remote draft: the weight loader only fetches *.safetensors/*.bin, so the
+    # mask embedding (a plain .pt) must be downloaded explicitly.
+    try:
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(
+            repo_id=model_path,
+            filename=MASK_EMBEDDING_FILENAME,
+            revision=revision,
+        )
+    except Exception:
+        return None
+
 
 class DFlashQwen3Attention(nn.Module):
     """Attention for DFlash speculative decoding.
@@ -64,6 +100,8 @@ class DFlashQwen3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
+        add_swa_attention_sink_bias: bool = False,
+        sliding_window: int | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -109,6 +147,14 @@ class DFlashQwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
         )
+
+        self.attention_sink_bias = (
+            torch.nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
+            if add_swa_attention_sink_bias
+            else None
+        )
+
+        self.sliding_window = sliding_window
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -116,9 +162,26 @@ class DFlashQwen3Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
+            sinks=self.attention_sink_bias,
         )
+        if sliding_window is not None:
+            # DFlash attends non-causally: the query block (bonus + mask tokens)
+            # must attend to itself bidirectionally, and the current full-
+            # attention path relies on that. Attention defaults a DECODER
+            # sliding window to the causal (w-1, 0) tuple, which would mask
+            # later query tokens from earlier ones. Widen the right edge to a
+            # symmetric (w-1, w-1) window so the windowed masking matches the
+            # non-causal reference (the FlashAttention impl stores the window as
+            # a (left, right) tuple). The KV-cache SlidingWindowSpec is still
+            # driven by the int window passed above, so block management is
+            # unchanged. For causal layers a symmetric window is equivalent,
+            # since causal masking clamps the right edge regardless.
+            impl_window = getattr(self.attn.impl, "sliding_window", None)
+            if isinstance(impl_window, tuple):
+                self.attn.impl.sliding_window = (sliding_window - 1, sliding_window - 1)
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -131,7 +194,7 @@ class DFlashQwen3Attention(nn.Module):
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
-        qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Per-head RMSNorm
@@ -150,6 +213,21 @@ class DFlashQwen3Attention(nn.Module):
         return output
 
 
+def _apply_dflash_rope_config(config: Qwen3Config) -> dict:
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    backbone_rotary_base = dflash_config.get("backbone_rotary_base")
+    if backbone_rotary_base is None:
+        set_default_rope_theta(config, default_theta=1000000)
+        return config.rope_parameters
+
+    rope_parameters = dict(getattr(config, "rope_parameters", None) or {})
+    rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
+    rope_parameters["rope_theta"] = backbone_rotary_base
+    config.rope_parameters = rope_parameters
+    config.rope_theta = backbone_rotary_base
+    return rope_parameters
+
+
 class DFlashQwen3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -162,8 +240,25 @@ class DFlashQwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        set_default_rope_theta(config, default_theta=1000000)
+        rope_parameters = _apply_dflash_rope_config(config)
         attn_type = AttentionType.DECODER
+
+        # DFlash drafts store the sink-bias flag inside dflash_config; fall back
+        # to the top-level attribute used by other configs.
+        dflash_config = getattr(config, "dflash_config", None) or {}
+        add_swa_attention_sink_bias = dflash_config.get(
+            "attention_sink_bias",
+            getattr(config, "add_swa_attention_sink_bias", False),
+        )
+
+        # Sliding-window attention is configured in dflash_config (use_swa /
+        # swa_window_size); fall back to the top-level sliding_window field.
+        # When disabled the draft keeps full attention (sliding_window=None).
+        sliding_window = None
+        if dflash_config.get("use_swa", False):
+            sliding_window = dflash_config.get(
+                "swa_window_size", getattr(config, "sliding_window", None)
+            )
 
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
@@ -172,10 +267,12 @@ class DFlashQwen3DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
+            add_swa_attention_sink_bias=add_swa_attention_sink_bias,
+            sliding_window=sliding_window,
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_parameters=config.rope_parameters,
+            rope_parameters=rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
@@ -243,6 +340,22 @@ class DFlashQwen3Model(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
+        # Masked query slots are fed to the draft as `mask_token_id`. The target
+        # embedding table (shared with this draft) has no trained row for that
+        # token, so DFlash ships a separately-trained vector in
+        # `mask_embedding.pt`. When that file is available, `embed_input_ids`
+        # substitutes it for masked slots instead of `embed_tokens[mask_token_id]`.
+        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.register_buffer(
+            "mask_embedding",
+            torch.zeros(
+                self.config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+            ),
+            persistent=False,
+        )
+        self.has_mask_embedding = False
+
         self.layers = nn.ModuleList(
             [
                 DFlashQwen3DecoderLayer(
@@ -284,7 +397,13 @@ class DFlashQwen3Model(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        embeds = self.embed_tokens(input_ids)
+        if self.has_mask_embedding and self.mask_token_id is not None:
+            # Replace masked slots with the trained mask embedding. Use a
+            # data-independent torch.where so this stays CUDA-graph friendly.
+            is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
+            embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
+        return embeds
 
     def _build_fused_kv_buffers(self) -> None:
         """Build fused weight buffers for precompute_and_store_context_kv.
@@ -340,6 +459,10 @@ class DFlashQwen3Model(nn.Module):
 
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+        self._use_fused_kv_precompute = all(
+            a.qkv_proj.quant_method.__class__.__name__ == "UnquantizedLinearMethod"
+            for a in layers_attn
+        )
 
     def precompute_and_store_context_kv(
         self,
@@ -372,7 +495,6 @@ class DFlashQwen3Model(nn.Module):
         hd = self._head_dim
         nkv = self._num_kv_heads
 
-        # --- Fused KV projection (one GEMM for all layers) ---
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
             normed_context_states,
@@ -380,6 +502,51 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+
+        if not self._use_fused_kv_precompute:
+            for layer in self.layers:
+                attn_mod = layer.self_attn
+                qkv, _ = attn_mod.qkv_proj(normed_context_states)
+                _, k, v = qkv.split(
+                    [attn_mod.q_size, attn_mod.kv_size, attn_mod.kv_size],
+                    dim=-1,
+                )
+
+                k = k.view(num_ctx, nkv, hd)
+                v = v.view(num_ctx, nkv, hd)
+                k_normed = torch.empty_like(k)
+                ops.rms_norm(
+                    k_normed,
+                    k,
+                    attn_mod.k_norm.weight.data,
+                    self._rms_norm_eps,
+                )
+
+                k_flat = k_normed.view(num_ctx, kv)
+                cos_sin_cache = attn_mod.rotary_emb.cos_sin_cache
+                if cos_sin_cache.dtype != k_flat.dtype:
+                    cos_sin_cache = cos_sin_cache.to(dtype=k_flat.dtype)
+                ops.rotary_embedding(
+                    context_positions,
+                    k_flat,
+                    None,
+                    attn_mod.rotary_emb.head_size,
+                    cos_sin_cache,
+                    attn_mod.rotary_emb.is_neox_style,
+                )
+
+                if context_slot_mapping is not None:
+                    attn = attn_mod.attn
+                    attn.impl.do_kv_cache_update(
+                        attn,
+                        k_flat.view(num_ctx, nkv, hd),
+                        v,
+                        attn.kv_cache,
+                        context_slot_mapping,
+                    )
+            return
+
+        # --- Fused KV projection (one GEMM for all layers) ---
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
         )
@@ -466,6 +633,8 @@ class DFlashQwen3Model(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
@@ -473,6 +642,20 @@ class DFlashQwen3Model(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+            if "attention_sink_bias" in name:
+                if name not in params_dict:
+                    continue
+
+                # Sink bias is per-head; shard it across TP ranks like the
+                # attention heads themselves.
+                param = params_dict[name]
+                heads_per_rank = loaded_weight.shape[0] // tp_size
+                head_start = tp_rank * heads_per_rank
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -492,7 +675,8 @@ class DFlashQwen3Model(nn.Module):
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
@@ -586,7 +770,9 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         includes_embed_tokens = False
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
-                "DFlash should use mask_token_id to embed the padding hidden state"
+                "DFlash embeds masked slots via mask_token_id (optionally "
+                "overridden by a mask_embedding.pt file); it should not ship a "
+                "mask_hidden weight."
             )
             if "t2d" in name:
                 continue
@@ -613,4 +799,66 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        self._load_mask_embedding()
         self.model._build_fused_kv_buffers()
+
+    def _load_mask_embedding(self) -> None:
+        """Load the trained mask embedding from ``mask_embedding.pt`` if present.
+
+        DFlash drafts ship a separately-trained embedding for the mask token in
+        a ``mask_embedding.pt`` file, because the (shared) target embedding table
+        has no meaningful row for ``mask_token_id``. When the file is available
+        the draft uses this vector for masked query slots; otherwise it falls
+        back to embedding ``mask_token_id`` through ``embed_tokens``.
+        """
+        model = self.model
+        if model.mask_token_id is None:
+            return
+
+        path = _find_mask_embedding_file(
+            self.draft_model_config.model,
+            revision=self.draft_model_config.revision,
+        )
+        if path is None:
+            logger.info(
+                "No %s found for DFlash draft; embedding mask_token_id (%s) "
+                "via the shared embed_tokens table.",
+                MASK_EMBEDDING_FILENAME,
+                model.mask_token_id,
+            )
+            return
+
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(state, dict):
+            embedding = state["embedding"]
+            file_mask_token_id = state.get("mask_token_id")
+        else:
+            embedding = state
+            file_mask_token_id = None
+
+        if file_mask_token_id is not None and file_mask_token_id != model.mask_token_id:
+            raise ValueError(
+                f"{MASK_EMBEDDING_FILENAME} mask_token_id ({file_mask_token_id}) "
+                f"does not match dflash_config.mask_token_id "
+                f"({model.mask_token_id})."
+            )
+
+        embedding = embedding.reshape(-1)
+        if embedding.numel() != model.mask_embedding.numel():
+            raise ValueError(
+                f"{MASK_EMBEDDING_FILENAME} has {embedding.numel()} elements but "
+                f"the draft hidden size is {model.mask_embedding.numel()}."
+            )
+
+        model.mask_embedding.copy_(
+            embedding.to(
+                device=model.mask_embedding.device,
+                dtype=model.mask_embedding.dtype,
+            )
+        )
+        model.has_mask_embedding = True
+        logger.info(
+            "Loaded trained mask embedding from %s for DFlash mask_token_id %s.",
+            path,
+            model.mask_token_id,
+        )
