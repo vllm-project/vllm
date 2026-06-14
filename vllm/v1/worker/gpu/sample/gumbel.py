@@ -14,6 +14,14 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 _FP32_TINY = (
     tl.constexpr(float.fromhex("0x1p-126")) if HAS_TRITON else float.fromhex("0x1p-126")
 )
+_FP32_ONE_MINUS_EPS = (
+    tl.constexpr(float.fromhex("0x1.fffffep-1"))
+    if HAS_TRITON
+    else float.fromhex("0x1.fffffep-1")
+)
+_FP64_ONE_MINUS_EPS = (
+    tl.constexpr(0.9999999999999999) if HAS_TRITON else 0.9999999999999999
+)
 
 
 @triton.jit
@@ -131,13 +139,15 @@ def gumbel_block_argmax(
 
         if USE_FP64:
             u = tl_rand64(gumbel_seed, block, includes_zero=False)
+            u = tl.minimum(u, _FP64_ONE_MINUS_EPS)
         else:
             u = tl.rand(gumbel_seed, block)
-            u = tl.maximum(u, _FP32_TINY)
+            u = tl.minimum(tl.maximum(u, _FP32_TINY), _FP32_ONE_MINUS_EPS)
         gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+        finite = logits > float("-inf")
+        logits = tl.where(mask & finite, logits + gumbel_noise, float("-inf"))
 
     value, idx = tl.max(logits, axis=0, return_indices=True)
     return value, idx
