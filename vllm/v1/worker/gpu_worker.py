@@ -162,7 +162,21 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+        # Resolved lazily on first sleep/wake; persists worker-process state.
+        self._sleep_mode_backend = None
+
+    def _get_sleep_mode_backend(self):
+        if self._sleep_mode_backend is None:
+            from vllm.device_allocator.sleep_mode_backend import (
+                SleepModeBackendFactory,
+            )
+
+            self._sleep_mode_backend = SleepModeBackendFactory.create_backend(
+                self.vllm_config.model_config
+            )
+        return self._sleep_mode_backend
+
+    def sleep(self, level: int = 1, tags: tuple[str, ...] | None = None) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -172,8 +186,12 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        # Thread ``tags`` through so per-call selective-offload overrides on
+        # backends that support it (e.g. CuMemTagBackend - see RFC #34303)
+        # actually reach ``backend.suspend``. Backends that do not support
+        # selective offload accept and ignore the argument (see
+        # ``SleepModeBackend.suspend`` signature).
+        self._get_sleep_mode_backend().suspend(level, tags=tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -185,8 +203,13 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
+        backend = self._get_sleep_mode_backend()
+        # Snapshot which tags the backend recorded as suspended *before* the
+        # resume call clears that state. Used below to gate
+        # ``post_kv_cache_wake_up`` so a selective wake of a backend that
+        # only suspended weights does not zero a still-live KV cache.
+        suspended_before_resume = backend.suspended_tags()
+        backend.resume(tags)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -196,7 +219,17 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+        # Only re-initialize the KV cache if it was actually suspended (or if
+        # the backend doesn't track per-tag suspend state, which is the
+        # pre-abstraction CuMemBackend behavior - everything was always
+        # included in sleep/wake). Otherwise the selective-offload path
+        # (suspend(tags=("weights",)) then wake_up(tags=None)) would zero
+        # live KV pages the engine still has cached.
+        kv_was_suspended = (
+            suspended_before_resume is None  # backend doesn't track -> assume yes
+            or "kv_cache" in suspended_before_resume
+        )
+        if kv_was_suspended and (tags is None or "kv_cache" in tags):
             self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
