@@ -8,7 +8,9 @@ reproduced as a float fake-quant on the layer input and output, around a
 weight-only matmul, rather than a fused int8 GEMM.
 """
 
+import math
 from collections.abc import Callable
+from fractions import Fraction
 
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
@@ -34,9 +36,32 @@ from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
 
+
+def _maybe_pad_loader(inner_loader, packed_dim=1):
+    """Wrap a weight_loader to zero-pad old-style packed weights on load."""
+
+    def wrapper(param, loaded_weight, *args, **kwargs):
+        if isinstance(param, PackedvLLMParameter) and loaded_weight.ndim > packed_dim:
+            expected = param.data.shape[packed_dim]
+            actual = loaded_weight.shape[packed_dim]
+            if actual < expected:
+                dtype, device = loaded_weight.dtype, loaded_weight.device
+                pad_shape = list(loaded_weight.shape)
+                pad_shape[packed_dim] = expected - actual
+                padding = torch.zeros(pad_shape, dtype=dtype, device=device)
+                loaded_weight = torch.cat([loaded_weight, padding], dim=packed_dim)
+        return inner_loader(param, loaded_weight, *args, **kwargs)
+
+    return wrapper
+
+
 WNA8O8_SUPPORTED_TYPES_MAP = {
     2: scalar_types.uint2b2,
+    3: scalar_types.uint3b4,
     4: scalar_types.uint4b8,
+    5: scalar_types.uint5b16,
+    6: scalar_types.uint6b32,
+    7: scalar_types.uint7b64,
     8: scalar_types.uint8b128,
 }
 
@@ -60,7 +85,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         quant_format: str = "pack-quantized",
     ):
         self.num_bits = num_bits
-        self.pack_factor = 32 // num_bits
+        self.pack_factor = Fraction(32, num_bits)
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
         self.has_input_act = has_input_act
@@ -141,6 +166,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                 ),
             )
         else:
+            packed_input_dim = math.ceil(input_size_per_partition / 32) * self.num_bits
             layer.register_parameter(
                 "weight_packed",
                 PackedvLLMParameter(
@@ -148,10 +174,10 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                     output_dim=0,
                     packed_dim=1,
                     packed_factor=self.pack_factor,
-                    weight_loader=weight_loader,
+                    weight_loader=_maybe_pad_loader(weight_loader),
                     data=torch.empty(
                         out,
-                        input_size_per_partition // self.pack_factor,
+                        packed_input_dim,
                         dtype=torch.int32,
                     ),
                 ),
