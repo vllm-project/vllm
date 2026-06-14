@@ -765,8 +765,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        # AITER backend requires weights to be marked as shuffled.
-        if self.fp8_backend == Fp8MoeBackend.AITER:
+        # AITER-backed backends require weights to be marked as shuffled.
+        if (
+            self.fp8_backend == Fp8MoeBackend.AITER
+            or self.fp8_backend == Fp8MoeBackend.BATCHED_AITER
+        ):
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
 
