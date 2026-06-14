@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -766,15 +767,29 @@ def _get_tile_size(
     is_prefill: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization."""
+    head_size_padded = triton.next_power_of_2(head_size)
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
-        return 32
+        tile_size = 32
+    else:
+        # Note: tile size must be at least 32 for fp8 (element_size == 1).
+        tile_size = 32 if is_prefill else 16 if element_size >= 2 else 32
 
-    # Default behavior
-    if is_prefill:
-        return 32
-    # Note: tile size must be at least 32 for fp8 (element_size == 1).
-    return 16 if element_size >= 2 else 32
+    # Hardware-aware safety check for padded large-head configurations on
+    # older GPUs. Triton kernels use the padded head size when determining
+    # resource usage, so apply the fallback based on head_size_padded.
+    if tile_size == 32 and head_size_padded >= 512 and element_size >= 2:
+        if current_platform.is_cuda():
+            max_shared_memory = get_max_shared_memory_bytes()
+        else:
+            # Fallback for non-CUDA platforms (e.g., Intel XPU, ROCm)
+            max_shared_memory = 65536
+
+        if max_shared_memory < 98304:
+            tile_size = 16
+
+    return tile_size
 
 
 def unified_attention(
