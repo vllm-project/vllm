@@ -105,6 +105,8 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         sc.device_name = ""
         sc.master_server_address = ""
         sc.enable_offload = False
+        sc.enable_dummy_client = False
+        sc.real_client_address = ""
         with (
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
