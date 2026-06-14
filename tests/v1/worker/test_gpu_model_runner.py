@@ -312,6 +312,42 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
+def test_preprocess_zeroes_padded_model_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.supports_mm_inputs = False
+    runner.enable_prompt_embeds = False
+    runner.uses_mrope = False
+    runner.uses_xdrope_dim = 0
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.input_ids = SimpleNamespace(
+        gpu=torch.tensor([11, 12, 13, 991, 992], dtype=torch.int32)
+    )
+    runner.positions = torch.tensor([101, 102, 103, 901, 902], dtype=torch.int64)
+    runner._init_model_kwargs = lambda: {}
+
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+
+    input_ids, inputs_embeds, positions, *_ = GPUModelRunner._preprocess(
+        runner,
+        scheduler_output,
+        num_input_tokens=5,
+    )
+
+    assert inputs_embeds is None
+    assert torch.equal(input_ids[:3], torch.tensor([11, 12, 13], dtype=torch.int32))
+    assert torch.equal(positions[:3], torch.tensor([101, 102, 103], dtype=torch.int64))
+    assert torch.equal(input_ids[3:], torch.zeros(2, dtype=torch.int32))
+    assert torch.equal(positions[3:], torch.zeros(2, dtype=torch.int64))
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
