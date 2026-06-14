@@ -24,9 +24,12 @@ from vllm.model_executor.models.llama import (
     LlamaModel,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils import init_logger
 from vllm.v1.attention.backend import AttentionType
 
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, maybe_compress_lm_head_to_fp8
+
+logger = init_logger(__name__)
 
 
 class MistralMLP(nn.Module):
@@ -281,10 +284,13 @@ class MistralForCausalLM(LlamaForCausalLM):
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(
+        loaded = loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights
         )
+        if self._compress_lm_head:
+            maybe_compress_lm_head_to_fp8(self, logger)
+        return loaded
 
     def maybe_remap_mistral(
         self,
