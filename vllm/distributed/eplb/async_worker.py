@@ -8,9 +8,9 @@ import threading
 from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import ProcessGroup
+from torch.distributed import ProcessGroup, all_reduce
 
-from vllm.distributed.parallel_state import get_eplb_group
+from vllm.distributed.parallel_state import get_ep_group, get_eplb_group
 from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent
@@ -53,16 +53,13 @@ def start_async_worker(
 def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
+    global_expert_load_window: torch.Tensor,
     physical_to_logical_map_cpu: torch.Tensor,
     cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
-    # Move the global expert load window to CPU for computation.
-    with torch.cuda.stream(cuda_stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
-    # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
         eplb_stats.num_replicas,
@@ -97,9 +94,12 @@ def transfer_run_periodically(
             # rearrange_event) and copy it to CPU
             with torch.cuda.stream(cuda_stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
+                assert model_state.eplb_stats is not None
+                window_cpu = model_state.eplb_stats.global_expert_load_window.cpu()
+                all_reduce(window_cpu, group=get_ep_group().cpu_group)
 
             new_physical_to_logical_map = run_rebalance_experts(
-                model_state, state, physical_to_logical_map_cpu, cuda_stream
+                model_state, state, window_cpu, physical_to_logical_map_cpu, cuda_stream
             )
             logger.info(
                 "Async worker computed new indices for model %s",
