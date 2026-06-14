@@ -139,6 +139,27 @@ class INCConfig(QuantizationConfig):
         )
 
     def get_layer_config(self, layer, layer_name: str):
+        REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
+
+        def is_explicitly_configured(name: str) -> bool:
+            """Return True if *name* has an explicit entry in extra_config,
+            either via exact key match or via a regex pattern key."""
+            if not self.extra_config:
+                return False
+            if name in self.extra_config:
+                return True
+            for pattern in self.extra_config:
+                if not isinstance(pattern, str) or not any(
+                    c in REGEX_SPECIAL_CHARS for c in pattern
+                ):
+                    continue
+                try:
+                    if re.search(re.compile(pattern), name) is not None:
+                        return True
+                except re.error:
+                    continue
+            return False
+
         def get_config(name: str, quantized: bool = True):
             if not self.extra_config:
                 return (
@@ -156,7 +177,6 @@ class INCConfig(QuantizationConfig):
                     cfg.get("sym", self.sym if quantized else True),
                 )
 
-            REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
             for pattern, cfg in self.extra_config.items():
                 if not isinstance(pattern, str) or not any(
                     c in REGEX_SPECIAL_CHARS for c in pattern
@@ -213,6 +233,14 @@ class INCConfig(QuantizationConfig):
                     sub_names = [
                         layer_name.replace(fusion_key, sub_key) for sub_key in sub_keys
                     ]
+                    # Only trigger if at least one sub_name is explicitly
+                    # configured in extra_config (via exact match or regex).
+                    # This prevents false matches when a short fusion_key
+                    # (e.g. "qkv") is merely a substring of a longer layer
+                    # name (e.g. "in_proj_qkvz") and none of the generated
+                    # sub_names are actually configured.
+                    if not any(is_explicitly_configured(n) for n in sub_names):
+                        continue
                     sub_configs = [get_config(name, quantized) for name in sub_names]
                     if len(set(sub_configs)) == 1:
                         return sub_configs[0]
