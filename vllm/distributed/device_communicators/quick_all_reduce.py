@@ -32,7 +32,8 @@ class QuickReduceRegime(Enum):
     INT8 = 1
     INT6 = 2
     INT4 = 3
-    NONE = 4
+    Turbo = 4
+    NONE = 5
 
 
 KB = 1024
