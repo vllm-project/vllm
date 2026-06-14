@@ -93,6 +93,22 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
+def _is_skippable_triton_compile_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return (
+        "PassManager::run failed" in message
+        or "operand #0 does not dominate this use" in message
+        or "TritonGPURemoveLayoutConversions" in message
+    )
+
+
+def _format_exception_summary(exc: RuntimeError, max_chars: int = 500) -> str:
+    message = " ".join(str(exc).split())
+    if len(message) <= max_chars:
+        return message
+    return f"{message[:max_chars]}..."
+
+
 def benchmark_config(
     config: BenchmarkConfig,
     num_tokens: int,
@@ -331,6 +347,68 @@ def benchmark_config(
     avg = sum(latencies) / (num_iters * 10) * 1000  # us
     graph.reset()
     return avg
+
+
+def _tune_search_space(
+    num_tokens: int,
+    num_experts: int,
+    shard_intermediate_size: int,
+    hidden_size: int,
+    topk: int,
+    dtype: torch.dtype,
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
+    search_space: list[dict[str, int]],
+    block_quant_shape: list[int] | None,
+    use_deep_gemm: bool,
+) -> dict[str, int] | None:
+    best_config = None
+    best_time = float("inf")
+    for idx, config in enumerate(tqdm(search_space)):
+        try:
+            kernel_time = benchmark_config(
+                config,
+                num_tokens,
+                num_experts,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                num_iters=20,
+                block_quant_shape=block_quant_shape,
+                use_deep_gemm=use_deep_gemm,
+            )
+        except triton.runtime.autotuner.OutOfResources:
+            # Some configurations may be invalid and fail to compile.
+            continue
+        except RuntimeError as e:
+            if not _is_skippable_triton_compile_error(e):
+                raise
+            print(
+                "Skipping config for batch_size="
+                f"{num_tokens} due to Triton compile error: "
+                f"config={config}, error={_format_exception_summary(e)}"
+            )
+            continue
+
+        if kernel_time < best_time:
+            best_time = kernel_time
+            best_config = config
+
+        # Periodically clear Triton JIT cache to prevent OOM
+        # This is especially important for large models with many experts
+        if (
+            TRITON_CACHE_CLEAR_INTERVAL > 0
+            and idx > 0
+            and idx % TRITON_CACHE_CLEAR_INTERVAL == 0
+        ):
+            clear_triton_cache()
+
+    return best_config
 
 
 def get_rocm_tuning_space(use_fp16):
@@ -598,14 +676,12 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         search_space: list[dict[str, int]],
-        block_quant_shape: list[int],
+        block_quant_shape: list[int] | None,
         use_deep_gemm: bool,
-    ) -> dict[str, int]:
+    ) -> dict[str, int] | None:
         # local import to allow serialization by ray
         from vllm.platforms import current_platform
 
-        best_config = None
-        best_time = float("inf")
         if current_platform.is_rocm():
             is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
             search_space = prune_rocm_search_space(
@@ -627,46 +703,32 @@ class BenchmarkWorker:
             # Ray restricts each worker to one GPU; use local index 0
             torch.accelerator.device_index(0) if need_device_guard else nullcontext()
         ):
-            for idx, config in enumerate(tqdm(search_space)):
-                try:
-                    kernel_time = benchmark_config(
-                        config,
-                        num_tokens,
-                        num_experts,
-                        shard_intermediate_size,
-                        hidden_size,
-                        topk,
-                        dtype,
-                        use_fp8_w8a8,
-                        use_int8_w8a16,
-                        use_int4_w4a16,
-                        num_iters=20,
-                        block_quant_shape=block_quant_shape,
-                        use_deep_gemm=use_deep_gemm,
-                    )
-                except triton.runtime.autotuner.OutOfResources:
-                    # Some configurations may be invalid and fail to compile.
-                    continue
-
-                if kernel_time < best_time:
-                    best_time = kernel_time
-                    best_config = config
-
-                # Periodically clear Triton JIT cache to prevent OOM
-                # This is especially important for large models with many experts
-                if (
-                    TRITON_CACHE_CLEAR_INTERVAL > 0
-                    and idx > 0
-                    and idx % TRITON_CACHE_CLEAR_INTERVAL == 0
-                ):
-                    clear_triton_cache()
+            best_config = _tune_search_space(
+                num_tokens,
+                num_experts,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                search_space,
+                block_quant_shape,
+                use_deep_gemm,
+            )
 
         # Final cleanup after tuning completes
         clear_triton_cache()
 
         now = datetime.now()
+        if best_config is None:
+            print(
+                f"{now.ctime()}] No valid config found for "
+                f"batch_size={num_tokens}; skipping this batch"
+            )
+            return None
         print(f"{now.ctime()}] Completed tuning for batch_size={num_tokens}")
-        assert best_config is not None
         return best_config
 
 
@@ -998,9 +1060,19 @@ def main(args: argparse.Namespace):
                 for batch_size in batch_sizes
             ],
         )
-        best_configs = {
-            M: sort_config(config) for M, config in zip(batch_sizes, configs)
-        }
+        best_configs = {}
+        skipped_batch_sizes = []
+        for batch_size, config in zip(batch_sizes, configs):
+            if config is None:
+                skipped_batch_sizes.append(batch_size)
+                continue
+            best_configs[batch_size] = sort_config(config)
+        if skipped_batch_sizes:
+            print(f"Skipped batch sizes with no valid config: {skipped_batch_sizes}")
+        if not best_configs:
+            raise RuntimeError(
+                "No valid tuning configs found for any requested batch size."
+            )
         save_configs(
             best_configs,
             E,
