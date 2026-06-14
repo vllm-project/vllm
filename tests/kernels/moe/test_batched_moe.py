@@ -23,6 +23,13 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton MoE kernels require CUDA/ROCm/XPU.",
+)
+
 MNK_FACTORS = [
     (1, 128, 128),
     (1, 512, 512),
@@ -71,19 +78,19 @@ class BatchedMMTensors:
         A = (
             torch.randn(
                 (config.num_experts, config.max_tokens_per_expert, config.K),
-                device="cuda",
+                device=DEVICE,
                 dtype=config.in_dtype,
             )
             / 10
         )
         B = torch.randn(
             (config.num_experts, config.N, config.K),
-            device="cuda",
+            device=DEVICE,
             dtype=config.in_dtype,
         )
         C = torch.zeros(
             (config.num_experts, config.max_tokens_per_expert, config.N),
-            device="cuda",
+            device=DEVICE,
             dtype=config.out_dtype,
         )
 
@@ -91,7 +98,7 @@ class BatchedMMTensors:
             low=0,
             high=config.max_tokens_per_expert,
             size=(config.num_experts,),
-            device="cuda",
+            device=DEVICE,
             dtype=torch.int32,
         )
 
@@ -120,8 +127,10 @@ def test_batched_mm(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
-        89
+    if (
+        dtype == torch.float8_e4m3fn
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
     ):
         pytest.skip(
             "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
@@ -144,7 +153,7 @@ def test_batched_mm(
         low=0,
         high=max_tokens_per_expert,
         size=(num_experts,),
-        device="cuda",
+        device=DEVICE,
         dtype=torch.int32,
     )
 
@@ -169,9 +178,9 @@ def test_batched_mm(
     )
 
     out_shape = (num_experts, max_tokens_per_expert, N)
-    test_output = torch.zeros(out_shape, dtype=act_dtype, device="cuda")
-    ref_output = torch.zeros(out_shape, dtype=act_dtype, device="cuda")
-    q_ref_output = torch.zeros(out_shape, dtype=act_dtype, device="cuda")
+    test_output = torch.zeros(out_shape, dtype=act_dtype, device=DEVICE)
+    ref_output = torch.zeros(out_shape, dtype=act_dtype, device=DEVICE)
+    q_ref_output = torch.zeros(out_shape, dtype=act_dtype, device=DEVICE)
 
     compute_tl_dtype = {
         torch.float16: tl.float16,
@@ -257,8 +266,10 @@ def test_fused_moe_batched_experts(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
-    if (dtype == torch.float8_e4m3fn) and not current_platform.has_device_capability(
-        89
+    if (
+        dtype == torch.float8_e4m3fn
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
     ):
         pytest.skip(
             "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
@@ -273,8 +284,8 @@ def test_fused_moe_batched_experts(
     if per_act_token_quant and block_shape is not None:
         pytest.skip("Skip illegal quantization test.")
 
-    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
-    score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
+    a = torch.randn((m, k), device=DEVICE, dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device=DEVICE, dtype=torch.bfloat16)
 
     if dtype.itemsize == 1:
         act_dtype = torch.bfloat16
@@ -294,8 +305,8 @@ def test_fused_moe_batched_experts(
     )
 
     if input_scales and quant_dtype is not None:
-        a1_scale = torch.tensor(1, device="cuda", dtype=torch.float32)
-        a2_scale = torch.tensor(1, device="cuda", dtype=torch.float32)
+        a1_scale = torch.tensor(1, device=DEVICE, dtype=torch.float32)
+        a2_scale = torch.tensor(1, device=DEVICE, dtype=torch.float32)
     else:
         a1_scale = None
         a2_scale = None

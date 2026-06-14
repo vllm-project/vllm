@@ -16,7 +16,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device="cuda")
+    return torch.as_tensor(x, dtype=torch.float32, device=current_platform.device_type)
 
 
 def ref_dynamic_per_token_quant(

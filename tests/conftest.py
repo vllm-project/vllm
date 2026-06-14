@@ -294,6 +294,9 @@ def workspace_init():
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
         init_workspace_manager(device)
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu:0")
+        init_workspace_manager(device)
     yield
     reset_workspace_manager()
 
