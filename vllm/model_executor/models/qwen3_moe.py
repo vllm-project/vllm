@@ -273,6 +273,7 @@ class Qwen3MoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        per_layer_sliding_window: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -328,6 +329,7 @@ class Qwen3MoeAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             **{
                 "layer_idx": extract_layer_index(prefix),
@@ -374,6 +376,15 @@ class Qwen3MoeDecoderLayer(nn.Module):
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
         )
+
+        # Determine per-layer sliding window from layer_types config.
+        layer_idx = extract_layer_index(prefix)
+        layer_types = getattr(config, "layer_types", None)
+        if layer_types and layer_types[layer_idx] == "sliding_attention":
+            per_layer_sliding_window = config.sliding_window
+        else:
+            per_layer_sliding_window = None
+
         self.self_attn = Qwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -387,10 +398,10 @@ class Qwen3MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
+            per_layer_sliding_window=per_layer_sliding_window,
         )
 
         # `mlp_only_layers` in the config.
-        layer_idx = extract_layer_index(prefix)
         mlp_only_layers = (
             [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         )

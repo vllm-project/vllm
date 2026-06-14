@@ -78,6 +78,7 @@ class Qwen3Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        per_layer_sliding_window: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -136,6 +137,7 @@ class Qwen3Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             **{
@@ -183,6 +185,15 @@ class Qwen3DecoderLayer(nn.Module):
             config, "dual_chunk_attention_config", None
         )
 
+        # Determine per-layer sliding window from layer_types config,
+        # following the same pattern as Gemma2.
+        layer_idx = extract_layer_index(prefix)
+        layer_types = getattr(config, "layer_types", None)
+        if layer_types and layer_types[layer_idx] == "sliding_attention":
+            per_layer_sliding_window = config.sliding_window
+        else:
+            per_layer_sliding_window = None
+
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
         # bidirectional attention, which is used in some embedding models
@@ -206,6 +217,7 @@ class Qwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
+            per_layer_sliding_window=per_layer_sliding_window,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
