@@ -133,6 +133,7 @@ MoEBackend = Literal[
     "humming",
     "triton_unfused",
     "aiter",
+    "flydsl",
     "emulation",
 ]
 
@@ -142,6 +143,7 @@ LinearBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_trtllm",
     "flashinfer_cudnn",
+    "flashinfer_b12x",
     "marlin",
     "triton",
     "deep_gemm",
@@ -185,6 +187,7 @@ class KernelConfig:
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
@@ -197,6 +200,7 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
+    - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
