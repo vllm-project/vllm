@@ -932,6 +932,37 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
             (256, 256, 768),
             id="qwen35_27b_tp8",
         ),
+        # ai21labs/AI21-Jamba2-Mini (Mamba1)
+        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
+        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
+        # Conv state holds only x: a single contiguous sub-projection.
+        pytest.param(
+            "mamba1",
+            1,
+            8192,
+            3,
+            (8192, 16),
+            (8192,),
+            id="jamba_mini_tp1",
+        ),
+        pytest.param(
+            "mamba1",
+            4,
+            2048,
+            3,
+            (2048, 16),
+            (2048,),
+            id="jamba_mini_tp4",
+        ),
+        pytest.param(
+            "mamba1",
+            8,
+            1024,
+            3,
+            (1024, 16),
+            (1024,),
+            id="jamba_mini_tp8",
+        ),
     ],
 )
 def test_derive_mamba_conv_split(
@@ -955,6 +986,7 @@ def test_derive_mamba_conv_split(
     from vllm.v1.kv_cache_interface import MambaSpec
 
     _TYPE_MAP = {
+        "mamba1": MambaAttentionBackendEnum.MAMBA1,
         "mamba2": MambaAttentionBackendEnum.MAMBA2,
         "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
     }
