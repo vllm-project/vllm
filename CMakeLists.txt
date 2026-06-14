@@ -430,6 +430,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+    "csrc/libtorch_stable/quantization/w8a8/fp8/qkv_padded_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/libtorch_stable/permute_cols.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
