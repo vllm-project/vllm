@@ -55,11 +55,6 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
-    import gguf
-except ImportError:
-    gguf = PlaceholderModule("gguf")
-
-try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
 
 except ImportError:
