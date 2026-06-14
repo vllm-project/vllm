@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
+    VLLM_TRACE_HIDE_TOKEN_IDS: bool = False
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -786,6 +787,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+    # If set to 1/true, token level profiling trace will not include
+    # new_token_ids in span events.
+    "VLLM_TRACE_HIDE_TOKEN_IDS": lambda: os.getenv(
+        "VLLM_TRACE_HIDE_TOKEN_IDS", ""
+    ).lower()
+    in ("1", "true"),
     # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
     # by default when the hardware supports it — set to 0 to opt out
     # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
