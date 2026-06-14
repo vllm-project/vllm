@@ -351,6 +351,25 @@ def select_fp8_moe_backend(
                 backend, config, weight_key, activation_key, activation_format
             )
 
+    # LoRA: w8a8 backends quantize the activations to fp8 before the experts
+    # run, but the Triton MoE-LoRA shrink/expand kernels require bf16/fp16
+    # activations (a mixed fp8 x bf16 tl.dot is unsupported and crashes with
+    # "Unsupported lhs dtype fp8e4nv"). Marlin runs W8A16 -- activations stay
+    # in the original dtype -- and natively supports LoRA, so prefer it.
+    # See https://github.com/vllm-project/vllm/issues/45101.
+    if config.is_lora_enabled and current_platform.is_cuda():
+        logger.info_once(
+            "LoRA is enabled with an FP8 MoE: selecting the MARLIN (W8A16) "
+            "backend so the MoE-LoRA kernels receive unquantized activations."
+        )
+        return _return_or_raise(
+            Fp8MoeBackend.MARLIN,
+            config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
