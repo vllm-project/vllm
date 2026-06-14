@@ -90,7 +90,8 @@ class WorkspaceManager:
         return self._locked
 
     def get_simultaneous(
-        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+        self,
+        *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
     ) -> list[torch.Tensor]:
         """Get multiple workspace tensors simultaneously from a single allocation.
 
@@ -153,7 +154,8 @@ class WorkspaceManager:
                     )
                 return "unknown"
 
-            if self._locked:
+            can_initialize_locked_ubatch = current_size == 0
+            if self._locked and not can_initialize_locked_ubatch:
                 raise AssertionError(
                     f"Workspace is locked but allocation from '{get_caller_info()}' "
                     f"requires {required_bytes / _MB:.2f} MB, current size is "
@@ -161,17 +163,15 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            # Only resize the requesting ubatch's workspace.  Other
-            # ubatches resize lazily on their next get_simultaneous call.
-            # Resizing all ubatches here would orphan the other ubatch's
-            # old tensor when it still holds views into it (DBO leak).
+            # Only resize the requesting ubatch's workspace. Other ubatches
+            # resize lazily on their next get_simultaneous call. Resizing all
+            # ubatches here would orphan another ubatch's old tensor while it
+            # still holds views into it (DBO leak).
             self._current_workspaces[ubatch_id] = None
             del current_workspace
-            # Release the freed segment back to CUDA so the caching
-            # allocator can reuse the GPU memory for the larger
-            # allocation below. Without this, each resize may leave a
-            # dead segment in reserved memory which can cause higher peak
-            # memory usage.
+            # Release the freed segment back to the accelerator allocator so
+            # the larger allocation below can reuse the memory instead of
+            # leaving dead reserved segments behind.
             torch.accelerator.empty_cache()
             self._current_workspaces[ubatch_id] = torch.empty(
                 (required_bytes,), dtype=torch.uint8, device=self._device
@@ -187,7 +187,6 @@ class WorkspaceManager:
                     required_bytes / _MB,
                     ubatch_id,
                 )
-
         return current_workspace
 
 

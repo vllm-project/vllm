@@ -26,10 +26,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.workspace import (
-    current_workspace_manager,
-    is_workspace_manager_initialized,
-)
+from vllm.v1.attention.ops.common import get_cp_collective_scratch_tensors
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -116,18 +113,15 @@ def _dcp_a2a_send_recv_buffers(
     shape: tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype,
+    scratch_workspace: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if is_workspace_manager_initialized():
-        send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
-            (shape, dtype),
-            (shape, dtype),
-        )
-        return send_buffer, recv_buffer
-
-    return (
-        torch.empty(shape, device=device, dtype=dtype),
-        torch.empty(shape, device=device, dtype=dtype),
+    send_buffer, recv_buffer = get_cp_collective_scratch_tensors(
+        device,
+        (shape, dtype),
+        (shape, dtype),
+        scratch_workspace=scratch_workspace,
     )
+    return send_buffer, recv_buffer
 
 
 @triton.jit
@@ -397,6 +391,7 @@ def dcp_a2a_lse_reduce(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    scratch_workspace: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
@@ -433,6 +428,7 @@ def dcp_a2a_lse_reduce(
         (world_size, B, H_per_rank, D + lse_pack_dim),
         device=cp_attn_out.device,
         dtype=cp_attn_out.dtype,
+        scratch_workspace=scratch_workspace,
     )
 
     _dcp_a2a_pack_send(
