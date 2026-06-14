@@ -31,7 +31,10 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
     int iters = size_k / default_threads;
     int rest = size_k % default_threads;
 
-    int offset = row * row_stride;
+    // Promote to int64 before multiplying: for large M (e.g. batch*seq_len)
+    // row * row_stride can exceed 2^31 and overflow a 32-bit int, wrapping the
+    // pointer offset to a bogus (possibly negative) value. See gh issue #45469.
+    int64_t offset = static_cast<int64_t>(row) * row_stride;
 
     half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + offset);
     half* out_half = reinterpret_cast<half*>(out_int4_ptr + offset);

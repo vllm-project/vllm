@@ -33,23 +33,31 @@ __global__ void merge_attn_states_kernel(
   const uint pack_size = 16 / sizeof(scalar_t);
   const uint threads_per_head = head_size / pack_size;
 
-  const uint global_idx = blockIdx.x * NUM_THREADS + threadIdx.x;
-  const uint token_head_threads = num_tokens * num_heads * threads_per_head;
+  // Compute the global thread index in 64-bit. With ~1M+ tokens the total
+  // thread count exceeds 2^32, so a 32-bit global_idx (and the bound it's
+  // compared against) would wrap around. See gh issue #45500.
+  const int64_t global_idx =
+      static_cast<int64_t>(blockIdx.x) * NUM_THREADS + threadIdx.x;
+  const int64_t token_head_threads =
+      static_cast<int64_t>(num_tokens) * num_heads * threads_per_head;
 
   if (global_idx >= token_head_threads) return;
 
   // global_idx -> token_idx + head_idx + pack_idx
-  const uint token_head_idx = global_idx / threads_per_head;
-  const uint pack_idx = global_idx % threads_per_head;
+  const int64_t token_head_idx = global_idx / threads_per_head;
+  const int64_t pack_idx = global_idx % threads_per_head;
 
-  const uint token_idx = token_head_idx / num_heads;
-  const uint head_idx = token_head_idx % num_heads;
+  const int64_t token_idx = token_head_idx / num_heads;
+  const int64_t head_idx = token_head_idx % num_heads;
 
-  const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
-  const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
-                               head_idx * prefix_head_stride;
-  const uint dst_head_offset = token_idx * num_heads * output_head_stride +
-                               head_idx * output_head_stride;
+  const uint pack_offset =
+      static_cast<uint>(pack_idx) * pack_size;  // (0~15)*8, etc.
+  // token_idx is int64, so these offsets are computed in 64-bit and won't
+  // overflow even when token_idx * num_heads * head_stride exceeds 2^32.
+  const int64_t src_head_offset = token_idx * num_heads * prefix_head_stride +
+                                  head_idx * prefix_head_stride;
+  const int64_t dst_head_offset = token_idx * num_heads * output_head_stride +
+                                  head_idx * output_head_stride;
   const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
   const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
   output_t* output_head_ptr = output + dst_head_offset;
@@ -282,10 +290,15 @@ void merge_attn_states_launcher(
   // Process one pack elements per thread. for float, the
   // pack_size is 4 for half/bf16, the pack_size is 8.
   const uint threads_per_head = head_size / pack_size;
-  const uint total_threads = num_tokens * num_heads * threads_per_head;
+  // Compute the launch dimensions in 64-bit: for large token counts the total
+  // thread count can exceed 2^32 and wrap a 32-bit value, producing a bad grid
+  // size. gridDim.x itself is bounded well above any realistic value here.
+  const int64_t total_threads =
+      static_cast<int64_t>(num_tokens) * num_heads * threads_per_head;
 
   dim3 block(NUM_THREADS);
-  dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
+  dim3 grid(static_cast<unsigned int>((total_threads + NUM_THREADS - 1) /
+                                      NUM_THREADS));
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       prefix_output.get_device_index());
