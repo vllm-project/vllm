@@ -29,7 +29,6 @@ from itertools import islice
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
@@ -46,6 +45,9 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.shared_expert_gate import (
+    fused_shared_expert_gate,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -129,7 +131,7 @@ class Qwen3MoeMLP(nn.Module):
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
+            out = fused_shared_expert_gate(x, self.expert_gate.weight, out)
 
         return out
 
