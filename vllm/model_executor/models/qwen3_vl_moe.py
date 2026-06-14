@@ -28,6 +28,7 @@ import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeConfig,
@@ -63,6 +64,53 @@ from .qwen3_vl import (
 from .utils import is_pp_missing_parameter, maybe_prefix
 
 logger = init_logger(__name__)
+
+# Matches ModelOpt's per-expert quantized weight naming, e.g.
+#   model.language_model.layers.0.mlp.experts.gate_proj.42.weight_scale_2
+# which vLLM's loader expects in the form
+#   model.layers.0.mlp.experts.42.gate_proj.weight_scale_2
+# (experts indexed first, projection second). See #40885.
+_MODELOPT_EXPERT_NAME_RE = re.compile(
+    r"^(?P<prefix>.*\.mlp\.experts\.)"
+    r"(?P<proj>gate_proj|up_proj|down_proj)\."
+    r"(?P<expert>\d+)\."
+    r"(?P<rest>.*)$"
+)
+
+
+def _remap_modelopt_qwen3_vl_moe_name(name: str) -> str:
+    """Normalise a ModelOpt-quantized Qwen3-VL-MoE checkpoint key to the
+    layout vLLM's `Qwen3MoeLLMModel.load_weights` expects.
+
+    Two transformations:
+
+    1. Strip the `language_model.` segment that the HuggingFace
+       `Qwen3VLMoEForConditionalGeneration` wrapper inserts before the
+       inner LLM. vLLM loads the LLM directly here, so paths look like
+       `model.layers.0.…` not `model.language_model.layers.0.…`.
+
+    2. Swap `experts.{proj}.{N}.…` to `experts.{N}.{proj}.…`. ModelOpt
+       emits each expert as its own 2-D tensor with the projection name
+       first and the expert index second; vLLM's
+       `FusedMoE.make_expert_params_mapping` produces weight names with
+       the expert index first.
+
+    The same swap covers all quant suffixes (`.weight`, `.weight_scale`,
+    `.weight_scale_2`, `.input_scale`, `.input_scale_2`) because the
+    regex captures them as `rest`.
+
+    This is a pure rename: shapes and values are untouched, and the
+    function is a no-op on already-vLLM-shaped names (no matching
+    `experts.<proj>.<digits>.` substring).
+    """
+    name = name.replace("model.language_model.", "model.")
+    match = _MODELOPT_EXPERT_NAME_RE.match(name)
+    if match is not None:
+        name = (
+            f"{match.group('prefix')}{match.group('expert')}."
+            f"{match.group('proj')}.{match.group('rest')}"
+        )
+    return name
 
 
 class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
@@ -162,6 +210,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Normalise ModelOpt NVFP4 quantized checkpoints. These ship the
+        # `Qwen3VLMoEForConditionalGeneration` wrapper prefix and use
+        # `experts.{proj}.{N}` ordering. The remap function is a no-op
+        # on regular (non-ModelOpt) checkpoints. See #40885.
+        weights = (
+            (_remap_modelopt_qwen3_vl_moe_name(name), weight)
+            for name, weight in weights
+        )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
