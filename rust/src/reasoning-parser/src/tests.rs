@@ -32,6 +32,8 @@ impl Tokenizer for FakeTokenizer {
             "<|END_THINKING|>" => Some(4),
             "◁think▷" => Some(5),
             "◁/think▷" => Some(6),
+            "[THINK]" => Some(8),
+            "[/THINK]" => Some(9),
             "<seed:think>" => Some(10),
             "</seed:think>" => Some(11),
             _ => None,
@@ -41,6 +43,39 @@ impl Tokenizer for FakeTokenizer {
     fn is_special_id(&self, token_id: u32) -> bool {
         token_id == 7
     }
+}
+
+/// Push every delta through `parser`, then `finish()`, returning the
+/// accumulated `(reasoning, content)` (empty collapses to `None`).
+pub(crate) fn run_streaming(
+    parser: &mut dyn ReasoningParser,
+    output: &[&str],
+) -> (Option<String>, Option<String>) {
+    let mut reasoning = String::new();
+    let mut content = String::new();
+
+    for delta in output {
+        let result = parser.push(delta).unwrap();
+        if let Some(next) = result.reasoning {
+            reasoning.push_str(&next);
+        }
+        if let Some(next) = result.content {
+            content.push_str(&next);
+        }
+    }
+
+    let final_delta = parser.finish().unwrap();
+    if let Some(next) = final_delta.reasoning {
+        reasoning.push_str(&next);
+    }
+    if let Some(next) = final_delta.content {
+        content.push_str(&next);
+    }
+
+    (
+        (!reasoning.is_empty()).then_some(reasoning),
+        (!content.is_empty()).then_some(content),
+    )
 }
 
 #[test]
