@@ -1103,6 +1103,37 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             group_size,
         )
 
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        # Handle KV-cache quantization first (same as base class).
+        if isinstance(layer, (Attention, MLAAttention)):
+            return self.KVCacheMethodCls(self)
+
+        # When lm_head is excluded but checkpoint has NVFP4 tensors,
+        # use the special unquantized method that registers placeholders.
+        if self.is_layer_excluded(prefix):
+            if isinstance(layer, (LinearBase, ParallelLMHead)):
+                return ModelOptNvFp4UnquantizedLMHeadMethod(self)
+            return None
+
+        # Vision modules are never quantized.
+        if (
+            "vision_tower" in prefix
+            or "vision_model" in prefix
+            or "vit_large_projector" in prefix
+        ):
+            return UnquantizedLinearMethod()
+
+        # Quantized linear layers.
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
+            quant_method = self.LinearMethodCls(self)
+            if getattr(quant_method, "backend", "") == "marlin":
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
+
+        return None
+
 
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
@@ -1236,6 +1267,97 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+
+
+class ModelOptNvFp4UnquantizedLMHeadMethod(LinearMethodBase):
+    """Handles lm_head excluded from quantization with NVFP4 checkpoint tensors.
+
+    NVIDIA ModelOpt exports lm_head as quantized (with input_scale, weight_scale,
+    weight_scale_2), but vLLM's exclude_modules typically excludes lm_head from
+    quantization. This method registers placeholder parameters so the checkpoint
+    tensors can be loaded, then discards them — lm_head runs unquantized.
+    """
+
+    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        # Unquantized weight (same as UnquantizedLinearMethod)
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # Placeholder parameters for NVFP4 checkpoint tensors.
+        # These allow the weight loader to find and consume the tensors
+        # from the checkpoint; they are discarded after loading.
+        input_scale = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("input_scale", input_scale)
+
+        weight_scale_2 = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale_2", weight_scale_2)
+
+        # Per-block weight scale (shape matches NVFP4 structure)
+        weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // self.quant_config.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Discard the NVFP4 quantization placeholders — lm_head runs unquantized.
+        for attr in ("input_scale", "weight_scale_2", "weight_scale"):
+            if hasattr(layer, attr):
+                delattr(layer, attr)
+
+        logger.warning_once(
+            "lm_head has NVFP4 quantization tensors in the checkpoint but is "
+            "excluded from quantization (exclude_modules). Running lm_head "
+            "unquantized."
+        )
+
+        # Transpose weight for inference (same as UnquantizedLinearMethod)
+        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):

@@ -14,12 +14,12 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4UnquantizedLMHeadMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -110,7 +110,7 @@ def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
 
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
-    assert isinstance(method, UnquantizedLinearMethod)
+    assert isinstance(method, ModelOptNvFp4UnquantizedLMHeadMethod)
 
 
 def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
