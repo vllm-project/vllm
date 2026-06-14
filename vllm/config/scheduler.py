@@ -220,6 +220,14 @@ class SchedulerConfig:
         #   https://github.com/vllm-project/vllm/issues/29585
         factors.append(self.max_num_batched_tokens)
 
+        # max_num_seqs determines the number of request slots and therefore the
+        # size of the per-request static buffers (e.g. block tables, sampling
+        # metadata) captured in the torch.compile graph. It also shapes the
+        # dummy batch used by the startup memory-profiling forward pass, so in
+        # multi-node TP/PP it must match across ranks or the profiling
+        # collectives desync.
+        factors.append(self.max_num_seqs)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
