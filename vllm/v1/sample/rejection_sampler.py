@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.model_executor.triton_dispatcher import pluggable_kernel
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
@@ -834,6 +835,7 @@ def rejection_random_sample_kernel(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
+@pluggable_kernel
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
