@@ -16,10 +16,12 @@ reason about temporal order.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
@@ -38,8 +40,13 @@ from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
@@ -902,6 +909,489 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
 
 # ---------------------------------------------------------------------------
+# Native Gemma4 vision tower (LoRA-compatible, replaces AutoModel.from_config)
+#
+# Key design choices:
+#   - All attention/MLP linears wrapped in disable_tp=True to keep the ViT
+#     data-parallel, preventing vLLM LoRA from sharding LoRA-B matrices.
+#   - Clip linears wrapped under a `.linear` sub-module (Gemma4NativeClipped*)
+#     so that parameter paths exactly match the HF checkpoint naming, e.g.
+#     `vision_tower.encoder.layers.0.self_attn.q_proj.linear.weight`.
+#   - AutoWeightsLoader auto-loads the four clip buffers (input_min/max,
+#     output_min/max) as persistent buffers on each wrapper module.
+# ---------------------------------------------------------------------------
+
+
+def _apply_2d_rope(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """2D spatial RoPE matching HF apply_multidimensional_rope (ndim=2).
+
+    x: (B, S, H, D)  cos/sin: (B, S, D)
+    Head features are split into two halves; each half rotates independently
+    with the x- and y-coordinate frequencies.
+    """
+    D = x.shape[-1]
+    half = D // 2
+    x0, x1 = x.split(half, dim=-1)
+    c0, c1 = cos.split(half, dim=-1)
+    s0, s1 = sin.split(half, dim=-1)
+    out_parts = []
+    for xp, cp, sp in ((x0, c0, s0), (x1, c1, s1)):
+        cp = cp.unsqueeze(2)  # (B, S, 1, half) – broadcast over H
+        sp = sp.unsqueeze(2)
+        h = xp.shape[-1] // 2
+        rotated = torch.cat((-xp[..., h:], xp[..., :h]), dim=-1)
+        out_parts.append(xp * cp + rotated * sp)
+    return torch.cat(out_parts, dim=-1)
+
+
+class Gemma4NativeClippedColumnLinear(nn.Module):
+    """ColumnParallelLinear (disable_tp=True) nested under ``.linear`` to
+    match HF checkpoint paths (e.g. ``q_proj.linear.weight``).  The four
+    clip buffers replicate ``Gemma4ClippableLinear`` semantics; they are
+    initialised to ±inf (no-op) and overwritten from the checkpoint."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.linear = ColumnParallelLinear(
+            in_features,
+            out_features,
+            bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "linear"),
+            disable_tp=True,
+        )
+        self.register_buffer("input_min", torch.tensor(float("-inf")))
+        self.register_buffer("input_max", torch.tensor(float("inf")))
+        self.register_buffer("output_min", torch.tensor(float("-inf")))
+        self.register_buffer("output_max", torch.tensor(float("inf")))
+
+    def forward(self, x: torch.Tensor):
+        x = x.clamp(min=self.input_min, max=self.input_max)
+        out, bias = self.linear(x)
+        return out.clamp(min=self.output_min, max=self.output_max), bias
+
+
+class Gemma4NativeClippedRowLinear(nn.Module):
+    """RowParallelLinear (disable_tp=True) nested under ``.linear`` with
+    four clip buffers, mirroring ``Gemma4NativeClippedColumnLinear``."""
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.linear = RowParallelLinear(
+            in_features,
+            out_features,
+            bias=False,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "linear"),
+            disable_tp=True,
+        )
+        self.register_buffer("input_min", torch.tensor(float("-inf")))
+        self.register_buffer("input_max", torch.tensor(float("inf")))
+        self.register_buffer("output_min", torch.tensor(float("-inf")))
+        self.register_buffer("output_max", torch.tensor(float("inf")))
+
+    def forward(self, x: torch.Tensor):
+        x = x.clamp(min=self.input_min, max=self.input_max)
+        out, bias = self.linear(x)
+        return out.clamp(min=self.output_min, max=self.output_max), bias
+
+
+class Gemma4NativeVision2DRotaryEmbedding(nn.Module):
+    """2D spatial RoPE for the Gemma4 vision encoder.
+
+    Matches ``Gemma4VisionRotaryEmbedding`` from HF transformers exactly.
+    ``inv_freq`` is non-persistent so it is neither saved nor expected in
+    the checkpoint.
+    """
+
+    def __init__(self, config: Gemma4VisionConfig):
+        super().__init__()
+        spatial_dim = config.head_dim // 2
+        base = config.rope_parameters["rope_theta"]
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, spatial_dim, 2, dtype=torch.float32) / spatial_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        x: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (cos, sin) shaped (B, S, head_dim)."""
+        inv_exp = self.inv_freq[None, :, None].float().to(x.device)
+        all_cos, all_sin = [], []
+        for i in range(2):
+            pos = pixel_position_ids[:, :, i][:, None, :].float()  # (B,1,S)
+            freqs = (inv_exp @ pos).transpose(1, 2)  # (B,S,n)
+            emb = torch.cat((freqs, freqs), dim=-1)  # (B,S,2n)
+            all_cos.append(emb.cos())
+            all_sin.append(emb.sin())
+        cos = torch.cat(all_cos, dim=-1).to(x.dtype)  # (B,S,head_dim)
+        sin = torch.cat(all_sin, dim=-1).to(x.dtype)
+        return cos, sin
+
+
+class Gemma4NativeVisionPatchEmbedder(nn.Module):
+    """Patch projection and 2D position embedding.
+
+    ``input_proj`` is a plain ``nn.Linear`` (NOT clipped) matching the HF
+    checkpoint where ``patch_embedder.input_proj.weight`` has no ``.linear``
+    intermediate.
+    """
+
+    def __init__(self, config: Gemma4VisionConfig):
+        super().__init__()
+        self.position_embedding_size = config.position_embedding_size
+        self.input_proj = nn.Linear(
+            3 * config.patch_size**2,
+            config.hidden_size,
+            bias=False,
+        )
+        self.position_embedding_table = nn.Parameter(
+            torch.ones(2, config.position_embedding_size, config.hidden_size)
+        )
+
+    def _position_embeddings(
+        self,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        clamped = pixel_position_ids.clamp(min=0)
+        one_hot = F.one_hot(clamped, num_classes=self.position_embedding_size)
+        one_hot = one_hot.permute(0, 2, 1, 3).to(self.position_embedding_table)
+        pos_emb = (one_hot @ self.position_embedding_table).sum(dim=1)
+        return torch.where(padding_positions.unsqueeze(-1), 0.0, pos_emb)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        x = 2 * (pixel_values - 0.5)
+        x = self.input_proj(x.to(self.input_proj.weight.dtype))
+        return x + self._position_embeddings(pixel_position_ids, padding_positions)
+
+
+class Gemma4NativeVisionMLP(nn.Module):
+    """Gated MLP (separate gate/up projections) for the Gemma4 ViT."""
+
+    def __init__(
+        self,
+        config: Gemma4VisionConfig,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.gate_proj = Gemma4NativeClippedColumnLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "gate_proj"),
+        )
+        self.up_proj = Gemma4NativeClippedColumnLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "up_proj"),
+        )
+        self.down_proj = Gemma4NativeClippedRowLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "down_proj"),
+        )
+        self.act_fn = get_act_fn(config.hidden_activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate, _ = self.gate_proj(x)
+        up, _ = self.up_proj(x)
+        out, _ = self.down_proj(self.act_fn(gate) * up)
+        return out
+
+
+class Gemma4NativeVisionAttention(nn.Module):
+    """Multi-head attention for Gemma4 ViT with per-head QKV norms and 2D RoPE.
+
+    Separate q/k/v projections (NOT fused QKVParallelLinear) are required
+    because the per-head norms must be applied after reshaping to head
+    granularity but before RoPE.  All projections use disable_tp=True.
+    """
+
+    def __init__(
+        self,
+        config: Gemma4VisionConfig,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.head_dim = config.head_dim
+
+        self.q_proj = Gemma4NativeClippedColumnLinear(
+            config.hidden_size,
+            self.num_heads * self.head_dim,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "q_proj"),
+        )
+        self.k_proj = Gemma4NativeClippedColumnLinear(
+            config.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "k_proj"),
+        )
+        self.v_proj = Gemma4NativeClippedColumnLinear(
+            config.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "v_proj"),
+        )
+        self.o_proj = Gemma4NativeClippedRowLinear(
+            self.num_heads * self.head_dim,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "o_proj"),
+        )
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: "torch.Tensor | None",
+    ) -> torch.Tensor:
+        B, S, _ = hidden_states.shape
+        cos, sin = position_embeddings
+
+        q, _ = self.q_proj(hidden_states)
+        q = q.view(B, S, self.num_heads, self.head_dim)
+        q = self.q_norm(q)
+        q = _apply_2d_rope(q, cos, sin).transpose(1, 2)  # (B,H,S,D)
+
+        k, _ = self.k_proj(hidden_states)
+        k = k.view(B, S, self.num_kv_heads, self.head_dim)
+        k = self.k_norm(k)
+        k = _apply_2d_rope(k, cos, sin).transpose(1, 2)
+
+        v, _ = self.v_proj(hidden_states)
+        v = v.view(B, S, self.num_kv_heads, self.head_dim)
+        v = self.v_norm(v).transpose(1, 2)  # no RoPE for v
+
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attention_mask, scale=1.0
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(B, S, -1)
+        out, _ = self.o_proj(attn_out)
+        return out
+
+
+class Gemma4NativeVisionEncoderLayer(nn.Module):
+    """Sandwich-normalised transformer block for the Gemma4 ViT.
+
+    Norm order (matching HF Gemma4VisionEncoderLayer):
+        residual → input_LN → attn → post_attn_LN → +residual
+        residual → pre_ff_LN  → MLP  → post_ff_LN  → +residual
+    """
+
+    def __init__(
+        self,
+        config: Gemma4VisionConfig,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.self_attn = Gemma4NativeVisionAttention(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "self_attn"),
+        )
+        self.mlp = Gemma4NativeVisionMLP(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "mlp"),
+        )
+        eps = config.rms_norm_eps
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=eps)
+        self.pre_feedforward_layernorm = RMSNorm(config.hidden_size, eps=eps)
+        self.post_feedforward_layernorm = RMSNorm(config.hidden_size, eps=eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: "torch.Tensor | None",
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.self_attn(
+            self.input_layernorm(hidden_states),
+            position_embeddings,
+            attention_mask,
+        )
+        hidden_states = residual + self.post_attention_layernorm(hidden_states)
+
+        residual = hidden_states
+        hidden_states = self.mlp(self.pre_feedforward_layernorm(hidden_states))
+        return residual + self.post_feedforward_layernorm(hidden_states)
+
+
+class Gemma4NativeVisionEncoder(nn.Module):
+    """Stack of ``Gemma4NativeVisionEncoderLayer`` with shared 2D RoPE."""
+
+    def __init__(
+        self,
+        config: Gemma4VisionConfig,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.rotary_emb = Gemma4NativeVision2DRotaryEmbedding(config)
+        self.layers = nn.ModuleList(
+            [
+                Gemma4NativeVisionEncoderLayer(
+                    config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, f"layers.{i}"),
+                )
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+    ):
+        # Convert bool (B,S) True=valid mask to additive (B,1,1,S) float mask
+        # so that padding keys receive −∞ logits before softmax.
+        additive_mask: torch.Tensor | None = None
+        if attention_mask is not None:
+            additive_mask = torch.zeros(
+                attention_mask.shape[0],
+                1,
+                1,
+                attention_mask.shape[1],
+                dtype=inputs_embeds.dtype,
+                device=inputs_embeds.device,
+            )
+            additive_mask.masked_fill_(~attention_mask[:, None, None, :], float("-inf"))
+
+        hidden_states = inputs_embeds
+        position_embeddings = self.rotary_emb(hidden_states, pixel_position_ids)
+
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, position_embeddings, additive_mask)
+
+        return SimpleNamespace(last_hidden_state=hidden_states)
+
+
+class Gemma4NativeVisionPooler(nn.Module):
+    """2D spatial average-pooling and scale for Gemma4 ViT outputs.
+
+    Pure-torch replica of HF ``Gemma4VisionPooler``; no learnable parameters.
+    """
+
+    def __init__(self, config: Gemma4VisionConfig):
+        super().__init__()
+        self.root_hidden_size: float = config.hidden_size**0.5
+
+    def _avg_pool_by_positions(
+        self,
+        hidden_states: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        length: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        input_seq_len = hidden_states.shape[1]
+        k = int((input_seq_len // length) ** 0.5)
+        if k * k * length != input_seq_len:
+            raise ValueError(
+                f"Cannot pool {hidden_states.shape} to {length}: "
+                f"k={k}^2 * {length} != {input_seq_len}."
+            )
+        clamped = pixel_position_ids.clamp(min=0)
+        max_x = clamped[..., 0].max(dim=-1, keepdim=True)[0] + 1
+        kernel_idxs = torch.div(clamped, k, rounding_mode="floor")
+        kernel_idxs = kernel_idxs[..., 0] + (max_x // k) * kernel_idxs[..., 1]
+        weights = F.one_hot(kernel_idxs.long(), length).float() / (k * k)
+        output = weights.transpose(1, 2) @ hidden_states.float()
+        mask = torch.logical_not((weights == 0).all(dim=1))
+        return output.to(hidden_states.dtype), mask
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+        output_length: "int | None" = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if output_length is not None and output_length > hidden_states.shape[1]:
+            raise ValueError(
+                f"Cannot output more soft tokens (requested {output_length}) "
+                f"than there are patches ({hidden_states.shape[1]})."
+            )
+        hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
+        if hidden_states.shape[1] != output_length:
+            hidden_states, padding_positions = self._avg_pool_by_positions(
+                hidden_states, pixel_position_ids, output_length
+            )
+        return hidden_states * self.root_hidden_size, padding_positions
+
+
+class Gemma4NativeVisionModel(nn.Module):
+    """vLLM-native Gemma4 vision tower.
+
+    Replaces ``AutoModel.from_config(config=config.vision_config)`` so that
+    all linear layers are vLLM-registered ``ColumnParallelLinear`` /
+    ``RowParallelLinear`` instances that the LoRA system can target.
+
+    Exposes ``.patch_embedder``, ``.encoder``, and ``.pooler`` to match the
+    interface assumed by ``_process_image_input``.
+    """
+
+    def __init__(
+        self,
+        config: Gemma4VisionConfig,
+        quant_config=None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.config = config
+        self.patch_embedder = Gemma4NativeVisionPatchEmbedder(config)
+        self.encoder = Gemma4NativeVisionEncoder(
+            config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "encoder"),
+        )
+        self.pooler = Gemma4NativeVisionPooler(config)
+        if config.standardize:
+            self.register_buffer("std_bias", torch.empty(config.hidden_size))
+            self.register_buffer("std_scale", torch.empty(config.hidden_size))
+
+
+# ---------------------------------------------------------------------------
 # Multimodal embedder
 # ---------------------------------------------------------------------------
 
@@ -1038,7 +1528,11 @@ class Gemma4ForConditionalGeneration(
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.vision_tower = Gemma4NativeVisionModel(
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -1680,6 +2174,23 @@ class Gemma4ForConditionalGeneration(
             ignore_unexpected_prefixes=ignore_prefixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    # ------------------------------------------------------------------ #
+    # Multimodal token count helpers (required by SupportsLoRA / vLLM)
+    # ------------------------------------------------------------------ #
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """Number of ViT encoder output tokens per image.
+
+        The pooler reduces by pooling_kernel_size² (=9 for k=3), so the
+        encoder produces 9× more tokens than the downstream soft-token count.
+        """
+        k = self.config.vision_config.pooling_kernel_size
+        return num_image_tokens * (k**2)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """Gemma4 connector is a 1-to-1 linear projection; no reduction."""
+        return num_vision_tokens
 
     # ------------------------------------------------------------------ #
     # LoRA / multimodal mapping
