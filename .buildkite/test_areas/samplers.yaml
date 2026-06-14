@@ -19,8 +19,17 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
   mirror:
     amd:
-      device: mi250_1
+      device: mi300_1
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers
+      - vllm/sampling_metadata.py
+      - vllm/v1/sample/
+      - vllm/entrypoints/generate/beam_search/
+      - tests/samplers
+      - tests/conftest.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
       commands:
       - pytest -v -s samplers
