@@ -6,7 +6,6 @@ import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
 from vllm.logger import init_logger
@@ -79,6 +78,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        moe_backend: str = "auto",
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
@@ -88,6 +88,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+        self.moe_backend = moe_backend
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -192,8 +193,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
-        moe_backend = get_current_vllm_config().kernel_config.moe_backend
-        if moe_backend == "flashinfer_cutedsl":
+        if self.moe_backend == "flashinfer_cutedsl":
             logger.info_once(
                 "Skip quantization when using FlashInfer CUTEDSL "
                 "(--moe-backend flashinfer_cutedsl) for ModelOptNvFp4FusedMoE."
