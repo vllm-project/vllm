@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -29,6 +30,28 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _maybe_rust_block_pool():
+    """If VLLM_USE_RUST_BLOCK_POOL=1, return the Rust-backed BlockPool
+    class; otherwise None. Defined at module level so importers can
+    replace BlockPool below if available."""
+    if os.environ.get("VLLM_USE_RUST_BLOCK_POOL", "") != "1":
+        return None
+    try:
+        from vllm.v1.core.rust_block_pool import RustBlockPool
+
+        logger.info(
+            "VLLM_USE_RUST_BLOCK_POOL=1 — using Rust-accelerated BlockPool"
+        )
+        return RustBlockPool
+    except ImportError as e:
+        logger.warning(
+            "VLLM_USE_RUST_BLOCK_POOL=1 but vllm_rs not importable: %s. "
+            "Falling back to Python BlockPool.",
+            e,
+        )
+        return None
 
 
 class BlockHashToBlockMap:
@@ -526,3 +549,11 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+# If VLLM_USE_RUST_BLOCK_POOL=1, replace BlockPool with the Rust-backed class
+# *at module level*, so all `from vllm.v1.core.block_pool import BlockPool`
+# importers get it transparently.
+_rust_cls = _maybe_rust_block_pool()
+if _rust_cls is not None:
+    BlockPool = _rust_cls  # type: ignore[misc,assignment]
