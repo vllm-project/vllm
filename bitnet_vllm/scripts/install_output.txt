@@ -1,0 +1,190 @@
+﻿uv :   脳 Failed to build 
+`vllm @ file:///C:/program
+ming_project/github/vllm`
+At line:1 char:34
++ ... ILED = "1"; uv pip 
+install -e . 
+--torch-backend=auto 
+--python .venv\S ...
++                 ~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo        
+      : NotSpecified: (   
+   脳 Failed to b...ct/g   
+ ithub/vllm`:String) [    
+], RemoteException
+    + FullyQualifiedError 
+   Id : NativeCommandErr  
+  or
+ 
+  鈹溾攢鈻?The build backend 
+returned an error
+  鈺扳攢鈻?Call to `setuptools
+.build_meta.build_editable
+` failed (exit code: 1)
+
+      [stdout]
+      Detected CUDA 13.0, 
+using variant cu130
+      VLLM_PRECOMPILED_WHE
+EL_COMMIT not valid: , 
+trying to fetch base 
+commit
+      in main branch
+      Upstream main 
+branch latest commit:
+      9dd5ee0117be1b891d1d
+dc4e5cd7d03071ec11ae
+      Using precompiled 
+wheel commit 394ff86965a64
+f0a337d2a8860eae0d2d70607e
+6
+      with variant cu130
+      Trying to fetch 
+nightly build metadata 
+from
+      https://wheels.vllm.
+ai/394ff86965a64f0a337d2a8
+860eae0d2d70607e6/cu130/vl
+lm/metadata.json
+
+      [stderr]
+      C:\Users\yuton\AppDa
+ta\Local\uv\cache\builds-v
+0\.tmpT47yi6\Lib\site-pack
+ages\torch\_subclasses\fun
+ctional_tensor.py:307:
+      UserWarning: Failed 
+to initialize NumPy: No
+      module named 
+'numpy' (Triggered 
+internally at
+      C:\actions-runner\_w
+ork\pytorch\pytorch\pytorc
+h\torch\csrc\utils\tensor_
+numpy.cpp:84.)
+        cpu = _conversion_
+method_template(device=tor
+ch.device("cpu"))
+      vLLM only supports 
+Linux platform (including 
+WSL) and MacOS.Building on
+      win32, so vLLM may 
+not be able to run 
+correctly
+      Traceback (most 
+recent call last):
+        File "<string>", 
+line 14, in <module>
+        File
+      "C:\Users\yuton\AppD
+ata\Local\uv\cache\builds-
+v0\.tmpT47yi6\Lib\site-pac
+kages\setuptools\build_met
+a.py",
+      line 479, in get_req
+uires_for_build_editable
+          return self.get_
+requires_for_build_wheel(c
+onfig_settings)
+                 ^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^
+        File
+      "C:\Users\yuton\AppD
+ata\Local\uv\cache\builds-
+v0\.tmpT47yi6\Lib\site-pac
+kages\setuptools\build_met
+a.py",
+      line 333, in get_req
+uires_for_build_wheel
+          return self._get
+_build_requires(config_set
+tings, requirements=[])
+                 ^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^
+        File
+      "C:\Users\yuton\AppD
+ata\Local\uv\cache\builds-
+v0\.tmpT47yi6\Lib\site-pac
+kages\setuptools\build_met
+a.py",
+      line 301, in 
+_get_build_requires
+          self.run_setup()
+        File
+      "C:\Users\yuton\AppD
+ata\Local\uv\cache\builds-
+v0\.tmpT47yi6\Lib\site-pac
+kages\setuptools\build_met
+a.py",
+      line 317, in 
+run_setup
+          exec(code, 
+locals())
+        File "<string>", 
+line 1052, in <module>
+        File "<string>", 
+line 647, in 
+determine_wheel_url
+      ValueError: No 
+precompiled vllm wheel
+      found for 
+architecture AMD64 from 
+repo
+      https://wheels.vllm.
+ai/394ff86965a64f0a337d2a8
+860eae0d2d70607e6/cu130/vl
+lm/.
+      All available 
+wheels: [{'package_name': 
+'vllm', 'version':
+      '0.19.1rc1.dev213+g3
+94ff8696', 'build_tag': 
+None,
+      'python_tag': 
+'cp38', 'abi_tag': 
+'abi3', 'platform_tag':
+      
+'manylinux_2_35_aarch64', 
+'variant': 'cu130', 
+'filename':
+      'vllm-0.19.1rc1.dev2
+13+g394ff8696.cu130-cp38-a
+bi3-manylinux_2_35_aarch64
+.whl',
+      'path':
+      '../../../394ff86965
+a64f0a337d2a8860eae0d2d706
+07e6/vllm-0.19.1rc1.dev213
+%2Bg394ff8696.cu130-cp38-a
+bi3-manylinux_2_35_aarch64
+.whl'},
+      {'package_name': 
+'vllm', 'version': '0.19.1
+rc1.dev213+g394ff8696',
+      'build_tag': None, 
+'python_tag': 'cp38', 
+'abi_tag': 'abi3',
+      'platform_tag': 
+'manylinux_2_35_x86_64', 
+'variant': 'cu130', 
+'filename':
+      'vllm-0.19.1rc1.dev2
+13+g394ff8696.cu130-cp38-a
+bi3-manylinux_2_35_x86_64.
+whl',
+      'path':
+      '../../../394ff86965
+a64f0a337d2a8860eae0d2d706
+07e6/vllm-0.19.1rc1.dev213
+%2Bg394ff8696.cu130-cp38-a
+bi3-manylinux_2_35_x86_64.
+whl'}]
+
+      hint: This usually 
+indicates a problem with 
+the package or the build
+      environment.

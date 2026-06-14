@@ -1,0 +1,42 @@
+﻿python : Traceback (most 
+recent call last):
+At line:1 char:1
++ python bitnet_vllm\scrip
+ts\dump_keys.py 2>&1 | 
+Out-File -Encoding utf ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo        
+      : NotSpecified: (T  
+  raceback (most recent   
+  call last)::String)     
+[], RemoteException
+    + FullyQualifiedError 
+   Id : NativeCommandErr  
+  or
+ 
+  File "C:\programming_pro
+ject\github\vllm\bitnet_vl
+lm\scripts\dump_keys.py", 
+line 7, in <module>
+    model_path = model_pat
+h_file.read_text(encoding=
+"utf-8").strip()
+                 ^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^
+  File "C:\Program Files\W
+indowsApps\PythonSoftwareF
+oundation.Python.3.11_3.11
+.2544.0_x64__qbz5n2kfra8p0
+\Lib\pathlib.py", line 
+1059, in read_text
+    return f.read()
+           ^^^^^^^^
+  File "<frozen codecs>", 
+line 322, in decode
+UnicodeDecodeError: 
+'utf-8' codec can't 
+decode byte 0xff in 
+position 0: invalid start 
+byte
