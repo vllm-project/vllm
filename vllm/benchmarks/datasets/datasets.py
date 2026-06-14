@@ -79,7 +79,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str] | list[dict]
+    prompt: str | list[str] | list[int] | list[dict]
     prompt_len: int
     expected_output_len: int | None
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
@@ -1561,7 +1561,6 @@ class TimedTrace(BenchmarkDataset):
             prompt_ids = self._expand_prompt(
                 entry.get(self.label_hash_ids, []), input_length, tokenizer
             )
-            prompt = tokenizer.decode(prompt_ids)
 
             # Get timestamp with proper error handling
             ts_value = entry.get(self.label_ts)
@@ -1577,7 +1576,7 @@ class TimedTrace(BenchmarkDataset):
 
             samples.append(
                 SampleRequest(
-                    prompt=prompt,
+                    prompt=prompt_ids,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
                     lora_request=None,
