@@ -1062,6 +1062,10 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        # Capture diagnostics before freeing blocks so we can log what was lost.
+        num_computed_tokens_before = request.num_computed_tokens
+        kv_cache_usage_before = self.kv_cache_manager.usage
+
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -1072,6 +1076,19 @@ class Scheduler(SchedulerInterface):
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
+        logger.warning(
+            "Preempting request %s: %d computed tokens lost (recompute on "
+            "resume), kv_cache_usage %.1f%% -> %.1f%%. "
+            "Preemption count for this request: %d. "
+            "To reduce preemptions, increase gpu_memory_utilization or "
+            "max_model_len, or decrease max_num_seqs.",
+            request.request_id,
+            num_computed_tokens_before,
+            kv_cache_usage_before * 100,
+            self.kv_cache_manager.usage * 100,
+            request.num_preemptions,
+        )
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)

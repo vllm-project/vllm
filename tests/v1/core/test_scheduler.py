@@ -4810,3 +4810,109 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def test_preemption_emits_structured_warning(caplog):
+    """Verify _preempt_request() emits a WARNING with per-request context.
+
+    When KV cache pressure forces the scheduler to preempt a running request,
+    operators need a structured log message to understand which request was
+    evicted, how many computed tokens are being discarded (recompute cost on
+    resume), and KV cache utilization before and after. Without this, diagnosing
+    preemption thrash requires ad-hoc instrumentation.
+
+    Related: https://github.com/vllm-project/vllm/issues/25538
+    """
+    import logging
+
+    # 11 blocks total; block 0 reserved as null -> 10 usable blocks of 16
+    # tokens. Two requests of 80 tokens each = 5 blocks each, so together they
+    # exhaust the cache, forcing preemption when requests[0] needs a new block
+    # after its first decode step.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    requests = create_requests(num_requests=2, num_tokens=80, block_size=16)
+
+    scheduler.add_request(requests[0])
+    scheduler_output_0 = scheduler.schedule()
+    assert len(scheduler_output_0.num_scheduled_tokens) == 1
+
+    scheduler.add_request(requests[1])
+    scheduler.schedule()
+
+    # Simulate requests[0] completing one decode step so it needs a new block.
+    model_out = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output_0, model_out)
+
+    # Next schedule(): requests[0] needs a new block, cache is full ->
+    # requests[1] is preempted.
+    with caplog.at_level(logging.WARNING, logger="vllm.v1.core.sched.scheduler"):
+        scheduler.schedule()
+
+    assert requests[1].status == RequestStatus.PREEMPTED
+
+    preemption_logs = [
+        r
+        for r in caplog.records
+        if "Preempting request" in r.message and r.levelno == logging.WARNING
+    ]
+    assert len(preemption_logs) >= 1, (
+        "Expected at least one WARNING from _preempt_request(); got none."
+    )
+
+    msg = preemption_logs[0].message
+    assert requests[1].request_id in msg, f"request_id missing: {msg!r}"
+    assert "kv_cache_usage" in msg, f"kv_cache_usage missing: {msg!r}"
+    assert "computed tokens lost" in msg, f"'computed tokens lost' missing: {msg!r}"
+    assert "Preemption count" in msg, f"'Preemption count' missing: {msg!r}"
+
+
+def test_preemption_log_reflects_request_count(caplog):
+    """Verify the preemption count in the log matches request.num_preemptions."""
+    import logging
+
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    requests = create_requests(num_requests=2, num_tokens=80, block_size=16)
+
+    scheduler.add_request(requests[0])
+    scheduler_output_0 = scheduler.schedule()
+
+    scheduler.add_request(requests[1])
+    scheduler.schedule()
+
+    model_out = ModelRunnerOutput(
+        req_ids=[requests[0].request_id],
+        req_id_to_index={requests[0].request_id: 0},
+        sampled_token_ids=[[1]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(scheduler_output_0, model_out)
+
+    with caplog.at_level(logging.WARNING, logger="vllm.v1.core.sched.scheduler"):
+        scheduler.schedule()
+
+    assert requests[1].num_preemptions >= 1
+
+    preemption_logs = [r for r in caplog.records if "Preempting request" in r.message]
+    expected = f"Preemption count for this request: {requests[1].num_preemptions}"
+    assert expected in preemption_logs[-1].message, (
+        f"Expected {expected!r} in: {preemption_logs[-1].message!r}"
+    )
