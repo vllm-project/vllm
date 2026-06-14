@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import ray
@@ -15,6 +16,7 @@ import zmq
 
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
+from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     EngineZmqAddresses,
@@ -97,6 +99,17 @@ def _bind_and_report_worker(listen_address, sock, args, client_config):
 
 class _DummyExecutor:
     pass
+
+
+def test_background_resources_passes_worker_shutdown_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeout = 7
+    monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", str(timeout))
+    engine_manager = Mock()
+    resources = BackgroundResources(ctx=None, engine_manager=engine_manager)
+    resources()
+    engine_manager.shutdown.assert_called_once_with(timeout=timeout)
 
 
 def _make_vllm_config() -> SimpleNamespace:
