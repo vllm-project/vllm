@@ -67,6 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.context import StreamingHarmonyContext
+from vllm.entrypoints.openai.responses.harmony import get_response_output_recipient
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
@@ -571,7 +572,7 @@ def emit_content_delta_events(
         return []
 
     channel = ctx.parser.current_channel
-    recipient = ctx.parser.current_recipient
+    recipient = get_response_output_recipient(ctx.parser.current_recipient)
 
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
@@ -605,7 +606,7 @@ def emit_previous_item_done_events(
     Harmony parser's message object and delegates to shared leaf helpers.
     """
     text = previous_item.content[0].text
-    if previous_item.recipient is not None:
+    if get_response_output_recipient(previous_item.recipient) is not None:
         # Deal with tool call
         if is_function_recipient(previous_item.recipient, function_tool_names):
             function_name = extract_function_from_recipient(previous_item.recipient)
