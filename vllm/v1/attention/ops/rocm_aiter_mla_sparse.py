@@ -1326,7 +1326,7 @@ def _sparse_attn_decode_ragged_kernel(
             other=0,
         )
         if IS_FNUZ:
-            x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
         encoded_scales = tl.load(
@@ -1394,7 +1394,7 @@ def _sparse_attn_decode_ragged_kernel(
                 other=0,
             )
             if IS_FNUZ:
-                x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+                x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
             encoded_scales = tl.load(
