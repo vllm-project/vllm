@@ -331,7 +331,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     # with the echo implementation.
                     prompt_token_ids_to_return: list[int] | None = None
 
-                    assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
                         if request.return_token_ids:
@@ -502,7 +501,6 @@ class OpenAIServingCompletion(OpenAIServing):
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
 
-                assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
                         prompt_text = ""

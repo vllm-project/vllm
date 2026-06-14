@@ -81,6 +81,41 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     "model_name",
     [MODEL_NAME],
 )
+async def test_completion_with_null_max_tokens(
+    client: openai.AsyncOpenAI, model_name: str
+) -> None:
+    # ``max_tokens`` is ``int | None`` in the request schema and ``None`` is a
+    # valid value: the server falls back to the model/context limit. It must
+    # generate normally rather than raise an internal server error.
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        temperature=0.0,
+        extra_body={"max_tokens": None},
+    )
+    assert completion.choices is not None and len(completion.choices) == 1
+    assert completion.choices[0].text is not None
+    assert completion.choices[0].finish_reason is not None
+
+    # The streaming path had its own assert and must also succeed.
+    stream = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        temperature=0.0,
+        stream=True,
+        extra_body={"max_tokens": None},
+    )
+    streamed_text = ""
+    async for chunk in stream:
+        streamed_text += chunk.choices[0].text
+    assert streamed_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_completion_truncation_side_controls_prompt_truncation(
     client: openai.AsyncOpenAI, model_name: str
 ) -> None:
