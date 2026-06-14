@@ -19,7 +19,10 @@ from .classify.protocol import (
 )
 from .embed.protocol import (
     CohereEmbedRequest,
+    EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
     EmbeddingBytesResponse,
+    EmbeddingChatInputRequest,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingResponse,
@@ -41,7 +44,12 @@ PoolingCompletionLikeRequest: TypeAlias = (
 )
 
 PoolingChatLikeRequest: TypeAlias = (
-    EmbeddingChatRequest | ClassificationChatRequest | PoolingChatRequest
+    EmbeddingChatRequest
+    | EmbeddingBatchChatRequest
+    | EmbeddingChatInputRequest
+    | EmbeddingBatchChatInputRequest
+    | ClassificationChatRequest
+    | PoolingChatRequest
 )
 
 AnyPoolingRequest: TypeAlias = (
