@@ -19,6 +19,8 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: debug
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
