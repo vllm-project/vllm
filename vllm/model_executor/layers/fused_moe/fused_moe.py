@@ -1183,6 +1183,13 @@ def get_moe_wna16_block_config(
             # at the same time.
             block_size_n = 1024
 
+        # CUDA moe_wna16_gemm only supports BLOCK_SIZE_K // group_size in
+        # {1, 2, 4, 8}; the heuristic above can overshoot (e.g. 512 // 32 = 16).
+        # Clamp to at most 8 groups per block row before enforcing divisibility.
+        max_block_size_k = group_size * 8
+        if block_size_k > max_block_size_k:
+            block_size_k = max_block_size_k
+
         # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
