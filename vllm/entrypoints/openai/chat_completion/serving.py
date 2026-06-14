@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
@@ -737,6 +738,16 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens
                     )
+                if reasoning_parser is not None and all_previous_token_ids is not None:
+                    num_reasoning_tokens = sum(
+                        reasoning_parser.count_reasoning_tokens(
+                            all_previous_token_ids[i]
+                        )
+                        for i in range(num_choices)
+                    )
+                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
+                        reasoning_tokens=num_reasoning_tokens
+                    )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1030,6 +1041,18 @@ class OpenAIServingChat(OpenAIServing):
         ):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
+            )
+        if self.reasoning_parser_cls is not None:
+            reasoning_parser = self.reasoning_parser_cls(
+                tokenizer,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            num_reasoning_tokens = sum(
+                reasoning_parser.count_reasoning_tokens(output.token_ids)
+                for output in final_res.outputs
+            )
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=num_reasoning_tokens
             )
 
         request_metadata.final_usage_info = usage

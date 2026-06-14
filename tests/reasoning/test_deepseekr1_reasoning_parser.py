@@ -286,3 +286,24 @@ def test_reasoning(
     else:
         content = parser.extract_content_ids(output)
         assert content == []
+
+
+def test_count_reasoning_tokens(deepseek_r1_qwen_tokenizer):
+    """DeepSeek-R1 opens the reasoning block via the prompt template, so the
+    generated output has no ``<think>`` start token; reasoning runs from the
+    start of the output up to (excluding) ``</think>``."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        deepseek_r1_qwen_tokenizer
+    )
+    start = parser.start_token_id
+    end = parser.end_token_id
+
+    # No start token (injected via prompt) + </think> present -> count the
+    # tokens before </think> (excludes the delimiter).
+    assert parser.count_reasoning_tokens([10, 11, 12, end, 99, 98]) == 3
+    # No start and no end -> reasoning unfinished or disabled -> 0.
+    assert parser.count_reasoning_tokens([10, 11, 12]) == 0
+    # Immediate </think> -> no reasoning tokens.
+    assert parser.count_reasoning_tokens([end, 1, 2]) == 0
+    # Explicit <think> in the output -> defer to the base span counter.
+    assert parser.count_reasoning_tokens([start, 10, 11, end, 99]) == 2
