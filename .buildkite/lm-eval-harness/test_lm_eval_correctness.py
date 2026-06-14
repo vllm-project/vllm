@@ -7,6 +7,14 @@ Configs are found in configs/$MODEL.yaml
 pytest -s -v test_lm_eval_correctness.py \
     --config-list-file=configs/models-small.txt \
     --tp-size=1
+
+Optional per-config keys (default behaviour is unchanged when omitted):
+    rtol: relative tolerance for the baseline (default 0.08).
+    gate: "rtol" (default) or "ci". With "ci", a proportion metric must clear
+        the baseline threshold via a one-sided Wilson lower confidence bound at
+        ``limit`` samples (accounts for sampling noise instead of trusting the
+        point estimate). See accuracy_gate.py.
+    confidence: one-sided confidence level for gate="ci" (default 0.95).
 """
 
 import os
@@ -15,10 +23,12 @@ from contextlib import contextmanager
 import lm_eval
 import pytest
 import yaml
+from accuracy_gate import evaluate_metric_gate
 
 from vllm.platforms import current_platform
 
 DEFAULT_RTOL = 0.08
+DEFAULT_CONFIDENCE = 0.95
 
 
 @contextmanager
@@ -131,19 +141,24 @@ def test_lm_eval_correctness_param(config_filename, tp_size):
     results = launch_lm_eval(eval_config, tp_size)
 
     rtol = eval_config.get("rtol", DEFAULT_RTOL)
+    gate = eval_config.get("gate", "rtol")
+    confidence = eval_config.get("confidence", DEFAULT_CONFIDENCE)
+    limit = eval_config.get("limit")
 
     success = True
     for task in eval_config["tasks"]:
         for metric in task["metrics"]:
             ground_truth = metric["value"]
             measured_value = results["results"][task["name"]][metric["name"]]
-            print(
-                f"{task['name']} | {metric['name']}: "
-                f"ground_truth={ground_truth:.3f} | "
-                f"measured={measured_value:.3f} | rtol={rtol}"
+            result = evaluate_metric_gate(
+                measured_value,
+                ground_truth,
+                gate=gate,
+                n=limit if isinstance(limit, int) else None,
+                confidence=confidence,
+                rtol=rtol,
             )
-
-            min_acceptable = ground_truth * (1 - rtol)
-            success = success and measured_value >= min_acceptable
+            print(f"{task['name']} | {metric['name']}: {result.detail}")
+            success = success and result.passed
 
     assert success
