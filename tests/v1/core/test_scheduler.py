@@ -1480,6 +1480,193 @@ def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
     assert external_stats.preempted_requests == 0
 
 
+def test_local_prefix_cache_stats_not_double_counted_on_retry():
+    """Regression test for gh-43736.
+
+    A request that performs a local prefix cache lookup but then fails to
+    allocate KV slots stays in the waiting queue and is retried on later
+    scheduling steps. Local prefix cache stats must be recorded only when the
+    request is actually scheduled -- not once per lookup -- otherwise the
+    reported hit rate is inflated.
+
+    Here the request is larger than the entire KV cache, so it can never be
+    allocated. It is looked up on every schedule() call but never scheduled,
+    so it must contribute nothing to the prefix cache stats. Before the fix it
+    was counted once per lookup (requests == num_steps).
+    """
+    block_size = 16
+    # 5 blocks total, 1 reserved as the null block -> 4 usable (64 tokens).
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=False,
+        num_blocks=5,
+        block_size=block_size,
+    )
+
+    # 8 blocks (128 tokens) cannot fit in the 4 usable blocks, so
+    # allocate_slots() returns None and the request is left in the waiting
+    # queue to be retried on subsequent steps.
+    request = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 8,
+        block_size=block_size,
+    )[0]
+    scheduler.add_request(request)
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+
+    # Spy on allocate_slots to guarantee the test exercises the intended path:
+    # the request reaches allocation and is rejected (returns None), rather
+    # than exiting earlier (e.g. on a token-budget break).
+    orig_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    allocate_results: list = []
+
+    def spy_allocate_slots(*args, **kwargs):
+        result = orig_allocate_slots(*args, **kwargs)
+        allocate_results.append(result)
+        return result
+
+    scheduler.kv_cache_manager.allocate_slots = spy_allocate_slots
+
+    num_steps = 3
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        # The request never gets scheduled (cannot allocate KV slots) and
+        # stays in the waiting queue, re-doing the lookup on the next step.
+        assert len(output.scheduled_new_reqs) == 0
+        assert len(scheduler.waiting) == 1
+
+    # The request actually reached allocation every step and was rejected.
+    assert len(allocate_results) == num_steps
+    assert all(result is None for result in allocate_results)
+
+    # Looked up num_steps times but never scheduled -> not counted at all.
+    assert stats.requests == 0
+    assert stats.queries == 0
+    assert stats.hits == 0
+
+
+def test_local_prefix_cache_stats_empty_when_caching_disabled():
+    """Guard for the schedule-time recording gate (gh-43736).
+
+    When prefix caching is disabled, get_computed_blocks() takes its early-out
+    and performs no lookup, so the new schedule-time record_prefix_cache_stats()
+    must also record nothing -- otherwise a scheduled request would register a
+    phantom miss and the local hit rate would go from "empty" to a misleading
+    0%.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    requests = create_requests(num_requests=3, num_tokens=16)
+    for request in requests:
+        scheduler.add_request(request)
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+
+    output = scheduler.schedule()
+    # The requests are scheduled (plenty of blocks) ...
+    assert len(output.scheduled_new_reqs) == len(requests)
+    # ... but with caching off no local prefix cache lookup happened, so the
+    # stats stay empty rather than recording phantom misses.
+    assert stats.requests == 0
+    assert stats.queries == 0
+    assert stats.hits == 0
+
+
+def test_local_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
+    """Regression test for gh-43736.
+
+    The reported symptom: a request that hits the local prefix cache but fails
+    KV allocation is retried on a later step, and each retry re-counted its
+    query and hit, inflating the reported hit rate. After the fix the lookup is
+    recorded once -- when the request is actually scheduled.
+
+    Unlike the "never scheduled" test above (which checks a 0/0/0 result against
+    an empty cache), this drives the actual issue scenario: a genuine local
+    cache hit on a request that is rejected once and then admitted, so the query
+    and hit must appear exactly once.
+    """
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=False,
+        block_size=block_size,
+    )
+
+    # Seed the local prefix cache: run a request to completion so its blocks are
+    # cached and can be hit by a later request with the same prompt.
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 2,
+        max_tokens=2,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["seed"],
+    )[0]
+    scheduler.add_request(seed)
+    seed_output = scheduler.schedule()
+    _step_until_done(
+        scheduler,
+        seed_output,
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # make_stats() during the seeding step swaps in a fresh accumulator, so
+    # re-read it now; the retried request's lookup must be the only thing
+    # recorded from here on.
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    # A request with the same prompt as the seed -> genuine local cache hit.
+    retried = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 3,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["retried"],
+    )[0]
+    scheduler.add_request(retried)
+
+    # Force the first allocation attempt to fail so the request is retried, then
+    # delegate so it is admitted on the next step.
+    orig_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    allocate_results: list = []
+
+    def spy_allocate_slots(*args, **kwargs):
+        if not allocate_results:
+            allocate_results.append(None)
+            return None
+        result = orig_allocate_slots(*args, **kwargs)
+        allocate_results.append(result)
+        return result
+
+    scheduler.kv_cache_manager.allocate_slots = spy_allocate_slots
+
+    # Step 1: allocation rejected -> request retried, nothing recorded yet.
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 0
+    assert len(scheduler.waiting) == 1
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    # Step 2: admitted -> the lookup is recorded exactly once, with the hit.
+    output = scheduler.schedule()
+    assert "retried" in output.num_scheduled_tokens
+    assert allocate_results[0] is None and allocate_results[1] is not None
+    assert stats.requests == 1
+    assert stats.queries == retried.num_tokens
+    assert stats.hits == block_size * 2
+
+
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
 )
