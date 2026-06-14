@@ -267,9 +267,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         all_toks: list[np.ndarray] = []  # stop-token ids at those rows
 
         for req_idx, min_tok, current_len, stop_toks in entries:
-            remaining = min_tok - current_len
-            # How many leading draft positions still need stop-token masking.
-            n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
+            # Row j predicts the (j+1)-th token of this step. Align with
+            # ``apply()`` / ``update_state``: mask stop logits while the
+            # output length *before* that token would still be below
+            # ``min_tok``, i.e. ``current_len + j < min_tok`` →
+            # ``j < min_tok - current_len``.
+            n_mask = int(
+                min(max(min_tok - current_len, 0), num_draft_arr[req_idx])
+            )
 
             if n_mask > 0:
                 offset = cumsum[req_idx]
