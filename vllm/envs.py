@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -1240,6 +1241,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
+    # If set, route CUDA BF16 unquantized linear layers through a local
+    # torch.compile wrapper with max-autotune enabled for each exact shape.
+    "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
+    ),
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
