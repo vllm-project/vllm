@@ -1350,6 +1350,34 @@ class SpecDecodeBaseProposer:
                 )
 
             if share_embeddings:
+                # Only share if embedding output dim matches the draft's
+                # hidden size. When they differ (e.g. EAGLE3-LLaMA3.1 draft
+                # with a MiniMax-M2 target), sharing would corrupt the
+                # concat(embeds, hidden_states) in the first decoder layer.
+                def get_embedding_dim(module: nn.Module) -> int | None:
+                    weight = getattr(module, "weight", None)
+                    if isinstance(weight, torch.Tensor) and weight.ndim >= 2:
+                        return weight.shape[1]
+                    return None
+
+                target_embed_dim = get_embedding_dim(target_embed_tokens)
+                draft_hidden = getattr(self.model.model, "embed_tokens", None)
+                draft_embed_dim = (
+                    get_embedding_dim(draft_hidden)
+                    if draft_hidden is not None
+                    else None
+                ) or self.hidden_size
+                if target_embed_dim is not None and target_embed_dim != draft_embed_dim:
+                    share_embeddings = False
+                    logger.info(
+                        "Skipping embedding sharing: target embedding dim "
+                        "(%d) != draft hidden size (%d). "
+                        "Draft model keeps its own embedding weights.",
+                        target_embed_dim,
+                        draft_embed_dim,
+                    )
+
+            if share_embeddings:
                 if hasattr(self.model.model, "embed_tokens"):
                     del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
