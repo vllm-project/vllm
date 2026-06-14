@@ -57,6 +57,11 @@ class ReasoningParser:
         """
         return None
 
+    @property
+    def implicit_reasoning_end_strs(self) -> list[str]:
+        """Strings that also terminate reasoning without being emitted end tags."""
+        return []
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """

@@ -60,6 +60,10 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    @property
+    def implicit_reasoning_end_strs(self) -> list[str]:
+        return [self._tool_call_tag]
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
