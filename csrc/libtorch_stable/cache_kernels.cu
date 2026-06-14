@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <limits>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -1576,8 +1577,13 @@ void concat_mla_q(
   if (num_tokens == 0) return;
 
   constexpr int warps_per_block = 8;
-  const int total_warps = num_tokens * num_heads;
-  const int grid_size = (total_warps + warps_per_block - 1) / warps_per_block;
+  // 64-bit: num_tokens * num_heads overflows int past 2^31 token-heads.
+  const int64_t total_warps = static_cast<int64_t>(num_tokens) * num_heads;
+  const int64_t grid_size_64 =
+      (total_warps + warps_per_block - 1) / warps_per_block;
+  STD_TORCH_CHECK(grid_size_64 <= std::numeric_limits<int>::max(),
+                  "concat_mla_q grid size exceeds CUDA limits: ", grid_size_64);
+  const int grid_size = static_cast<int>(grid_size_64);
   const int block_size = warps_per_block * 32;
 
   const torch::stable::accelerator::DeviceGuard device_guard(
