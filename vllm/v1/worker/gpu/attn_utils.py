@@ -85,8 +85,8 @@ def init_attn_backend(
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
 
-        group_map: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec]] = []
+        group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[str, KVCacheSpec, int]] = []
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
@@ -95,7 +95,12 @@ def init_attn_backend(
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
 
-            key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
+            # Also split on per-rank num_heads_q so layers with different Q-head
+            # counts (e.g. a spec-decode draft head and its target) get separate
+            # metadata builders, matching the V1 runner. Non-attention layers
+            # (e.g. Mamba) lack num_heads; fall back to 0.
+            num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
                     attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
