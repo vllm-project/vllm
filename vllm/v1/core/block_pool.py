@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
 from collections.abc import Iterable, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -181,6 +183,14 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # FIFO queue of eager-registration buckets, one per in-flight step.
+        self._uncommitted: deque[dict[str, list[KVCacheBlock]]] = deque()
+        # When True, cache_full_blocks skips _uncommitted tracking. Used by
+        # post-worker-confirmed paths (AsyncScheduler post-output, KV connector
+        # load completion) where the bytes are already valid and the entry
+        # must not be evictable by a later rollback_uncommitted call.
+        self._suppress_uncommitted_tracking: bool = False
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -264,6 +274,17 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+
+        # Track new registrations in the current step's bucket so they can
+        # be rolled back on preempt. Skipped when committed=True (bytes are
+        # worker-confirmed) or no step is open (caller bypassed schedule()).
+        if self._suppress_uncommitted_tracking or not self._uncommitted:
+            uncommitted_bucket: list[KVCacheBlock] | None = None
+        else:
+            uncommitted_bucket = self._uncommitted[-1].setdefault(
+                request.request_id, []
+            )
+
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -281,6 +302,9 @@ class BlockPool:
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+
+            if uncommitted_bucket is not None:
+                uncommitted_bucket.append(blk)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -440,6 +464,39 @@ class BlockPool:
         else:
             self.free_block_queue.append_n(freed_blocks)
 
+    def rollback_uncommitted(self, request_id: str) -> int:
+        """Evict ``request_id``'s uncommitted cache entries across all buckets.
+        Called by preempt/abort paths. Returns the number evicted.
+        """
+        evicted = 0
+        for bucket in self._uncommitted:
+            blocks = bucket.pop(request_id, None)
+            if blocks:
+                evicted += sum(self._maybe_evict_cached_block(b) for b in blocks)
+        return evicted
+
+    def begin_step(self) -> None:
+        """Open a new eager-registration bucket for the current step."""
+        self._uncommitted.append({})
+
+    @contextmanager
+    def suppress_uncommitted_tracking(self):
+        """Skip ``_uncommitted`` tracking within this context. Used by paths
+        that register cache entries whose K/V bytes are already worker-
+        confirmed (AsyncScheduler post-output, KV connector load completion).
+        """
+        prev = self._suppress_uncommitted_tracking
+        self._suppress_uncommitted_tracking = True
+        try:
+            yield
+        finally:
+            self._suppress_uncommitted_tracking = prev
+
+    def commit_step(self) -> None:
+        """Promote the oldest pending bucket to committed. Idempotent."""
+        if self._uncommitted:
+            self._uncommitted.popleft()
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
@@ -479,6 +536,8 @@ class BlockPool:
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
+
+        self._uncommitted.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

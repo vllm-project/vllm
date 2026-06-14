@@ -388,6 +388,9 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Open this step's eager-registration bucket; the matching
+        # commit_step runs at the top of update_from_output.
+        self.kv_cache_manager.begin_step()
         self.kv_cache_manager.new_step_starts()
 
         # First, schedule the RUNNING requests.
@@ -1046,6 +1049,8 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        # Worker hasn't run for this step yet; evict zombies before free.
+        self.kv_cache_manager.rollback_uncommitted(request.request_id)
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
@@ -1397,6 +1402,10 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # Worker has confirmed writes for this step; commit its eager
+        # registrations before any finish-triggered free() runs below.
+        self.kv_cache_manager.commit_step()
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2258,18 +2267,26 @@ class Scheduler(SchedulerInterface):
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+                # Cache any valid computed tokens. These bytes are
+                # connector-loaded (valid by construction), so register as
+                # committed to keep them safe from later rollback_uncommitted.
+                self.kv_cache_manager.cache_blocks(
+                    request, request.num_computed_tokens, committed=True
+                )
             else:
                 # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
+                # There may be a local cache hit on retry. KV load failed,
+                # so evict any zombies before releasing.
+                self.kv_cache_manager.rollback_uncommitted(request.request_id)
                 self.kv_cache_manager.free(request)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
-            # Now that the blocks are ready, actually cache them.
-            # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            # Now that the blocks are ready, actually cache them. Bytes are
+            # connector-loaded and worker-confirmed, so register as committed.
+            self.kv_cache_manager.cache_blocks(
+                request, request.num_computed_tokens, committed=True
+            )
 
             # on a full prompt hit, we need to re-compute the last token
             # in order to be able to sample the next token

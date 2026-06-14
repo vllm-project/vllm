@@ -438,9 +438,9 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     original_cache_blocks = recompute_scheduler.kv_cache_manager.cache_blocks
     cache_blocks_calls = []
 
-    def cache_blocks_spy(req, num_tokens):
+    def cache_blocks_spy(req, num_tokens, **kwargs):
         cache_blocks_calls.append((req.request_id, num_tokens))
-        return original_cache_blocks(req, num_tokens)
+        return original_cache_blocks(req, num_tokens, **kwargs)
 
     with patch.object(
         recompute_scheduler.kv_cache_manager, "cache_blocks", cache_blocks_spy

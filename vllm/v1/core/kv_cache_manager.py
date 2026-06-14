@@ -467,6 +467,12 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def rollback_uncommitted(self, request_id: str) -> int:
+        """Evict pending eager cache entries for ``request_id``. Call before
+        ``free`` on preempt/abort paths to avoid zombie hash entries.
+        """
+        return self.block_pool.rollback_uncommitted(request_id)
+
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
     ) -> None:
@@ -572,15 +578,31 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        *,
+        committed: bool = False,
+    ) -> None:
         """Cache the blocks for the request, if enabled.
 
         Args:
             request: The request to cache the blocks.
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
+            committed: Pass True when the worker has already confirmed writing
+                the bytes for these blocks (e.g. AsyncScheduler post-output
+                cache update, KV connector load completion). Skips
+                ``_uncommitted`` tracking so the entries are not evictable by
+                a subsequent ``rollback_uncommitted`` call.
         """
-        if self.enable_caching:
+        if not self.enable_caching:
+            return
+        if committed:
+            with self.block_pool.suppress_uncommitted_tracking():
+                self.coordinator.cache_blocks(request, num_computed_tokens)
+        else:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(
@@ -599,3 +621,13 @@ class KVCacheManager:
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
         self.coordinator.new_step_starts()
+
+    def begin_step(self) -> None:
+        """Open a new eager-registration bucket at the top of ``schedule()``."""
+        self.block_pool.begin_step()
+
+    def commit_step(self) -> None:
+        """Pop the oldest pending bucket at the top of ``update_from_output``.
+        Idempotent.
+        """
+        self.block_pool.commit_step()
