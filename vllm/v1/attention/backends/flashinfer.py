@@ -405,7 +405,7 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
             12, 1
         )
 
