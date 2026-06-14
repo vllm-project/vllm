@@ -378,14 +378,20 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
-  - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
   - vllm/model_executor/layers/rotary_embedding/
   - vllm/_aiter_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/backends/
+  - tests/kernels/core
+  - tests/kernels/utils.py
+  - tests/kernels/test_concat_mla_q.py
+  - tests/v1/attention/test_rocm_attention_backends_selection.py
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py
+  - pytest -v -s kernels/test_concat_mla_q.py
+  - pytest -v -s v1/attention/test_rocm_attention_backends_selection.py
 
 - label: Kernels Helion Test # TBD
   timeout_in_minutes: 180
@@ -1628,14 +1634,20 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/
-  - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
   - vllm/model_executor/layers/rotary_embedding/
   - vllm/_aiter_ops.py
+  - vllm/envs.py
   - vllm/platforms/rocm.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/backends/
+  - tests/kernels/core
+  - tests/kernels/utils.py
+  - tests/kernels/test_concat_mla_q.py
+  - tests/v1/attention/test_rocm_attention_backends_selection.py
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py
+  - pytest -v -s kernels/test_concat_mla_q.py
+  - pytest -v -s v1/attention/test_rocm_attention_backends_selection.py
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -3050,6 +3062,29 @@ steps:
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
+
+- label: Kernels Core Operation Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/backends/
+  - tests/kernels/core
+  - tests/kernels/utils.py
+  - tests/kernels/test_concat_mla_q.py
+  - tests/v1/attention/test_rocm_attention_backends_selection.py
+  commands:
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py
+  - pytest -v -s kernels/test_concat_mla_q.py
+  - pytest -v -s v1/attention/test_rocm_attention_backends_selection.py
 
 - label: Kernels (B200-MI355) # TBD
   timeout_in_minutes: 180

@@ -25,6 +25,32 @@ steps:
   commands:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
 
+- label: Kernels Core Operation Test (MI355)
+  key: kernels-core-operation-test-mi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 180
+  device: mi355_1
+  soft_fail: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/v1/attention/selector.py
+  - vllm/v1/attention/backends/
+  - tests/kernels/core
+  - tests/kernels/utils.py
+  - tests/kernels/test_concat_mla_q.py
+  - tests/v1/attention/test_rocm_attention_backends_selection.py
+  commands:
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py
+  - pytest -v -s kernels/test_concat_mla_q.py
+  - pytest -v -s v1/attention/test_rocm_attention_backends_selection.py
+
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
   timeout_in_minutes: 15
