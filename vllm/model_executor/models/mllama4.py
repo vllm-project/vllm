@@ -926,6 +926,7 @@ class Llama4ForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -954,6 +955,7 @@ class Llama4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -966,6 +968,7 @@ class Llama4ForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             inputs["pixel_values"],
@@ -975,6 +978,7 @@ class Llama4ForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             mm_kwargs["pixel_values"],

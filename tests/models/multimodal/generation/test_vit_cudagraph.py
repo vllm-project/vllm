@@ -75,15 +75,16 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
-    "internvl": VitCudagraphTestConfig(
-        model="OpenGVLab/InternVL3-1B",
-        num_video_frames=8,
-        image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
-        video_prompt=internvl_chat_template(
-            "<video>\nDescribe this video in one sentence."
+    "qwen2_vl": VitCudagraphTestConfig(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
         ),
         needs_video_metadata=False,
-        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
     "qwen2_5_vl": VitCudagraphTestConfig(
@@ -122,16 +123,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
-    "qwen2_vl": VitCudagraphTestConfig(
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        image_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
-        ),
-        video_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|video_pad|><|vision_end|>"
-            "Describe this video in one sentence."
+    "internvl": VitCudagraphTestConfig(
+        model="OpenGVLab/InternVL3-1B",
+        num_video_frames=8,
+        image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
+        video_prompt=internvl_chat_template(
+            "<video>\nDescribe this video in one sentence."
         ),
         needs_video_metadata=False,
+        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
     "step3_vl": VitCudagraphTestConfig(
@@ -178,6 +178,19 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="Glm4vForConditionalGeneration",
             ),
         },
+    ),
+    "deepseek_ocr": VitCudagraphTestConfig(
+        model="deepseek-ai/DeepSeek-OCR",
+        modalities=["image"],
+        image_prompt="<image>\nWhat is in this image?",
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="DeepseekOCRForCausalLM",
+            ),
+        },
+        marks=[pytest.mark.core_model],
     ),
 }
 
