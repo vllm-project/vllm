@@ -1,7 +1,24 @@
 #pragma once
 
+#include "torch_utils.h"
+
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
+
+#include <vector>
+
+inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
+  // Ensure tensor is on CUDA
+  STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");
+
+  // Get the raw data pointer
+  void* data_ptr = tensor.mutable_data_ptr();
+
+  // Create a new tensor from the raw data pointer
+  return torch::stable::from_blob(data_ptr, tensor.sizes(), tensor.strides(),
+                                  tensor.device(), tensor.scalar_type(),
+                                  [base = tensor](void*) {});
+}
 
 void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                torch::stable::Tensor& output_q,
@@ -347,6 +364,18 @@ void free_shared_buffer(int64_t buffer);
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,
                         torch::stable::Tensor& input, double limit);
+
+void silu_and_mul_quant(torch::stable::Tensor& out,
+                        torch::stable::Tensor& input,
+                        torch::stable::Tensor& scale);
+
+void persistent_masked_m_silu_mul_quant(
+    const torch::stable::Tensor& input,              // (E, T, 2*H)
+    const torch::stable::Tensor& tokens_per_expert,  // (E)
+    torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
+    torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
+    bool use_ue8m0);
+
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_tanh_and_mul(torch::stable::Tensor& out,

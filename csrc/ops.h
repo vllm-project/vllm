@@ -9,28 +9,6 @@
 
 #include <vector>
 
-torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
-  // Ensure tensor is on CUDA
-  if (!tensor.is_cuda()) {
-    throw std::runtime_error("Tensor must be on CUDA device");
-  }
-
-  // Get the raw data pointer
-  void* data_ptr = tensor.data_ptr();
-
-  // Get tensor sizes and strides
-  std::vector<int64_t> sizes = tensor.sizes().vec();
-  std::vector<int64_t> strides = tensor.strides().vec();
-
-  // Get tensor options (dtype, device)
-  auto options = tensor.options();
-
-  // Create a new tensor from the raw data pointer
-  auto new_tensor = torch::from_blob(data_ptr, sizes, strides, options);
-
-  return new_tensor;
-}
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
@@ -51,16 +29,6 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);
-
-void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
-                        torch::Tensor& scale);
-
-void persistent_masked_m_silu_mul_quant(
-    const at::Tensor& input,   // (E, T, 2*H)
-    const at::Tensor& counts,  // (E)
-    at::Tensor& y_q,           // (E, T, H) [OUT]
-    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    bool use_ue8m0);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
