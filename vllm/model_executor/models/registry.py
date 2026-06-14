@@ -70,6 +70,7 @@ logger = init_logger(__name__)
 
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "ParamBharatGenForCausalLM": ("parambharatgen", "ParamBharatGenForCausalLM"),
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
