@@ -8,6 +8,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import random
 import os
 import tempfile
 import threading
@@ -826,6 +827,7 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    shuffle_safetensors_files: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -838,6 +840,14 @@ def safetensors_weights_iterator(
         loading_desc += " (eager)"
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+
+    if shuffle_safetensors_files:
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = 0
+        rng = random.Random(42 + rank)
+        rng.shuffle(sorted_files)
 
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
