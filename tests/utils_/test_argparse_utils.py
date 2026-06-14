@@ -126,6 +126,30 @@ def test_config_args(parser_with_config, cli_config_file):
     assert args.trust_remote_code
 
 
+def test_config_args_with_equals_syntax(parser_with_config, cli_config_file):
+    # `--config=<path>` should expand the YAML config just like the spaced
+    # `--config <path>` form does (see test_config_args). The `=` form was
+    # previously skipped, so the config file was silently ignored.
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", f"--config={cli_config_file}"]
+    )
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code
+
+    # CLI args still take precedence over config values with the `=` form.
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "mymodel",
+            f"--config={cli_config_file}",
+            "--tensor-parallel-size",
+            "3",
+        ]
+    )
+    assert args.tensor_parallel_size == 3
+    assert args.port == 12312
+
+
 def test_config_file(parser_with_config):
     with pytest.raises(FileNotFoundError):
         parser_with_config.parse_args(
