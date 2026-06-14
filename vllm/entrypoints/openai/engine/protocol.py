@@ -247,6 +247,7 @@ class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    strict: bool | None = None
     defer_loading: bool | None = None
 
     @model_serializer(mode="wrap")
