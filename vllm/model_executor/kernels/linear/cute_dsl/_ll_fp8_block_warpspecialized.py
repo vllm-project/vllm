@@ -1,0 +1,507 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""LL FP8 Block-Scaled GEMM kernel (SM100 compatible).
+
+C[M,N] = (scale_A * A_fp8) @ (scale_B * B_fp8)^T
+
+Warp-specialized: cp.async + mma.sync.m16n8k32.e4m3 + post-MMA scaling.
+FP8 data passed as bf16 view (2 fp8 elements per bf16).
+Block scales: scale_A[M, K//128] per-token-group,
+              scale_B[N//128, K//128] per-block, packed ue8m0 int32.
+"""
+
+import math
+
+import cutlass
+import cutlass.cute as cute
+from cuda.bindings.driver import CUstream
+from cutlass._mlir import ir as _ir
+from cutlass._mlir.dialects import llvm as _llvm
+from cutlass.cutlass_dsl import dsl_user_op
+from cutlass.pipeline import sm90 as pipeline
+
+
+def _make_pred(tXgX, tXcX, dim_size):
+    num_vec = tXgX.shape[0][1]
+    num_mn = cute.size(tXgX, mode=[1])
+    num_k = cute.size(tXgX, mode=[2])
+    pred = cute.make_rmem_tensor(
+        cute.make_layout((num_vec, num_mn, num_k), stride=(num_mn, 1, 0)),
+        cutlass.Boolean,
+    )
+    for rv in range(num_vec):
+        for mn in range(num_mn):
+            pred[rv, mn, 0] = cute.elem_less(tXcX[(0, rv), mn, 0, 0][0], dim_size)
+    return pred
+
+
+@dsl_user_op
+def fused_ue8m0_scale(sa_packed, sb_packed, byte_idx, *, loc=None, ip=None):
+    """Fused scale: 2^(ea+eb-254) from packed ue8m0 A and B scales."""
+    f32 = cutlass.Float32.mlir_type
+    val_a = sa_packed.ir_value(loc=loc, ip=ip)
+    val_b = sb_packed.ir_value(loc=loc, ip=ip)
+    idx = byte_idx.ir_value(loc=loc, ip=ip)
+    res = _llvm.inline_asm(
+        f32,
+        [val_a, val_b, idx],
+        "{"
+        ".reg .u32 ea, eb, combined;"
+        "prmt.b32 ea, $1, 0, $3;"
+        "and.b32 ea, ea, 0xFF;"
+        "prmt.b32 eb, $2, 0, $3;"
+        "and.b32 eb, eb, 0xFF;"
+        "add.u32 combined, ea, eb;"
+        "sub.u32 combined, combined, 127;"
+        "shl.b32 combined, combined, 23;"
+        "mov.b32 $0, combined;"
+        "}",
+        "=f,r,r,r",
+        has_side_effects=False,
+        loc=loc,
+        ip=ip,
+    )
+    return cutlass.Float32(res)
+
+
+@dsl_user_op
+class LLFp8BlockGemm:
+    def __init__(
+        self,
+        tile_n: int = 16,
+        tile_k: int = 256,
+        num_stages: int = 2,
+        num_dma_warps: int = 4,
+        *,
+        loc=None,
+        ip=None,
+    ):
+        self.ab_dtype = cutlass.BFloat16
+        self.acc_dtype = cutlass.Float32
+        self.out_dtype = cutlass.BFloat16
+        self.tile_m = 16
+        self.tile_n = tile_n
+        self.tile_k = tile_k
+        self.tile_k_fp8 = tile_k * 2
+        self.num_stages = num_stages
+        self.mma_shape = (16, 8, 16)
+        self.atom_layout = (1, 1, 1)
+        self.num_mma_warps = 4
+        self.num_dma_threads = num_dma_warps * 32
+        self.num_mma_threads = self.num_mma_warps * 32
+        self.num_threads = self.num_dma_threads + self.num_mma_threads
+
+    def _make_smem_layout_AB(self, dtype, copy_bits, smem_tiler):
+        major_size = min(smem_tiler[1], 64)
+        swizzle_bits = int(math.log2(major_size * dtype.width // copy_bits))
+        swizzle_bits = min(swizzle_bits, 3)
+        layout_atom_outer = cute.make_layout((8, major_size), stride=(major_size, 1))
+        layout_atom = cute.make_composed_layout(
+            cute.make_swizzle(swizzle_bits, 3, 3), 0, layout_atom_outer
+        )
+        return cute.tile_to_shape(layout_atom, smem_tiler, (0, 1, 2))
+
+    def _make_gmem_tiled_copy(self, atom_copy, dtype, copy_bits, num_threads):
+        copy_elems = copy_bits // dtype.width
+        k_threads = cute.size(self.tile_k) // copy_elems
+        thread_layout = cute.make_layout(
+            (num_threads // k_threads, k_threads), stride=(k_threads, 1)
+        )
+        value_layout = cute.make_layout((1, copy_elems))
+        return cute.make_tiled_copy_tv(atom_copy, thread_layout, value_layout)
+
+    @cute.jit
+    def __call__(
+        self,
+        mA: cute.Tensor,
+        mB: cute.Tensor,
+        mC: cute.Tensor,
+        mSA: cute.Tensor,
+        mSB: cute.Tensor,
+        stream: CUstream,
+    ):
+        bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
+        copy_bits = 128
+        sA_layout = self._make_smem_layout_AB(
+            mA.element_type, copy_bits, (bM, bK, self.num_stages)
+        )
+        sB_layout = self._make_smem_layout_AB(
+            mB.element_type, copy_bits, (bN, bK, self.num_stages)
+        )
+        atom_g2s = cute.make_copy_atom(
+            cute.nvgpu.cpasync.CopyG2SOp(
+                cache_mode=cute.nvgpu.cpasync.LoadCacheMode.GLOBAL
+            ),
+            mA.element_type,
+            num_bits_per_copy=copy_bits,
+        )
+        tiled_copy_A = self._make_gmem_tiled_copy(
+            atom_g2s, mA.element_type, copy_bits, self.num_dma_threads
+        )
+        tiled_copy_B = self._make_gmem_tiled_copy(
+            atom_g2s, mB.element_type, copy_bits, self.num_dma_threads
+        )
+        op = cute.nvgpu.warp.MmaF16BF16Op(self.ab_dtype, self.acc_dtype, self.mma_shape)
+        perm_mnk = (
+            self.atom_layout[0] * self.mma_shape[0],
+            self.atom_layout[1] * self.mma_shape[1] * (self.tile_n // 8),
+            self.atom_layout[2] * self.mma_shape[2],
+        )
+        tiled_mma = cute.make_tiled_mma(
+            op, cute.make_layout(self.atom_layout), permutation_mnk=perm_mnk
+        )
+        op_fp8 = cute.nvgpu.warp.MmaFP8Op(cutlass.Float8E4M3FN, self.acc_dtype, (16, 8, 32))
+        perm_mnk_fp8 = (
+            self.atom_layout[0] * 16,
+            self.atom_layout[1] * 8 * (self.tile_n // 8),
+            self.atom_layout[2] * 32,
+        )
+        tiled_mma_fp8 = cute.make_tiled_mma(
+            op_fp8, cute.make_layout(self.atom_layout), permutation_mnk=perm_mnk_fp8
+        )
+        grid_m = cute.ceil_div(cute.size(mC, mode=[0]), bM)
+        grid_n = cute.ceil_div(cute.size(mC, mode=[1]), bN)
+        self.kernel(
+            mA,
+            mB,
+            mC,
+            mSA,
+            mSB,
+            sA_layout,
+            sB_layout,
+            tiled_copy_A,
+            tiled_copy_B,
+            tiled_mma,
+            tiled_mma_fp8,
+        ).launch(
+            grid=[cute.size(grid_m), cute.size(grid_n), 1],
+            block=[self.num_threads, 1, 1],
+            stream=stream,
+            use_pdl=True,
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        mA,
+        mB,
+        mC,
+        mSA,
+        mSB,
+        sA_layout: cute.ComposedLayout,
+        sB_layout: cute.ComposedLayout,
+        tiled_copy_A: cute.TiledCopy,
+        tiled_copy_B: cute.TiledCopy,
+        tiled_mma: cute.TiledMma,
+        tiled_mma_fp8: cute.TiledMma,
+    ):
+        bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
+        num_stages = self.num_stages
+        tidx, _, _ = cute.arch.thread_idx()
+        bid_m, bid_n, _ = cute.arch.block_idx()
+        warp_idx = tidx // 32
+        is_dma = warp_idx < (self.num_dma_threads // 32)
+        dma_tidx = tidx
+        mma_tidx = tidx - self.num_dma_threads
+        N_out = cute.size(mC, mode=[1])
+        M_out = cute.size(mC, mode=[0])
+
+        cta_tiler = (bM, bN, bK)
+        coord = (bid_m, bid_n, None)
+        gA = cute.local_tile(mA, tiler=cta_tiler, coord=coord, proj=(1, None, 1))
+        gB = cute.local_tile(mB, tiler=cta_tiler, coord=coord, proj=(None, 1, 1))
+        gC = cute.local_tile(mC, tiler=cta_tiler, coord=coord, proj=(1, 1, None))
+        gA = cute.make_tensor(gA.iterator.align(16), gA.layout)
+        gB = cute.make_tensor(gB.iterator.align(16), gB.layout)
+
+        mcA = cute.make_identity_tensor(mA.layout.shape)
+        mcB = cute.make_identity_tensor(mB.layout.shape)
+        cA = cute.local_tile(mcA, tiler=cta_tiler, coord=coord, proj=(1, None, 1))
+        cB = cute.local_tile(mcB, tiler=cta_tiler, coord=coord, proj=(None, 1, 1))
+
+        @cute.struct
+        class SharedStorage:
+            a: cute.struct.Align[
+                cute.struct.MemRange[mA.element_type, cute.cosize(sA_layout)], 16
+            ]
+            b: cute.struct.Align[
+                cute.struct.MemRange[mB.element_type, cute.cosize(sB_layout)], 16
+            ]
+            sa_scale: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int32, bM * num_stages], 4
+            ]
+            sb_scale: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int32, num_stages], 4
+            ]
+            mbar: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int64, num_stages * 2], 8
+            ]
+
+        smem = cutlass.utils.SmemAllocator()
+        storage_ptr = smem.allocate(SharedStorage.size_in_bytes(), byte_alignment=16)
+        storage = SharedStorage(storage_ptr)
+        sA = storage.a.get_tensor(sA_layout)
+        sB = storage.b.get_tensor(sB_layout)
+
+        producer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, self.num_dma_threads
+        )
+        consumer_group = pipeline.CooperativeGroup(
+            pipeline.Agent.Thread, self.num_mma_threads
+        )
+        mainloop_pipeline = pipeline.PipelineCpAsync.create(
+            barrier_storage=storage.mbar.data_ptr(),
+            num_stages=num_stages,
+            producer_group=producer_group,
+            consumer_group=consumer_group,
+        )
+
+        k_tile_count = cute.size(gA, mode=[2])
+        sSA_ptr = storage.sa_scale.data_ptr()
+        sSB_ptr = storage.sb_scale.data_ptr()
+        n_block_idx = bid_n * bN // 128
+        TILE_K_FP8_C: cutlass.Constexpr = self.tile_k_fp8
+        num_packed_k = (k_tile_count * TILE_K_FP8_C // 128) // 4
+
+        if is_dma:
+            cute.arch.setmaxregister_decrease(40)
+            thr_A = tiled_copy_A.get_slice(dma_tidx)
+            thr_B = tiled_copy_B.get_slice(dma_tidx)
+            tAgA = thr_A.partition_S(gA)
+            tAsA = thr_A.partition_D(sA)
+            tBgB = thr_B.partition_S(gB)
+            tBsB = thr_B.partition_D(sB)
+            tAcA = thr_A.partition_S(cA)
+            tBcB = thr_B.partition_S(cB)
+
+            tApA = _make_pred(tAgA, tAcA, mA.shape[0])
+
+            tBpB = _make_pred(tBgB, tBcB, mB.shape[0])
+
+            producer_state = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, num_stages
+            )
+
+            # Pre-create scale tensors (like A/B tile tensors)
+            n_repr = n_block_idx * 128
+            m_slot = dma_tidx % bM
+            global_m = bid_m * bM + m_slot
+            safe_m = global_m if global_m < M_out else M_out - 1
+            gSA = cute.make_tensor(
+                (mSA.iterator + safe_m * num_packed_k).align(4),
+                cute.make_layout((num_packed_k,)),
+            )
+            gSB = cute.make_tensor(
+                (mSB.iterator + n_repr).align(4),
+                cute.make_layout((num_packed_k,), stride=(N_out,)),
+            )
+            sSA = cute.make_tensor(
+                sSA_ptr,
+                cute.make_layout((bM, num_stages), stride=(1, bM)),
+            )
+            sSB = cute.make_tensor(
+                sSB_ptr,
+                cute.make_layout((num_stages,)),
+            )
+
+            # Peeled first iteration: B data + B scale before wait,
+            # A data after wait, A scale overlaps with cp.async A.
+            mainloop_pipeline.producer_acquire(producer_state)
+            packed_k = cutlass.Int32(0)
+            cute.copy(
+                tiled_copy_B,
+                tBgB[None, None, None, 0],
+                tBsB[None, None, None, producer_state.index],
+                pred=tBpB,
+            )
+            sSB[producer_state.index] = gSB[packed_k]
+            
+            cute.arch.griddepcontrol_wait()
+            
+            cute.copy(
+                tiled_copy_A,
+                tAgA[None, None, None, 0],
+                tAsA[None, None, None, producer_state.index],
+                pred=tApA,
+            )
+            sSA[m_slot, producer_state.index] = gSA[packed_k]
+            mainloop_pipeline.producer_commit(producer_state)
+            producer_state.advance()
+
+            for k_tile in range(1, k_tile_count):
+                mainloop_pipeline.producer_acquire(producer_state)
+                packed_k = (k_tile * TILE_K_FP8_C // 128) // 4
+                cute.copy(
+                    tiled_copy_A,
+                    tAgA[None, None, None, k_tile],
+                    tAsA[None, None, None, producer_state.index],
+                    pred=tApA,
+                )
+                cute.copy(
+                    tiled_copy_B,
+                    tBgB[None, None, None, k_tile],
+                    tBsB[None, None, None, producer_state.index],
+                    pred=tBpB,
+                )
+                sSA[m_slot, producer_state.index] = gSA[packed_k]
+                sSB[producer_state.index] = gSB[packed_k]
+                mainloop_pipeline.producer_commit(producer_state)
+                producer_state.advance()
+
+            mainloop_pipeline.producer_tail(producer_state)
+
+        else:
+            cute.arch.setmaxregister_increase(232)
+            lane_id = mma_tidx % 32
+            mma_warp_idx = mma_tidx // 32
+            NUM_MMA_WARPS: cutlass.Constexpr = self.num_mma_warps
+
+            thr_mma = tiled_mma.get_slice(lane_id)
+            tCsA = thr_mma.partition_A(sA)
+            tCsB = thr_mma.partition_B(sB)
+            tCgC = thr_mma.partition_C(gC)
+            tCrA = tiled_mma.make_fragment_A(tCsA[None, None, None, 0])
+            tCrB = tiled_mma.make_fragment_B(tCsB[None, None, None, 0])
+            tCrC = tiled_mma.make_fragment_C(tCgC)
+            tCrC.fill(0.0)
+
+            atom_s2r_A = cute.make_copy_atom(
+                cute.nvgpu.warp.LdMatrix8x8x16bOp(False, 4), mA.element_type
+            )
+            atom_s2r_B = cute.make_copy_atom(
+                cute.nvgpu.warp.LdMatrix8x8x16bOp(False, 4), mB.element_type
+            )
+            tiled_s2r_A = cute.make_tiled_copy_A(atom_s2r_A, tiled_mma)
+            tiled_s2r_B = cute.make_tiled_copy_B(atom_s2r_B, tiled_mma)
+            thr_s2r_A = tiled_s2r_A.get_slice(lane_id)
+            thr_s2r_B = tiled_s2r_B.get_slice(lane_id)
+            tCsA_v = thr_s2r_A.partition_S(sA)
+            tCrA_v = thr_s2r_A.retile(tCrA)
+            tCsB_v = thr_s2r_B.partition_S(sB)
+            tCrB_v = thr_s2r_B.retile(tCrB)
+
+            num_k_block = cute.size(tCrA, mode=[2])
+            K_PER_WARP: cutlass.Constexpr = num_k_block // NUM_MMA_WARPS
+            KB_PER_SCALE: cutlass.Constexpr = 4
+            SCALE_GROUPS_PER_WARP: cutlass.Constexpr = K_PER_WARP // KB_PER_SCALE
+
+            consumer_state = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, num_stages
+            )
+
+            m_row_0 = lane_id // 4
+            m_row_1 = m_row_0 + 8
+
+            # Pre-create smem scale tensors for reading
+            sSA_mma = cute.make_tensor(
+                sSA_ptr,
+                cute.make_layout((bM, num_stages), stride=(1, bM)),
+            )
+            sSB_mma = cute.make_tensor(
+                sSB_ptr,
+                cute.make_layout((num_stages,)),
+            )
+
+            for k_tile in range(k_tile_count):
+                mainloop_pipeline.consumer_wait(consumer_state)
+
+                tCsA_p = tCsA_v[None, None, None, consumer_state.index]
+                tCsB_p = tCsB_v[None, None, None, consumer_state.index]
+
+                # A+B scales from smem (loaded by DMA warps this iteration)
+                stage = consumer_state.index
+                sa0_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                sa0_packed[0] = sSA_mma[m_row_0, stage]
+                sa1_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                sa1_packed[0] = sSA_mma[m_row_1, stage]
+                sb_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
+                sb_packed[0] = sSB_mma[stage]
+
+                for sg in cutlass.range(SCALE_GROUPS_PER_WARP, unroll_full=True):
+                    sg_global = mma_warp_idx * SCALE_GROUPS_PER_WARP + sg
+                    k_fp8_base = k_tile * TILE_K_FP8_C + sg_global * 128
+                    scale_k_idx = k_fp8_base // 128
+                    packed_k = scale_k_idx // 4
+                    byte_k = scale_k_idx - packed_k * 4
+
+                    scale_m0 = fused_ue8m0_scale(sa0_packed[0], sb_packed[0], byte_k)
+                    scale_m1 = fused_ue8m0_scale(sa1_packed[0], sb_packed[0], byte_k)
+
+                    tCrP = tiled_mma_fp8.make_fragment_C(tCgC)
+                    tCrP.fill(0.0)
+                    for kb in cutlass.range(KB_PER_SCALE, unroll_full=True):
+                        k_block = mma_warp_idx * K_PER_WARP + sg * KB_PER_SCALE + kb
+                        cute.copy(
+                            tiled_s2r_A,
+                            tCsA_p[None, None, k_block],
+                            tCrA_v[None, None, 0],
+                        )
+                        cute.copy(
+                            tiled_s2r_B,
+                            tCsB_p[None, None, k_block],
+                            tCrB_v[None, None, 0],
+                        )
+                        cute.gemm(
+                            tiled_mma_fp8,
+                            tCrP,
+                            cute.recast_tensor(tCrA[None, None, 0], cutlass.Float8E4M3FN),
+                            cute.recast_tensor(tCrB[None, None, 0], cutlass.Float8E4M3FN),
+                            tCrP,
+                        )
+
+                    p0, p1, p2, p3 = tCrP[0], tCrP[1], tCrP[2], tCrP[3]
+                    p4, p5, p6, p7 = tCrP[4], tCrP[5], tCrP[6], tCrP[7]
+                    tCrC[0] = tCrC[0] + p0 * scale_m0
+                    tCrC[1] = tCrC[1] + p1 * scale_m0
+                    tCrC[2] = tCrC[2] + p2 * scale_m1
+                    tCrC[3] = tCrC[3] + p3 * scale_m1
+                    tCrC[4] = tCrC[4] + p4 * scale_m0
+                    tCrC[5] = tCrC[5] + p5 * scale_m0
+                    tCrC[6] = tCrC[6] + p6 * scale_m1
+                    tCrC[7] = tCrC[7] + p7 * scale_m1
+
+                mainloop_pipeline.consumer_release(consumer_state)
+                consumer_state.advance()
+
+            # Signal dependent kernels after GEMM is done
+            if mma_tidx == 0:
+                cute.arch.griddepcontrol_launch_dependents()
+                # pass
+            cute.arch.sync_threads()
+
+            # Epilogue: warp reduction + global store
+            smem_red_ptr = cute.arch.alloc_smem(
+                cutlass.Float32, bM * bN * NUM_MMA_WARPS, alignment=16
+            )
+            smem_warp = cute.make_tensor(
+                smem_red_ptr + mma_warp_idx * bM * bN,
+                cute.make_layout((bM, bN), stride=(bN, 1)),
+            )
+            tCsC_partial = thr_mma.partition_C(smem_warp)
+            cute.autovec_copy(tCrC, tCsC_partial)
+            cute.arch.sync_threads()
+
+            num_elems: cutlass.Constexpr = bM * bN
+            elems_per_thread: cutlass.Constexpr = num_elems // self.num_mma_threads
+            for ei in cutlass.range_constexpr(elems_per_thread):
+                idx = ei * self.num_mma_threads + mma_tidx
+                m = idx // bN
+                n = idx % bN
+                global_m = bid_m * bM + m
+                global_n = bid_n * bN + n
+                if global_m < M_out:
+                    if global_n < N_out:
+                        total = cutlass.Float32(0.0)
+                        for w in cutlass.range_constexpr(NUM_MMA_WARPS):
+                            p = smem_red_ptr + w * bM * bN + idx
+                            t = cute.make_tensor(p, cute.make_layout((1,)))
+                            r = cute.make_rmem_tensor((1,), cutlass.Float32)
+                            cute.autovec_copy(t, r)
+                            total = total + r[0]
+                        out_p = (mC.iterator + global_m * N_out + global_n).align(2)
+                        out_t = cute.make_tensor(out_p, cute.make_layout((1,)))
+                        out_r = cute.make_rmem_tensor((1,), self.out_dtype)
+                        out_r[0] = total.to(self.out_dtype)
+                        out_t[0] = out_r[0]
+
+        cute.arch.sync_threads()

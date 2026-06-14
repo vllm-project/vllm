@@ -23,6 +23,9 @@ from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
+    LLFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -312,6 +315,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
+        LLFp8BlockScaledMMKernel,
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
@@ -1038,6 +1042,7 @@ __all__ = [
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
     "_KernelT",
+    "LLFp8BlockScaledMMKernel",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
 ]
