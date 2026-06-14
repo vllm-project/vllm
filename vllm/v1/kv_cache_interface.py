@@ -607,7 +607,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
-    dtypes: tuple[torch.dtype]
+    dtypes: tuple[torch.dtype, ...]
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
