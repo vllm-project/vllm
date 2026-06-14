@@ -771,9 +771,9 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     )
 
     # TODO mla test
-    default_stride = tuple(range(5))
+    default_stride = tuple(range(4))
     # Permutation that gets you back to expected kv shape
-    for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
+    for test_stride in ((0, 2, 1, 3), (0, 1, 2, 3)):
 
         def rnd_stride_order(
             include_num_layers_dimension: bool = False, test_stride=test_stride
@@ -1321,9 +1321,10 @@ def test_hybrid_attention_mamba_tensor_shapes():
             actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
-            # Check K and V separately
-            assert torch.equal(actual_kv[0], expected)
-            assert torch.equal(actual_kv[1], expected)
+            # Packed layout: (num_kv_heads, block_size, 2*head_size). Every
+            # head in the block was filled with the same constant.
+            for head_idx in range(actual_kv.shape[0]):
+                assert torch.equal(actual_kv[head_idx], expected)
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):

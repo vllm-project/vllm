@@ -1395,41 +1395,32 @@ class MooncakeConnectorWorker:
         seen_base_addresses = []
         self.block_len_per_layer = []
 
-        split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
-        for layer_name, cache_or_caches in kv_caches.items():
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
-            logger.debug(
-                "registering layer %s with %d cache tensor(s)",
-                layer_name,
-                len(cache_list),
+        for layer_name, cache in kv_caches.items():
+            self._log_debug_cache_registration(layer_name, cache)
+            base_addr = cache.data_ptr()
+            if base_addr in seen_base_addresses:
+                continue
+
+            seen_base_addresses.append(base_addr)
+
+            if tensor_size_bytes is None:
+                tensor_size_bytes = cache.nbytes
+                self.num_blocks = cache.shape[0]
+            assert cache.shape[0] == self.num_blocks, (
+                "All kv cache tensors must have the same number of blocks"
             )
 
-            for cache in cache_list:
-                self._log_debug_cache_registration(layer_name, cache)
-                base_addr = cache.data_ptr()
-                if base_addr in seen_base_addresses:
-                    continue
+            # Use stride-based block length so RDMA reaches the last
+            # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
+            # reflects the actual byte distance between consecutive
+            # blocks in GPU memory, which matches or exceeds the
+            # shape-based size.
+            block_len = cache.stride(0) * cache.element_size()
 
-                seen_base_addresses.append(base_addr)
-
-                if tensor_size_bytes is None:
-                    tensor_size_bytes = cache.nbytes
-                    self.num_blocks = cache.shape[0]
-                assert cache.shape[0] == self.num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
-
-                # Use stride-based block length so RDMA reaches the last
-                # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
-                # reflects the actual byte distance between consecutive
-                # blocks in GPU memory, which matches or exceeds the
-                # shape-based size.
-                block_len = cache.stride(0) * cache.element_size()
-
-                self.block_len_per_layer.append(block_len)
-                kv_data_ptrs.append(base_addr)
-                kv_data_lens.append(self.num_blocks * block_len)
+            self.block_len_per_layer.append(block_len)
+            kv_data_ptrs.append(base_addr)
+            kv_data_lens.append(self.num_blocks * block_len)
 
         self.kv_caches_base_addr = seen_base_addresses
         self.seen_base_addresses = seen_base_addresses
