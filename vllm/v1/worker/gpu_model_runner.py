@@ -3456,9 +3456,21 @@ class GPUModelRunner(
                 is_multimodal=is_mm_embed,
             )
 
+            num_real_tokens = inputs_embeds_scheduled.shape[0]
+            
+            if num_scheduled_tokens != num_real_tokens:
+                if self.max_num_tokens < num_real_tokens:
+                    raise RuntimeError(
+                        f"The embedding size {num_real_tokens} exceeds"
+                        f"the max amount of tokens {self.max_num_tokens}."
+                        
+                logger.warning(f"Mismatch detected: {num_scheduled_tokens} vs {num_real_tokens}")
+                
+                num_scheduled_tokens = inputs_embeds_scheduled.shape[0]
+
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
-
+            
             input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
                 **self._init_model_kwargs(),
