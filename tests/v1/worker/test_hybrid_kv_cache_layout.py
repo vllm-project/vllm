@@ -231,7 +231,7 @@ def _compute_layout_new(
         FlexAttentionBackend,
     ],
 )
-@pytest.mark.parametrize("pack_size", [1, 2, 4])
+@pytest.mark.parametrize("pack_size", [1, 2, 3, 4, 5, 8])
 @pytest.mark.parametrize("enable_hybrid_attn_mamba_layout", [False, True])
 @pytest.mark.parametrize("cache_layout", ["NHD", "HND"])
 def test_hybrid_attention_mamba_layout_matches_reference(

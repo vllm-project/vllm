@@ -1698,11 +1698,11 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     current_platform.is_rocm(),
     reason="Attention backend FLASHINFER is not supported on ROCm.",
 )
-@pytest.mark.parametrize("pack_size", [1, 2, 4])
+@pytest.mark.parametrize("pack_size", [1, 2, 3, 4, 5, 8])
 def test_hybrid_attention_mamba_kv_cache_pack_size(pack_size: int):
     """
     Test that KV cache layout for Attention layers in a hybrid (Attention+Mamba)
-    model correctly reflects pack_size settings (1, 2, 4) after calling
+    model correctly reflects pack_size settings after calling
     get_kv_cache_configs() and initialize_kv_cache().
 
     Verifications:
@@ -1738,6 +1738,7 @@ def test_hybrid_attention_mamba_kv_cache_pack_size(pack_size: int):
     model_config = ModelConfig(
         model="ibm-granite/granite-4.0-tiny-preview",
         dtype="float16",
+        max_model_len=512,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,

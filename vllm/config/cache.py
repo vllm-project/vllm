@@ -35,7 +35,6 @@ CacheDType = Literal[
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
-AttnPackSize = Literal[1, 2, 4, 8]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -140,7 +139,7 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
-    attn_pack_size: AttnPackSize = 1
+    attn_pack_size: int = Field(default=1, gt=0)
     """The number of attention pages to allocate for Mamba layers. 
     This is only relevant for models that includes Mamba layers."""
 
@@ -268,6 +267,16 @@ class CacheConfig:
                 "1.0."
             )
         return calculate_kv_scales
+
+    @field_validator("attn_pack_size", mode="after")
+    @classmethod
+    def _warn_large_attn_pack_size(cls, attn_pack_size: int) -> int:
+        if attn_pack_size >= 8:
+            logger.warning_once(
+                "Large attn_pack_size=%d may cause significant GPU memory waste.",
+                attn_pack_size,
+            )
+        return attn_pack_size
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
