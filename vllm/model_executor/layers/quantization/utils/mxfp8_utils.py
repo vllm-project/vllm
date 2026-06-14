@@ -11,6 +11,32 @@ MXFP8_SCALE_DTYPE = torch.uint8
 MXFP8_BLOCK_SIZE = 32
 
 
+def normalize_mxfp8_e4m3fn_to_e4m3fnuz(
+    values: torch.Tensor,
+    scales: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert OCP E4M3 MXFP8 storage to AMD E4M3FNUZ in place.
+
+    For an identical byte pattern, E4M3FNUZ represents half the E4M3FN value.
+    Incrementing the E8M0 exponent preserves the dequantized value without
+    expanding the one-byte weights. OCP negative zero (0x80) is NaN in FNUZ,
+    so it must be canonicalized to positive zero before reinterpreting.
+    """
+    if values.dtype == torch.float8_e4m3fnuz:
+        return values, scales
+    if values.dtype != torch.float8_e4m3fn:
+        raise ValueError(f"Expected E4M3FN or E4M3FNUZ values, got {values.dtype}.")
+    if scales.dtype != MXFP8_SCALE_DTYPE:
+        raise ValueError(f"Expected {MXFP8_SCALE_DTYPE} scales, got {scales.dtype}.")
+    if int(scales.max().item()) >= 254:
+        raise ValueError("Cannot convert MXFP8 scale exponent 254 to E4M3FNUZ.")
+
+    value_bits = values.view(torch.int8)
+    value_bits.masked_fill_(value_bits == -128, 0)
+    scales.add_(1)
+    return value_bits.view(torch.float8_e4m3fnuz), scales
+
+
 def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
     """Swizzle MXFP8 scales from row-major 2D to F8_128x4 layout."""
     scaling_vector_size = MXFP8_BLOCK_SIZE  # 32 for MXFP8
@@ -38,6 +64,7 @@ def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
 def _mxfp8_e4m3_quantize_torch(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,
+    value_dtype: torch.dtype = MXFP8_VALUE_DTYPE,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Naive MXFP8 quantization.
     For each block of 32 elements along the last dimension, compute a
@@ -65,7 +92,7 @@ def _mxfp8_e4m3_quantize_torch(
     descale = torch.exp2(scale_biased - 127.0)
     x_scaled = x_blocked / descale.unsqueeze(-1)
 
-    x_fp8 = x_scaled.view(orig_shape).to(MXFP8_VALUE_DTYPE)
+    x_fp8 = x_scaled.view(orig_shape).to(value_dtype)
 
     if x.ndim == 2:
         M, K = x.shape
@@ -139,6 +166,7 @@ def _mxfp8_e4m3_quantize_triton(
     x: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused 2D MXFP8 quant (non-swizzled, row-major [M, K//32] scales)."""
+    from vllm.platforms import current_platform
     from vllm.triton_utils import triton
 
     global _MXFP8_QUANT_KERNEL
@@ -147,7 +175,10 @@ def _mxfp8_e4m3_quantize_triton(
 
     M, K = x.shape
     x = x.contiguous()
-    xq = torch.empty((M, K), dtype=MXFP8_VALUE_DTYPE, device=x.device)
+    value_dtype = (
+        torch.float8_e4m3fnuz if current_platform.is_fp8_fnuz() else MXFP8_VALUE_DTYPE
+    )
+    xq = torch.empty((M, K), dtype=value_dtype, device=x.device)
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
@@ -233,7 +264,19 @@ def mxfp8_e4m3_quantize_fake(
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile tracing."""
-    fp_data = torch.empty_like(x, dtype=MXFP8_VALUE_DTYPE)
+    from vllm.platforms import current_platform
+
+    value_dtype = (
+        torch.float8_e4m3fnuz
+        if (
+            current_platform.is_fp8_fnuz()
+            and not is_sf_swizzled_layout
+            and x.ndim == 2
+            and x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+        )
+        else MXFP8_VALUE_DTYPE
+    )
+    fp_data = torch.empty_like(x, dtype=value_dtype)
 
     block_size = MXFP8_BLOCK_SIZE
 

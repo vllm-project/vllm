@@ -1276,7 +1276,9 @@ class FusedMoEConfig:
 
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
+    max_model_len: int = 0
     has_bias: bool = False
+    has_shared_experts: bool = False
     is_lora_enabled: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp

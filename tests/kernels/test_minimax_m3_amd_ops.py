@@ -8,21 +8,22 @@ tests assert the two agree within tolerance:
   * Gemma RMSNorm (plain + fused-add-residual)  -> fp32 PyTorch normalize
   * SwiGLU-OAI (split layout)                    -> fp32 PyTorch elementwise
   * Fused MXFP8 activation quant (Triton)        -> _mxfp8_e4m3_quantize_torch
-  * Native MXFP8 linear (dot_scaled)             -> dequant-to-bf16 @ matmul
-  * Native MXFP8 MoE (dot_scaled grouped GEMM)   -> dequant-to-bf16 MoE math
+  * Native MXFP8 linear (CDNA4 dot_scaled)       -> dequant-to-bf16 @ matmul
+  * Fused MXFP8 MoE (grouped GEMM)               -> dequant-to-bf16 MoE math
 
-The native MXFP8 GEMMs also guard the ``dot_scaled`` rhs-scale orientation: the
-scale is loaded ``[N, K//32]`` and passed WITHOUT transpose; a stray ``.T``
-makes the shape ``[K//32, N]`` and Triton raises before producing output, so any
-regression there fails these tests loudly.
+CDNA4 exercises Triton ``dot_scaled`` for linear and MoE. CDNA3 converts MoE
+checkpoint bytes to E4M3FNUZ, executes native FP8 partial dots for each 1x32
+block, and applies the E8M0 scale product in-register. Dense linear layers
+continue to use the faster BF16-at-load hipBLASLt path on CDNA3.
 
 Hardware scope: the whole module is ROCm-only (these are the AMD path; NVIDIA
-uses the FlashInfer kernels). The norm/activation/quant kernels run on any ROCm
-arch; the native MXFP8 ``dot_scaled`` linear/MoE tests are additionally gated to
-CDNA4 gfx95x (``@requires_gfx950``) since gfx942 uses the BF16 emulation path.
+uses the FlashInfer kernels). Fused MXFP8 MoE tests run on CDNA3 gfx94x and
+CDNA4 gfx95x; native MXFP8 linear tests remain CDNA4-only.
 
 Run:  pytest tests/kernels/test_minimax_m3_amd_ops.py -v
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     _mxfp8_e4m3_quantize_torch,
     _mxfp8_e4m3_quantize_triton,
     dequant_mxfp8_to_bf16,
+    normalize_mxfp8_e4m3fn_to_e4m3fnuz,
 )
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
@@ -57,16 +59,77 @@ def _gcn_arch() -> str:
         return ""
 
 
-# The pure-Triton norm/activation/quant kernels run on any ROCm arch (CDNA3
-# gfx942 and CDNA4 gfx950). The native MXFP8 ``dot_scaled`` GEMMs (linear + MoE)
-# use CDNA4 hardware microscaling and are gated to gfx95x in the source
-# (``RocmDotScaledMxfp8LinearKernel.is_supported``; the MoE oracle routes gfx942
-# to the BF16 emulation path instead) — so those tests are gfx950-only.
+# The fused MoE path is selected on MI300/MI325 (gfx94x) and MI350 (gfx95x).
+requires_mi3xx = pytest.mark.skipif(
+    not any(arch in _gcn_arch() for arch in ("gfx94", "gfx95")),
+    reason="fused ROCm MXFP8 requires gfx94x or gfx95x.",
+)
+
 requires_gfx950 = pytest.mark.skipif(
     "gfx95" not in _gcn_arch(),
-    reason="native MXFP8 dot_scaled is a CDNA4 (gfx95x) feature; "
-    "gfx942 uses the BF16 emulation path instead.",
+    reason="native MXFP8 linear requires CDNA4 (gfx95x).",
 )
+
+
+@requires_mi3xx
+def test_mxfp8_fused_moe_backend_supported():
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        Mxfp8NativeTritonExperts,
+    )
+
+    assert Mxfp8NativeTritonExperts._supports_current_device()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"max_model_len": 10240}, False),
+        ({"max_model_len": 0}, False),
+        ({"ep_size": 8}, False),
+        ({"has_shared_experts": False}, False),
+        ({"experts_per_token": 8}, False),
+        ({"hidden_dim": 4096}, False),
+    ],
+)
+def test_mxfp8_bf16_decode_fallback_scope(overrides, expected):
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        _should_use_bf16_decode_fallback,
+    )
+
+    values = {
+        "ep_size": 1,
+        "has_shared_experts": True,
+        "num_experts": 128,
+        "experts_per_token": 4,
+        "hidden_dim": 6144,
+        "intermediate_size": 3072,
+        "max_model_len": 2304,
+    }
+    values.update(overrides)
+    assert _should_use_bf16_decode_fallback(SimpleNamespace(**values)) is expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_fp8_fnuz(),
+    reason="E4M3FN checkpoint normalization is specific to gfx94x.",
+)
+@torch.inference_mode()
+def test_mxfp8_e4m3fn_to_fnuz_normalization():
+    value_bits = torch.zeros((1, 32), dtype=torch.int8, device=DEVICE)
+    value_bits[0, :3] = torch.tensor([-128, 56, -72], device=DEVICE)
+    values = value_bits.view(torch.float8_e4m3fn)
+    scales = torch.tensor([[127]], dtype=torch.uint8, device=DEVICE)
+    expected = dequant_mxfp8_to_bf16(values, scales)
+
+    converted, converted_scales = normalize_mxfp8_e4m3fn_to_e4m3fnuz(
+        values.clone(), scales.clone()
+    )
+
+    assert converted.dtype == torch.float8_e4m3fnuz
+    assert converted.view(torch.int8)[0, 0].item() == 0
+    assert converted_scales.item() == 128
+    assert torch.equal(dequant_mxfp8_to_bf16(converted, converted_scales), expected)
 
 
 def _relerr(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -176,7 +239,11 @@ def test_swiglu_oai_split(m, inter, limit, dtype):
 def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     torch.manual_seed(0)
     x = torch.randn(*shape, device=DEVICE, dtype=dtype)
-    xq_t, s_t = _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout=False)
+    xq_t, s_t = _mxfp8_e4m3_quantize_torch(
+        x,
+        is_sf_swizzled_layout=False,
+        value_dtype=current_platform.fp8_dtype(),
+    )
     xq_k, s_k = _mxfp8_e4m3_quantize_triton(x)
     assert s_k.shape == s_t.shape == (shape[0], shape[1] // 32)
     # E8M0 block exponents share the floor(log2(amax))+127 algorithm; allow at
@@ -189,7 +256,7 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
 
 
 # --------------------------------------------------------------------------- #
-# Native MXFP8 linear (dot_scaled) vs dequant-to-bf16 matmul
+# Native CDNA4 MXFP8 linear vs dequant-to-bf16 matmul
 # --------------------------------------------------------------------------- #
 @requires_gfx950
 @pytest.mark.parametrize("m,n,k", [(64, 256, 128), (37, 512, 256), (1, 6144, 4096)])
@@ -215,7 +282,7 @@ def test_mxfp8_native_linear(m, n, k):
 
 
 # --------------------------------------------------------------------------- #
-# Native MXFP8 MoE (dot_scaled grouped GEMM) vs dequant-to-bf16 MoE math
+# Fused MXFP8 MoE grouped GEMM vs dequant-to-bf16 MoE math
 # --------------------------------------------------------------------------- #
 def _ref_moe(x, w13, w2, topk_weights, topk_ids, alpha, beta, limit):
     T, H = x.shape
@@ -237,9 +304,14 @@ def _ref_moe(x, w13, w2, topk_weights, topk_ids, alpha, beta, limit):
     return out.to(x.dtype)
 
 
-@requires_gfx950
+@requires_mi3xx
 @pytest.mark.parametrize(
-    "T,H,inter,E,top_k", [(8, 256, 512, 8, 2), (1, 512, 256, 16, 4)]
+    "T,H,inter,E,top_k",
+    [
+        (8, 256, 512, 8, 2),
+        (1, 512, 256, 16, 4),
+        (1, 2048, 256, 4, 2),
+    ],
 )
 @torch.inference_mode()
 def test_mxfp8_native_moe(T, H, inter, E, top_k):
@@ -255,6 +327,9 @@ def test_mxfp8_native_moe(T, H, inter, E, top_k):
         w13_bf16, is_sf_swizzled_layout=False
     )
     w2_fp8, w2_scale = _mxfp8_e4m3_quantize_torch(w2_bf16, is_sf_swizzled_layout=False)
+    if current_platform.is_fp8_fnuz():
+        w13_fp8, w13_scale = normalize_mxfp8_e4m3fn_to_e4m3fnuz(w13_fp8, w13_scale)
+        w2_fp8, w2_scale = normalize_mxfp8_e4m3fn_to_e4m3fnuz(w2_fp8, w2_scale)
 
     x = torch.randn(T, H, device=DEVICE, dtype=torch.bfloat16) * 0.5
     logits = torch.randn(T, E, device=DEVICE, dtype=torch.float32)

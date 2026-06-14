@@ -95,6 +95,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -2092,7 +2093,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
-        On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
+        On devices without a fused MXFP8 MoE kernel,
         ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
@@ -2125,6 +2126,43 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             "MXFP8->BF16 load-time dequant complete (%d experts/layer); MoE "
             "now runs in BF16 with no per-step dequant.",
             num_experts,
+        )
+
+    def _retain_bf16_decode_weights(self, layer: RoutedExperts) -> None:
+        """Keep BF16 weights for decode-sized TP batches on gfx94x."""
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+
+        if self.moe_kernel is None:
+            raise RuntimeError("MXFP8 MoE kernel was not initialized.")
+        experts = self.moe_kernel.fused_experts
+        if not isinstance(experts, Mxfp8NativeTritonExperts):
+            raise TypeError(
+                "Expected Mxfp8NativeTritonExperts for the gfx94x native backend."
+            )
+
+        target_dtype = getattr(layer, "orig_dtype", torch.bfloat16)
+        w13_bf16 = dequant_mxfp8_to_bf16(layer.w13_weight, layer.w13_weight_scale).to(
+            target_dtype
+        )
+        w2_bf16 = dequant_mxfp8_to_bf16(layer.w2_weight, layer.w2_weight_scale).to(
+            target_dtype
+        )
+
+        layer.register_buffer("_mxfp8_w13_bf16", w13_bf16, persistent=False)
+        layer.register_buffer("_mxfp8_w2_bf16", w2_bf16, persistent=False)
+        experts.bind_bf16_weights(
+            layer._mxfp8_w13_bf16,
+            layer._mxfp8_w2_bf16,
+        )
+
+        logger.info_once(
+            "Retaining BF16 MXFP8 MoE weights for decode-sized gfx94x TP "
+            "batches; larger batches continue to use the native MXFP8 kernel."
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -2164,7 +2202,20 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
 
-        # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+
+        experts = self.moe_kernel.fused_experts
+        if (
+            self.mxfp8_backend == Fp8MoeBackend.NATIVE_MXFP8
+            and current_platform.is_fp8_fnuz()
+            and isinstance(experts, Mxfp8NativeTritonExperts)
+            and experts.requires_bf16_decode_weights
+        ):
+            self._retain_bf16_decode_weights(layer)
+
+        # No fused MXFP8 MoE kernel on this device: the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
         # weights to BF16 once, here, so the MoE runs like a BF16 checkpoint.
         # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the 1-byte

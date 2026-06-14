@@ -318,7 +318,13 @@ def FusedMoE(
         moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
+        max_model_len=(
+            vllm_config.model_config.max_model_len
+            if vllm_config.model_config is not None
+            else 0
+        ),
         has_bias=has_bias,
+        has_shared_experts=shared_experts is not None,
         is_lora_enabled=vllm_config.lora_config is not None,
         activation=moe_activation,
         device=vllm_config.device_config.device,
