@@ -740,10 +740,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         if "input_features" in processed_outputs:
             # Unpad per-item so each item's cache entry is
-            # self-contained. The batched() field config in
-            # _get_mm_fields_config will re-pad all fields to the
-            # batch's max length at batch time, ensuring consistent
-            # padding regardless of cache history.
+            # self-contained (independent of the batch it was first
+            # processed in). At batch time, batched() in
+            # _get_mm_fields_config stacks equal-length items into a
+            # tensor but leaves mixed-length items as a list; the
+            # list case is re-padded to the batch max in
+            # _process_audio_input, where padding is masked out.
             masks = processed_outputs["input_features_mask"]
             unpadded_features = [
                 f[mask]
@@ -1469,8 +1471,29 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        feats = audio_input["input_features_padded"]
+        masks = audio_input["input_features_mask"]
+        if isinstance(feats, list):
+            # Variable-length batch: MultiModalFieldConfig.batched() can only
+            # stack equal-shaped items, so for mixed mel lengths it falls back
+            # to a list of [T_i, 128] tensors. Re-pad here to the batch max.
+            # Padded frames are zero-filled and marked False in the mask; the
+            # audio tower masks padded frames at every SSCP conv and in
+            # attention, and only real (`enc[mask]`) tokens are kept below, so
+            # padding never affects the transcription.
+            t_max = max(f.shape[-2] for f in feats)
+            feat_dim = feats[0].shape[-1]
+            input_features = feats[0].new_zeros((len(feats), t_max, feat_dim))
+            input_features_mask = masks[0].new_zeros(
+                (len(feats), t_max), dtype=torch.bool
+            )
+            for i, (f, m) in enumerate(zip(feats, masks, strict=True)):
+                t = f.shape[-2]
+                input_features[i, :t] = f
+                input_features_mask[i, :t] = m.to(torch.bool)
+        else:
+            input_features = feats.squeeze(1)
+            input_features_mask = masks.squeeze(1)
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
