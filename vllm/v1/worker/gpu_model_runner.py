@@ -1303,6 +1303,14 @@ class GPUModelRunner(
                 # when prev_num_draft_len > 0.
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
+                elif num_computed_tokens < req_state.num_computed_tokens:
+                    # Scheduler rewound num_computed_tokens (e.g. KV load
+                    # failure triggered recompute via
+                    # _update_requests_with_invalid_blocks). All tokens past
+                    # the rewind point were invalidated, which includes the
+                    # context used to propose the previous drafts. Skip the
+                    # optimistic acceptance assumption entirely.
+                    req_state.prev_num_draft_len = 0
                 else:
                     # Optimistically assume all accepted; queue up a correction
                     # to be called after the model forward to preserve async
