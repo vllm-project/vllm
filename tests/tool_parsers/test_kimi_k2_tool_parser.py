@@ -580,3 +580,74 @@ class TestStreamingIntervals:
         assert len(rec.tool_calls) == 1
         assert rec.tool_calls[0].function.name == "get_weather"
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+
+class TestToolNameAndArgumentFidelity:
+    """Tool names containing dots must be preserved (not truncated to the last
+    dotted segment), and streamed argument fragments must concatenate to exactly
+    the non-streaming arguments (no leading/trailing whitespace drift)."""
+
+    @pytest.mark.parametrize(
+        "wire_id, expected_name",
+        [
+            ("functions.get_weather:0", "get_weather"),
+            ("get_weather:0", "get_weather"),  # no functions. prefix
+            ("functions.my.namespace.do_thing:0", "my.namespace.do_thing"),
+            ("functions.functions:0", "functions"),  # tool literally named functions
+        ],
+    )
+    def test_dotted_tool_name_nonstreaming(self, parser, wire_id, expected_name):
+        _, tool_calls = run_tool_extraction(
+            parser, _wrap(_tool(wire_id, '{"x": 1}')), streaming=False
+        )
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == expected_name
+
+    @pytest.mark.parametrize(
+        "wire_id, expected_name",
+        [
+            ("functions.get_weather:0", "get_weather"),
+            ("functions.my.namespace.do_thing:0", "my.namespace.do_thing"),
+        ],
+    )
+    def test_dotted_tool_name_streaming(
+        self, kimi_k2_tokenizer, wire_id, expected_name
+    ):
+        deltas = _chunk_tokenized_deltas(
+            kimi_k2_tokenizer, _wrap(_tool(wire_id, '{"x": 1}')), stream_interval=1
+        )
+        parser = KimiK2ToolParser(kimi_k2_tokenizer)
+        rec = run_tool_extraction_streaming(
+            parser, deltas, assert_one_tool_per_delta=False
+        )
+        assert len(rec.tool_calls) == 1
+        assert rec.tool_calls[0].function.name == expected_name
+
+    @pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+    def test_streaming_arguments_match_nonstreaming_with_whitespace(
+        self, kimi_k2_tokenizer, stream_interval
+    ):
+        # Kimi emits whitespace around the JSON under the whitespace-tolerant
+        # grammar; streamed fragments must concatenate to exactly the
+        # non-streaming arguments.
+        output = (
+            SECTION_BEGIN
+            + TOOL_BEGIN
+            + "functions.get_weather:0 "
+            + ARG_BEGIN
+            + ' {"city": "SF"} '
+            + TOOL_END
+            + SECTION_END
+        )
+        ns_parser = KimiK2ToolParser(kimi_k2_tokenizer)
+        _, nonstream = run_tool_extraction(ns_parser, output, streaming=False)
+
+        deltas = _chunk_tokenized_deltas(kimi_k2_tokenizer, output, stream_interval)
+        st_parser = KimiK2ToolParser(kimi_k2_tokenizer)
+        rec = run_tool_extraction_streaming(
+            st_parser, deltas, assert_one_tool_per_delta=False
+        )
+
+        assert len(rec.tool_calls) == 1
+        assert nonstream[0].function.arguments == rec.tool_calls[0].function.arguments
+        assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "SF"}
