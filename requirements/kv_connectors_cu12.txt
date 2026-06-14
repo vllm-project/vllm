@@ -1,0 +1,4 @@
+-r kv_connectors.txt
+# CuPy 14.1.0 imports pytest from cupy.testing._random. Use <14.1.0
+# until a fixed newer release is verified for runtime images.
+cupy-cuda12x < 14.1.0
