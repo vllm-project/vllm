@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -168,6 +169,7 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.pool.late_interaction import LATE_INTERACTION_MODE_SCORE_DOC
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
@@ -3357,9 +3359,79 @@ class GPUModelRunner(
         )
 
         model = cast(VllmModelForPooling, self.model)
-        raw_pooler_output: PoolerOutput = model.pooler(
-            hidden_states=hidden_states, pooling_metadata=pooling_metadata
+
+        # Zero-copy path: project entire batch in one matmul, then
+        # build per-request output by slicing (views, no copy).
+        # Doc slices stay contiguous in projected_batch — the rerank
+        # kernel reads them directly, skipping torch.cat entirely.
+        #
+        # Requirements / fallbacks to normal pooler:
+        #   - Chunked prefill: AllPool caches partial chunks that the
+        #     slice bypass cannot reconstruct.
+        #   - Matryoshka (dimensions != embed_dim): forward_chunk
+        #     truncates BEFORE activation; project_batch normalizes the
+        #     full vector, so a later truncation would not be unit norm.
+        #   - use_activation=False: project_batch unconditionally applies
+        #     activation; this diverges from forward_chunk's gated path.
+        projected_batch = None
+        cursor = pooling_metadata.pooling_cursor
+        use_zerocopy = (
+            self.late_interaction_runner.has_pending_docs
+            and not os.environ.get("VLLM_DISABLE_ZEROCOPY")
+            and hasattr(model.pooler, "head")
+            and hasattr(model.pooler.head, "project_batch")
+            and cursor is not None
+            and not cursor.is_partial_prefill()
         )
+
+        if use_zerocopy:
+            # Verify every doc request uses params compatible with
+            # project_batch (no matryoshka truncation, activation on).
+            for p in pooling_metadata.pooling_params:
+                lip = p.late_interaction_params
+                if (
+                    lip is not None
+                    and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC
+                    and (p.dimensions is not None or p.use_activation is False)
+                ):
+                    use_zerocopy = False
+                    break
+
+        if use_zerocopy:
+            assert cursor is not None  # narrowed by use_zerocopy
+            pooler = model.pooler
+            # One matmul for the full batch — all tokens projected.
+            projected_batch = pooler.head.project_batch(hidden_states)  # type: ignore[operator,union-attr]
+            # Per-request slicing: AllPool extracts views of hidden_states
+            pooled_data = pooler.pooling(hidden_states, pooling_metadata)  # type: ignore[operator]
+            # Single GPU->CPU sync instead of N .item() calls per request.
+            firsts = cursor.first_token_indices_gpu.tolist()
+            lasts = cursor.last_token_indices_gpu.tolist()
+            params_list = pooling_metadata.pooling_params
+            # Build output: docs get projected_batch slices (views),
+            # queries/other go through normal forward_chunk.
+            zerocopy_output: list[torch.Tensor | None] = []
+            for i in range(num_reqs):
+                lip = params_list[i].late_interaction_params
+                if lip is not None and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC:
+                    # View into projected_batch — no copy, no extra alloc
+                    zerocopy_output.append(projected_batch[firsts[i] : lasts[i] + 1])
+                else:
+                    zerocopy_output.append(
+                        pooler.head.forward_chunk(  # type: ignore[operator,union-attr]
+                            pooled_data[i], params_list[i]
+                        )
+                    )
+            raw_pooler_output: PoolerOutput = zerocopy_output
+            # Release AllPool views so hidden_states can be freed.
+            # forward_chunk results are independent tensors; doc entries
+            # are views of projected_batch (not hidden_states).
+            del pooled_data
+        else:
+            raw_pooler_output = model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=pooling_metadata,
+            )
 
         finished_mask = [
             seq_len == prompt_len
@@ -3370,6 +3442,8 @@ class GPUModelRunner(
             pooling_params=pooling_metadata.pooling_params,
             req_ids=self.input_batch.req_ids,
             finished_mask=finished_mask,
+            projected_batch=projected_batch,
+            pooling_cursor=pooling_metadata.pooling_cursor,
         )
 
         model_runner_output = ModelRunnerOutput(
@@ -5210,6 +5284,14 @@ class GPUModelRunner(
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
+
+        # Warm up flash-maxsim Triton kernels only when the loaded model
+        # supports late-interaction zero-copy scoring (same capability check
+        # the runtime path uses). Plain LLMs skip the autotune cost.
+        pooler = getattr(self.model, "pooler", None)
+        pooler_head = getattr(pooler, "head", None) if pooler is not None else None
+        if pooler_head is not None and hasattr(pooler_head, "project_batch"):
+            self.late_interaction_runner.warmup_kernels()
 
         if (
             self._moe_model is not None
