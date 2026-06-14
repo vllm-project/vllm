@@ -22,6 +22,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -1077,9 +1078,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
-                )
+                parallel_factors = vllm_config.parallel_config.compile_factors()
+                ready_msg["parallel_config_hash"] = hash_factors(parallel_factors)
 
             handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 

@@ -8,10 +8,9 @@ from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from vllm import envs
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -78,7 +77,7 @@ class LoRAConfig:
     deployment. Only meaningful forMoE models; ignored otherwise. Default False 
     keeps the existing model-driven behavior."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -90,20 +89,17 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.enable_tower_connector_lora)
-        factors.append(self.enable_mixed_moe_lora_format)
-        # target_modules affects which modules get LoRA applied
-        factors.append(
-            tuple(sorted(self.target_modules)) if self.target_modules else None
-        )
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            # Runtime/placement only; does not affect compiled graph
+            "max_cpu_loras",
+            "default_mm_loras",
+        }
+        factors = get_compile_factors(self, ignored_factors)
+        if self.target_modules is not None:
+            # Runtime treats this as set-style membership; order is not semantic.
+            # we're overwriting here because we want to sort
+            factors["target_modules"] = tuple(sorted(self.target_modules))
+        return factors
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
