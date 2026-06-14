@@ -14,7 +14,6 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
-from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -65,12 +64,11 @@ class BaseModelLoader(ABC):
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
+            peak_memory = torch.accelerator.max_memory_allocated()
+            logger.debug_once(
+                "Peak GPU memory after loading weights: %s GiB",
+                format_gib(peak_memory),
+            )
 
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.

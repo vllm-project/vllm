@@ -43,7 +43,7 @@ MODELS = [
 )
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -134,7 +134,7 @@ def test_kv_cache_model_load_and_run(
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -171,7 +171,7 @@ def test_online_quantization(
                 assert attn._k_scale == 1.0
                 assert attn._v_scale == 1.0
 
-            if current_platform.is_cuda():
+            if current_platform.is_cuda() or current_platform.is_xpu():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
                     assert fc1.weight.dtype == torch.float8_e4m3fn
