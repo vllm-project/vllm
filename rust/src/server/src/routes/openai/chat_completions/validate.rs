@@ -1,6 +1,8 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::token_ids::{validate_allowed_token_ids, validate_logit_bias};
+use crate::routes::openai::utils::token_ids::{
+    validate_allowed_token_ids, validate_logit_bias, validate_stop_token_ids,
+};
 use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
@@ -169,7 +171,9 @@ pub(super) fn validate_token_id_ranges(
     tokenizer_vocab_size: usize,
     model_vocab_size: Option<usize>,
 ) -> Result<(), ApiError> {
+    let prompt_bound = tokenizer_vocab_size.max(model_vocab_size.unwrap_or(0));
     validate_allowed_token_ids(request.allowed_token_ids.as_deref(), tokenizer_vocab_size)?;
+    validate_stop_token_ids(request.stop_token_ids.as_deref(), prompt_bound)?;
     validate_logit_bias(
         request.logit_bias.as_ref(),
         model_vocab_size.unwrap_or(usize::MAX),

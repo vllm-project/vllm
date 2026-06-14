@@ -4,6 +4,7 @@ use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::token_ids::{
     validate_allowed_token_ids, validate_logit_bias, validate_prompt_token_ids,
+    validate_stop_token_ids,
 };
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
@@ -111,6 +112,7 @@ pub(super) fn validate_token_id_ranges(
     let prompt_bound = tokenizer_vocab_size.max(model_vocab_size.unwrap_or(0));
     validate_prompt_token_ids(&request.prompt, prompt_bound)?;
     validate_allowed_token_ids(request.allowed_token_ids.as_deref(), tokenizer_vocab_size)?;
+    validate_stop_token_ids(request.stop_token_ids.as_deref(), prompt_bound)?;
     validate_logit_bias(
         request.logit_bias.as_ref(),
         model_vocab_size.unwrap_or(usize::MAX),
