@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.config import ModelConfig
@@ -10,6 +12,7 @@ from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
     _detect_developer_role_support,
+    _detect_qwen_system_first_template,
     _get_hf_base_chat_template_params,
     _try_extract_ast,
     resolve_chat_template,
@@ -702,6 +705,14 @@ class TestDetectDeveloperRoleSupport:
         assert _detect_developer_role_support(STRICT_ROLE_TEMPLATE) is False
 
 
+class TestDetectQwenSystemFirstTemplate:
+    def test_detects_qwen_system_first_template(self):
+        assert _detect_qwen_system_first_template(SYSTEM_FIRST_TEMPLATE) is True
+
+    def test_absent_in_chatml(self):
+        assert _detect_qwen_system_first_template(CHATML_TEMPLATE) is False
+
+
 class TestSafeApplyChatTemplateDeveloperRole:
     @pytest.fixture
     def model_config(self):
@@ -844,6 +855,60 @@ SYSTEM_FIRST_TEMPLATE = (
     "{{ '<|im_start|>assistant\\n' }}"
     "{% endif %}"
 )
+
+
+class _FakeModelConfig:
+    def __init__(self):
+        self.trust_remote_code = False
+        self.hf_config = SimpleNamespace(model_type="qwen3_5")
+
+
+class _FakeTokenizer:
+    name_or_path = "Qwen/Qwen3.5-27B"
+
+    def get_chat_template(self, chat_template=None, tools=None):
+        return chat_template
+
+    def apply_chat_template(
+        self,
+        conversation,
+        tools=None,
+        chat_template=None,
+        tokenize=True,
+        add_generation_prompt=False,
+        return_dict=False,
+    ):
+        prompt = ""
+        for i, message in enumerate(conversation):
+            role = message["role"]
+            if role == "system" and i > 0:
+                raise ValueError("System message must be at the beginning.")
+            prompt += f"<|im_start|>{role}\n{message.get('content', '')}<|im_end|>\n"
+        if add_generation_prompt:
+            prompt += "<|im_start|>assistant\n"
+        return prompt
+
+
+class TestSafeApplyChatTemplateQwenSystemRole:
+    def test_qwen_template_consolidates_non_initial_system(self):
+        conversation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+            {"role": "system", "content": "Summarize the conversation."},
+            {"role": "user", "content": "Please summarize."},
+        ]
+        result = safe_apply_chat_template(
+            _FakeModelConfig(),
+            _FakeTokenizer(),
+            conversation,
+            chat_template=SYSTEM_FIRST_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert result.count("<|im_start|>system") == 1
+        assert "You are helpful.\n\nSummarize the conversation." in result
+        assert "Please summarize." in result
 
 
 class TestConsolidateSystemMessages:
