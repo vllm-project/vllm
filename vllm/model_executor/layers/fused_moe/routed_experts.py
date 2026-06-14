@@ -197,6 +197,7 @@ class RoutedExperts(PluggableLayer):
             "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         )
 
     def _ensure_moe_quant_config_init(self):
@@ -610,6 +611,7 @@ class RoutedExperts(PluggableLayer):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
             "CompressedTensorsWNA16RDNA3MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()

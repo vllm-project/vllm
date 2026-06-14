@@ -1,3 +1,4 @@
+#include <cuda.h>
 #include <cudaTypedefs.h>
 
 #include <torch/csrc/stable/tensor.h>
@@ -174,15 +175,20 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
 
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
   // CUTLASS grouped FP8 kernels need at least CUDA 12.3 and SM90 (Hopper)
-  // or CUDA 12.8 and SM100 (Blackwell)
+  // or CUDA 12.8 and SM100 (Blackwell). Only report archs that have an
+  // actual cutlass_moe_mm dispatch compiled into this file.
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability >= 100) {
+  #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
+  if (cuda_device_capability >= 100 && cuda_device_capability < 110) {
     return CUDA_VERSION >= 12080;
   }
-  if (cuda_device_capability >= 90) {
+  #endif
+  #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
+  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
     return CUDA_VERSION >= 12030;
   }
+  #endif
 #endif
 
   return false;
