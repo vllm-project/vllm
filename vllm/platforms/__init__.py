@@ -169,16 +169,21 @@ def cpu_platform_plugin() -> str | None:
             logger.debug(
                 "Confirmed CPU platform is available because vLLM is built with CPU."
             )
-        if not is_cpu:
-            import sys
-
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
-                logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
-                )
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
+
+    # Fallback: on macOS, always use CPU.  This must live outside the
+    # try/except above because vllm_version_matches_substr re-raises
+    # PackageNotFoundError in source checkouts, which would skip any
+    # darwin check placed inside the try block.
+    if not is_cpu:
+        import sys
+
+        is_cpu = sys.platform.startswith("darwin")
+        if is_cpu:
+            logger.debug(
+                "Confirmed CPU platform is available because the machine is macOS."
+            )
 
     if not is_cpu:
         return None
