@@ -237,21 +237,30 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
   // Get the final absolute maximum values.
   float vecMax = float(__hmax(localMax.x, localMax.y));
 
-  // Get the SF (max value of the vector / max value of e2m1).
-  // maximum value of e2m1 = 6.0.
-  // TODO: use half as compute data type.
-  float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
   // 8 bits representation of the SF.
+  float SFValue;
   uint8_t fp8SFVal;
-  // Write the SF to global memory (STG.8).
+
   if constexpr (UE8M0_SF) {
-    // Extract the 8 exponent bits from float32.
-    // float 32bits = 1 sign bit + 8 exponent bits + 23 mantissa bits.
-    uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
-    fp8SFVal = tmp & 0xff;
-    // Convert back to fp32.
-    reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
+    // OCP MX spec E8M0 scale computation (MXFP4 path):
+    // scale_exp = biased_exponent(round_up(vecMax)) - 2
+    //   -2 because max E2M1 value is 6.0 ≈ 2^2.58; we use 2^2=4 as the
+    //   safe divisor so that max_val / scale <= 6.0 for values near 2^n.
+    uint32_t max_bits = __float_as_uint(vecMax);
+    // Add rounding bias at mantissa bit 21 (equivalent to bf16 val_to_add=32
+    // at bit 5). Threshold: values with mantissa >= 0.75 (i.e. >= 1.75*2^n)
+    // round up to the next power of 2.
+    uint32_t rounded_bits = (max_bits + (1u << 21)) & 0xFF800000u;
+    uint32_t biased_exp = (rounded_bits >> 23) & 0xFFu;
+    uint32_t scale_exp = (biased_exp > 2u) ? (biased_exp - 2u) : 0u;
+    scale_exp = min(scale_exp, 254u);
+    fp8SFVal = static_cast<uint8_t>(scale_exp);
+    // Reconstruct scale as float32: scale = 2^(scale_exp - 127)
+    uint32_t sf_bits = scale_exp << 23;
+    SFValue = __uint_as_float(sf_bits);
   } else {
+    // NVFP4 path: scale = max / 6.0, stored as E4M3.
+    SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
     // Here SFValue is always positive, so E4M3 is the same as UE4M3.
     __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
     reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
@@ -262,13 +271,21 @@ __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
   // Write the SF to global memory (STG.8).
   if (SFout) *SFout = fp8SFVal;
 
-  // Get the output scale.
-  // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
-  //                       reciprocal(SFScaleVal))
-  float outputScale =
-      SFValue != 0.0f ? reciprocal_approximate_ftz(
+  // Get the output scale (= 1 / SFValue for the MXFP4/UE8M0 path where
+  // SFScaleVal=1).  Use exact division for UE8M0 to ensure bit-exact scaling
+  // that matches the reference QDQ implementation (dividing by a power-of-2
+  // scale is exact in IEEE 754).
+  float outputScale;
+  if constexpr (UE8M0_SF) {
+    // SFValue is always a power of 2 for UE8M0, so 1/SFValue is exact.
+    outputScale = SFValue != 0.0f ? (1.0f / SFValue) : 0.0f;
+  } else {
+    // NVFP4 path: use fast approximate reciprocal (original behavior).
+    outputScale = SFValue != 0.0f
+                      ? reciprocal_approximate_ftz(
                             SFValue * reciprocal_approximate_ftz(SFScaleVal))
                       : 0.0f;
+  }
 
   // Convert the input to float.
   float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
