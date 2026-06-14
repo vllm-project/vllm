@@ -210,8 +210,31 @@ async def stream_decode_response(session, response, request_id):
         await session.close()
 
 
-def example_round_robin_dp_loader(request_number, dp_size):
-    return request_nums % dp_size
+def flat_interleaved_dp_route(request_number, instances):
+    """Flat round-robin over the full (instance, dp_rank) slot space.
+
+    ONE counter over (n_instances * dp_size) slots, so instance-selection and
+    DP-rank-selection are derived from the SAME index and can never alias. The
+    previous scheme computed instance = req % n and rank = req % dp from the
+    same counter with n | dp, which locked each instance to a stride-n subset
+    of its ranks (e.g. 2 prefill instances -> 4 of 8 ranks each -> half the
+    GPUs never receive a request, so the deployment falsely appears not to
+    scale).
+
+    Interleaved order — inst0_r0, inst1_r0, inst0_r1, inst1_r1, ... — so
+    consecutive requests alternate instances AND every rank gets walked.
+
+    Assumes homogeneous dp_size across a role's instances (true for the
+    DP<->DP and DP<->TP deployments this proxy targets). Returns
+    (instance_index, dp_rank); dp_rank is None when dp_size == 1 (e.g. a TP
+    decode), which avoids forwarding an out-of-range data-parallel rank.
+    """
+    n = len(instances)
+    dp = instances[0]["dp_size"]
+    slot = (request_number - 1) % (n * dp)
+    inst_idx = slot % n
+    dp_rank = (slot // n) if dp > 1 else None
+    return inst_idx, dp_rank
 
 
 @app.route("/v1/completions", methods=["POST"])
@@ -244,17 +267,20 @@ async def handle_request(api: str, request: Request):
                     503,
                 )
             )
-        pid = request_nums % len(prefill_instances)
-        did = request_nums % len(decode_instances)
+        # Flat interleaved round-robin (see flat_interleaved_dp_route): ONE
+        # counter over the full (instance, dp_rank) slot space per role, so
+        # instance-selection and DP-rank-selection derive from the same index
+        # and can never alias. The old scheme keyed both on request_nums with
+        # n_instances | dp_size, stranding half the ranks (e.g. in 2P_DP8EP).
+        pid, selected_prefill_dp_rank = flat_interleaved_dp_route(
+            request_nums, prefill_instances
+        )
+        # Decode instance selection uses the same interleaved walk; in READ
+        # mode the decode reads KV from selected_prefill_dp_rank, so the
+        # decode's own dp_rank is not forwarded here.
+        did, _ = flat_interleaved_dp_route(request_nums, decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
         decode_instance_endpoint = decode_instances[did]
-
-        selected_prefill_dp_rank = None
-        if prefill_instance_endpoint["dp_size"] > 1:
-            selected_prefill_dp_rank = example_round_robin_dp_loader(
-                request_nums // len(prefill_instance_endpoint),
-                prefill_instance_endpoint["dp_size"],
-            )
 
         # Embed both zmq_addresses in the request_id so the connector can parse
         # the peer's host/ports from it, similar to P2P-NCCL
@@ -422,8 +448,9 @@ if __name__ == "__main__":
     app.config["BODY_TIMEOUT"] = 360000
     app.config["RESPONSE_TIMEOUT"] = 360000
 
-    import os
     import asyncio
+    import os
+
     from hypercorn.asyncio import serve as _hypercorn_serve
     from hypercorn.config import Config as _HypercornConfig
 
