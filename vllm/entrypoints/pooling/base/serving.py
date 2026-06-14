@@ -16,9 +16,9 @@ from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
@@ -109,6 +109,11 @@ class PoolingServingBase(ABC):
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
+        if isinstance(pooling_params, list):
+            for params in pooling_params:
+                params.verify(self.model_config)
+        else:
+            pooling_params.verify(self.model_config)
         ctx = PoolingServeContext(
             request=request,
             raw_request=raw_request,
@@ -283,7 +288,6 @@ class PoolingServingBase(ABC):
         request = ctx.request
         if request.model in self.models.lora_requests:
             ctx.lora_request = self.models.lora_requests[request.model]
-            return None
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.

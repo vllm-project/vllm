@@ -993,6 +993,16 @@ class SupportsLateInteraction(Protocol):
 
     score_type: ClassVar[ScoreType] = "late-interaction"
 
+    @classmethod
+    def is_colbert_pooling_model(cls, model_config: object) -> bool:
+        """Return True when asymmetric ColBERT encoding applies."""
+        ...
+
+    @classmethod
+    def get_colbert_encoder(cls, model_config: object, tokenizer: object):
+        """Return ColBERT query/document text encoder for IO processors."""
+        ...
+
 
 class SupportsQuant:
     """The interface required for all models that support quantization."""
@@ -1658,7 +1668,8 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 

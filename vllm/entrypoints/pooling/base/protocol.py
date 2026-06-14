@@ -17,6 +17,8 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
+ColBERTEmbeddingMode = Literal["query", "document"]
+
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
     # --8<-- [start:pooling-common-params]
@@ -293,6 +295,29 @@ class EmbedRequestMixin(EncodingRequestMixin):
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:embed-extra-params]
+
+
+def validate_colbert_embedding_mode(
+    model_config,
+    embedding_mode: ColBERTEmbeddingMode | None,
+) -> None:
+    """Validate ``embedding_mode`` before pooling IO (ColBERT architectures only)."""
+    from vllm.model_executor.models.colbert_encoding import (
+        validate_colbert_embedding_mode as _validate_colbert_embedding_mode,
+    )
+
+    _validate_colbert_embedding_mode(model_config, embedding_mode)
+
+
+class ColBERTEmbeddingModeMixin(OpenAIBaseModel):
+    embedding_mode: ColBERTEmbeddingMode | None = Field(
+        default=None,
+        description=(
+            "ColBERT asymmetric encoding mode. Use 'query' for query embeddings "
+            "and 'document' for document embeddings. When omitted, legacy "
+            "token_embed behavior is preserved."
+        ),
+    )
 
 
 class ClassifyRequestMixin(OpenAIBaseModel):

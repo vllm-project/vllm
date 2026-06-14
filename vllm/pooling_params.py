@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 
@@ -61,6 +61,9 @@ class PoolingParams(
     step_tag_id: int | None = None
     returned_token_ids: list[int] | None = None
 
+    ## ColBERT asymmetric encoding (token_embed)
+    embedding_mode: Literal["query", "document"] | None = None
+
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
@@ -87,6 +90,12 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
+        from vllm.model_executor.models.colbert_encoding import (
+            validate_colbert_embedding_mode,
+        )
+
+        validate_colbert_embedding_mode(model_config, self.embedding_mode)
+
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
@@ -219,8 +228,17 @@ class PoolingParams(
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
+            f"embedding_mode={self.embedding_mode}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
+
+    def sync_colbert_extra_kwargs(self) -> None:
+        if self.embedding_mode is None:
+            return
+        extra = dict(self.extra_kwargs or {})
+        extra["embedding_mode"] = self.embedding_mode
+        extra["colbert_embedding_mode"] = self.embedding_mode
+        self.extra_kwargs = extra
 
     def __post_init__(self) -> None:
         if self.output_kind != RequestOutputKind.FINAL_ONLY:
@@ -228,3 +246,4 @@ class PoolingParams(
                 "For pooling output_kind has to be FINAL_ONLY, "
                 f"got {self.output_kind!r}"
             )
+        self.sync_colbert_extra_kwargs()
