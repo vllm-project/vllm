@@ -15,6 +15,7 @@ from typing import ClassVar
 import torch
 import torch.nn as nn
 
+import vllm._custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
@@ -82,9 +83,32 @@ def basic_cache(
     to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
     kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ):
-    block_size = kv_cache.shape[1]
-    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
+    if not to_cache.is_cuda:
+        block_size = kv_cache.shape[1]
+        valid = slot_mapping >= 0
+        kv_cache[
+            slot_mapping[valid] // block_size,
+            slot_mapping[valid] % block_size,
+        ] = to_cache[valid]
+        return
+
+    # Use the existing fixed-shape cache update kernel on CUDA. It skips
+    # negative slot ids internally without materializing slot_mapping[valid],
+    # which keeps CUDA graph replay safe when padding slots change to -1.
+    ops.reshape_and_cache_flash(
+        to_cache,
+        to_cache,
+        kv_cache,
+        kv_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -221,7 +245,14 @@ class CacheOnlyAttentionImpl(AttentionImpl):
             f"KV cache must be {self.kv_cache_torch_dtype}, got {kv_cache.dtype}"
         )
 
-        basic_cache(to_cache, kv_cache, slot_mapping)
+        basic_cache(
+            to_cache,
+            kv_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def forward(self, *args, **kwargs):
         # Empty implementation of abstract method
