@@ -47,6 +47,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
     get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
@@ -77,7 +78,19 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    CrossAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -91,6 +104,99 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+def _dtype_str(dtype) -> str:
+    return str(dtype).replace("torch.", "")
+
+
+def _serialize_group(group: KVCacheGroupSpec) -> dict:
+    """Serialize one KVCacheGroupSpec to a plain dict safe for IPC transport.
+    All torch.dtype values are converted to plain strings (e.g. 'bfloat16')
+    and the concrete spec class name is stored under 'spec_type' so the API
+    layer can reconstruct the correct Pydantic model without isinstance checks.
+    """
+    spec = group.kv_cache_spec
+    base: dict = {
+        "spec_type": type(spec).__name__,
+        "layer_names": group.layer_names,
+        "block_size": spec.block_size,
+        "page_size_bytes": spec.page_size_bytes,
+    }
+
+    # Most-derived types must be checked before their base types.
+    if isinstance(spec, MLAAttentionSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "head_size_v": spec.head_size_v,
+            "dtype": _dtype_str(spec.dtype),
+            "sliding_window": spec.sliding_window,
+            "attention_chunk_size": spec.attention_chunk_size,
+            "cache_dtype_str": spec.cache_dtype_str,
+        }
+    if isinstance(spec, SinkFullAttentionSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "head_size_v": spec.head_size_v,
+            "dtype": _dtype_str(spec.dtype),
+            "sliding_window": spec.sliding_window,
+            "attention_chunk_size": spec.attention_chunk_size,
+            "sink_len": spec.sink_len,
+        }
+    if isinstance(spec, FullAttentionSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "head_size_v": spec.head_size_v,
+            "dtype": _dtype_str(spec.dtype),
+            "sliding_window": spec.sliding_window,
+            "attention_chunk_size": spec.attention_chunk_size,
+        }
+    if isinstance(spec, SlidingWindowSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "dtype": _dtype_str(spec.dtype),
+            "sliding_window": spec.sliding_window,
+        }
+    if isinstance(spec, ChunkedLocalAttentionSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "dtype": _dtype_str(spec.dtype),
+            "attention_chunk_size": spec.attention_chunk_size,
+        }
+    if isinstance(spec, CrossAttentionSpec):
+        return base | {
+            "num_kv_heads": spec.num_kv_heads,
+            "head_size": spec.head_size,
+            "dtype": _dtype_str(spec.dtype),
+        }
+    if isinstance(spec, MambaSpec):
+        return base | {
+            "shapes": [list(s) for s in spec.shapes],
+            "dtypes": [_dtype_str(d) for d in spec.dtypes],
+            "mamba_type": spec.mamba_type,
+            "mamba_cache_mode": spec.mamba_cache_mode,
+        }
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return base | {
+            "layer_specs": [
+                _serialize_group(KVCacheGroupSpec([name], sub_spec))
+                for name, sub_spec in spec.kv_cache_specs.items()
+            ],
+        }
+
+    raise ValueError(f"Unhandled KVCacheSpec type: {type(spec)!r}")
+
+
+def _serialize_kv_cache_groups(kv_cache_config: KVCacheConfig) -> list[dict]:
+    return [
+        {"group_id": i} | _serialize_group(g)
+        for i, g in enumerate(kv_cache_config.kv_cache_groups)
+    ]
 
 
 class EngineCore:
@@ -327,6 +433,20 @@ class EngineCore:
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
+
+    def get_kv_cache_config(self) -> dict:
+        kv_cache_config = self.scheduler.kv_cache_config
+        block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        max_concurrency = get_max_concurrency_for_kv_cache_config(
+            self.vllm_config, kv_cache_config
+        )
+        return {
+            "kv_cache_size_tokens": kv_cache_config.num_blocks * block_size,
+            "max_concurrency": max_concurrency,
+            "num_gpu_blocks": kv_cache_config.num_blocks,
+            "num_cpu_blocks": self.vllm_config.cache_config.num_cpu_blocks or 0,
+            "groups": _serialize_kv_cache_groups(kv_cache_config),
+        }
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
