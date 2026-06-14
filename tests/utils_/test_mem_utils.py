@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm_test_utils.monitor import monitor
 
@@ -129,3 +130,54 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
         assert snapshot.free_memory == mock_cuda_free
         assert snapshot.total_memory == mock_cuda_total
         mock_psutil.virtual_memory.assert_not_called()
+
+
+def test_memory_snapshot_xpu_unsupported_mem_query_fallback():
+    """On XPU, unsupported mem_get_info should fallback to host memory."""
+    mock_total_memory = 16 * 1024**3
+    mock_psutil_available = 12 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+    ):
+        mock_platform.mem_get_info.side_effect = RuntimeError(
+            "doesn't support querying the available free memory"
+        )
+        mock_platform.get_device_total_memory.return_value = mock_total_memory
+        mock_platform.is_integrated_gpu.return_value = False
+        mock_platform.memory_stats.return_value = {
+            "allocated_bytes.all.peak": 0,
+        }
+        mock_platform.memory_reserved.return_value = 0
+        mock_platform.current_device = lambda: "xpu:0"
+        mock_platform.device_type = "xpu"
+
+        mock_vmem = MagicMock()
+        mock_vmem.available = mock_psutil_available
+        mock_psutil.virtual_memory.return_value = mock_vmem
+
+        snapshot = MemorySnapshot(device="xpu:0")
+
+        assert snapshot.total_memory == mock_total_memory
+        assert snapshot.free_memory == mock_psutil_available
+
+
+def test_memory_snapshot_non_xpu_runtime_error_reraises():
+    """Non-XPU mem_get_info RuntimeError should not be swallowed."""
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil"),
+    ):
+        mock_platform.mem_get_info.side_effect = RuntimeError("boom")
+        mock_platform.is_integrated_gpu.return_value = False
+        mock_platform.memory_stats.return_value = {
+            "allocated_bytes.all.peak": 0,
+        }
+        mock_platform.current_device = lambda: "cuda:0"
+        mock_platform.device_type = "cuda"
+
+        with patch("torch.accelerator.memory_reserved", return_value=0):
+            with patch("torch.accelerator.memory_stats", return_value={}):
+                with pytest.raises(RuntimeError, match="boom"):
+                    MemorySnapshot(device="cuda:0")
