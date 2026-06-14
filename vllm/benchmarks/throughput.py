@@ -33,7 +33,11 @@ from vllm.benchmarks.datasets import (
     add_random_dataset_base_args,
     add_random_multimodal_dataset_args,
 )
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    parse_metadata,
+    write_to_json,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -489,7 +493,9 @@ def save_to_pytorch_benchmark_format(
             "tokens_per_second": [results["tokens_per_second"]],
         },
         extra_info={
-            k: results[k] for k in ["elapsed_time", "num_requests", "total_num_tokens"]
+            k: v
+            for k, v in results.items()
+            if k not in {"requests_per_second", "tokens_per_second"}
         },
     )
     if pt_records:
@@ -954,6 +960,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Path to save the throughput results in JSON format.",
     )
     parser.add_argument(
+        "--metadata",
+        metavar="KEY=VALUE",
+        nargs="*",
+        help="Key-value pairs (e.g, --metadata version=0.3.3 tp=1) "
+        "for metadata of this run to be saved in the result JSON file "
+        "for record keeping purposes.",
+    )
+    parser.add_argument(
         "--async-engine",
         action="store_true",
         default=False,
@@ -1089,6 +1103,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    metadata = parse_metadata(args.metadata)
     validate_args(args)
     if args.seed is None:
         args.seed = 0
@@ -1205,13 +1220,18 @@ def main(args: argparse.Namespace):
 
     # Output JSON results if specified
     if args.output_json:
-        results = {
-            "elapsed_time": elapsed_time,
-            "num_requests": len(requests),
-            "total_num_tokens": total_num_tokens,
-            "requests_per_second": len(requests) / elapsed_time,
-            "tokens_per_second": total_num_tokens / elapsed_time,
-        }
+        results: dict[str, Any] = metadata.copy()
+        results.update(
+            {
+                "elapsed_time": elapsed_time,
+                "num_requests": len(requests),
+                "total_num_tokens": total_num_tokens,
+                "requests_per_second": len(requests) / elapsed_time,
+                "tokens_per_second": total_num_tokens / elapsed_time,
+            }
+        )
+
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
+
         save_to_pytorch_benchmark_format(args, results)

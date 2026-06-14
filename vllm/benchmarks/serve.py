@@ -50,7 +50,11 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    parse_metadata,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
@@ -1873,6 +1877,7 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
+    metadata = parse_metadata(args.metadata)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -2124,15 +2129,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     result_json["num_prompts"] = args.num_prompts
 
     # Metadata
-    if args.metadata:
-        for item in args.metadata:
-            if "=" in item:
-                kvstring = item.split("=", 1)
-                result_json[kvstring[0].strip()] = kvstring[1].strip()
-            else:
-                raise ValueError(
-                    "Invalid metadata format. Please use KEY=VALUE format."
-                )
+    result_json.update({k: v for k, v in metadata.items() if k not in result_json})
 
     # Traffic
     result_json["request_rate"] = (
