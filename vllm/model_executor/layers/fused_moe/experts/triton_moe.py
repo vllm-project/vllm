@@ -492,6 +492,21 @@ class TritonWNA16Experts(TritonExperts):
             "This method should not be called."
         )
 
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        E, M, N, K, topk = super().moe_problem_size(a1, w1, w2, topk_ids)
+        # Interleave-repacked int4: w1 is [E, K, N//8] int32, so N can't
+        # be read from w1.shape[1].  Derive it from the scale tensor.
+        if self.quant_config.use_int4_w4a16 and w1.dtype == torch.int32:
+            assert self.w1_scale is not None
+            N = self.w1_scale.size(2)
+        return E, M, N, K, topk
+
     def apply(
         self,
         output: torch.Tensor,
@@ -511,7 +526,10 @@ class TritonWNA16Experts(TritonExperts):
         apply_router_weight_on_input: bool,
     ):
         # Check constraints.
-        if self.quant_config.use_int4_w4a16:
+        _interleave = self.quant_config.is_int4_w4a16_interleaved(w1)
+        if _interleave:
+            assert hidden_states.size(-1) == w1.size(1), "Hidden size mismatch"
+        elif self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
         else:
             assert hidden_states.size(-1) == w1.size(2), (
@@ -544,6 +562,7 @@ class TritonWNA16Experts(TritonExperts):
             self.quant_config.config_name(hidden_states.dtype),
             num_tokens,
             block_shape=self.block_shape,
+            int4_packed_as_int32=_interleave,
         )
 
         if hidden_states.dtype == torch.bfloat16:
