@@ -565,7 +565,77 @@ class Scheduler(SchedulerInterface):
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
-                    break
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        # Priority-based preemption at max_num_seqs:
+                        # Allow a higher-priority waiting request to preempt
+                        # a lower-priority running request.
+                        request_queue = self._select_waiting_queue_for_scheduling()
+                        if request_queue is None:
+                            break
+                        waiting_req = request_queue.peek_request()
+
+                        # Find the lowest-priority running request.
+                        lowest_priority_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+
+                        # If the waiting request has higher priority
+                        # (lower numerical value), preempt the runner.
+                        if waiting_req < lowest_priority_req:
+                            self.running.remove(lowest_priority_req)
+                            if lowest_priority_req in scheduled_running_reqs:
+                                scheduled_running_reqs.remove(
+                                    lowest_priority_req
+                                )
+                                preempted_req_id = (
+                                    lowest_priority_req.request_id
+                                )
+                                token_budget += (
+                                    num_scheduled_tokens.pop(
+                                        preempted_req_id
+                                    )
+                                )
+                                req_to_new_blocks.pop(preempted_req_id)
+                                scheduled_spec_decode_tokens.pop(
+                                    preempted_req_id, None
+                                )
+                                preempted_encoder_inputs = (
+                                    scheduled_encoder_inputs.pop(
+                                        preempted_req_id, None
+                                    )
+                                )
+                                if preempted_encoder_inputs:
+                                    num_embeds_to_restore = sum(
+                                        lowest_priority_req.get_num_encoder_embeds(i)
+                                        for i in preempted_encoder_inputs
+                                    )
+                                    encoder_compute_budget += (
+                                        num_embeds_to_restore
+                                    )
+
+                                # Recalculate scheduled_loras since
+                                # scheduled_running_reqs changed.
+                                if self.lora_config:
+                                    scheduled_loras = set(
+                                        req.lora_request.lora_int_id
+                                        for req in scheduled_running_reqs
+                                        if (
+                                            req.lora_request
+                                            and req.lora_request.lora_int_id > 0
+                                        )
+                                    )
+
+                            self._preempt_request(
+                                lowest_priority_req, scheduled_timestamp
+                            )
+                            preempted_reqs.append(lowest_priority_req)
+                            # Loop back to schedule the waiting request.
+                            continue
+                        else:
+                            break
+                    else:
+                        break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
