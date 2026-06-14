@@ -93,7 +93,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "What is in this image?"
         ),
         needs_video_metadata=False,
-        vllm_runner_kwargs={"trust_remote_code": True},
+        # Single bucket sized to cover the test images' output tokens.
+        # The default auto-inferred range fans out into multiple power-of-2
+        # buckets, each holding a full ViT capture pool.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024],
+        },
+        # Shrink to 1 text + 1 vision layer with random weights so the
+        # test runs on any CI GPU (incl. L4) and skips the multi-GiB
+        # weight download. The test only validates that encoder CG
+        # capture/replay functions correctly, not output quality.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiVLForConditionalGeneration",
+            ),
+        },
         marks=[pytest.mark.core_model],
     ),
     "qwen3_vl": VitCudagraphTestConfig(
