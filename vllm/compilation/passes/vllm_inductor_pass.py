@@ -15,6 +15,7 @@ import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
+from torch._logging._internal import LazyString
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -23,6 +24,83 @@ from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
+
+
+def _format_graph_code_content(result: str) -> str:
+    """Convert non-Python header lines in lazy_format_graph_code output to comments.
+
+    This transforms lines like:
+        TRACED GRAPH
+        ===== post_grad.0.NoOpEliminationPass.after =====
+        <eval_with_key>.107 from /path/to/file.py:123 in forward class MyClass...
+
+    Into Python comments:
+        # TRACED GRAPH
+        # post_grad.0.NoOpEliminationPass.after
+        # Source: <eval_with_key>.107 from /path/to/file.py:123
+        class MyClass...
+
+    Args:
+        result: The raw output from lazy_format_graph_code.
+
+    Returns:
+        The formatted content with headers converted to comments.
+    """
+    title_pattern = re.compile(r'^\s*={2,}\s*(.+?)\s*={2,}\s*$')
+    # Match <eval_with_key> lines, capturing metadata and optional code after.
+    # We use a non-greedy match for metadata up to the function name.
+    eval_with_key_pattern = re.compile(
+        r'^(\s*<eval_with_key>.*? in \S+)(?:\s+(.*))?$'
+    )
+
+    lines = result.split('\n')
+    formatted_lines = []
+
+    for line in lines:
+        if line.strip() == 'TRACED GRAPH':
+            formatted_lines.append('# TRACED GRAPH')
+        elif (match := title_pattern.match(line)):
+            formatted_lines.append(f'# {match.group(1).strip()}')
+        elif (eval_match := eval_with_key_pattern.match(line)):
+            metadata = eval_match.group(1).strip()
+            code = eval_match.group(2)
+            formatted_lines.append(f'# Source: {metadata}')
+            if code and code.strip():
+                formatted_lines.append(code.strip())
+        elif re.match(r'^\s*<eval_with_key>', line):
+            # Fallback: entire line is metadata if no code found
+            formatted_lines.append(f'# Source: {line.strip()}')
+        else:
+            formatted_lines.append(line)
+
+    return '\n'.join(formatted_lines)
+
+
+def format_graph_code(
+    name: str, gm: fx.GraphModule, tabsize: int = 4
+) -> LazyString:
+    """Wrapper around lazy_format_graph_code with cleaner output.
+
+    This function provides the same interface as lazy_format_graph_code,
+    but additionally converts non-Python header lines (like '===== title ====='
+    and '<eval_with_key>.xxx from /path/to/file') to Python comments for
+    better readability of dumped graph code.
+
+    The formatting is applied lazily - the actual string transformation only
+    happens when the result is converted to a string (e.g., when written to
+    file or printed), preserving the lazy evaluation behavior of PyTorch's
+    original lazy_format_graph_code.
+
+    Args:
+        name: Name to include in the graph dump.
+        gm: The GraphModule to format.
+        tabsize: Indentation size (default: 4).
+
+    Returns:
+        A LazyString that applies formatting on str() conversion.
+    """
+    result = lazy_format_graph_code(name, gm, tabsize)
+    return LazyString(lambda: _format_graph_code_content(str(result)))
 
 
 @dataclass
