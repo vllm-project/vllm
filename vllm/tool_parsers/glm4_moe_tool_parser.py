@@ -304,16 +304,22 @@ class Glm4MoeModelToolParser(ToolParser):
                 break
         return results
 
-    def _extract_tool_name_from_region(self, inner_text: str) -> str | None:
+    def _extract_tool_name_from_region(
+        self, inner_text: str, is_complete: bool = False
+    ) -> str | None:
         """Extract the tool name from the beginning of a tool-call region.
 
-        The name is everything before the first ``\\n`` or ``<arg_key>``.
+        The name is everything before the first ``\\n`` or ``<arg_key>``. For
+        complete zero-argument calls, the whole region is the tool name.
         Returns ``None`` if the name hasn't fully arrived yet.
         """
         nl = inner_text.find("\n")
         ak = inner_text.find(self.arg_key_start)
         candidates = [i for i in [nl, ak] if i != -1]
         if not candidates:
+            if is_complete:
+                name = inner_text.strip()
+                return name if name and "<" not in name else None
             return None
         cut = min(candidates)
         name = inner_text[:cut].strip()
@@ -449,7 +455,7 @@ class Glm4MoeModelToolParser(ToolParser):
             self._ensure_tool_state_for(i)
 
             # Extract tool name
-            tool_name = self._extract_tool_name_from_region(inner_text)
+            tool_name = self._extract_tool_name_from_region(inner_text, is_complete)
             if not tool_name:
                 break
 
