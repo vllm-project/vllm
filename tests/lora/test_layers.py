@@ -44,7 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
     get_masked_input_and_mask,
 )
-from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
+from vllm.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 

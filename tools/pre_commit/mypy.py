@@ -32,6 +32,7 @@ SEPARATE_GROUPS = [
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
     "vllm/model_executor/models",
+    "vllm/models",
     "vllm/model_executor/layers/fla/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",

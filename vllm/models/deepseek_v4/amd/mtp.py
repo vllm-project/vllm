@@ -33,9 +33,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_mtp import SharedHead
-from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v2 import (
+    SharedHead,
+    get_spec_layer_idx_from_weight_name,
+)
 from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
