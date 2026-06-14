@@ -733,6 +733,85 @@ def test_set_inputs_first_pass_parallel_drafting():
             )
 
 
+def test_gather_mm_embeddings_for_drafter_does_not_mutate_mrope_state():
+    """
+    Issue #43820: when the spec-decode draft path calls
+    `_gather_mm_embeddings` with `shift_computed_tokens=1`, the pruning +
+    M-RoPE branch must not mutate any per-request or runner-wide M-RoPE
+    state.
+
+    `propose_draft_token_ids` captures `target_positions` as a view into
+    `self.mrope_positions.gpu` before this call. Without the `for_drafter`
+    guard, the pruning branch would:
+      - overwrite `req_state.mrope_positions`,
+      - reassign `req_state.mrope_position_delta`,
+      - run `_calc_mrope_positions` + `self.mrope_positions.copy_to_gpu`,
+    which mutates the buffer `target_positions` views and corrupts the
+    drafter's positions input.
+
+    This test calls the real method with a mock runner, asserts that none
+    of the mutation paths run, and verifies that the recompute is invoked
+    with the *shifted* `num_computed_tokens` (so the embedding window and
+    the recompute boundary agree).
+    """
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    num_computed_tokens = 10
+    shift = 1
+    num_scheduled_tokens = 4
+
+    req_state = mock.MagicMock()
+    req_state.num_computed_tokens = num_computed_tokens
+    req_state.mm_features = []  # skip inner mm-gather loop; pruning branch still runs
+    req_state.mrope_positions = torch.tensor([[0, 1, 2, 3]] * 3, dtype=torch.long)
+    req_state.mrope_position_delta = -5
+    req_state.prompt_token_ids = [1, 2, 3, 4]
+
+    initial_mrope_positions = req_state.mrope_positions.clone()
+    initial_mrope_position_delta = req_state.mrope_position_delta
+
+    runner = mock.MagicMock()
+    runner.is_multimodal_pruning_enabled = True
+    runner.uses_mrope = True
+    runner.requests = {"req_A": req_state}
+    runner.input_batch.req_ids = ["req_A"]
+
+    # Distinct values so any mutation would be detectable.
+    new_mrope_positions = torch.full((3, num_scheduled_tokens), 99, dtype=torch.long)
+    new_delta = -42
+    runner.model.recompute_mrope_positions.return_value = (
+        [],  # cleaned mm_embeds (empty since mm_features=[])
+        new_mrope_positions,
+        new_delta,
+    )
+
+    scheduler_output = mock.MagicMock()
+    scheduler_output.num_scheduled_tokens = {"req_A": num_scheduled_tokens}
+    scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
+
+    GPUModelRunner._gather_mm_embeddings(
+        runner,
+        scheduler_output,
+        shift_computed_tokens=shift,
+        for_drafter=True,
+    )
+
+    # No per-request mutation.
+    assert torch.equal(req_state.mrope_positions, initial_mrope_positions)
+    assert req_state.mrope_position_delta == initial_mrope_position_delta
+
+    # No runner-wide mutation.
+    runner._calc_mrope_positions.assert_not_called()
+    runner.mrope_positions.copy_to_gpu.assert_not_called()
+
+    # The recompute itself MUST run (it strips position channels from mm_embeds).
+    runner.model.recompute_mrope_positions.assert_called_once()
+    kwargs = runner.model.recompute_mrope_positions.call_args.kwargs
+    # And it must use the *shifted* num_computed_tokens so the embedding
+    # window and the recompute boundary line up.
+    assert kwargs["num_computed_tokens"] == num_computed_tokens + shift
+
+
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
