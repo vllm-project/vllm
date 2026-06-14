@@ -22,6 +22,27 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     )
 
 
+if current_platform.is_rocm():
+
+    @triton.jit
+    def _round_to_nearest(x):
+        return tl.extra.hip.libdevice.round(x)
+
+
+elif current_platform.is_xpu():
+
+    @triton.jit
+    def _round_to_nearest(x):
+        return tl.extra.intel.libdevice.round(x)
+
+
+else:
+
+    @triton.jit
+    def _round_to_nearest(x):
+        return tl.extra.cuda.libdevice.round(x)
+
+
 @triton.jit
 def reshape_and_cache_kernel_flash(
     key_ptr,  # [num_tokens, num_heads, head_size]
@@ -172,6 +193,7 @@ def _reshape_cache_per_token_head(
     head_size: tl.constexpr,
     head_size_v: tl.constexpr,
     HEAD_SIZE_PADDED: tl.constexpr,  # next_power_of_2(max(head_size, head_size_v))
+    INT8_KV_CACHE: tl.constexpr = False,
     QUANT_MAX: tl.constexpr = 127.0,
     QUANT_MIN: tl.constexpr = -128.0,
 ):
@@ -204,7 +226,11 @@ def _reshape_cache_per_token_head(
         k_scale,
     )
 
-    k_q = tl.clamp(k_h * (1.0 / k_scale), QUANT_MIN, QUANT_MAX)
+    k_scaled = k_h * (1.0 / k_scale)
+    if INT8_KV_CACHE:
+        k_q = tl.clamp(_round_to_nearest(k_scaled), QUANT_MIN, QUANT_MAX)
+    else:
+        k_q = tl.clamp(k_scaled, QUANT_MIN, QUANT_MAX)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -232,7 +258,11 @@ def _reshape_cache_per_token_head(
         v_scale,
     )
 
-    v_q = tl.clamp(v_h * (1.0 / v_scale), QUANT_MIN, QUANT_MAX)
+    v_scaled = v_h * (1.0 / v_scale)
+    if INT8_KV_CACHE:
+        v_q = tl.clamp(_round_to_nearest(v_scaled), QUANT_MIN, QUANT_MAX)
+    else:
+        v_q = tl.clamp(v_scaled, QUANT_MIN, QUANT_MAX)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -318,6 +348,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         head_size=head_size,
         head_size_v=head_size_v,
         HEAD_SIZE_PADDED=head_size_padded,
+        INT8_KV_CACHE=cache_dtype == torch.int8,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
         num_warps=num_warps,
