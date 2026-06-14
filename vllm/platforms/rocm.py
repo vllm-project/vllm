@@ -131,10 +131,6 @@ def _sync_hip_cuda_env_vars():
         os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
 
 
-# Sync at import time - catches misconfigurations from process start.
-_sync_hip_cuda_env_vars()
-
-
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -430,8 +426,7 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
-    # rocm shares the same device control env var as CUDA
-    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    device_control_env_var: str = "HIP_VISIBLE_DEVICES"
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
