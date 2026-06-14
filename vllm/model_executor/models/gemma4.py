@@ -1669,6 +1669,29 @@ class Gemma4ForCausalLM(
                 #
                 # No transpose needed: checkpoint orientation already
                 # matches FusedMoE's expected layout.
+                # PATCH: AWQ compressed-tensors key remapping
+                if "moe.gate_up_proj_packed" in name and weight.dim() == 3:
+                    mid = weight.size(1) // 2
+                    for e in range(weight.size(0)):
+                        base = name.replace("moe.", f"moe.experts.{e}.")
+                        yield base.replace("gate_up_proj_packed", "gate_proj.weight_packed"), weight[e, :mid]
+                        yield base.replace("gate_up_proj_packed", "up_proj.weight_packed"), weight[e, mid:]
+                    continue
+                if "moe.gate_up_proj_scale" in name and weight.dim() == 3:
+                    mid = weight.size(1) // 2
+                    for e in range(weight.size(0)):
+                        base = name.replace("moe.", f"moe.experts.{e}.")
+                        yield base.replace("gate_up_proj_scale", "gate_proj.weight_scale"), weight[e, :mid]
+                        yield base.replace("gate_up_proj_scale", "up_proj.weight_scale"), weight[e, mid:]
+                    continue
+                if "moe.down_proj_packed" in name and weight.dim() == 3:
+                    for e in range(weight.size(0)):
+                        yield name.replace("moe.", f"moe.experts.{e}.").replace("down_proj_packed", "down_proj.weight_packed"), weight[e]
+                    continue
+                if "moe.down_proj_scale" in name and weight.dim() == 3:
+                    for e in range(weight.size(0)):
+                        yield name.replace("moe.", f"moe.experts.{e}.").replace("down_proj_scale", "down_proj.weight_scale"), weight[e]
+                    continue
                 if "moe.gate_up_proj" in name and weight.dim() == 3:
                     num_experts = weight.size(0)
                     intermediate_size = weight.size(1) // 2
