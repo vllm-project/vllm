@@ -368,6 +368,8 @@ class RequestState:
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
+            prompt_logits=self.logprobs_processor.prompt_logits,
+            kld_result=self.logprobs_processor.kld_result,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
