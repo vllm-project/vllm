@@ -16,6 +16,12 @@ Key benefits:
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
+!!! tip
+    Running multiple sleep-mode containers on the same host? See
+    [Multi-Tenant Sleep Mode Operations](sleep_mode_multi_tenant.md) for
+    co-tenancy planning, sleep-level tradeoffs observed in production, and
+    deadlock-detection guidance.
+
 ## Sleep levels
 
 Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update.
