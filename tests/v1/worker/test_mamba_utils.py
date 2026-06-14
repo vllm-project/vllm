@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -149,6 +150,62 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         )
 
     assert mamba_state_idx == {"keep": 99}
+
+
+def test_preprocess_mamba_temporal_source_oob_falls_back_to_neutral_copy():
+    """Accepted-token bias can outlive the current block table.
+
+    Regression coverage for issue #41884: the temporal copy source used to
+    index ``block_ids[src_block_idx + accepted - 1]`` directly, which raised
+    IndexError before the copy metadata could be staged.
+    """
+    spec = SimpleNamespace(block_size=4, num_speculative_blocks=1)
+    cache_config = MagicMock(enable_prefix_caching=True)
+    sched = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"req": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={"req": [1]},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+        preempted_req_ids=set(),
+    )
+
+    input_batch = SimpleNamespace(
+        req_ids=["req"],
+        num_accepted_tokens_cpu=np.array([2], dtype=np.int32),
+    )
+    req_state = SimpleNamespace(num_computed_tokens=3, block_ids=[[0, 1]])
+    state = torch.empty((2, 1))
+    copy_bufs = SimpleNamespace(
+        mamba_group_ids=[0],
+        mamba_spec=spec,
+        src_ptrs=SimpleNamespace(np=np.zeros(4, dtype=np.uint64)),
+        dst_ptrs=SimpleNamespace(np=np.zeros(4, dtype=np.uint64)),
+        sizes=SimpleNamespace(np=np.zeros(4, dtype=np.uint64)),
+        offset=0,
+    )
+
+    with patch("vllm.v1.worker.mamba_utils.do_mamba_copy_block"):
+        preprocess_mamba(
+            sched,
+            SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["layer"])]),
+            cache_config,
+            {"req": 1},
+            input_batch,
+            {"req": req_state},
+            {"layer": SimpleNamespace(kv_cache=[state])},
+            (get_temporal_copy_spec,),
+            copy_bufs,
+        )
+
+    assert input_batch.num_accepted_tokens_cpu[0] == 1
+    assert copy_bufs.offset == 1
+    assert copy_bufs.src_ptrs.np[0] == state[1].data_ptr()
+    assert copy_bufs.dst_ptrs.np[0] == state[0].data_ptr()
 
 
 # -----------------------------------------------------------------------------
