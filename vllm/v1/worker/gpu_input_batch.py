@@ -293,6 +293,7 @@ class InputBatch:
 
         # Cached reference to the GPU tensor of previously sampled tokens
         self.prev_sampled_token_ids: torch.Tensor | None = None
+        self.prev_draft_token_ids: torch.Tensor | None = None
         self.prev_req_id_to_index: dict[str, int] | None = None
         # These are used to update output_token_ids with real sampled
         # ids from prior step, if required by current sampling params
