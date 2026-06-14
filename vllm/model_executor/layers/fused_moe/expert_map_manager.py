@@ -405,6 +405,9 @@ class ExpertMapManager:
         if self._expert_map is None:
             return f"[0..{self.global_num_experts - 1}]"
 
+        if self._expert_map.is_meta:
+            return f"<meta expert_map shape={tuple(self._expert_map.shape)}>"
+
         global_indices = torch.where(self._expert_map != -1)[0]
         local_indices = self._expert_map[global_indices]
         return ", ".join(
