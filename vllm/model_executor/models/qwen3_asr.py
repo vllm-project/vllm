@@ -177,12 +177,11 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
 
         feature_extractor = self.info.get_feature_extractor()
 
-        target_audio_length = (
-            min(
-                feature_extractor.chunk_length,
-                30,
-            )
-            * feature_extractor.sampling_rate
+        # Defer to ``chunk_length`` (overridable via ``--mm-processor-kwargs``)
+        # so the encoder-cache budget can scale past Whisper's 30s default;
+        # Qwen3-ASR's encoder supports much longer audio.
+        target_audio_length = int(
+            feature_extractor.chunk_length * feature_extractor.sampling_rate
         )
 
         audio_overrides = mm_options.get("audio")
