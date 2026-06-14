@@ -25,7 +25,7 @@ tuning cost:
 --no-enable-flashinfer-autotune
 ```
 
-PDL is also kept off by default during correctness debugging:
+PDL is kept off by default for baseline correctness debugging:
 
 ```bash
 VLLM_MAMBA_MTP_REPLAY_PDL=0
@@ -138,8 +138,23 @@ Same-node DP=1/TP=1 eager A/B, GSM8K limit 64:
 | Replay, after fix | 0.921875 | 0.921875 | 64 |
 
 This indicates the replay path is no longer causing the large accuracy collapse.
-Full GSM8K replay validation should still be used before moving to performance
-benchmarking.
+
+Full DP=1/TP=1 replay GSM8K validation without PDL also matched the expected
+range:
+
+| Mode | GSM8K strict | GSM8K flexible | Limit |
+| --- | ---: | ---: | ---: |
+| Replay, eager, PDL off | 0.9204 | 0.9287 | full |
+
+PDL was then sanity checked on DP=1/TP=1:
+
+| Mode | GSM8K strict | GSM8K flexible | Limit |
+| --- | ---: | ---: | ---: |
+| Replay, eager, PDL on | 0.9375 | 0.9375 | 64 |
+| Replay, CUDA graph, PDL on | 0.9375 | 0.9531 | 64 |
+
+The CUDA graph run omitted `--enforce-eager`; serving logs confirmed
+torch.compile and CUDA graph capture completed.
 
 ## Other Correctness Notes
 
@@ -150,5 +165,7 @@ full SSM checkpoint for every draft token, so when the scheduler promotes an
 accepted physical slot, replay also has to preserve the compact trace and base
 state under that promoted slot.
 
-PDL is a performance feature, not required for correctness. It should stay
-behind `VLLM_MAMBA_MTP_REPLAY_PDL` until accuracy is fully validated.
+PDL is a performance feature, not required for correctness. Initial PDL
+correctness sanity passed in both eager and CUDA graph modes, but it remains
+behind `VLLM_MAMBA_MTP_REPLAY_PDL` so full PDL GSM8K and performance
+benchmarking can be controlled separately.
