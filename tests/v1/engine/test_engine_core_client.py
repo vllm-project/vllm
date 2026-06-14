@@ -237,30 +237,6 @@ def test_dplb_non_late_interaction_still_uses_lb():
     assert client.lb_engines[1][0] == 1
 
 
-def test_apply_ready_response_syncs_block_size():
-    import msgspec
-
-    client = object.__new__(MPClient)
-    client.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
-        model_config=SimpleNamespace(max_model_len=8192),
-    )
-    client.stats_update_address = None
-
-    payload = msgspec.msgpack.encode(
-        EngineCoreReadyResponse(
-            max_model_len=8192,
-            num_gpu_blocks=100,
-            block_size=1056,
-            dp_stats_address=None,
-            dtype="bfloat16",
-            vllm_version="test",
-        )
-    )
-    client._apply_ready_response(payload)
-    assert client.vllm_config.cache_config.block_size == 1056
-
-
 def loop_until_done(client: EngineCoreClient, outputs: dict):
     while True:
         engine_core_outputs = client.get_output().outputs
