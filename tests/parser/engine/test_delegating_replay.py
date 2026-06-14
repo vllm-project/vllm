@@ -50,7 +50,7 @@ def _get_delegating_parser_cls(pairings: str) -> type[Parser]:
 
 
 def _pairing_samples() -> list[tuple[str, object]]:
-    items = []
+    items: list[tuple[str, object]] = []
     for pairing_name, (_, _, model) in _PAIRINGS.items():
         for sample in build_samples(model):
             items.append((pairing_name, sample))
@@ -85,6 +85,7 @@ def test_delegating_replay(sample, chunk_size, pairings):
         chunk_size=chunk_size,
         finished_on_last=True,
         tools=sample.tools,
+        prompt_token_ids=sample.prompt_token_ids,
     )
     output = collect_output(deltas)
     assert_parse_output(output, sample)

@@ -389,7 +389,7 @@ def gemma4_config() -> ParserEngineConfig:
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                (EventType.TOOL_CALL_START,),
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
                 ParserState.TOOL_NAME,

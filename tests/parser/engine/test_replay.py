@@ -62,6 +62,7 @@ class TestQwen3ReplayWithHoldback:
             sample.tokens,
             chunk_size=chunk_size,
             holdback_chars=holdback,
+            prompt_token_ids=sample.prompt_token_ids,
         )
         output = collect_output(deltas)
 
@@ -87,6 +88,7 @@ class TestGemma4ReplayWithHoldback:
             sample.tokens,
             chunk_size=chunk_size,
             holdback_chars=holdback,
+            prompt_token_ids=sample.prompt_token_ids,
         )
         output = collect_output(deltas)
 
@@ -114,7 +116,12 @@ class TestGemma4TextHoldback:
     def test_replay(self, sample, delay):
         tokenizer = make_mock_tokenizer(sample)
         parser = Gemma4Parser(tokenizer, sample.tools)
-        deltas = replay_with_text_holdback(parser, sample.tokens, text_delay=delay)
+        deltas = replay_with_text_holdback(
+            parser,
+            sample.tokens,
+            text_delay=delay,
+            prompt_token_ids=sample.prompt_token_ids,
+        )
         output = collect_output(deltas)
 
         assert_parse_output(output, sample)
@@ -222,7 +229,9 @@ class TestSkipToolParsingReplay:
                 "".join(all_texts[start:end]),
                 all_ids[start:end],
                 request,
-                prompt_token_ids=[] if start == 0 else None,
+                prompt_token_ids=(sample.prompt_token_ids or [])
+                if start == 0
+                else None,
                 finished=is_last,
             )
             results.append(result)

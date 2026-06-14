@@ -49,6 +49,7 @@ class Scenario:
     reasoning: str | None = None
     content: str | None = None
     tool_calls: list[ToolCallSpec] | None = None
+    after_tool_response: bool = False
 
 
 # ── Scenarios ────────────────────────────────────────────────────────
@@ -132,6 +133,12 @@ SCENARIOS: list[Scenario] = [
         description="Empty reasoning section followed by content",
         reasoning="",
         content="The epoch timestamp is 1779111346.",
+    ),
+    Scenario(
+        id="tool-after-tool-response",
+        description="Tool call immediately after tool response (agentic flow)",
+        tool_calls=[_READ_TOOL],
+        after_tool_response=True,
     ),
 ]
 
@@ -251,7 +258,13 @@ def _validate_sample(sample: Sample, parser_cls: type, **kwargs) -> None:
     """Replay sample through the real parser and assert correctness."""
     tokenizer = MockTokenizer(vocab=dict(sample.vocab), tokens=sample.tokens)
     parser = parser_cls(tokenizer, sample.tools, **kwargs)
-    deltas = replay_streaming(parser, sample.tokens, chunk_size=1, tools=sample.tools)
+    deltas = replay_streaming(
+        parser,
+        sample.tokens,
+        chunk_size=1,
+        tools=sample.tools,
+        prompt_token_ids=sample.prompt_token_ids,
+    )
     output = collect_output(deltas)
     assert_parse_output(output, sample)
 
@@ -274,6 +287,7 @@ def _make_sample(
     expected_tool_calls: list[dict] | None,
     tools: list[dict] | None,
     chat_template_kwargs: dict | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> Sample:
     tokens = _tokenize(segments, vocab)
     return Sample(
@@ -287,6 +301,7 @@ def _make_sample(
         expected_tool_calls=expected_tool_calls,
         tools=_validate_tools(tools),
         chat_template_kwargs=chat_template_kwargs,
+        prompt_token_ids=prompt_token_ids,
     )
 
 
@@ -452,6 +467,9 @@ def _gemma4_segments(scenario: Scenario) -> list[tuple[str, bool]]:
 
 
 def _build_gemma4(scenario: Scenario, validate: bool = True) -> Sample:
+    prompt_token_ids = None
+    if scenario.after_tool_response:
+        prompt_token_ids = [_GEMMA4_VOCAB["<|tool_response>"]]
     sample = _make_sample(
         sample_id=f"gemma4-{scenario.id}",
         description=scenario.description,
@@ -461,6 +479,7 @@ def _build_gemma4(scenario: Scenario, validate: bool = True) -> Sample:
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
         tools=_expected_tools(scenario),
+        prompt_token_ids=prompt_token_ids,
     )
     if validate:
         _validate_sample(sample, Gemma4Parser)

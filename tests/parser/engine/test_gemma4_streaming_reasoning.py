@@ -29,7 +29,6 @@ CHANNEL_END_ID = 51  # <channel|>
 TOOL_CALL_START_ID = 48  # <|tool_call>
 TOOL_CALL_END_ID = 49  # <tool_call|>
 QUOTED_ID = 52  # <|"|>
-
 SPECIAL_TOKEN_MAP = {
     CHANNEL_START_ID: "<|channel>",
     CHANNEL_END_ID: "<channel|>",
