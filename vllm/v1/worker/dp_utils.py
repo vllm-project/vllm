@@ -54,6 +54,23 @@ def _run_ar(
     return tensor
 
 
+def sync_drafter_run_across_dp(
+    should_run_drafter: bool,
+    parallel_config: ParallelConfig,
+) -> bool:
+    if parallel_config.data_parallel_size == 1:
+        return should_run_drafter
+
+    device, group = _get_device_and_group(parallel_config)
+    tensor = torch.tensor(
+        [1 if should_run_drafter else 0],
+        device=device,
+        dtype=torch.int32,
+    )
+    dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=group)
+    return bool(tensor.item())
+
+
 def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]

@@ -198,7 +198,10 @@ from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import (
+    coordinate_batch_across_dp,
+    sync_drafter_run_across_dp,
+)
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -4476,6 +4479,12 @@ class GPUModelRunner(
                 or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
+                input_fits_in_drafter = sync_drafter_run_across_dp(
+                    input_fits_in_drafter,
+                    self.parallel_config,
+                )
+
+            if use_gpu_toks:
                 # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
@@ -5964,12 +5973,22 @@ class GPUModelRunner(
                 ):
                     use_cudagraphs = False
 
-                self.drafter.dummy_run(
-                    num_tokens,
-                    use_cudagraphs=use_cudagraphs,
-                    is_graph_capturing=is_graph_capturing,
-                    slot_mappings=slot_mappings,
-                )
+                should_run_drafter = True
+                if not self.speculative_config.disable_padded_drafter_batch:
+                    # Keep real and dummy DP ranks aligned at the drafter
+                    # boundary when a request is too close to max_model_len.
+                    should_run_drafter = sync_drafter_run_across_dp(
+                        True,
+                        self.parallel_config,
+                    )
+
+                if should_run_drafter:
+                    self.drafter.dummy_run(
+                        num_tokens,
+                        use_cudagraphs=use_cudagraphs,
+                        is_graph_capturing=is_graph_capturing,
+                        slot_mappings=slot_mappings,
+                    )
 
         # We register layerwise NVTX hooks here after the first dynamo tracing is
         # done to avoid nvtx operations in hook functions being traced by
