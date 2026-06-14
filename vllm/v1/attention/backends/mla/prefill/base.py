@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.prefill.selector import (
         MLAPrefillSelectorConfig,
@@ -43,6 +44,12 @@ class MLAPrefillBackend(ABC):
     @classmethod
     def is_available(cls) -> bool:
         return True
+
+    def supports_quant_output(self, quant_key: "QuantKey") -> bool:
+        """Whether `run_prefill_new_tokens` can write quantized output
+        directly (fused) for the given quant key, skipping the post-quant
+        pass. Overridden by backends that support it."""
+        return False
 
     @classmethod
     def validate_configuration(
@@ -107,6 +114,8 @@ class MLAPrefillBackend(ABC):
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
