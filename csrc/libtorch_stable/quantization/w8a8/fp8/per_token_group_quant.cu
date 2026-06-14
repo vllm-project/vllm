@@ -95,6 +95,73 @@ __device__ __forceinline__ void QuantizeGroup(
       scalar_op_quant);   // scalar handler
 }
 
+template <typename T, int VEC_SIZE>
+__device__ __forceinline__ float LoadRegisterGroupAndComputeAbsmax(
+    const T* __restrict__ group_input, const bool is_valid_group,
+    T (&regs)[VEC_SIZE], const float eps) {
+  float local_absmax = eps;
+  if (!is_valid_group) {
+    return local_absmax;
+  }
+
+  uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
+  const uint4* src = reinterpret_cast<const uint4*>(group_input);
+  dst[0] = src[0];
+  dst[1] = src[1];
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    float v = fabsf(static_cast<float>(regs[i]));
+    local_absmax = fmaxf(local_absmax, v);
+  }
+
+  return local_absmax;
+}
+
+__device__ __forceinline__ float GroupReduceMax8(float val) {
+#ifdef USE_ROCM
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFull << (lane_in_wave & ~7);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1, 8));
+#else
+  unsigned mask = 0xffu << (threadIdx.x & 24u);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+#endif
+  return val;
+}
+
+template <typename T, typename DST_DTYPE, int VEC_SIZE>
+__device__ __forceinline__ uint4
+QuantizeRegisterGroup(const T (&regs)[VEC_SIZE], const float inv_y,
+                      const float min_8bit, const float max_8bit) {
+  uint32_t packed_lo = 0;
+  uint32_t packed_lo_hi = 0;
+  uint32_t packed_hi_lo = 0;
+  uint32_t packed_hi = 0;
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    float q =
+        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    DST_DTYPE qb = DST_DTYPE(q);
+    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
+    const int shift = (i & 3) * 8;
+    if (i < 4) {
+      packed_lo |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 8) {
+      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 12) {
+      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
+    } else {
+      packed_hi |= static_cast<uint32_t>(byte) << shift;
+    }
+  }
+
+  return make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+}
+
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
           bool SCALE_UE8M0 = false, typename scale_packed_t = float>
 __global__ void per_token_group_quant_8bit_kernel(
@@ -182,6 +249,84 @@ inline int GetGroupsPerBlockX(int64_t padded_groups_per_row) {
   return 4;
 }
 
+template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR,
+          bool SCALE_UE8M0, int GROUP_SIZE, int kGroupsPerBlockX,
+          int kRowsPerBlock>
+__global__ void per_token_group_quant_8bit_register_kernel(
+    const T* __restrict__ input, void* __restrict__ output_q,
+    float* __restrict__ output_s, const int groups_per_row, const int mn,
+    const float eps, const float min_8bit, const float max_8bit,
+    const int scale_stride) {
+  static_assert(GROUP_SIZE == 128, "fast path supports GROUP_SIZE==128 only");
+  constexpr int THREADS_PER_GROUP = 8;
+  constexpr int VEC_SIZE = 32 / sizeof(T);  // 16 for bf16/fp16
+  static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE,
+                "GROUP_SIZE must equal THREADS_PER_GROUP * VEC_SIZE");
+  static_assert(32 % THREADS_PER_GROUP == 0,
+                "THREADS_PER_GROUP must divide warp size for the shuffle "
+                "mask to be valid");
+  static_assert(
+      kGroupsPerBlockX > 0 && (kGroupsPerBlockX & (kGroupsPerBlockX - 1)) == 0,
+      "kGroupsPerBlockX must be a positive power of 2");
+  static_assert(kRowsPerBlock > 0, "kRowsPerBlock must be positive");
+
+  const int local_group_id = threadIdx.x / THREADS_PER_GROUP;
+  const int lane_id = threadIdx.x % THREADS_PER_GROUP;
+
+  const int sf_k_local = local_group_id % kGroupsPerBlockX;
+  const int row_local = local_group_id / kGroupsPerBlockX;
+  const int sf_k_idx = blockIdx.x * kGroupsPerBlockX + sf_k_local;
+  const int mn_idx = blockIdx.y * kRowsPerBlock + row_local;
+
+  if (mn_idx >= mn) {
+    return;
+  }
+
+  const bool is_valid_group = sf_k_idx < groups_per_row;
+
+  // register-only fast path for group_size == 128.
+  alignas(16) T regs[VEC_SIZE];
+  const T* group_input =
+      input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  // each 8-lane subgroup processes one logical group.
+  float local_absmax = LoadRegisterGroupAndComputeAbsmax<T, VEC_SIZE>(
+      group_input, is_valid_group, regs, eps);
+  local_absmax = GroupReduceMax8(local_absmax);
+
+  float y_s = local_absmax / max_8bit;
+  if constexpr (SCALE_UE8M0) {
+    y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
+  }
+
+  if (lane_id == 0 && is_valid_group) {
+    float* scale_output;
+    if constexpr (IS_COLUMN_MAJOR) {
+      scale_output =
+          output_s + static_cast<int64_t>(sf_k_idx) * scale_stride + mn_idx;
+    } else {
+      scale_output =
+          output_s + static_cast<int64_t>(mn_idx) * groups_per_row + sf_k_idx;
+    }
+    *scale_output = y_s;
+  }
+
+  if (!is_valid_group) {
+    return;
+  }
+
+  float inv_y = 1.0f / y_s;
+
+  // pack into 16 fp8/int8 bytes (= uint4)
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
+      regs, inv_y, min_8bit, max_8bit);
+  DST_DTYPE* group_output =
+      static_cast<DST_DTYPE*>(output_q) +
+      static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  *reinterpret_cast<uint4*>(group_output) = packed_out;
+}
+
 void per_token_group_quant_8bit(const torch::stable::Tensor& input,
                                 torch::stable::Tensor& output_q,
                                 torch::stable::Tensor& output_s,
@@ -208,6 +353,10 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
+  const bool use_register_fast_path =
+      group_size == 128 &&
+      (input.scalar_type() == torch::headeronly::ScalarType::Half ||
+       input.scalar_type() == torch::headeronly::ScalarType::BFloat16);
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                        \
   do {                                                                     \
@@ -250,17 +399,90 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
     }                                                                      \
   } while (0)
 
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Char) {
-          LAUNCH_KERNEL(scalar_t, int8_t);
-        } else {
-          VLLM_STABLE_DISPATCH_FP8_TYPES(
-              dst_type, "per_token_group_quant_8bit_fp8",
-              ([&] { LAUNCH_KERNEL(scalar_t, fp8_t); }));
-        }
-      }));
+#define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, KX, \
+                               RY)                                             \
+  do {                                                                         \
+    dim3 grid(static_cast<unsigned int>(blocks_x),                             \
+              static_cast<unsigned int>(blocks_y));                            \
+    dim3 block(num_threads_fast);                                              \
+    per_token_group_quant_8bit_register_kernel<T, DST_DTYPE, IS_COLUMN_MAJOR,  \
+                                               SCALE_UE8M0, 128, KX, RY>       \
+        <<<grid, block, 0, stream>>>(                                          \
+            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),      \
+            static_cast<float*>(output_s.data_ptr()),                          \
+            static_cast<int>(groups_per_row), static_cast<int>(mn),            \
+            static_cast<float>(eps), static_cast<float>(min_8bit),             \
+            static_cast<float>(max_8bit), scale_stride);                       \
+  } while (0)
 
+#define LAUNCH_REG_KERNEL(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0)        \
+  do {                                                                       \
+    if (kx == 16) {                                                          \
+      LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, 16, \
+                             1);                                             \
+    } else if (kx == 8) {                                                    \
+      LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, 8,  \
+                             2);                                             \
+    } else if (kx == 4) {                                                    \
+      LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, IS_COLUMN_MAJOR, SCALE_UE8M0, 4,  \
+                             4);                                             \
+    } else {                                                                 \
+      STD_TORCH_CHECK(false, "Unsupported kx value ", kx);                   \
+    }                                                                        \
+  } while (0)
+
+#define LAUNCH_REG_KERNEL_FLAGS(T, DST_DTYPE)         \
+  do {                                                \
+    if (is_column_major) {                            \
+      if (scale_ue8m0) {                              \
+        LAUNCH_REG_KERNEL(T, DST_DTYPE, true, true);  \
+      } else {                                        \
+        LAUNCH_REG_KERNEL(T, DST_DTYPE, true, false); \
+      }                                               \
+    } else if (scale_ue8m0) {                         \
+      LAUNCH_REG_KERNEL(T, DST_DTYPE, false, true);   \
+    } else {                                          \
+      LAUNCH_REG_KERNEL(T, DST_DTYPE, false, false);  \
+    }                                                 \
+  } while (0)
+
+  if (use_register_fast_path) {
+    const int64_t k = input.size(-1);
+    const int64_t mn = input.numel() / k;
+    const int64_t groups_per_row = k / group_size;
+    const int64_t padded_groups_per_row = ((groups_per_row + 3) / 4) * 4;
+    const int kx = GetGroupsPerBlockX(padded_groups_per_row);
+    const int ry = 16 / kx;
+    const int64_t blocks_x = padded_groups_per_row / kx;
+    const int64_t blocks_y = (mn + ry - 1) / ry;
+    const int num_threads_fast = (kx * ry) * 8;
+    STD_TORCH_CHECK(blocks_x <= static_cast<int64_t>(INT32_MAX) &&
+                        blocks_y <= static_cast<int64_t>(INT32_MAX),
+                    "per_token_group_quant_8bit fast-path grid too large: (",
+                    blocks_x, ", ", blocks_y, ").");
+
+    VLLM_STABLE_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "per_token_group_quant_8bit_register", ([&] {
+          if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+            LAUNCH_REG_KERNEL_FLAGS(scalar_t, __nv_fp8_e4m3);
+          } else if (dst_type == torch::headeronly::ScalarType::Char) {
+            LAUNCH_REG_KERNEL_FLAGS(scalar_t, int8_t);
+          }
+        }));
+  } else {
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+        input.scalar_type(), "per_token_group_quant_8bit", ([&] {
+          if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+            LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
+          } else if (dst_type == torch::headeronly::ScalarType::Char) {
+            LAUNCH_KERNEL(scalar_t, int8_t);
+          }
+        }));
+  }
+
+#undef LAUNCH_REG_KERNEL
+#undef LAUNCH_REG_KERNEL_INST
+#undef LAUNCH_REG_KERNEL_FLAGS
 #undef LAUNCH_KERNEL
 }
 
@@ -316,36 +538,15 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   // alignas(16) is required so the uint4* reinterpret_cast below is
   // well-defined for T == bf16/fp16 (default alignof is 2).
   alignas(16) T regs[VEC_SIZE];
-  float local_absmax = eps;
-  if (is_valid_group) {
-    const T* group_input =
-        input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
-        sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
-    uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
-    const uint4* src = reinterpret_cast<const uint4*>(group_input);
-    dst[0] = src[0];
-    dst[1] = src[1];
-#pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-      float v = fabsf(static_cast<float>(regs[i]));
-      local_absmax = fmaxf(local_absmax, v);
-    }
-  }
+  const T* group_input =
+      input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  float local_absmax = LoadRegisterGroupAndComputeAbsmax<T, VEC_SIZE>(
+      group_input, is_valid_group, regs, eps);
 
   // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
   // 8 lanes within the warp that share a group.
-#ifdef USE_ROCM
-  const int lane_in_wave = threadIdx.x % warpSize;
-  const unsigned long long mask = 0xFFull << (lane_in_wave & ~7);
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4, 8));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2, 8));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1, 8));
-#else
-  unsigned mask = 0xffu << (threadIdx.x & 24u);
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
-#endif
+  local_absmax = GroupReduceMax8(local_absmax);
 
   float y_s = local_absmax / max_8bit;
   y_s = fmaxf(y_s, 1e-10f);
@@ -388,30 +589,8 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
   // fill four 32-bit words, four bytes each.
-  uint32_t packed_lo = 0;
-  uint32_t packed_lo_hi = 0;
-  uint32_t packed_hi_lo = 0;
-  uint32_t packed_hi = 0;
-#pragma unroll
-  for (int i = 0; i < VEC_SIZE; ++i) {
-    float q =
-        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
-    DST_DTYPE qb = DST_DTYPE(q);
-    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
-    const int shift = (i & 3) * 8;
-    if (i < 4) {
-      packed_lo |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 8) {
-      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 12) {
-      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
-    } else {
-      packed_hi |= static_cast<uint32_t>(byte) << shift;
-    }
-  }
-
-  uint4 packed_out =
-      make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
+      regs, inv_y, min_8bit, max_8bit);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
