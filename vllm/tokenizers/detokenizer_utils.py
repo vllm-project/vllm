@@ -55,6 +55,28 @@ def _convert_tokens_to_string_with_added_encoders(
 # tokenizers (bigger = more conservative).
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
+_LEADING_SPACE_MARKERS = frozenset(("▁", "Ġ"))
+
+
+def _restore_leading_spaces(raw_token: object, token_str: str) -> str:
+    if not isinstance(raw_token, str):
+        return token_str
+
+    num_leading_spaces = 0
+    for char in raw_token:
+        if char not in _LEADING_SPACE_MARKERS:
+            break
+        num_leading_spaces += 1
+
+    if num_leading_spaces == 0:
+        return token_str
+
+    decoded_leading_spaces = len(token_str) - len(token_str.lstrip(" "))
+    num_missing_spaces = num_leading_spaces - decoded_leading_spaces
+    if num_missing_spaces <= 0:
+        return token_str
+    return " " * num_missing_spaces + token_str
+
 
 def convert_prompt_ids_to_tokens(
     tokenizer: TokenizerLike,
@@ -94,12 +116,21 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
 
     """
+    if not token_ids:
+        return []
+
+    raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    if isinstance(raw_tokens, str):
+        raw_tokens = [raw_tokens]
+
     token_str_lst = []
-    for token_id in token_ids:
+    for idx, token_id in enumerate(token_ids):
         # use default skip_special_tokens.
         token_str = tokenizer.decode([token_id])
         if token_str is None:
             token_str = ""
+        raw_token = raw_tokens[idx] if idx < len(raw_tokens) else None
+        token_str = _restore_leading_spaces(raw_token, token_str)
         token_str_lst.append(token_str)
     return token_str_lst
 
