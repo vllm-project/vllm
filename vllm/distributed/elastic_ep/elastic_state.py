@@ -392,6 +392,13 @@ class ElasticEPScalingState:
             # e.g., to drain in-batch requests.
             self._create_standby_groups()
             self._switch_and_prepare()
+            # MoE workspace was sized for the old (larger) EP; per-rank
+            # M_full grows after scale-down because each remaining rank
+            # now serves more local experts. Run the unified warm-and-
+            # capture phase to grow + recapture under the new topology.
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("warm_and_capture",)
+            )
             self._update_parallel_config()
             self.state = ScaleDownRemainingEngineState.COMPLETE
             return True
@@ -538,10 +545,10 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("perform_eplb_reshuffle",)
         )
-        # Reshuffle changes per-rank token routing; the locked MoE workspace
-        # may now be too small. Rewarm covers both new and existing engines.
+        # Single warm + cudagraph-capture phase for the new topology; covers
+        # both new and existing engines on scale-up.
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("rewarm_workspace",)
+            "elastic_ep_execute", args=("warm_and_capture",)
         )
         assert self.new_dp_group is not None
         if self.new_dp_group.rank() == 0:
