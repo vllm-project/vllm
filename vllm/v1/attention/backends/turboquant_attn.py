@@ -84,7 +84,12 @@ def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
     H = torch.tensor([[1.0]])
     while H.shape[0] < d:
         H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
-    return (H / math.sqrt(d)).to(torch.device(device_str))
+    # H is now next_power_of_2(d) x next_power_of_2(d)
+    # Correct normalization for orthonormal Hadamard is 1/sqrt(N)
+    N = H.shape[0]
+    H = H / math.sqrt(N)
+    # Slice to dxd to match head_dim
+    return H[:d, :d].to(torch.device(device_str))
 
 
 class TurboQuantAttentionBackend(AttentionBackend):
