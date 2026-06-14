@@ -366,9 +366,10 @@ class IterationStats:
             if output.prefill_stats is not None:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
-            first_token_latency = self._time_since(req_stats.arrival_time)
-            self.time_to_first_tokens_iter.append(first_token_latency)
-            req_stats.first_token_latency = first_token_latency
+            if len(output.new_token_ids) > 0 or output.finish_reason is not None:
+                first_token_latency = self._time_since(req_stats.arrival_time)
+                self.time_to_first_tokens_iter.append(first_token_latency)
+                req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
