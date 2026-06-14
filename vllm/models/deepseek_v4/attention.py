@@ -62,23 +62,22 @@ logger = init_logger(__name__)
 
 
 def _resolve_dsv4_kv_cache_dtype(
-    use_flashmla_fp8_layout: bool,
+    use_fp8_ds_mla_layout: bool,
     kv_cache_dtype: str,
     cache_config: CacheConfig | None,
 ) -> tuple[str, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The
-    FlashMLA fp8 layout (FlashMLA / ROCm Aiter) is the ``fp8_ds_mla`` format:
-    UE8M0 block-scaled fp8 packed as ``uint8`` (the canonical ``fp8_ds_mla``
-    string is written back onto ``cache_config`` so the page-size specs pick
-    the 576B per-token slot). Otherwise (FlashInfer) each token's KV row is
-    stored in its plain element dtype — bf16 or per-tensor FP8 E4M3.
+    ``fp8_ds_mla`` format is UE8M0 block-scaled fp8 packed as ``uint8`` (the
+    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
+    page-size specs pick the 576B per-token slot). Plain-row backends store each
+    token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
     """
-    if use_flashmla_fp8_layout:
+    if use_fp8_ds_mla_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
         assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 FlashMLA fp8 layout only supports fp8 kv-cache, "
+            f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
             f"got {kv_cache_dtype}"
         )
         if kv_cache_dtype != "fp8_ds_mla":
@@ -100,18 +99,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     The platform-specific sparse-MLA forward (``forward_mqa`` /
     ``get_padded_num_q_heads`` / ``_o_proj`` / ``backend_cls``) is provided by a
-    subclass — ``DeepseekV4FlashMLAAttention`` / ``DeepseekV4FlashInferMLAAttention``
-    (CUDA) or ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the
-    platform-specific deepseek_v4 model module. The base is never instantiated
-    directly.
+    subclass — ``DeepseekV4FlashMLAAttention`` /
+    ``DeepseekV4FlashInferSM120Attention`` /
+    ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
+    ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
+    deepseek_v4 model module. The base is never instantiated directly.
     """
 
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
     # KV-cache per-token block format (both layouts are paged). True (default)
-    # = FlashMLA / ROCm fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8);
-    # False = FlashInfer plain bf16 / per-tensor fp8 KV row.
-    use_flashmla_fp8_layout: ClassVar[bool] = True
+    # = fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8); False = plain
+    # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
+    # a single attention class dispatches across arch-specific layouts.
+    use_fp8_ds_mla_layout: ClassVar[bool] = True
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -144,6 +145,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
         raise NotImplementedError
+
+    def _uses_fp8_ds_mla_layout(self) -> bool:
+        """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
+        return self.use_fp8_ds_mla_layout
 
     def __init__(
         self,
@@ -276,13 +281,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.max_model_len = vllm_config.model_config.max_model_len
 
-        # Resolve the kv-cache dtype from this backend's block format (a
-        # ClassVar set by the subclass): fp8_ds_mla (UE8M0 block-scaled fp8 as
-        # uint8) for FlashMLA / ROCm, vs a plain bf16 / per-tensor fp8 row for
-        # FlashInfer. The same resolution drives the SWA cache tensor dtype
-        # below.
+        # Resolve the kv-cache dtype from this backend's block format. The same
+        # resolution drives the SWA cache tensor dtype below.
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
-            self.use_flashmla_fp8_layout, cache_config.cache_dtype, cache_config
+            self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
         )
 
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -539,7 +541,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # kv is unchanged; attention reads kv solely via swa_kv_cache.
         if cache_dtype == torch.uint8:
-            # Legacy FlashMLA UE8M0 paged path. Horizontally fused:
+            # fp8_ds_mla UE8M0 paged path. Horizontally fused:
             #   Q side:  per-head RMSNorm (no weight) + GPT-J RoPE, zero-filling
             #            the padding head slots; the kernel allocates and returns
             #            the padded q tensor.
@@ -557,10 +559,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata.block_size,
             )
 
-        # FlashInfer full-cache path: the [num_blocks, block_size, 512] cache
-        # stores the KV row in its plain dtype (no Q padding). bf16 rewrites q
-        # in place; per-tensor fp8 writes a separately-allocated fp8 q and
-        # quantizes the KV row.
+        # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
+        # row in its element dtype (no Q padding). bf16 rewrites q in place;
+        # per-tensor fp8 writes a separately-allocated fp8 q and quantizes the
+        # KV row.
         block_size = swa_metadata.block_size
         swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
         if cache_dtype == torch.bfloat16:
@@ -601,18 +603,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.compress_ratio <= 1
         ):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        # FlashMLA uses the fp8_ds_mla block format (UE8M0 block-scaled fp8 as
-        # uint8, 576B aligned); FlashInfer stores a plain bf16 / per-tensor fp8
-        # row with no extra alignment.
-        is_flashmla = self.kv_cache_dtype == "fp8_ds_mla"
+        # fp8_ds_mla is a UE8M0 block-scaled uint8 layout and needs 576B
+        # alignment; plain bf16 / per-tensor fp8 rows use natural element-size
+        # pages.
+        uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8 if is_flashmla else self.kv_cache_torch_dtype,
+            dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if is_flashmla else None,  # FlashMLA needs 576B
+            alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
         )
 
