@@ -176,34 +176,20 @@ def _import_deep_gemm():
     return None
 
 
-def _apply_pdl(enable: bool) -> None:
-    """Set PDL on every DeepGEMM module currently importable.
-
-    The external (pip-installed) ``deep_gemm`` and the vendored
-    ``vllm.third_party.deep_gemm`` are independent C extensions with
-    independent global PDL state. Apply the flag to both so model code
-    that imports either module sees the same setting.
-    """
-    applied_to: list[str] = []
-    for mod_name in ("deep_gemm", "vllm.third_party.deep_gemm"):
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:  # noqa: BLE001
-            continue
+def _apply_pdl(mod, enable: bool = True) -> None:
+    mod_name = getattr(mod, "__name__", str(mod))
+    try:
         set_pdl_fn = getattr(mod, "set_pdl", None)
         if set_pdl_fn is None:
-            continue
-        try:
-            set_pdl_fn(enable)
-            applied_to.append(mod_name)
-        except Exception as e:  # noqa: BLE001
-            logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
-    if applied_to:
+            return
+        set_pdl_fn(enable)
         logger.info_once(
             "DeepGEMM PDL %s on %s.",
             "enabled" if enable else "disabled",
-            ", ".join(applied_to),
+            mod_name,
         )
+    except Exception as e:  # noqa: BLE001
+        logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
 
 
 def _lazy_init() -> None:
@@ -248,18 +234,9 @@ def _lazy_init() -> None:
     if _dg is None:
         return
 
-    # Apply DeepGEMM PDL setting once per process, before any kernel launches
-    # or CUDA-graph capture. PDL state is global in DeepGEMM and is read at
-    # each kernel launch; flipping it later would diverge from launches
-    # captured into CUDA graphs.
-    #
-    # NOTE: vLLM may load two independent DeepGEMM C extensions in the same
-    # process — the pip-installed ``deep_gemm`` and the vendored
-    # ``vllm.third_party.deep_gemm`` (e.g. deepseek_v4.py imports the
-    # vendored module directly). Each has its own global PDL state, so we
-    # apply set_pdl to whichever modules are already importable.
-    _apply_pdl(envs.VLLM_USE_DEEP_GEMM_PDL)
-
+    # Enable PDL for DeepGEMM on architectures that support it (SM90+).
+    if current_platform.is_arch_support_pdl():
+        _apply_pdl(_dg, True)
     _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)

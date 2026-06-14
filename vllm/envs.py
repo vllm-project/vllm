@@ -175,7 +175,6 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
-    VLLM_USE_DEEP_GEMM_PDL: bool = False
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -1399,11 +1398,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
-    ),
-    # Enable PDL for DeepGEMM kernels o Hopper/Blackwell.Tthe flag is consumed by
-    # deep_gemm.set_pdl() once per process before any DeepGEMM kernel launches
-    "VLLM_USE_DEEP_GEMM_PDL": lambda: bool(
-        int(os.getenv("VLLM_USE_DEEP_GEMM_PDL", "0"))
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
