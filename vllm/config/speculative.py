@@ -157,6 +157,14 @@ class SpeculativeConfig:
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
 
+    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    """Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    inclusive batch-size range.
+    """
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -1072,6 +1080,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
