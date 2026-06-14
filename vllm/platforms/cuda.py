@@ -608,12 +608,19 @@ class CudaPlatformBase(Platform):
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
+    def _get_nvml_handle(cls, device_id: int = 0):
+        """Get NVML device handle, supporting both integer indices and MIG UUIDs."""
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        if isinstance(physical_device_id, str):
+            return pynvml.nvmlDeviceGetHandleByUUID(physical_device_id)
+        return pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+    @classmethod
     @cache
     @with_nvml_context
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
-            physical_device_id = cls.device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            handle = cls._get_nvml_handle(device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
         except RuntimeError:
@@ -634,21 +641,19 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        return cls._get_physical_device_name(physical_device_id)
+        handle = cls._get_nvml_handle(device_id)
+        return pynvml.nvmlDeviceGetName(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = cls._get_nvml_handle(device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = cls._get_nvml_handle(device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
@@ -657,7 +662,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
-        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
+        handles = [
+            pynvml.nvmlDeviceGetHandleByUUID(i)
+            if isinstance(i, str)
+            else pynvml.nvmlDeviceGetHandleByIndex(i)
+            for i in physical_device_ids
+        ]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
@@ -686,8 +696,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_device_numa_node(cls, device_id: int = 0) -> int | None:
         """Get the NUMA node ID for a GPU device."""
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = cls._get_nvml_handle(device_id)
 
         try:
             numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)

@@ -232,7 +232,7 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
-    def device_id_to_physical_device_id(cls, device_id: int):
+    def device_id_to_physical_device_id(cls, device_id: int) -> "int | str":
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
@@ -242,7 +242,12 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            try:
+                return int(physical_device_id)
+            except ValueError:
+                # MIG UUIDs (e.g. "MIG-xxxx-...") are not integers.
+                # Return the raw string so callers can resolve via UUID.
+                return physical_device_id
         else:
             return device_id
 
