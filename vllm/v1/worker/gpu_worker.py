@@ -727,6 +727,15 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
+            # Warm spec-decode helper kernels (vllm-project/vllm#39790).
+            # ``_dummy_run`` exercises the draft model forward but skips
+            # ``drafter.propose()``, so the per-step Triton kernels and the
+            # async-spec ``@torch.compile`` correction in
+            # ``vllm/v1/spec_decode/utils.py`` (and the
+            # ``update_num_computed_tokens_for_batch_change`` call in this
+            # runner) JIT on the first real request, spiking TTFT.
+            self._warmup_spec_decode_helpers()
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -748,6 +757,52 @@ class Worker(WorkerBase):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _warmup_spec_decode_helpers(self) -> None:
+        """JIT-compile spec-decode helper kernels at warmup, not first request.
+
+        See ``vllm/v1/spec_decode/llm_base_proposer.py::dry_run_helper_kernels``
+        for the kernel inventory and rationale (vllm-project/vllm#39790).
+        """
+        drafter = getattr(self.model_runner, "drafter", None)
+        if drafter is None:
+            return
+        if hasattr(drafter, "dry_run_helper_kernels"):
+            drafter.dry_run_helper_kernels()
+
+        # Also warm the async-spec ``@torch.compile`` correction owned by
+        # the model runner (V1 only -- V2 does not call it).
+        if not getattr(self.model_runner, "use_async_spec_decode", False):
+            return
+        from vllm.v1.spec_decode.utils import (
+            update_num_computed_tokens_for_batch_change,
+        )
+
+        max_num_reqs = self.model_runner.max_num_reqs
+        device = self.device
+        prev_positions = torch.zeros(max_num_reqs, dtype=torch.int64, device=device)
+        valid_sampled_token_count = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        prev_num_draft_tokens = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        cpu_num_computed_tokens = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        update_num_computed_tokens_for_batch_change(
+            self.model_runner.num_computed_tokens,
+            self.model_runner.num_accepted_tokens.gpu[:max_num_reqs],
+            prev_positions,
+            valid_sampled_token_count,
+            prev_num_draft_tokens,
+            cpu_num_computed_tokens,
+        )
+        # Reset state we wrote so warmup does not leak into the first
+        # real request.
+        self.model_runner.num_computed_tokens.zero_()
+        self.model_runner.num_accepted_tokens.gpu.zero_()
+        torch.accelerator.synchronize()
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
