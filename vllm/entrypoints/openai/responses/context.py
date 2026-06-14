@@ -278,6 +278,7 @@ class ParsableContext(ConversationContext):
         parser_cls: type[Parser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
+        allowed_subtools: dict[str, list[str] | None] | None = None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         enable_auto_tools: bool = False,
@@ -312,6 +313,7 @@ class ParsableContext(ConversationContext):
         self.request = request
 
         self.available_tools = available_tools or []
+        self.allowed_subtools = allowed_subtools or {}
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
@@ -432,12 +434,32 @@ class ParsableContext(ConversationContext):
 
         return [message]
 
+    def _is_subtool_allowed(self, namespace: str, subtool: str) -> bool:
+        """Check if a sub-tool is permitted by the request's allowed_tools."""
+        allowed = self.allowed_subtools.get(namespace)
+        if allowed is None:
+            return True
+        return subtool in allowed
+
     async def call_search_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
+
+        tool_name = "search"
+        if not self._is_subtool_allowed("browser", tool_name):
+            message = ResponseFunctionToolCallOutputItem(
+                id=f"fco_{random_uuid()}",
+                type="function_call_output",
+                call_id=f"call_{random_uuid()}",
+                output=f"Error: tool '{tool_name}' is not in allowed_tools"
+                " for this request.",
+                status="completed",
+            )
+            return [message]
+
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.arguments)
@@ -445,7 +467,7 @@ class ParsableContext(ConversationContext):
                 return _create_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.arguments)
-        result = await tool_session.call_tool("search", args)
+        result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
 
         message = ResponseFunctionToolCallOutputItem(
@@ -480,7 +502,19 @@ class ParsableContext(ConversationContext):
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
-        # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+
+        tool_name = "exec"
+        if not self._is_subtool_allowed("container", tool_name):
+            message = ResponseFunctionToolCallOutputItem(
+                id=f"fco_{random_uuid()}",
+                type="function_call_output",
+                call_id=f"call_{random_uuid()}",
+                output=f"Error: tool '{tool_name}' is not in allowed_tools"
+                " for this request.",
+                status="completed",
+            )
+            return [message]
+
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.arguments)
@@ -488,7 +522,7 @@ class ParsableContext(ConversationContext):
                 return _create_json_parse_error_messages(last_msg, e)
         else:
             args = json.loads(last_msg.arguments)
-        result = await tool_session.call_tool("exec", args)
+        result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
 
         message = ResponseFunctionToolCallOutputItem(
@@ -591,10 +625,12 @@ class HarmonyContext(ConversationContext):
         messages: list,
         available_tools: list[str],
         function_tool_names: frozenset[str] | None = None,
+        allowed_subtools: dict[str, list[str] | None] | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.allowed_subtools = allowed_subtools or {}
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
@@ -780,6 +816,13 @@ class HarmonyContext(ConversationContext):
     def render_for_completion(self) -> list[int]:
         return render_for_completion(self.messages)
 
+    def _is_subtool_allowed(self, namespace: str, subtool: str) -> bool:
+        """Check if a sub-tool is permitted by the request's allowed_tools."""
+        allowed = self.allowed_subtools.get(namespace)
+        if allowed is None:
+            return True
+        return subtool in allowed
+
     async def call_search_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
@@ -787,6 +830,22 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
+
+        if not self._is_subtool_allowed("browser", tool_name):
+            error_text = (
+                f"Error: tool '{tool_name}' is not in allowed_tools for this request."
+            )
+            content = TextContent(text=error_text)
+            author = Author(role=Role.TOOL, name=last_msg.recipient)
+            return [
+                Message(
+                    author=author,
+                    content=[content],
+                    recipient=Role.ASSISTANT,
+                    channel=last_msg.channel,
+                )
+            ]
+
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)
@@ -874,6 +933,22 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+
+        if not self._is_subtool_allowed("container", tool_name):
+            error_text = (
+                f"Error: tool '{tool_name}' is not in allowed_tools for this request."
+            )
+            content = TextContent(text=error_text)
+            author = Author(role=Role.TOOL, name=last_msg.recipient)
+            return [
+                Message(
+                    author=author,
+                    content=[content],
+                    recipient=Role.ASSISTANT,
+                    channel=last_msg.channel,
+                )
+            ]
+
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.content[0].text)

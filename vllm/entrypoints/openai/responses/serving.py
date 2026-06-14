@@ -415,6 +415,8 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             assert len(builtin_tool_list) == 0
             available_tools = []
+
+        allowed_subtools = self._build_allowed_subtools_map(request)
         tokenizer = self.renderer.get_tokenizer()
 
         for engine_input in engine_inputs:
@@ -448,22 +450,27 @@ class OpenAIServingResponses(OpenAIServing):
             if self.use_harmony:
                 if request.stream:
                     context = StreamingHarmonyContext(
-                        messages, available_tools, function_tool_names
+                        messages,
+                        available_tools,
+                        function_tool_names,
+                        allowed_subtools=allowed_subtools,
                     )
                 else:
                     context = HarmonyContext(
-                        messages, available_tools, function_tool_names
+                        messages,
+                        available_tools,
+                        function_tool_names,
+                        allowed_subtools=allowed_subtools,
                     )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                    # This is a feature in development for parsing
-                    # tokens during generation instead of at the end
                     context = ParsableContext(
                         response_messages=messages,
                         tokenizer=tokenizer,
                         parser_cls=self.parser,
                         request=request,
                         available_tools=available_tools,
+                        allowed_subtools=allowed_subtools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
@@ -1121,6 +1128,30 @@ class OpenAIServingResponses(OpenAIServing):
             "python_description": python_description,
             "container_description": container_description,
         }
+
+    def _build_allowed_subtools_map(
+        self, request: ResponsesRequest
+    ) -> dict[str, list[str] | None]:
+        """Build a mapping from tool namespace to allowed sub-tools.
+
+        Translates the request-level allowed_tools (keyed by server_label /
+        tool type) into a map keyed by the internal namespace name used by
+        the execution contexts (e.g. "browser", "python", "container").
+        A value of None means all sub-tools are allowed for that namespace.
+        """
+        allowed_tools_map = _extract_allowed_tools_from_mcp_requests(request.tools)
+
+        _TYPE_TO_NAMESPACE = {
+            "web_search_preview": "browser",
+            "code_interpreter": "python",
+            "container": "container",
+        }
+
+        allowed_subtools: dict[str, list[str] | None] = {}
+        for tool_type, namespace in _TYPE_TO_NAMESPACE.items():
+            if tool_type in allowed_tools_map:
+                allowed_subtools[namespace] = allowed_tools_map[tool_type]
+        return allowed_subtools
 
     def _construct_input_messages_with_harmony(
         self,
