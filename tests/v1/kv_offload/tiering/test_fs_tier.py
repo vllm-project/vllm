@@ -10,6 +10,7 @@ data integrity throughout the process.
 
 import mmap
 import os
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -22,6 +23,7 @@ from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -296,3 +298,23 @@ def test_store_load_data_integrity(fs_tier):
         assert torch.allclose(tensor[bid], expected[i]), (
             f"Block {bid} data mismatch after store+load"
         )
+
+
+def test_wait_idle_blocks_until_tasks_complete():
+    """wait_idle must not return while a task is still in flight."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    gate = threading.Event()
+    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
+
+    waiter = threading.Thread(target=pool.wait_idle)
+    waiter.start()
+    try:
+        waiter.join(timeout=0.2)
+        assert waiter.is_alive(), "wait_idle returned before task completed"
+        gate.set()
+        waiter.join(timeout=5.0)
+        assert not waiter.is_alive(), "wait_idle did not unblock"
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+        waiter.join(timeout=5.0)
