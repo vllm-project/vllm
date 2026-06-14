@@ -782,8 +782,15 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # Only resume scheduling when the executor is fully resident.
+        # A partial wake (e.g. wake_up(tags=["weights"])) restores weights
+        # but leaves the KV cache asleep — resuming scheduling then would
+        # let a forward pass write into released GPU memory and crash with
+        # CUDA illegal memory access. See issue #44395.
+        # The caller is expected to follow a partial wake with a full one
+        # (no tags) before scheduling can resume.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
