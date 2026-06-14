@@ -667,6 +667,71 @@ true
     assert isinstance(args["verbose"], bool)
 
 
+def test_qwen3coder_streaming_closes_function_after_parameter_fragment():
+    class FakeTokenizer:
+        def get_vocab(self):
+            return {
+                "<tool_call>": 248058,
+                "</tool_call>": 248059,
+            }
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_pdf",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer"},
+                    },
+                },
+            },
+        )
+    ]
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    parser = Qwen3CoderToolParser(FakeTokenizer(), tools=tools)
+
+    chunks = [
+        ("\n\n<tool_call>", [271, 248058]),
+        ("\n<function=read_pdf>\n<", [198, 27, 1628, 86779, 38623, 29, 198, 27]),
+        ("parameter=page>\n1\n</", [15704, 28, 2799, 29, 198, 16, 198, 510]),
+        (
+            "parameter>\n</function>\n</tool_call>",
+            [15704, 29, 198, 510, 1628, 29, 198, 248059],
+        ),
+        ("", [248046]),
+    ]
+
+    previous_text = ""
+    previous_token_ids: list[int] = []
+    accumulated_args = ""
+
+    for delta_text, delta_token_ids in chunks:
+        current_text = previous_text + delta_text
+        current_token_ids = previous_token_ids + delta_token_ids
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=previous_token_ids,
+            current_token_ids=current_token_ids,
+            delta_token_ids=delta_token_ids,
+            request=request,
+        )
+
+        if delta and delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                function = tool_call.function
+                if function and function.arguments is not None:
+                    accumulated_args += function.arguments
+
+        previous_text = current_text
+        previous_token_ids = current_token_ids
+
+    assert json.loads(accumulated_args) == {"page": 1}
+
+
 @pytest.mark.parametrize(
     ids=[
         "no_tools",
