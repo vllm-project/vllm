@@ -506,33 +506,11 @@ class Qwen3CoderToolParser(ToolParser):
                 self.param_count += 1
                 json_fragments.append(json_fragment)
 
-            if json_fragments:
-                combined = "".join(json_fragments)
-
-                if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[self.current_tool_index] += combined
-                else:
-                    logger.warning(
-                        "streamed_args_for_tool out of sync: index=%d len=%d",
-                        self.current_tool_index,
-                        len(self.streamed_args_for_tool),
-                    )
-
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments=combined),
-                        )
-                    ]
-                )
-
-            # Check for function end AFTER processing parameters.
-            # This ordering is critical: with speculative decoding a
-            # burst can deliver the final parameter value together with
-            # </function>. If the close check ran first it would emit
-            # "}" and set in_function=False before the parameter loop
-            # ever ran, causing the parameter to be silently dropped.
+            # Check for function end. When a single delta delivers
+            # both the final parameter and </function>, we must emit
+            # the closing "}" in the same response to avoid the next
+            # (possibly empty/EOS) delta never reaching this branch.
+            close_brace = ""
             if not self.json_closed and self.function_end_token in tool_text:
                 self.json_closed = True
 
@@ -559,8 +537,15 @@ class Qwen3CoderToolParser(ToolParser):
                             exc_info=True,
                         )
 
+                close_brace = "}"
+                self.in_function = False
+                self.accumulated_params = {}
+
+            combined = "".join(json_fragments) + close_brace
+
+            if combined:
                 if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[self.current_tool_index] += "}"
+                    self.streamed_args_for_tool[self.current_tool_index] += combined
                 else:
                     logger.warning(
                         "streamed_args_for_tool out of sync: index=%d len=%d",
@@ -568,19 +553,13 @@ class Qwen3CoderToolParser(ToolParser):
                         len(self.streamed_args_for_tool),
                     )
 
-                result = DeltaMessage(
+                return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
+                            function=DeltaFunctionCall(arguments=combined),
                         )
                     ]
                 )
-
-                self.in_function = False
-                self.json_closed = True
-                self.accumulated_params = {}
-
-                return result
 
         return None

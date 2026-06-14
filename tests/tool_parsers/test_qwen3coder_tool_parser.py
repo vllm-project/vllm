@@ -1210,6 +1210,43 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     assert args["unit"] == "fahrenheit"
 
 
+def test_streaming_param_and_function_end_in_same_chunk(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: closing </parameter> and </function> in same delta (#45256).
+
+    With stream_interval > 1, a single delta can contain both the end of the
+    last parameter and the </function> tag. Previously the parser returned
+    after emitting the parameter fragment without also emitting the closing
+    "}", producing invalid JSON like '{"page": 1' instead of '{"page": 1}'.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",
+        "<parameter=city>\nDallas\n</parameter>\n<parameter=state>\nTX\n</",
+        "parameter>\n</function>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    args_str = reconstructor.tool_calls[0].function.arguments
+    args = json.loads(args_str)
+    assert args == {"city": "Dallas", "state": "TX"}
+
+
 def test_no_double_serialization_string_args(qwen3_tool_parser):
     """Regression: string arguments must not be double-serialized (PR #35615)."""
     tools = [
