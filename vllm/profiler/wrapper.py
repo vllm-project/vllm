@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import csv
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -258,6 +260,51 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
+    def _export_profiler_table(self, rank: int) -> None:
+        """Write per-event profiler metrics as a structured 'csv' or 'json' file."""
+        export_format = self.profiler_config.torch_profiler_table_format
+        profiler_dir = self.profiler_config.torch_profiler_dir
+
+        # Skip file write for URI paths (gs://, s3://, etc.)
+        # as standard file I/O doesn't work with URI schemes
+        if _is_uri_path(profiler_dir):
+            return
+
+        # Extract every public, non-callable metric from each event.
+        rows: list[dict[str, object]] = []
+        for event in self.profiler.key_averages():
+            row: dict[str, object] = {}
+            for attr in dir(event):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    value = getattr(event, attr)
+                except Exception:
+                    continue
+                if not callable(value):
+                    row[attr] = value
+            rows.append(row)
+
+        # Stable, sorted superset of every metric seen across the events.
+        fieldnames = sorted({key for row in rows for key in row})
+
+        out_file = f"{profiler_dir}/profiler_out_{rank}.{export_format}"
+        if export_format == "json":
+            with open(out_file, "w") as f:
+                json.dump(rows, f, indent=2, default=str)
+        else:  # csv
+            for row in rows:
+                # Flatten non-primitive values (lists, tensors, etc.) for CSV.
+                for key, value in row.items():
+                    if value is not None and not isinstance(
+                        value, (int, float, bool, str)
+                    ):
+                        row[key] = str(value)
+            with open(out_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
+                writer.writeheader()
+                writer.writerows(rows)
+
     @override
     def _start(self) -> None:
         self.profiler.start()
@@ -268,9 +315,11 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         profiler_config = self.profiler_config
         rank = self.local_rank
+        export_format = profiler_config.torch_profiler_table_format
         if profiler_config.torch_profiler_dump_cuda_time_total:
             table = self._build_profiler_table(sort_key="self_cuda_time_total")
-            self._write_profiler_table(rank, table)
+            if export_format == "txt":
+                self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -280,11 +329,16 @@ class TorchProfilerWrapper(WorkerProfiler):
             table = self._build_profiler_table(
                 sort_key="self_cpu_time_total", row_limit=50
             )
-            self._write_profiler_table(rank, table)
+            if export_format == "txt":
+                self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
+
+        # Structured formats replace the .txt file and are written once.
+        if export_format in ("csv", "json"):
+            self._export_profiler_table(rank)
 
     @override
     def _profiler_step(self) -> bool:
