@@ -52,9 +52,10 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
-    from datasets import load_dataset
+    from datasets import DownloadMode, load_dataset
 except ImportError:
     datasets = PlaceholderModule("datasets")
+    DownloadMode = datasets.placeholder_attr("DownloadMode")
     load_dataset = datasets.placeholder_attr("load_dataset")
 
 try:
@@ -86,14 +87,6 @@ class SampleRequest:
     lora_request: LoRARequest | None = None
     request_id: str | None = None
     timestamp: float | None = None
-    # Pre-built chat messages. When set, the chat backend uses this list
-    # directly and skips constructing messages from `prompt` + multimodal
-    # content. Mutually exclusive with the `prompt`-based path.
-    chat_messages: list[dict[str, Any]] | None = None
-    # Per-request fields merged into the request body (e.g. tools,
-    # tool_choice, response_format). Shallow-merged with --extra-body at
-    # dispatch time; per-request keys win.
-    request_overrides: dict | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -3202,6 +3195,7 @@ class HuggingFaceDataset(BenchmarkDataset):
     """Base class for datasets hosted on HuggingFace."""
 
     SUPPORTED_DATASET_PATHS: set[str] | dict[str, Callable] = set()
+    ENSURE_LATEST_REVISION = False
 
     def __init__(
         self,
@@ -3224,15 +3218,52 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        self.data = load_dataset(
-            self.dataset_path,
-            name=self.dataset_subset,
-            split=self.dataset_split,
-            streaming=self.load_stream,
-            trust_remote_code=self.trust_remote_code,
+        load_kwargs: dict[str, Any] = {
+            "path": self.dataset_path,
+            "name": self.dataset_subset,
+            "split": self.dataset_split,
+            "streaming": self.load_stream,
+            "trust_remote_code": self.trust_remote_code,
+        }
+
+        latest_revision = (
+            self._get_latest_revision() if self.ENSURE_LATEST_REVISION else None
         )
+        if latest_revision is not None:
+            load_kwargs["revision"] = latest_revision
+            if not self.load_stream and not self._has_cached_revision(latest_revision):
+                logger.info(
+                    "Latest revision %s for Hugging Face dataset %s is not "
+                    "present in the local cache; forcing a redownload.",
+                    latest_revision,
+                    self.dataset_path,
+                )
+                load_kwargs["download_mode"] = DownloadMode.FORCE_REDOWNLOAD
+
+        self.data = load_dataset(**load_kwargs)
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
+
+    def _get_latest_revision(self) -> str | None:
+        """Return the latest Hub revision when metadata lookup is available."""
+        with suppress(Exception):
+            return hf_api().dataset_info(self.dataset_path).sha
+        return None
+
+    def _has_cached_revision(self, revision: str) -> bool:
+        """Check whether the latest dataset snapshot is already cached."""
+        with suppress(Exception):
+            from huggingface_hub import scan_cache_dir
+
+            cache_info = scan_cache_dir()
+            for repo in cache_info.repos:
+                if repo.repo_type != "dataset" or repo.repo_id != self.dataset_path:
+                    continue
+                return any(
+                    cached_revision.commit_hash == revision
+                    for cached_revision in repo.revisions
+                )
+        return False
 
 
 # -----------------------------------------------------------------------------
@@ -3578,6 +3609,7 @@ class MTBenchDataset(HuggingFaceDataset):
     """  # noqa: E501
 
     DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    ENSURE_LATEST_REVISION = True
     SUPPORTED_DATASET_PATHS = {
         "philschmid/mt-bench",
     }

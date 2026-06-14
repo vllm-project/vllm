@@ -9,6 +9,7 @@ from typing import TypeAlias, TypeVar
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.repo_utils import retry_with_kwargs_in_ci
 
 from .protocol import TokenizerLike
 
@@ -172,14 +173,18 @@ class CachedHfTokenizer(TokenizerLike):
         **kwargs,
     ) -> HfTokenizer:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                path_or_repo_id,
-                *args,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                cache_dir=download_dir,
-                **kwargs,
-            )
+            with retry_with_kwargs_in_ci(
+                AutoTokenizer.from_pretrained,
+                local_files_only=True,
+            ) as from_pretrained:
+                tokenizer = from_pretrained(
+                    path_or_repo_id,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    cache_dir=download_dir,
+                    **kwargs,
+                )
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
