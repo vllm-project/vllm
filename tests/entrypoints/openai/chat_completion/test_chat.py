@@ -336,8 +336,47 @@ async def test_chat_streaming(client: openai.AsyncOpenAI, model_name: str):
     # finish reason should only return in last block
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
-    assert delta.content
+    assert not delta.content
     assert "".join(chunks) == output
+
+
+@pytest.mark.asyncio
+async def test_streaming_finish_reason_length_empty_delta(
+    client: openai.AsyncOpenAI,
+):
+    """The final chunk with finish_reason set should have an empty delta,
+    matching OpenAI's streaming convention."""
+    messages = [
+        {"role": "user", "content": "Tell me a long story about a dragon"},
+    ]
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_completion_tokens=5,
+        temperature=0.0,
+        stream=True,
+    )
+
+    chunks_content: list[str] = []
+    finish_reason = None
+    async for chunk in stream:
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if delta.content:
+            # Content chunks must have finish_reason=None
+            assert choice.finish_reason is None, (
+                "Chunk with content should have finish_reason=None"
+            )
+            chunks_content.append(delta.content)
+        if choice.finish_reason is not None:
+            finish_reason = choice.finish_reason
+
+    # The final chunk should have finish_reason="length" with empty delta
+    assert finish_reason == "length"
+    assert not delta.content
+    # We should have received some content tokens
+    assert len(chunks_content) > 0
 
 
 @pytest.mark.asyncio
