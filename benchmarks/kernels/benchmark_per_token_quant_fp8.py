@@ -45,6 +45,7 @@ def bench_compile(fn: Callable):
 torch._dynamo.config.recompile_limit = 8888
 
 
+@default_vllm_config()
 def calculate_diff(
     batch_size: int,
     hidden_size: int,
@@ -139,10 +140,17 @@ def compute_geomean_speedups(
     from scipy.stats import gmean
 
     def geo_speedup(group: pd.DataFrame) -> pd.Series:
+        import numpy as np
+
         ratios = {
             col: (group[baseline_col] / group[col]).values for col in speedup_cols
         }
-        return pd.Series({col: gmean(vals) for col, vals in ratios.items()})
+        return pd.Series(
+            {
+                col: gmean(vals) if np.isfinite(vals) else np.nan
+                for col, vals in ratios.items()
+            }
+        )
 
     if groupby_cols is None:
         result = geo_speedup(df).to_frame().T
@@ -175,7 +183,7 @@ if __name__ == "__main__":
         "--batch-sizes",
         type=int,
         nargs="+",
-        default=[1, 16, 128, 512, 1024],
+        default=[1, 16, 128, 512, 2048, 8192],
         help="Batch sizes to benchmark",
     )
     parser.add_argument(
@@ -198,7 +206,8 @@ if __name__ == "__main__":
     dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
 
     hidden_sizes = args.hidden_sizes
-    batch_sizes = args.batch_sizes
+    # vLLM compiles the largest batch size first, which affects perf
+    batch_sizes = sorted(args.batch_sizes, reverse=True)
 
     if args.group_sizes is not None:
         group_shapes = []
@@ -263,10 +272,10 @@ if __name__ == "__main__":
     # Print geomean speedups
     geo_table_grouped = compute_geomean_speedups(
         df,
-        baseline_col="Torch (Compiled)",
-        speedup_cols=["CUDA", "Triton"],
+        baseline_col="Torch (Compiled) (us)",
+        speedup_cols=["CUDA (us)", "Triton (us)"],
         groupby_cols=["col_major", "group_shape"],
     )
 
-    print("Speedup over Torch (Compiled)")
+    print("\nSpeedup over Torch (Compiled)")
     print(geo_table_grouped.to_string(index=False))

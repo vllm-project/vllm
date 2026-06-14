@@ -24,3 +24,11 @@ steps:
   - vllm/v1/attention/
   commands:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+
+- label: Kernel Benchmarks Smoke Test
+  device: h200_18gb
+  optional: true
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/"
+  commands:
+  - python3 benchmarks/kernels/benchmark_per_token_quant_fp8.py
