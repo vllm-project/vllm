@@ -166,6 +166,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def release_kv_cache(self, mode: "PauseMode" = "abort") -> bool:
+        """Release the engine's KV cache"""
+        ...
+
+    @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the engine"""
         ...

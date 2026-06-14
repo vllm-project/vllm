@@ -785,6 +785,28 @@ class EngineCore:
         # Resume scheduling (applies to all levels)
         self.resume_scheduler()
 
+    def release_kv_cache(self, mode: PauseMode = "abort") -> bool | Future:
+        """Release KV cache memory while keeping model weights resident."""
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
+        model_executor = self.model_executor
+        if pause_future is None:
+            return model_executor.release_kv_cache()
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()
+                future.set_result(model_executor.release_kv_cache())
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info(
+            "Waiting for in-flight requests to complete before releasing KV cache..."
+        )
+        pause_future.add_done_callback(pause_complete)
+        return future
+
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping

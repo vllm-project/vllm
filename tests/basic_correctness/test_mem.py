@@ -76,6 +76,34 @@ def test_basic_cumem():
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_release_kv_cache():
+    kv_cache_memory_bytes = 256 * 1024 * 1024
+    llm = LLM(
+        "Qwen/Qwen3-0.6B",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.1,
+        kv_cache_memory_bytes=kv_cache_memory_bytes,
+        max_model_len=1024,
+        max_num_seqs=4,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    free_bytes = current_platform.mem_get_info()[0]
+    llm.release_kv_cache()
+    free_bytes_after_release = current_platform.mem_get_info()[0]
+    freed_bytes = free_bytes_after_release - free_bytes
+    assert freed_bytes >= kv_cache_memory_bytes * 0.99
+
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA graph not supported on XPU")
 def test_cumem_with_cudagraph():
     allocator = get_mem_allocator_instance()

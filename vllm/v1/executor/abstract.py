@@ -317,8 +317,11 @@ class Executor(ABC):
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:
-            logger.warning("Executor is already sleeping.")
-            return
+            if self.sleeping_tags == {"kv_cache"}:
+                logger.info("Executor is releasing weights after KV cache release.")
+            else:
+                logger.warning("Executor is already sleeping.")
+                return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
@@ -339,13 +342,14 @@ class Executor(ABC):
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
                     return
+        tags_to_wake = tags if tags is not None else list(self.sleeping_tags)
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        self.collective_rpc("wake_up", kwargs=dict(tags=tags_to_wake))
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",
             time_after_wakeup - time_before_wakeup,
-            tags if tags is not None else self.sleeping_tags,
+            tags_to_wake,
         )
         if tags:
             for tag in tags:
@@ -354,6 +358,21 @@ class Executor(ABC):
             self.sleeping_tags.clear()
         if not self.sleeping_tags:
             self.is_sleeping = False
+
+    def release_kv_cache(self) -> bool:
+        if self.is_sleeping:
+            logger.warning("Executor is already sleeping.")
+            return False
+        time_before_release = time.perf_counter()
+        self.collective_rpc("release_kv_cache")
+        time_after_release = time.perf_counter()
+        self.sleeping_tags = {"kv_cache"}
+        self.is_sleeping = True
+        logger.info(
+            "It took %.6f seconds to release KV cache.",
+            time_after_release - time_before_release,
+        )
+        return True
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

@@ -160,6 +160,9 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
+    def release_kv_cache(self, mode: PauseMode = "abort") -> bool:
+        raise NotImplementedError
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
@@ -235,6 +238,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        raise NotImplementedError
+
+    async def release_kv_cache_async(self, mode: PauseMode = "abort") -> bool:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
@@ -326,6 +332,13 @@ class InprocClient(EngineCoreClient):
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
         result = self.engine_core.sleep(level, mode)
         assert result is None
+
+    def release_kv_cache(self, mode: PauseMode = "abort") -> bool:
+        if mode == "wait":
+            raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
+        result = self.engine_core.release_kv_cache(mode)
+        assert isinstance(result, bool)
+        return result
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
@@ -923,6 +936,9 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         self.call_utility("sleep", level, mode)
 
+    def release_kv_cache(self, mode: PauseMode = "abort") -> bool:
+        return self.call_utility("release_kv_cache", mode)
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
 
@@ -1158,6 +1174,9 @@ class AsyncMPClient(MPClient):
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)
+
+    async def release_kv_cache_async(self, mode: PauseMode = "abort") -> bool:
+        return await self.call_utility_async("release_kv_cache", mode)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)
