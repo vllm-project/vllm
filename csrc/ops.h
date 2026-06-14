@@ -40,6 +40,12 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void rms_norm_weightless(torch::Tensor& out, torch::Tensor& input,
+                         double epsilon);
+
+void fused_add_rms_norm_weightless(torch::Tensor& input, torch::Tensor& residual,
+                                   double epsilon);
+
 // rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
 // ABI for CUDA). It remains here because the CPU build still uses these
 // torch::Tensor declarations.
