@@ -761,6 +761,22 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def get_device_info(self) -> dict:
+        """Return hardware properties for this rank's device."""
+        device_id = self.local_rank
+        capability = current_platform.get_device_capability(device_id)
+        return {
+            "rank": self.rank,
+            "name": current_platform.get_device_name(device_id),
+            "total_memory_bytes": current_platform.get_device_total_memory(device_id),
+            "compute_capability": (
+                {"major": capability.major, "minor": capability.minor}
+                if capability is not None
+                else None
+            ),
+            "num_compute_units": current_platform.num_compute_units(device_id),
+        }
+
     def get_compilation_match_table(self) -> dict[str, int]:
         from vllm.compilation.passes.vllm_inductor_pass import get_match_table
 
