@@ -24,6 +24,7 @@ HIP graphs already eliminate — measured end-to-end throughput is identical
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -132,11 +133,10 @@ def swiglu_oai_quantize_mxfp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """SwiGLU-OAI on split-layout ``[M, 2I]`` fused with MXFP8 activation-quant.
 
-    Returns ``(act_q [M, I] float8_e4m3fn, act_scale [M, I//32] uint8 E8M0)``,
-    identical to ``mxfp8_e4m3_quantize(swiglu_oai_split(gate_up))`` but in a
-    single Triton pass (no bf16 intermediate). Used between the two GEMMs of the
-    native MXFP8 MoE. Numerically equivalent to the unfused chain (bit-exact on
-    measured MoE shapes); marginally more accurate (fp32 act, no bf16 round-trip).
+    Returns platform-native E4M3 values plus ``[M, I//32]`` uint8 E8M0 scales,
+    equivalent to ``mxfp8_e4m3_quantize(swiglu_oai_split(gate_up))`` but in a
+    single Triton pass (no bf16 intermediate). gfx94x emits E4M3FNUZ so
+    ``tl.dot`` lowers to the native CDNA3 FP8 matrix cores.
     """
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         MXFP8_BLOCK_SIZE,
@@ -151,7 +151,10 @@ def swiglu_oai_quantize_mxfp8(
     )
     g1 = gate_up.reshape(-1, two_i).contiguous()
     M = g1.shape[0]
-    aq = torch.empty((M, n_inter), dtype=MXFP8_VALUE_DTYPE, device=g1.device)
+    value_dtype = (
+        torch.float8_e4m3fnuz if current_platform.is_fp8_fnuz() else MXFP8_VALUE_DTYPE
+    )
+    aq = torch.empty((M, n_inter), dtype=value_dtype, device=g1.device)
     asc = torch.empty(
         (M, n_inter // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=g1.device
     )

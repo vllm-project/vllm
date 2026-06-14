@@ -79,12 +79,20 @@ def _select_kernel_cls(
 def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """ROCm fallback when vendor MXFP8 backends are unavailable."""
 
-    if current_platform.supports_mx():
+    if current_platform.supports_mx() or current_platform.is_fp8_fnuz():
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
             Mxfp8NativeTritonExperts,
         )
 
-        logger.info_once("Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend.")
+        if current_platform.supports_mx():
+            logger.info_once(
+                "Using native CDNA4 (gfx95x) MXFP8 dot_scaled MoE backend."
+            )
+        else:
+            logger.info_once(
+                "Using fused CDNA3 (gfx94x) MXFP8 FP8 MoE backend; weights "
+                "remain compressed and 1x32 scales are applied in-kernel."
+            )
         return Fp8MoeBackend.NATIVE_MXFP8, Mxfp8NativeTritonExperts
 
     from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (

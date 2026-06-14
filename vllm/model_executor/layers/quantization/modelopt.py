@@ -2092,7 +2092,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
-        On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
+        On devices without a fused MXFP8 MoE kernel,
         ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
@@ -2164,7 +2164,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
 
-        # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
+        # No fused MXFP8 MoE kernel on this device: the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
         # weights to BF16 once, here, so the MoE runs like a BF16 checkpoint.
         # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the 1-byte
