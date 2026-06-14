@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
 
+import os
 import numpy as np
 import torch
 from flashinfer import (
@@ -755,6 +756,56 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+            else:
+                # Auto-size based on FlashInfer's internal allocation formula
+                # (see flashinfer/include/flashinfer/attention/scheduler.cuh)
+                # batch_prefill_tmp_v needs:
+                #   num_qo_heads * padded_bs * cta_tile_q * head_dim * sizeof(float)
+                # batch_prefill_tmp_s needs:
+                #   num_qo_heads * padded_bs * cta_tile_q * sizeof(float)
+                num_sm = torch.cuda.get_device_properties(
+                    self.device).multi_processor_count
+                num_blocks_per_sm = 2
+                cta_tile_q = 192 if self.head_dim == 64 else 128
+                # padded_batch_size: FlashInfer uses at least 128 in
+                # the CUDA graph path, even if SM-based calc is smaller
+                padded_bs = max(
+                    num_blocks_per_sm * num_sm // max(self.num_kv_heads, 1),
+                    128,
+                )
+                estimated = (self.num_qo_heads * padded_bs
+                            * cta_tile_q * (self.head_dim + 1) * 4)
+                # Add headroom for int workspace + alignment padding
+                estimated += 16 * 1024 * 1024
+
+                user_explicitly_set = (
+                    "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE" in os.environ
+                )
+                if estimated > buffer_size:
+                    if user_explicitly_set:
+                        logger.warning(
+                            "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE is "
+                            "set to %d MiB but the estimated workspace "
+                            "need is %d MiB. Honoring the user-set "
+                            "value; if you hit a FlashInfer OOM, "
+                            "increase or unset the env var to enable "
+                            "auto-sizing.",
+                            buffer_size // (1024 * 1024),
+                            estimated // (1024 * 1024),
+                        )
+                    else:
+                        logger.info(
+                            "Auto-sized FlashInfer workspace buffer "
+                            "from %d MiB to %d MiB (num_qo_heads=%d, "
+                            "num_kv_heads=%d, head_dim=%d, num_sm=%d).",
+                            buffer_size // (1024 * 1024),
+                            estimated // (1024 * 1024),
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            num_sm,
+                        )
+                        buffer_size = estimated
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
             )
