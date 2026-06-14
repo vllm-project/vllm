@@ -254,7 +254,6 @@ class Scheduler(SchedulerInterface):
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
-            watermark=self.scheduler_config.watermark,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -842,7 +841,6 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
-                    has_scheduled_reqs=bool(self.running),
                 )
 
                 if new_blocks is None:
@@ -2254,8 +2252,12 @@ class Scheduler(SchedulerInterface):
         )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
+        """Blocks in-flight prefills still need to finish (their reservation).
 
+        Sums remaining full-ISL blocks over `self._inflight_prefills` (running
+        prefills + in-progress async loads). The candidate async load isn't yet
+        in the set, so it's naturally excluded.
+        """
         return sum(
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
