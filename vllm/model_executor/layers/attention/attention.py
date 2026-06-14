@@ -236,11 +236,28 @@ class Attention(nn.Module, AttentionLayerBase):
         # case anything bypassed that path.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
         if kv_cache_scheme is not None and kv_cache_dtype == "auto":
-            kv_cache_dtype = "fp8"
-            calculate_kv_scales = False
-            if cache_config is not None:
-                cache_config.cache_dtype = "fp8"
-                cache_config.calculate_kv_scales = False
+            # FP8 KV-cache attention kernels (FlashInfer) require SM90+.
+            # On SM89 (L4, RTX 4090) the kernels are missing and the
+            # override causes illegal-memory-access crashes during MTP
+            # speculative decoding.  Skip the auto-override on those
+            # GPUs; users can still force --kv-cache-dtype fp8.
+            if current_platform.has_device_capability(90):
+                kv_cache_dtype = "fp8"
+                calculate_kv_scales = False
+                if cache_config is not None:
+                    cache_config.cache_dtype = "fp8"
+                    cache_config.calculate_kv_scales = False
+            else:
+                cap = current_platform.get_device_capability()
+                cap_str = cap.as_version_str() if cap else "unknown"
+                logger.warning(
+                    "Model specifies kv_cache_scheme (FP8 KV cache) but "
+                    "the current GPU (compute capability %s) does not "
+                    "support FP8 attention kernels (SM90+ required). "
+                    "Falling back to auto KV cache dtype. "
+                    "Use --kv-cache-dtype fp8 to override.",
+                    cap_str,
+                )
 
         # Check if per-head quant scales are required based on kv_cache_scheme
         use_per_head_quant_scales = (
