@@ -81,3 +81,87 @@ def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def test_observe_finished_request_single() -> None:
+    """Non-parallel request (n=1) should record metrics correctly."""
+    from vllm.v1.metrics.stats import IterationStats
+    iteration_stats = IterationStats()
+
+    # n=1, no parent request
+    ParentRequest.observe_finished_request(
+        parent_req=None,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=42,
+    )
+
+    assert iteration_stats.n_params_iter == [1]
+    assert iteration_stats.max_num_generation_tokens_iter == [42]
+
+
+def test_observe_finished_request_parallel() -> None:
+    """Parallel request (n=3) should only record metrics when all children finish."""
+    from vllm.v1.metrics.stats import IterationStats
+    iteration_stats = IterationStats()
+
+    parent_request = ParentRequest(make_request(SamplingParams(n=3)))
+    child_ids = [parent_request.get_child_info(i)[0] for i in range(3)]
+
+    # Child 0 finishes with 10 tokens — not all done yet, no metrics recorded
+    parent_request.child_requests.remove(child_ids[0])
+    ParentRequest.observe_finished_request(
+        parent_req=parent_request,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=10,
+    )
+    assert iteration_stats.n_params_iter == []
+    assert iteration_stats.max_num_generation_tokens_iter == []
+
+    # Child 1 finishes with 20 tokens — still not all done
+    parent_request.child_requests.remove(child_ids[1])
+    ParentRequest.observe_finished_request(
+        parent_req=parent_request,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=20,
+    )
+    assert iteration_stats.n_params_iter == []
+    assert iteration_stats.max_num_generation_tokens_iter == []
+
+    # Child 2 finishes with 15 tokens — all done, metrics should be recorded
+    parent_request.child_requests.remove(child_ids[2])
+    ParentRequest.observe_finished_request(
+        parent_req=parent_request,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=15,
+    )
+    # n=3 recorded once, max tokens = 20 (max across all children)
+    assert iteration_stats.n_params_iter == [3]
+    assert iteration_stats.max_num_generation_tokens_iter == [20]
+
+
+def test_observe_finished_request_max_tokens_tracked() -> None:
+    """Max generation tokens should reflect the highest across all children."""
+    from vllm.v1.metrics.stats import IterationStats
+    iteration_stats = IterationStats()
+
+    parent_request = ParentRequest(make_request(SamplingParams(n=2)))
+    child_ids = [parent_request.get_child_info(i)[0] for i in range(2)]
+
+    # Child 0 finishes with 100 tokens
+    parent_request.child_requests.remove(child_ids[0])
+    ParentRequest.observe_finished_request(
+        parent_req=parent_request,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=100,
+    )
+
+    # Child 1 finishes with 5 tokens — max should still be 100
+    parent_request.child_requests.remove(child_ids[1])
+    ParentRequest.observe_finished_request(
+        parent_req=parent_request,
+        iteration_stats=iteration_stats,
+        num_generation_tokens=5,
+    )
+
+    assert iteration_stats.n_params_iter == [2]
+    assert iteration_stats.max_num_generation_tokens_iter == [100]
