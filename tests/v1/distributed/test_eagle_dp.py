@@ -9,9 +9,12 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
+
+logger = init_logger(__name__)
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
@@ -91,6 +94,12 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
             return token_ids
 
     async def engine_create_and_generate(engine_args: AsyncEngineArgs):
+        logger.info(
+            "VLLM_BATCH_INVARIANT=%s (model=%s, speculative=%s)",
+            os.environ.get("VLLM_BATCH_INVARIANT"),
+            engine_args.model,
+            engine_args.speculative_config is not None,
+        )
         async with AsyncExitStack() as after:
             engine = AsyncLLM.from_engine_args(engine_args)
             after.callback(engine.shutdown)
