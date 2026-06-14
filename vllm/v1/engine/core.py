@@ -782,8 +782,15 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # Only resume scheduling once the executor is fully awake. A partial
+        # wake (e.g. tags=["weights"]) restores weights but leaves the KV
+        # cache released, so resuming would run forward passes -- including
+        # the dummy decode that idle data-parallel ranks issue to stay in
+        # lockstep -- against freed KV cache memory, causing an illegal
+        # memory access. The scheduler is resumed by a later full wake or
+        # wake_up(tags=["kv_cache"]). See issue #44395.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
