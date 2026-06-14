@@ -494,6 +494,11 @@ class OpenAIServingResponses(OpenAIServing):
                             struct_out.structural_tag, self.tool_server
                         ),
                     )
+            reasoning_ended: bool | None = None
+            if self.parser and self.parser.reasoning_parser_cls is not None:
+                reasoning_ended = reasoning_parser.is_reasoning_end(
+                    engine_input.get("prompt_token_ids") or []
+                )
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
                 engine_input=engine_input,
@@ -502,6 +507,7 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
+                reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs
                 if self.parser and self.parser.reasoning_parser_cls is not None
                 else None,
@@ -649,6 +655,7 @@ class OpenAIServingResponses(OpenAIServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -673,6 +680,7 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
