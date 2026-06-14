@@ -349,6 +349,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
+        # AITER fused kernel parameters
+        cos_cache: torch.Tensor | None = None,
+        sin_cache: torch.Tensor | None = None,
+        is_neox_style: bool = False,
+        rotary_emb: torch.nn.Module | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -363,6 +368,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
+
+        # Store RoPE caches for AITER fused kernels
+        self.cos_cache = cos_cache
+        self.sin_cache = sin_cache
+        self.is_neox_style = is_neox_style
+        self.rotary_emb = rotary_emb
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -505,6 +516,52 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
+        # Check if AITER fused kernels (RoPE+KV fusion) can be used
+        # Requirements: ROCm + (FP4 or FP8 BMM support) + env flag + RoPE caches
+        # DEBUG: Log each condition
+        is_rocm = current_platform.is_rocm()
+        has_bmm = (
+            self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled
+        )
+        has_env_flag = envs.VLLM_USE_AITER_FUSED
+        has_cos = cos_cache is not None
+        has_sin = sin_cache is not None
+
+        self.use_aiter_fused = (
+            is_rocm and has_bmm and has_env_flag and has_cos and has_sin
+        )
+
+        # Import AITER fused kernels if enabled
+        if self.use_aiter_fused:
+            # Use unified RoPE + KV cache kernel for both prefill and decode
+            # BMM will be handled separately (not fused)
+            try:
+                from aiter.ops.triton.fusions.fused_kv_cache import (
+                    fused_qk_rope_cat_and_cache_mla,
+                )
+
+                self._fused_rope_kv_kernel = fused_qk_rope_cat_and_cache_mla
+
+                # Set kernel type for BMM selection (separate, not fused)
+                if self.is_aiter_triton_fp4_bmm_enabled:
+                    self._fused_kernel_type = "fp4"
+                else:
+                    self._fused_kernel_type = "fp8"
+            except ImportError as e:
+                logger.warning_once(
+                    f"AITER fused RoPE+KV cache kernel not available: {e}, "
+                    "falling back to separate ops"
+                )
+                self.use_aiter_fused = False
+
+        # Log fusion status
+        if self.use_aiter_fused:
+            logger.info(
+                "AITER unified RoPE+KV fusion ENABLED for prefill+decode "
+                "(single kernel call), using %s BMM separately",
+                self._fused_kernel_type.upper(),
+            )
+
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
         self._chunked_prefill_workspace_size: int | None = None
@@ -535,6 +592,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
+        use_fused_path: bool = False,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -544,8 +605,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _encode_layer_name(self.layer_name),
             )
 
+        # Store context for custom ops
+        forward_context: ForwardContext = get_forward_context()
+        if positions is not None:
+            forward_context._positions = positions
+        forward_context._use_fused_path = use_fused_path
+
         if self.use_direct_call:
-            forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
             attn_metadata: MLACommonMetadata
             if isinstance(attn_metadata_raw, dict):
@@ -578,9 +644,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
+                # Pass fusion parameters
+                positions=positions,
+                slot_mapping=(
+                    slot_mapping.get(self.layer_name) if slot_mapping else None
+                ),
+                use_fused_path=use_fused_path,
+                rotary_emb=rotary_emb,
             )
             return output
         else:
+            # Custom ops path (ROCm)
+            if slot_mapping is not None:
+                forward_context.slot_mapping[self.layer_name] = slot_mapping
+
             encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
@@ -596,6 +673,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 k_pe,
                 output,
                 encoded,
+                positions,
+                slot_mapping,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
@@ -614,8 +693,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        # AITER fused kernel parameters
+        positions: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
+        use_fused_path: bool | None = None,
+        rotary_emb: torch.nn.Module | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+
+        # Default to instance variable if not provided
+        if use_fused_path is None:
+            use_fused_path = self.use_aiter_fused
 
         quant_key = _detect_output_quant_key(
             output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
@@ -660,6 +748,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
+        # Extract slot_mapping from attn_metadata if not provided
+        if slot_mapping is None and hasattr(attn_metadata, "slot_mapping"):
+            slot_mapping = attn_metadata.slot_mapping
+
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -687,11 +779,68 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        # Apply unified RoPE+KV fusion to entire batch (decode + prefill)
+        # Single kernel call processes all tokens together
+        if (
+            self.use_aiter_fused
+            and rotary_emb is not None
+            and positions is not None
+            and slot_mapping is not None
+        ):
+            logger.info_once(
+                "Using AITER unified RoPE+KV fusion (single call) for entire batch",
+                scope="local",
+            )
+
+            # Split Q into nope and pe components
+            q_nope = q[..., : self.qk_nope_head_dim]
+            q_pe = q[..., self.qk_nope_head_dim :]
+
+            # Reshape K: [batch, dim] -> [batch, num_kv_heads, dim]
+            k_nope_3d = k_c_normed.view(-1, self.num_kv_heads, self.kv_lora_rank)
+            k_pe_3d = k_pe.squeeze(1).view(-1, self.num_kv_heads, self.qk_rope_head_dim)
+
+            # Reshape KV cache for AITER kernel
+            # MLA cache: (num_blocks, block_size, head_size)
+            # AITER expects: (B_cache, KH, d_cache) where KH=1 for MLA
+            num_blocks, block_size, head_size = kv_cache.shape
+            kv_cache_reshaped = kv_cache.view(num_blocks * block_size, 1, head_size)
+
+            # Call unified kernel for entire batch
+            # num_decode_toks_for_zeros=num_mqa_tokens tells kernel how many
+            # decode tokens are at the beginning
+            q_fused, _, k_pe_out, _ = self._fused_rope_kv_kernel(
+                q_nope=q_nope,
+                q_pe=q_pe,
+                k_nope=k_nope_3d,
+                k_pe=k_pe_3d,
+                kv_cache=kv_cache_reshaped,
+                slot_mapping=slot_mapping,
+                pos=positions,
+                cos=self.cos_cache,
+                sin=self.sin_cache,
+                k_scale=self._k_scale,
+                is_neox=self.is_neox_style,
+                num_decode_toks_for_zeros=num_mqa_tokens,
+                apply_scale=True,
+                q_out_dtype=q.dtype,
+            )
+
+            # Update tensors with fused results (RoPE applied, KV cache written)
+            q[:] = q_fused
+            k_pe[:] = k_pe_out
+
         if num_mha_tokens > 0:
+            prefill_q = q[num_mqa_tokens:]
+            prefill_k_c_normed = k_c_normed[num_mqa_tokens:]
+            prefill_k_pe = k_pe[num_mqa_tokens:]
+
+            # RoPE and KV cache write already applied by unified kernel above
+            # Run prefill attention
             self.impl.forward_mha(  # type: ignore[attr-defined]
-                q[num_mqa_tokens:],
-                k_c_normed[num_mqa_tokens:],
-                k_pe[num_mqa_tokens:],
+                prefill_q,
+                prefill_k_c_normed,
+                prefill_k_pe,
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
@@ -715,6 +864,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.resize_((B, N, L))
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
+
+            # Compute positions from seq_lens if not provided
+            # For decode: position = seq_lens - 1 (0-indexed current position)
+            if positions is None and attn_metadata.decode is not None:
+                decode_seq_lens = attn_metadata.decode.seq_lens
+                positions = decode_seq_lens - 1
+
+            if self.use_aiter_fused and slot_mapping is not None:
+                # Unified RoPE+KV kernel already applied RoPE and wrote KV cache
+                # Just run BMM separately
+                logger.info_once(
+                    "Decode using unified RoPE+KV results, running %s BMM separately",
+                    self._fused_kernel_type.upper(),
+                    scope="local",
+                )
+
+                # mqa_q already has RoPE applied from unified kernel
+                # mqa_q_nope already transposed to (N, B, P) above
+                # Now just compute BMM
 
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
@@ -1045,6 +1213,8 @@ def unified_mla_attention_with_output(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -1058,7 +1228,22 @@ def unified_mla_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, forward_context = get_attention_context(layer_name)
+
+    # Retrieve slot_mapping from attn_metadata if not provided as parameter
+    if (
+        slot_mapping is None
+        and attn_metadata is not None
+        and hasattr(attn_metadata, "slot_mapping")
+    ):
+        slot_mapping = attn_metadata.slot_mapping
+
+    # Get rotary_emb from layer (stored during __init__)
+    rotary_emb = layer.rotary_emb
+
+    # Use AITER fused path if available (static decision based on layer config)
+    use_fused_path = layer.use_aiter_fused
+
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1072,6 +1257,10 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        use_fused_path=use_fused_path,
+        rotary_emb=rotary_emb,
     )
 
 
@@ -1081,6 +1270,8 @@ def unified_mla_attention_with_output_fake(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
+    positions: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,

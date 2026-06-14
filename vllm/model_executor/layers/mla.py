@@ -5,9 +5,21 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
+
+# Check if AITER RMSNorm ops are available
+try:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _AITER_AVAILABLE = rocm_aiter_ops.is_rmsnorm_enabled()
+except ImportError:
+    _AITER_AVAILABLE = False
+    rocm_aiter_ops = None
 
 
 @dataclass
@@ -98,6 +110,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
+        # Extract RoPE caches for AITER fused kernels
+        if self.rotary_emb is not None:
+            # RoPE stores combined cos_sin_cache, need to split it
+            # Format: [seq_len, rotary_dim] where first half is cos, second half is sin
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            rotary_dim = self.rotary_emb.rotary_dim
+            half_dim = rotary_dim // 2
+            self.cos_cache = cos_sin_cache[:, :half_dim]
+            self.sin_cache = cos_sin_cache[:, half_dim:]
+            self.is_neox_style = self.rotary_emb.is_neox_style
+        else:
+            self.cos_cache = None
+            self.sin_cache = None
+            self.is_neox_style = False
+
         self.mla_attn = MLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -112,9 +139,29 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            # Pass RoPE caches for AITER fused kernels
+            cos_cache=self.cos_cache,
+            sin_cache=self.sin_cache,
+            is_neox_style=self.is_neox_style,
+            # Pass RoPE module (static, doesn't change)
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
+
+        # Enable dual RMSNorm fusion when AITER is available
+        self.fuse_dual_rmsnorm = False
+
+        if _AITER_AVAILABLE:
+            from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm
+
+            if check_aiter_fused_qk_rmsnorm():
+                self.fuse_dual_rmsnorm = True
+                logger.info(
+                    "[MLA_FUSION_INIT] Dual RMSNorm fusion enabled for %s: "
+                    "Using aiter.fused_qk_rmsnorm (2× faster than separate norms)",
+                    prefix,
+                )
 
     def forward(
         self,
@@ -136,13 +183,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 "q_b_proj is required when q_lora_rank is not None"
             )
 
+            # Step 1: QKV projection (use existing layer)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Step 2: Apply RMSNorm (fused if available)
+            if self.fuse_dual_rmsnorm:
+                # Fused dual RMSNorm using AITER op (2× faster than separate)
+                # Returns BF16 outputs, same as unfused path
+                mla_dual_rmsnorm_op = rocm_aiter_ops.get_mla_dual_rmsnorm_op()
+                q_c_normed, kv_c_normed = mla_dual_rmsnorm_op(
+                    q_c,
+                    self.q_a_layernorm.weight,
+                    self.q_a_layernorm.variance_epsilon,
+                    kv_c,
+                    self.kv_a_layernorm.weight,
+                    self.kv_a_layernorm.variance_epsilon,
+                )
+                # q_c_normed is BF16, same as unfused path below
+                q = self.q_b_proj(q_c_normed)[0]
+            else:
+                # Unfused path: Separate RMSNorm calls
+                q_c = self.q_a_layernorm(q_c)
+                kv_c_normed = self.kv_a_layernorm(kv_c)
+                q = self.q_b_proj(q_c)[0]
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -152,18 +222,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
-
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+            kv_c, k_pe = kv_lora.split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
+        # Check if we can use fused path (RoPE+KV cache fusion)
+        can_use_fused_path = (
+            hasattr(self.mla_attn, "use_aiter_fused")
+            and self.mla_attn.use_aiter_fused  # Platform supports fused kernel
+            and positions is not None  # Required for RoPE
+            and self.rotary_emb is not None  # RoPE module available
+        )
+
+        # Apply RoPE based on fused vs unfused path
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            if can_use_fused_path:
+                # FUSED PATH: Skip RoPE here, custom op will apply it
+                # RoPE will be applied inside the fused kernel along with KV cache write
+                pass
+            else:
+                # UNFUSED PATH: Apply RoPE to ALL tokens
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions,
+                    q[..., self.qk_nope_head_dim :],  # Q PE part gets RoPE
+                    k_pe,  # K PE gets RoPE
+                )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
@@ -172,10 +260,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q *= llama_4_scaling
 
         attn_out = self.mla_attn(
-            q,
+            q,  # Has RoPE if unfused, NO RoPE if fused
             kv_c_normed,
-            k_pe,
+            k_pe,  # Has RoPE if unfused, NO RoPE if fused
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            positions=positions,
+            slot_mapping=None,  # Retrieved from attn_metadata in mla_attention.py
+            use_fused_path=can_use_fused_path,  # Single flag for entire forward pass
+            rotary_emb=self.rotary_emb,
         )
 
         return self.o_proj(attn_out)[0]
