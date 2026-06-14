@@ -903,6 +903,19 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
+    # Stagger file reading order per rank to reduce I/O contention when
+    # multiple ranks read the same checkpoint files simultaneously. Each
+    # rank starts at a different offset in the file list so that at any
+    # given moment the ranks are reading *different* files. This must
+    # happen after prefetch starts so prefetch still slices the original
+    # globally sorted list across ranks.
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1 and len(sorted_files) > 1:
+            offset = len(sorted_files) * rank // world_size
+            sorted_files = sorted_files[offset:] + sorted_files[:offset]
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
         sorted_files,

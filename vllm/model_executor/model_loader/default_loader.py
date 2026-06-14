@@ -380,6 +380,7 @@ class DefaultModelLoader(BaseModelLoader):
 
     @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        logger.info_once("Starting load weights", scope="process")
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
             if (
@@ -397,6 +398,7 @@ class DefaultModelLoader(BaseModelLoader):
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
+            scope="process",
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
