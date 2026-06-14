@@ -1164,7 +1164,6 @@ def get_moe_wna16_block_config(
         if (
             num_m_blocks <= 16
             and size_k % (block_size_k * 2) == 0
-            and size_k % (block_size_k * 2) == 0
             and block_size_k <= 512
             and num_blocks >= 512
         ):
