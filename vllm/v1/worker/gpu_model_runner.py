@@ -3452,14 +3452,41 @@ class GPUModelRunner(
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.embed_input_ids(
-                self.input_ids.gpu[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
+            if self.enable_prompt_embeds and self.input_batch.req_prompt_embeds:
+                # Some positions carry precomputed prompt_embeds: they are
+                # already in self.inputs_embeds and marked is_token_ids=False.
+                # Embed only the token-id positions (zeroing the placeholder ids
+                # at prompt_embeds positions so the embedding gather cannot read
+                # out-of-range ids), and write them back without clobbering the
+                # prompt_embeds positions.
+                is_token_ids = self.is_token_ids.gpu[:num_scheduled_tokens]
+                safe_input_ids = torch.where(
+                    is_token_ids,
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    0,
+                )
+                inputs_embeds_scheduled = self.model.embed_input_ids(
+                    safe_input_ids,
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+                target = self.inputs_embeds.gpu[:num_scheduled_tokens]
+                self.inputs_embeds.gpu[:num_scheduled_tokens] = torch.where(
+                    is_token_ids.unsqueeze(-1),
+                    inputs_embeds_scheduled,
+                    target,
+                )
+            else:
+                inputs_embeds_scheduled = self.model.embed_input_ids(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
 
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
+                # TODO(woosuk): Avoid the copy. Optimize.
+                self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
+                    inputs_embeds_scheduled
+                )
 
             input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
