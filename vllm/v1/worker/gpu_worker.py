@@ -114,6 +114,52 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+def _release_stale_cuda_primary_contexts(local_rank: int) -> None:
+    """Release inherited CUDA primary contexts for non-assigned devices.
+
+    When workers are forked, they inherit the parent's active CUDA primary
+    contexts for all devices. A worker assigned to GPU 1, for example, will
+    have a stale primary context for GPU 0 from the parent process. These
+    stale contexts waste GPU memory and cause failures in external tools
+    that enumerate per-process CUDA contexts (e.g., NVIDIA cuda-checkpoint).
+
+    This function releases primary contexts for all devices other than the
+    worker's assigned device, using the CUDA driver API directly.
+    """
+    import ctypes
+
+    try:
+        libcuda = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return
+
+    if libcuda.cuInit(0) != 0:
+        return
+    device_count = torch.cuda.device_count()
+
+    for dev_id in range(device_count):
+        if dev_id == local_rank:
+            continue
+        dev = ctypes.c_int()
+        if libcuda.cuDeviceGet(ctypes.byref(dev), dev_id) != 0:
+            continue
+        flags = ctypes.c_uint()
+        state = ctypes.c_int()
+        if (
+            libcuda.cuDevicePrimaryCtxGetState(
+                dev, ctypes.byref(flags), ctypes.byref(state)
+            ) == 0
+            and state.value != 0
+        ):
+            libcuda.cuDevicePrimaryCtxRelease(dev)
+            logger.debug(
+                "Released stale CUDA primary context for device %d "
+                "(worker assigned to device %d)",
+                dev_id,
+                local_rank,
+            )
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -284,6 +330,12 @@ class Worker(WorkerBase):
 
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.accelerator.set_device_index(self.device)
+
+            # Release inherited CUDA primary contexts for non-assigned GPUs.
+            # When using fork, child processes inherit the parent's active
+            # CUDA contexts. These stale contexts waste memory and prevent
+            # tools like NVIDIA cuda-checkpoint from working correctly.
+            _release_stale_cuda_primary_contexts(self.local_rank)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
