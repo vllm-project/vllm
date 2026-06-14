@@ -55,8 +55,7 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
-    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
-
+    from fastsafetensors import SingleGroup
 except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
