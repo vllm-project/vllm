@@ -108,6 +108,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:prompt_tokens": [("_total", num_requests * num_prompt_tokens)],
         "vllm:generation_tokens": [("_total", num_requests * max_tokens)],
         "vllm:request_success": [("_total", num_requests)],
+        "vllm:request_received": [("_total", num_requests)],
     }
 
 
@@ -192,6 +193,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:iteration_tokens_total",
     "vllm:cache_config_info",
     "vllm:request_success_total",
+    "vllm:request_received_total",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
     "vllm:request_prompt_tokens_count",
