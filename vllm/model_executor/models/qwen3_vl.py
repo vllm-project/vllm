@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
@@ -1417,17 +1417,27 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 select_token_id=select_token_id,
             )
 
+        # New-style (transformers>=5.10) processors expand only the video_token
+        mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
+        proc_impl = getattr(type(hf_processor), "replace_video_token", None)
+        if proc_impl is not None and proc_impl is not mixin_impl:
+            # transformers>=5.10 only wants the video_token
+            video_target = hf_processor.video_token
+        else:
+            # Old-style processors expand the full placeholder
+            # NOTE: We match string on purpose since searching sequence of
+            # token ids takes more time.
+            video_target = "<|vision_start|><|video_pad|><|vision_end|>"
+
         return [
             PromptReplacement(
                 modality="image",
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
             PromptReplacement(
                 modality="video",
-                target="<|vision_start|><|video_pad|><|vision_end|>",
+                target=video_target,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]

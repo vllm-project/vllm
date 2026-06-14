@@ -369,7 +369,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
+    assert output.usage.prompt_tokens == 33
 
     # test continue_final_message
     response = requests.post(
@@ -401,7 +401,7 @@ async def test_chat_request(
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
+    assert output.usage.prompt_tokens == 35
 
     # test continue_final_message with add_generation_prompt
     response = requests.post(

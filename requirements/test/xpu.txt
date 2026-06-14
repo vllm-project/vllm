@@ -668,9 +668,10 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==5.5.3
+transformers @ git+https://github.com/huggingface/transformers.git@9f3feb97ac1c18b47d4df52463998edd15836b2c
     # via
     #   -c requirements/common.txt
+    #   -r requirements/test/xpu.in
     #   sentence-transformers
 triton-xpu==3.7.1
     # via torch
