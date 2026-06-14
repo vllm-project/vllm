@@ -3,6 +3,7 @@
 
 
 from collections.abc import Sequence
+import os
 
 import torch
 
@@ -262,9 +263,32 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if pad_n > 0 and bias is not None:
             bias = self._pad_to_alignment(bias, dim=0, alignment=16)
 
-        output = ops.cutlass_scaled_mm(
-            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
-        )
+        # Check if Helion scaled_mm should be used
+        use_helion = os.environ.get("VLLM_USE_HELION_SCALED_MM") == "1"
+
+        if use_helion and bias is None and out_dtype == torch.bfloat16:
+            # Helion path: only for bf16 output, no bias, RowWise scaling.
+            try:
+                # Importing the ops package runs the @register_kernel
+                # decorators that register torch.ops.vllm_helion.*. This must
+                # happen inside the engine process (the registration is not
+                # imported anywhere on the default model path).
+                import vllm.kernels.helion.ops  # noqa: F401
+
+                output = torch.ops.vllm_helion.scaled_mm(A, B, As, Bs)
+            except (AttributeError, RuntimeError) as e:
+                # Fallback to cutlass if Helion kernel not available
+                from vllm.logger import init_logger
+                logger = init_logger(__name__)
+                logger.warning(f"Helion scaled_mm failed, falling back to cutlass: {e}")
+                output = ops.cutlass_scaled_mm(
+                    A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+                )
+        else:
+            # Cutlass path
+            output = ops.cutlass_scaled_mm(
+                A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+            )
 
         if pad_n > 0:
             output = output[..., :output_size].contiguous()
