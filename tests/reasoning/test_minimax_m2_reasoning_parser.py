@@ -107,6 +107,24 @@ CODE_IN_REASONING = {
     "is_reasoning_end": True,
 }
 
+# Case: model re-emits </think> in content block (regression: leaked into content)
+# Happens when the model generates </think> a second time bundled with other tokens.
+# The second occurrence must be stripped from content rather than passed through.
+DOUBLE_END_TOKEN = {
+    "output": "reasoning</think>content A</think>content B",
+    "reasoning": "reasoning",
+    "content": "content Acontent B",
+    "is_reasoning_end": True,
+}
+
+# Streaming variant: second </think> arrives alone (single-token guard) then more text
+DOUBLE_END_TOKEN_STREAMING = {
+    "output": "reasoning</think>content A</think>content B",
+    "reasoning": "reasoning",
+    "content": "content Acontent B",
+    "is_reasoning_end": True,
+}
+
 TEST_CASES = [
     # Core cases: no start token (MiniMax M2 actual behavior)
     pytest.param(
@@ -188,6 +206,16 @@ TEST_CASES = [
         True,
         CODE_IN_REASONING,
         id="code_in_reasoning_streaming",
+    ),
+    pytest.param(
+        False,
+        DOUBLE_END_TOKEN,
+        id="double_end_token",
+    ),
+    pytest.param(
+        True,
+        DOUBLE_END_TOKEN_STREAMING,
+        id="double_end_token_streaming",
     ),
 ]
 
