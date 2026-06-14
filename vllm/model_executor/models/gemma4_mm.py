@@ -1469,8 +1469,22 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features_padded = audio_input["input_features_padded"]
+        input_features_mask = audio_input["input_features_mask"]
+
+        if isinstance(input_features_padded, (list, tuple)):
+            input_features_padded = torch.nn.utils.rnn.pad_sequence(
+                input_features_padded,
+                batch_first=True,
+            )
+            input_features_mask = torch.nn.utils.rnn.pad_sequence(
+                input_features_mask,
+                batch_first=True,
+                padding_value=False,
+            )
+
+        input_features = input_features_padded.squeeze(1)
+        input_features_mask = input_features_mask.squeeze(1)
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
