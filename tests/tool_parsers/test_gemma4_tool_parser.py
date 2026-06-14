@@ -784,6 +784,31 @@ class TestStreamingExtraction:
         assert by_index[1]["name"] == "get_time"
         assert json.loads(by_index[1]["arguments"]) == {"timezone": "GMT"}
 
+    def test_streaming_name_sent_when_args_and_end_share_delta(
+        self, parser, mock_request
+    ):
+        """Regression test for #45449.
+
+        When the function-name chunk does not contain "{" (so
+        _handle_tool_call_middle cannot extract the name yet), and the next
+        chunk contains both "{}" and the end token in the same delta, the
+        function name must still be sent via _handle_tool_call_end.
+        """
+        chunks = [
+            "<|tool_call>",
+            "call:sample__get_user_profile",  # no "{" in this chunk
+            "{}<tool_call|>",  # "{}" arrives together with the end token
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        name = self._collect_function_name(results)
+        assert name == "sample__get_user_profile", f"name was not sent: {name!r}"
+
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        assert json.loads(args_text) == {}
+
     def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
         """Trailing bare boolean must not be streamed twice."""
         chunks = [
