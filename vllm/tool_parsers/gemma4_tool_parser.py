@@ -49,6 +49,23 @@ logger = init_logger(__name__)
 TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
+TOOL_RESPONSE = "<|tool_response>"
+
+
+def _decoded_token_str(tokenizer: TokenizerLike, token_id: int, fallback: str) -> str:
+    """Return the string that ``tokenizer.decode([token_id])`` produces.
+
+    Some tokenizer builds store a vocab key like ``<|tool_call>`` but
+    decode the same token ID as ``<|tool_call|>`` (extra ``|>``).  The
+    parser must match whatever the detokenizer actually emits.
+    """
+    try:
+        decoded = tokenizer.decode([token_id], skip_special_tokens=False)
+        if decoded and decoded.strip():
+            return decoded.strip()
+    except Exception:
+        pass
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +101,12 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
-def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
+def _parse_gemma4_args(
+    args_str: str,
+    *,
+    partial: bool = False,
+    string_delim: str = STRING_DELIM,
+) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
     Format examples::
@@ -100,6 +122,8 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         partial: When True (streaming), bare values at end of string are
             omitted because they may be incomplete and type-unstable
             (e.g. partial boolean parsed as bare string).
+        string_delim: The string delimiter token (default ``<|"|>``).
+            Overridden when the tokenizer decodes it differently.
 
     Returns a dict ready for ``json.dumps()``.
     """
@@ -117,14 +141,30 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
 
-        # Parse key (unquoted, ends at ':')
-        key_start = i
-        while i < n and args_str[i] != ":":
-            i += 1
-        if i >= n:
-            break
-        key = args_str[key_start:i].strip()
-        i += 1  # skip ':'
+        # Parse key — may be bare (ends at ':') or string-delimited
+        if args_str[i:].startswith(string_delim):
+            # String-delimited key: <|"|>key_name<|"|>
+            i += len(string_delim)
+            key_end = args_str.find(string_delim, i)
+            if key_end == -1:
+                break
+            key = args_str[i:key_end]
+            i = key_end + len(string_delim)
+            # Advance past any whitespace to ':'
+            while i < n and args_str[i] != ":":
+                i += 1
+            if i >= n:
+                break
+            i += 1  # skip ':'
+        else:
+            # Bare key (unquoted, ends at ':')
+            key_start = i
+            while i < n and args_str[i] != ":":
+                i += 1
+            if i >= n:
+                break
+            key = args_str[key_start:i].strip()
+            i += 1  # skip ':'
 
         # Parse value
         if i >= n:
@@ -141,16 +181,16 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             break
 
         # String value: <|"|>...<|"|>
-        if args_str[i:].startswith(STRING_DELIM):
-            i += len(STRING_DELIM)
+        if args_str[i:].startswith(string_delim):
+            i += len(string_delim)
             val_start = i
-            end_pos = args_str.find(STRING_DELIM, i)
+            end_pos = args_str.find(string_delim, i)
             if end_pos == -1:
                 # Unterminated string — take rest
                 result[key] = args_str[val_start:]
                 break
             result[key] = args_str[val_start:end_pos]
-            i = end_pos + len(STRING_DELIM)
+            i = end_pos + len(string_delim)
 
         # Nested object: {...}
         elif args_str[i] == "{":
@@ -158,11 +198,10 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i:].startswith(STRING_DELIM):
-                    # Skip over string contents to avoid counting { inside strings
-                    i += len(STRING_DELIM)
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + len(STRING_DELIM)
+                if args_str[i:].startswith(string_delim):
+                    i += len(string_delim)
+                    next_delim = args_str.find(string_delim, i)
+                    i = n if next_delim == -1 else next_delim + len(string_delim)
                     continue
                 if args_str[i] == "{":
                     depth += 1
@@ -170,11 +209,16 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                     depth -= 1
                 i += 1
             if depth > 0:
-                # Incomplete nested object — use i (not i-1) to avoid
-                # dropping the last char, and recurse as partial.
-                result[key] = _parse_gemma4_args(args_str[obj_start:i], partial=True)
+                result[key] = _parse_gemma4_args(
+                    args_str[obj_start:i],
+                    partial=True,
+                    string_delim=string_delim,
+                )
             else:
-                result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
+                result[key] = _parse_gemma4_args(
+                    args_str[obj_start : i - 1],
+                    string_delim=string_delim,
+                )
 
         # Array: [...]
         elif args_str[i] == "[":
@@ -182,10 +226,10 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             arr_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i:].startswith(STRING_DELIM):
-                    i += len(STRING_DELIM)
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + len(STRING_DELIM)
+                if args_str[i:].startswith(string_delim):
+                    i += len(string_delim)
+                    next_delim = args_str.find(string_delim, i)
+                    i = n if next_delim == -1 else next_delim + len(string_delim)
                     continue
                 if args_str[i] == "[":
                     depth += 1
@@ -193,9 +237,16 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                     depth -= 1
                 i += 1
             if depth > 0:
-                result[key] = _parse_gemma4_array(args_str[arr_start:i], partial=True)
+                result[key] = _parse_gemma4_array(
+                    args_str[arr_start:i],
+                    partial=True,
+                    string_delim=string_delim,
+                )
             else:
-                result[key] = _parse_gemma4_array(args_str[arr_start : i - 1])
+                result[key] = _parse_gemma4_array(
+                    args_str[arr_start : i - 1],
+                    string_delim=string_delim,
+                )
 
         # Bare value (number, boolean, etc.)
         else:
@@ -226,7 +277,12 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     return result
 
 
-def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
+def _parse_gemma4_array(
+    arr_str: str,
+    *,
+    partial: bool = False,
+    string_delim: str = STRING_DELIM,
+) -> list:
     """Parse a Gemma4 array content string into a Python list."""
     items: list = []
     i = 0
@@ -239,14 +295,14 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             break
 
         # String element
-        if arr_str[i:].startswith(STRING_DELIM):
-            i += len(STRING_DELIM)
-            end_pos = arr_str.find(STRING_DELIM, i)
+        if arr_str[i:].startswith(string_delim):
+            i += len(string_delim)
+            end_pos = arr_str.find(string_delim, i)
             if end_pos == -1:
                 items.append(arr_str[i:])
                 break
             items.append(arr_str[i:end_pos])
-            i = end_pos + len(STRING_DELIM)
+            i = end_pos + len(string_delim)
 
         # Nested object
         elif arr_str[i] == "{":
@@ -254,10 +310,10 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i:].startswith(STRING_DELIM):
-                    i += len(STRING_DELIM)
-                    nd = arr_str.find(STRING_DELIM, i)
-                    i = nd + len(STRING_DELIM) if nd != -1 else n
+                if arr_str[i:].startswith(string_delim):
+                    i += len(string_delim)
+                    nd = arr_str.find(string_delim, i)
+                    i = nd + len(string_delim) if nd != -1 else n
                     continue
                 if arr_str[i] == "{":
                     depth += 1
@@ -265,9 +321,20 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     depth -= 1
                 i += 1
             if depth > 0:
-                items.append(_parse_gemma4_args(arr_str[obj_start:i], partial=True))
+                items.append(
+                    _parse_gemma4_args(
+                        arr_str[obj_start:i],
+                        partial=True,
+                        string_delim=string_delim,
+                    )
+                )
             else:
-                items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
+                items.append(
+                    _parse_gemma4_args(
+                        arr_str[obj_start : i - 1],
+                        string_delim=string_delim,
+                    )
+                )
 
         # Nested array
         elif arr_str[i] == "[":
@@ -275,10 +342,10 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i:].startswith(STRING_DELIM):
-                    i += len(STRING_DELIM)
-                    nd = arr_str.find(STRING_DELIM, i)
-                    i = nd + len(STRING_DELIM) if nd != -1 else n
+                if arr_str[i:].startswith(string_delim):
+                    i += len(string_delim)
+                    nd = arr_str.find(string_delim, i)
+                    i = nd + len(string_delim) if nd != -1 else n
                     continue
                 if arr_str[i] == "[":
                     depth += 1
@@ -286,9 +353,20 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     depth -= 1
                 i += 1
             if depth > 0:
-                items.append(_parse_gemma4_array(arr_str[sub_start:i], partial=True))
+                items.append(
+                    _parse_gemma4_array(
+                        arr_str[sub_start:i],
+                        partial=True,
+                        string_delim=string_delim,
+                    )
+                )
             else:
-                items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
+                items.append(
+                    _parse_gemma4_array(
+                        arr_str[sub_start : i - 1],
+                        string_delim=string_delim,
+                    )
+                )
 
         # Bare value
         else:
@@ -357,10 +435,6 @@ class Gemma4ToolParser(ToolParser):
                 "constructor during construction."
             )
 
-        # Token strings
-        self.tool_call_start_token = TOOL_CALL_START
-        self.tool_call_end_token = TOOL_CALL_END
-
         # Token IDs
         self.tool_call_start_token_id = self.vocab.get(TOOL_CALL_START)
         self.tool_call_end_token_id = self.vocab.get(TOOL_CALL_END)
@@ -371,19 +445,47 @@ class Gemma4ToolParser(ToolParser):
                 f"token '{TOOL_CALL_START}' in the tokenizer!"
             )
 
+        # Detect the actual decoded token strings. Some tokenizer builds
+        # decode differently from the vocab key (e.g. "<|tool_call|>"
+        # instead of "<|tool_call>"). The parser must match whatever the
+        # detokenizer emits.
+        self.tool_call_start_token = _decoded_token_str(
+            self.model_tokenizer,
+            self.tool_call_start_token_id,
+            TOOL_CALL_START,
+        )
+        self.tool_call_end_token = (
+            _decoded_token_str(
+                self.model_tokenizer,
+                self.tool_call_end_token_id,
+                TOOL_CALL_END,
+            )
+            if self.tool_call_end_token_id is not None
+            else TOOL_CALL_END
+        )
+
+        _string_delim_id = self.vocab.get(STRING_DELIM)
+        self.string_delim = (
+            _decoded_token_str(
+                self.model_tokenizer,
+                _string_delim_id,
+                STRING_DELIM,
+            )
+            if _string_delim_id is not None
+            else STRING_DELIM
+        )
+
         # Regex for non-streaming: extract complete tool calls.
-        # Supports function names with letters, digits, underscores,
-        # hyphens, and dots (e.g. "get-weather", "module.func").
+        # Built dynamically from detected token strings.
         self.tool_call_regex = re.compile(
-            r"<\|tool_call>call:([\w\-\.]+)\{(.*?)\}<tool_call\|>",
+            re.escape(self.tool_call_start_token)
+            + r"call:([\w\-\.]+)\{(.*?)\}"
+            + re.escape(self.tool_call_end_token),
             re.DOTALL,
         )
 
         # Streaming state — reset per-request via _reset_streaming_state()
         self._reset_streaming_state()
-
-        # Delta buffer for handling multi-token special sequences
-        self.buffered_delta_text = ""
 
     def _reset_streaming_state(self) -> None:
         """Reset all streaming state for a new request."""
@@ -391,6 +493,7 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        self.buffered_delta_text = ""
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -439,13 +542,16 @@ class Gemma4ToolParser(ToolParser):
         """
         combined = self.buffered_delta_text + delta_text
 
+        start_tok = self.tool_call_start_token
+        end_tok = self.tool_call_end_token
+
         # Check if combined ends with a complete special token
-        if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
+        if combined.endswith(start_tok) or combined.endswith(end_tok):
             self.buffered_delta_text = ""
             return combined
 
         # Check if combined ends with a partial prefix of a special token
-        for tag in [TOOL_CALL_START, TOOL_CALL_END]:
+        for tag in [start_tok, end_tok]:
             for i in range(1, len(tag)):
                 if combined.endswith(tag[:i]):
                     self.buffered_delta_text = combined[-i:]
@@ -478,7 +584,7 @@ class Gemma4ToolParser(ToolParser):
 
             tool_calls: list[ToolCall] = []
             for func_name, args_str in matches:
-                arguments = _parse_gemma4_args(args_str)
+                arguments = _parse_gemma4_args(args_str, string_delim=self.string_delim)
                 tool_calls.append(
                     ToolCall(
                         type="function",
@@ -519,17 +625,20 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        # Reset streaming state at the start of a new request (the parser
+        # instance is reused across requests).
+        if previous_text == "":
+            self._reset_streaming_state()
+
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
-        # Keep current_text from the upstream stream state. The buffered delta
-        # is only for emission, and must not be stitched back into the
-        # accumulated model text or normal content like "<div>" can be
-        # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
             if delta_text:
-                return DeltaMessage(content=delta_text)
+                text = delta_text.replace(TOOL_RESPONSE, "")
+                if text:
+                    return DeltaMessage(content=text)
             return None
 
         try:
@@ -614,6 +723,7 @@ class Gemma4ToolParser(ToolParser):
         if delta_text:
             text = delta_text.replace(self.tool_call_start_token, "")
             text = text.replace(self.tool_call_end_token, "")
+            text = text.replace(TOOL_RESPONSE, "")
             if text:
                 return DeltaMessage(content=text)
         return None
@@ -735,7 +845,7 @@ class Gemma4ToolParser(ToolParser):
                 self.streamed_args_for_tool.append("")
 
             func_name, args_str = all_matches[idx]
-            final_args = _parse_gemma4_args(args_str)
+            final_args = _parse_gemma4_args(args_str, string_delim=self.string_delim)
             final_args_json = json.dumps(final_args, ensure_ascii=False)
 
             # The name is sent exactly once per call. We track that via the
@@ -832,7 +942,11 @@ class Gemma4ToolParser(ToolParser):
             DeltaMessage with the argument diff, or None if no new content.
         """
         try:
-            current_args = _parse_gemma4_args(raw_args_str, partial=True)
+            current_args = _parse_gemma4_args(
+                raw_args_str,
+                partial=True,
+                string_delim=self.string_delim,
+            )
         except Exception:
             logger.debug(
                 "Could not parse partial Gemma4 args yet: %s",

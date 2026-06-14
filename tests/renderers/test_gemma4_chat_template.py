@@ -251,8 +251,9 @@ class TestGemma4ChatTemplate:
         assert "Let me think about this..." in result
         assert "<channel|>" in result
 
-    def test_reasoning_not_before_last_user(self, gemma4_template):
-        """reasoning on assistant BEFORE the last user message is dropped."""
+    def test_reasoning_preserved_before_last_user(self, gemma4_template):
+        """reasoning on assistant BEFORE the last user message is preserved
+        (preserve_thinking defaults to true)."""
         messages = [
             {"role": "user", "content": "First"},
             {
@@ -271,7 +272,7 @@ class TestGemma4ChatTemplate:
             {"role": "user", "content": "Second"},
         ]
         result = _render(gemma4_template, messages, add_generation_prompt=True)
-        assert "Old reasoning" not in result
+        assert "Old reasoning" in result
 
     def test_strip_thinking_in_model_content(self, gemma4_template):
         """<|channel>...<channel|> in model content is stripped by the
@@ -288,8 +289,8 @@ class TestGemma4ChatTemplate:
         assert "Visible answer" in result
 
     def test_multi_turn_tool_chain(self, gemma4_template):
-        """assistant->tool->assistant->tool produces exactly one
-        <|turn>model (later assistants continue the same turn)."""
+        """assistant->tool->assistant->tool produces model turn openers
+        for the first assistant and the generation prompt."""
         messages = [
             {"role": "user", "content": "Do two things"},
             {
@@ -316,7 +317,7 @@ class TestGemma4ChatTemplate:
             {"role": "tool", "tool_call_id": "c2", "content": "result2"},
         ]
         result = _render(gemma4_template, messages, add_generation_prompt=True)
-        assert result.count("<|turn>model\n") == 1
+        assert result.count("<|turn>model\n") == 2
 
     def test_format_argument_types(self, gemma4_template):
         """Strings wrapped in <|"|>, booleans as true/false, numbers bare."""
@@ -358,7 +359,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "download_image",
-                            "arguments": '{"url": "https://example.com/x.png"}',
+                            "arguments": {"url": "https://example.com/x.png"},
                         },
                     },
                 ],
@@ -392,7 +393,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "process",
-                            "arguments": "{}",
+                            "arguments": {},
                         },
                     },
                 ],
