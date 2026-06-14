@@ -200,6 +200,124 @@ class TestGemma4ChatTemplate:
         assert "response:get_weather{" in result
         assert "temperature:" in result
 
+    def test_mixed_assistant_content_precedes_tool_chain(self, gemma4_template):
+        """Visible assistant content should stay before tool calls/results."""
+        messages = [
+            {"role": "user", "content": "What is the weather in Paris?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "Paris"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"temperature": 18, "condition": "sunny"}',
+            },
+            {"role": "assistant", "content": "It is 18C and sunny."},
+        ]
+        result = _render(gemma4_template, messages)
+        assert result.index("Let me check.") < result.index(
+            "<|tool_call>call:get_weather{"
+        )
+        assert result.index("<|tool_call>call:get_weather{") < result.index(
+            "<|tool_response>response:get_weather{"
+        )
+        assert result.index("<|tool_response>response:get_weather{") < result.index(
+            "It is 18C and sunny."
+        )
+
+    def test_mixed_assistant_content_keeps_turn_tokens_balanced(self, gemma4_template):
+        """A mixed content+tool turn should not over-close model turns."""
+        messages = [
+            {"role": "user", "content": "What is the weather in Paris?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "Paris"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"temperature": 18, "condition": "sunny"}',
+            },
+            {"role": "assistant", "content": "It is 18C and sunny."},
+        ]
+        result = _render(gemma4_template, messages)
+        assert result.count("<|turn>") == result.count("<turn|>")
+        assert result.count("<|turn>model\n") == 1
+
+    def test_empty_reasoning_emits_empty_thought_block(self, gemma4_template):
+        """Explicit empty reasoning should still emit the thought channel."""
+        messages = [
+            {"role": "user", "content": "What is 2+2?"},
+            {
+                "role": "assistant",
+                "reasoning": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": {"expr": "2+2"},
+                        },
+                    }
+                ],
+            },
+        ]
+        result = _render(gemma4_template, messages)
+        empty_thought_block = "<|channel>thought\n<channel|>"
+        assert empty_thought_block in result
+        assert result.index(empty_thought_block) < result.index(
+            "<|tool_call>call:calculator{"
+        )
+
+    def test_legacy_tool_responses_do_not_emit_extra_openers(self, gemma4_template):
+        """Legacy tool_responses should emit one matched response block."""
+        messages = [
+            {"role": "user", "content": "What is the weather in Paris?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"city": "Paris"},
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "tool_responses": [
+                    {
+                        "name": "get_weather",
+                        "response": {"temperature": 18, "condition": "sunny"},
+                    }
+                ],
+            },
+        ]
+        result = _render(gemma4_template, messages)
+        assert result.count("<|tool_response>") == 1
+        assert result.count("<tool_response|>") == 1
+
     def test_generation_prompt_not_after_tool_response(self, gemma4_template):
         """add_generation_prompt=True should NOT add <|turn>model when the
         last message type was tool_response (the model turn continues)."""

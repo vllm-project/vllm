@@ -172,16 +172,25 @@
     {{- '<tool_response|>' -}}
 {%- endmacro -%}
 
-{%- set ns = namespace(prev_message_type=None) -%}
+{%- macro open_turn(role, ns) -%}
+    {%- set ns.open_turn_role = role -%}
+    {{- '<|turn>' + role + '\n' -}}
+{%- endmacro -%}
+
+{%- macro end_turn(ns) -%}
+    {%- set ns.open_turn_role = none -%}
+    {{- '<turn|>\n' -}}
+{%- endmacro -%}
+
+{%- set ns = namespace(open_turn_role=none) -%}
 {%- set loop_messages = messages -%}
 {{- bos_token -}}
 {#- Handle System/Tool Definitions Block -#}
 {%- if (enable_thinking is defined and enable_thinking) or tools or messages[0]['role'] in ['system', 'developer'] -%}
-    {{- '<|turn>system\n' -}}
+    {{- open_turn('system', ns) -}}
     {#- Inject Thinking token at the very top of the FIRST system turn -#}
     {%- if enable_thinking is defined and enable_thinking -%}
         {{- '<|think|>\n' -}}
-        {%- set ns.prev_message_type = 'think' -%}
     {%- endif -%}
     {%- if messages[0]['role'] in ['system', 'developer'] -%}
         {%- if messages[0]['content'] is string -%}
@@ -199,9 +208,8 @@
             {{- format_function_declaration(tool) | trim -}}
             {{- '<tool|>' -}}
         {%- endfor %}
-        {%- set ns.prev_message_type = 'tool' -%}
     {%- endif -%}
-    {{- '<turn|>\n' -}}
+    {{- end_turn(ns) -}}
 {%- endif %}
 
 {#- Pre-scan: find last user message index for reasoning guard -#}
@@ -215,31 +223,24 @@
 {#- Loop through messages -#}
 {%- for message in loop_messages -%}
     {%- if message['role'] != 'tool' -%}
-    {%- set ns.prev_message_type = None -%}
     {%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
-    {#- Detect continuation: suppress duplicate <|turn>model when previous non-tool message was also assistant -#}
-    {%- set prev_nt = namespace(role=None, found=false) -%}
-    {%- if loop.index0 > 0 -%}
-        {%- for j in range(loop.index0 - 1, -1, -1) -%}
-            {%- if not prev_nt.found -%}
-                {%- if loop_messages[j]['role'] != 'tool' -%}
-                    {%- set prev_nt.role = loop_messages[j]['role'] -%}
-                    {%- set prev_nt.found = true -%}
-                {%- endif -%}
+    {%- if ns.open_turn_role -%}
+        {%- if ns.open_turn_role != role -%}
+            {{- end_turn(ns) -}}
+            {{- open_turn(role, ns) -}}
+        {%- endif -%}
+    {%- else -%}
+        {{- open_turn(role, ns) -}}
+    {%- endif -%}
+
+        {%- set reasoning_block -%}
+            {%- set thinking_text = message['reasoning'] | default(message['reasoning_content']) | default(none) -%}
+            {%- if thinking_text is not none and loop.index0 > ns_turn.last_user_idx -%}
+                {{- '<|channel>thought\n' + thinking_text + '<channel|>' -}}
             {%- endif -%}
-        {%- endfor -%}
-    {%- endif -%}
-    {%- set continue_same_model_turn = (role == 'model' and prev_nt.role == 'assistant') -%}
-    {%- if not continue_same_model_turn -%}
-        {{- '<|turn>' + role + '\n' }}
-    {%- endif -%}
+        {%- endset -%}
 
-    {#- Render reasoning/reasoning_content as thinking channel -#}
-    {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
-    {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
-        {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
-    {%- endif -%}
-
+        {%- set tool_calls_block -%}
             {%- if message['tool_calls'] -%}
                 {%- for tool_call in message['tool_calls'] -%}
                     {%- set function = tool_call['function'] -%}
@@ -256,18 +257,20 @@
                     {%- endif -%}
                     {{- '}<tool_call|>' -}}
                 {%- endfor -%}
-                {%- set ns.prev_message_type = 'tool_call' -%}
             {%- endif -%}
+        {%- endset -%}
 
-            {%- set ns_tr_out = namespace(flag=false) -%}
+        {%- set legacy_tool_responses_block -%}
             {%- if message.get('tool_responses') -%}
                 {#- Legacy: tool_responses embedded on the assistant message (Google/Gemma native) -#}
                 {%- for tool_response in message['tool_responses'] -%}
                     {{- format_tool_response_block(tool_response['name'] | default('unknown', true), tool_response['response']) -}}
-                    {%- set ns_tr_out.flag = true -%}
-                    {%- set ns.prev_message_type = 'tool_response' -%}
                 {%- endfor -%}
-            {%- elif message.get('tool_calls') -%}
+            {%- endif -%}
+        {%- endset -%}
+
+        {%- set openai_tool_responses_block -%}
+            {%- if message.get('tool_calls') and not message.get('tool_responses') -%}
                 {#- OpenAI Chat Completions: forward-scan consecutive role:tool messages -#}
                 {%- set ns_tool_scan = namespace(stopped=false) -%}
                 {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
@@ -307,13 +310,12 @@
                         {%- else -%}
                             {{- format_tool_response_block(ns_tname.name, tool_body) -}}
                         {%- endif -%}
-                        {%- set ns_tr_out.flag = true -%}
-                        {%- set ns.prev_message_type = 'tool_response' -%}
                     {%- endif -%}
                 {%- endfor -%}
             {%- endif -%}
+        {%- endset -%}
 
-            {%- set captured_content -%}
+        {%- set captured_content -%}
             {%- if message['content'] is string -%}
                 {%- if role == 'model' -%}
                     {{- strip_thinking(message['content']) -}}
@@ -330,34 +332,56 @@
                         {%- endif -%}
                     {%- elif item['type'] == 'image' -%}
                         {{- '<|image|>' -}}
-                        {%- set ns.prev_message_type = 'image' -%}
                     {%- elif item['type'] == 'audio' -%}
                         {{- '<|audio|>' -}}
-                        {%- set ns.prev_message_type = 'audio' -%}
                     {%- elif item['type'] == 'video' -%}
                         {{- '<|video|>' -}}
-                        {%- set ns.prev_message_type = 'video' -%}
                     {%- endif -%}
                 {%- endfor -%}
             {%- endif -%}
-            {%- endset -%}
+        {%- endset -%}
 
+        {%- if role != 'model' -%}
+            {#- Non-model turn -#}
             {{- captured_content -}}
-            {%- set has_content = captured_content | trim | length > 0 -%}
-
-        {%- if ns.prev_message_type == 'tool_call' and not ns_tr_out.flag -%}
-            {{- '<|tool_response>' -}}
-        {%- elif not (ns_tr_out.flag and not has_content) -%}
-            {{- '<turn|>\n' -}}
+            {{- end_turn(ns) -}}
+        {%- elif message.get('tool_responses') -%}
+            {#- Model turn with legacy tool -#}
+            {{- reasoning_block -}}
+            {{- tool_calls_block -}}
+            {{- legacy_tool_responses_block -}}
+            {%- if captured_content -%}
+                {{- captured_content -}}
+                {{- end_turn(ns) -}}
+            {%- endif -%}
+        {%- elif message.get('tool_calls') -%}
+            {#- Model turn with OpenAI tool -#}
+            {{- reasoning_block -}}
+            {{- captured_content -}}
+            {{- tool_calls_block -}}
+            {%- if openai_tool_responses_block -%}
+                {{- openai_tool_responses_block -}}
+            {%- elif loop.last -%}
+                {{- '<|tool_response>' -}}
+            {%- endif -%}
+        {%- else -%}
+            {#- Model turn without tool -#}
+            {{- reasoning_block -}}
+            {{- captured_content -}}
+            {{- end_turn(ns) -}}
         {%- endif -%}
     {%- endif -%}
 {%- endfor -%}
 
 {%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
-        {{- '<|turn>model\n' -}}
-        {%- if not enable_thinking | default(false) -%}
-            {{- '<|channel>thought\n<channel|>' -}}
+    {#- Close previous non-model turn and start a new model turn -#}
+    {%- if ns.open_turn_role != 'model' -%}
+        {%- if ns.open_turn_role -%}
+            {{- end_turn(ns) -}}
         {%- endif -%}
+        {{- open_turn('model', ns) -}}
+    {%- endif -%}
+    {%- if not enable_thinking | default(false) -%}
+        {{- '<|channel>thought\n<channel|>' -}}
     {%- endif -%}
 {%- endif -%}
