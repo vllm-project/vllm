@@ -324,7 +324,11 @@ python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
     case transfers cache computed for the wrong token positions, producing
     incorrect results.
 
-    We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
+    A router or proxy must detect such mismatches across turns and skip
+    bidirectional KV reuse when the next request is not the exact expected
+    continuation. The multi-turn proxy example validates chat/completion
+    history before reusing cached D blocks and falls back to recompute on
+    mismatch. See [#43094](https://github.com/vllm-project/vllm/issues/43094).
 
 ## Multi-Instance Setup
 
