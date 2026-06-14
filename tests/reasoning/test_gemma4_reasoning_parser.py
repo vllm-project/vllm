@@ -249,17 +249,85 @@ def test_gemma4_reasoning(
     assert is_reasoning_end == param_dict["is_reasoning_end"]
 
 
-def test_gemma4_adjust_request(generic_tokenizer):
+def test_gemma4_adjust_request_thinking_enabled(generic_tokenizer):
+    """When thinking is enabled (default) with no tools, skip_special_tokens is
+    set to False and skip_token_ids remains None."""
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         generic_tokenizer
     )
-
     request = ChatCompletionRequest(messages=[], model="test-model")
     assert request.skip_special_tokens is True
 
     result = parser.adjust_request(request)
     assert result.skip_special_tokens is False
+    # No tools provided — default tool_choice='none' must not trigger suppression.
+    assert result.skip_token_ids is None
     assert result is request
+
+
+def test_gemma4_adjust_request_thinking_disabled(generic_tokenizer):
+    """When thinking is disabled, skip_special_tokens is left unchanged (True)."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert request.skip_special_tokens is True
+
+    result = parser.adjust_request(request)
+    assert result.skip_special_tokens is True
+    assert result.skip_token_ids is None
+    assert result is request
+
+
+def test_gemma4_adjust_request_thinking_enabled_tool_choice_none(generic_tokenizer):
+    """When thinking is enabled and tool_choice='none', skip_special_tokens is False
+    and skip_token_ids contains the tool-call delimiter token IDs."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        chat_template_kwargs={"enable_thinking": True},
+        tools=[{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        tool_choice="none",
+    )
+
+    result = parser.adjust_request(request)
+    assert result.skip_special_tokens is False
+
+    vocab = generic_tokenizer.get_vocab()
+    expected_ids = {vocab["<|tool_call>"]}
+    if (end_id := vocab.get("<tool_call|>")) is not None:
+        expected_ids.add(end_id)
+    if (esc_id := vocab.get('<|"|>')) is not None:
+        expected_ids.add(esc_id)
+
+    assert result.skip_token_ids is not None
+    assert set(result.skip_token_ids) == expected_ids
+
+
+def test_gemma4_adjust_request_thinking_enabled_tool_choice_auto(generic_tokenizer):
+    """When thinking is enabled and tool_choice='auto', skip_special_tokens is False
+    but skip_token_ids is not set (tool parser handles the tokens)."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+    request = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        chat_template_kwargs={"enable_thinking": True},
+        tools=[{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        tool_choice="auto",
+    )
+
+    result = parser.adjust_request(request)
+    assert result.skip_special_tokens is False
+    assert result.skip_token_ids is None
 
 
 def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
