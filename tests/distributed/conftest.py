@@ -149,11 +149,12 @@ class MockSubscriber:
                     break
 
                 frames = replay_socket.recv_multipart()
-                if not frames or not frames[-1]:
+                if len(frames) != 3 or not frames[-1]:
                     # End of replay marker
                     break
 
-                seq_bytes, payload = frames
+                topic, seq_bytes, payload = frames
+                assert topic == self.topic_bytes
                 seq = int.from_bytes(seq_bytes, "big")
                 data = self.decoder.decode(payload)
                 replayed.append((seq, data))
