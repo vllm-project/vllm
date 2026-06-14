@@ -1718,8 +1718,9 @@ class Scheduler(SchedulerInterface):
                 spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
             )
         ) is not None:
-            # Return stats to only one of the front-ends.
-            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            # Return stats to the primary front-end (client 0) so that
+            # the primary client can produce complete, aggregated stats.
+            if (eco := engine_core_outputs.get(0)) is None:
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
