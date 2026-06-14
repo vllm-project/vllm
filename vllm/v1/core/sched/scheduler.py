@@ -760,6 +760,19 @@ class Scheduler(SchedulerInterface):
                         # we can stop the scheduling here.
                         break
 
+                    # Pad placeholder spec tokens for the first decode step
+                    # so the batch shape matches pre-compiled CUDA graphs.
+                    if (
+                        self.num_spec_tokens > 0
+                        and num_new_tokens == 1
+                        and num_computed_tokens == request.num_tokens - 1
+                        and token_budget >= 1 + self.num_spec_tokens
+                    ):
+                        scheduled_spec_decode_tokens[request_id] = [
+                            0
+                        ] * self.num_spec_tokens
+                        num_new_tokens += self.num_spec_tokens
+
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
