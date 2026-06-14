@@ -61,7 +61,13 @@ class ChatMessage(OpenAIBaseModel):
     annotations: OpenAIAnnotation | None = None
     audio: OpenAIChatCompletionAudio | None = None
     function_call: FunctionCall | None = None
-    tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_calls: list[ToolCall] | None = None
+
+    @model_validator(mode="after")
+    def _validate_tool_calls(self) -> "ChatMessage":
+        if self.tool_calls is not None and not self.tool_calls:
+            self.tool_calls = None
+        return self
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
