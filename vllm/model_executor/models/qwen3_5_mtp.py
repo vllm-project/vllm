@@ -80,7 +80,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
-        # Ref: https://github.com/vllm-project/vllm/pull/38650
+        # Ref: https://github.com/vllm-project/vllm/pull/38832
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
         fc_quant = (
             None
@@ -96,6 +96,38 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
+
+        # Compressed-tensors NVFP4 Qwen3.5 MoE checkpoints store the MTP
+        # layer's fused expert weights as BF16 unquantized
+        # tensors (`mtp.layers.X.mlp.experts.{down,gate_up}_proj`, shape
+        # `[num_experts, ...]`) but the per-expert MTP linears are not in the
+        # compressed-tensors `ignore` list, so vLLM constructs the FusedMoE
+        # quantized and weight loading fails with
+        # `KeyError: 'layers.X.mlp.experts.w2_weight'` (see
+        # `Qwen3_5MultiTokenPredictor.load_fused_expert_weights`). Mirror the
+        # existing `mtp.fc` workaround (PR #38832) for the experts: extend
+        # the active CT `ignore` list with every per-expert MTP linear so the
+        # FusedMoE picks `UnquantizedFusedMoEMethod` and registers BF16
+        # `w13_weight` / `w2_weight` matching the checkpoint.
+        if (
+            quant_config is not None
+            and quant_config.get_name() == "compressed-tensors"
+            and hasattr(quant_config, "ignore")
+        ):
+            num_experts = getattr(config, "num_experts", 0)
+            extra: list[str] = []
+            for idx in range(self.num_mtp_layers):
+                for eid in range(num_experts):
+                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                        extra.append(f"{prefix}.layers.{idx}.mlp.experts.{eid}.{proj}")
+            new_entries = [n for n in extra if n not in quant_config.ignore]
+            quant_config.ignore.extend(new_entries)
+            if new_entries:
+                logger.info(
+                    "Qwen3_5MTP: extended compressed-tensors ignore with "
+                    "%d per-expert MTP linears (BF16 in the checkpoint)",
+                    len(new_entries),
+                )
 
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
