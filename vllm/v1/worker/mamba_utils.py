@@ -5,6 +5,7 @@ import itertools
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import CacheConfig
@@ -583,8 +584,10 @@ def collect_mamba_copy_meta(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    src_ptrs_np = copy_bufs.src_ptrs.np
-    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    # Device pointers can use the high bit on XPU. Store them by bit pattern
+    # instead of converting through signed int64, which rejects values >= 2**63.
+    src_ptrs_np = copy_bufs.src_ptrs.np.view(np.uint64)
+    dst_ptrs_np = copy_bufs.dst_ptrs.np.view(np.uint64)
     sizes_np = copy_bufs.sizes.np
     offset = copy_bufs.offset
 
