@@ -194,9 +194,8 @@ class ReasoningParser:
     ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag
-        Otherwise, None is returned
         """
-        return None
+        return original_tag
 
 
 class ReasoningParserManager:
