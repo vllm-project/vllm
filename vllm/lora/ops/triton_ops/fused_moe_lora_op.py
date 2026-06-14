@@ -1615,6 +1615,62 @@ def _fused_moe_lora(
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
 
+    # When fully-sharded all-gather is in effect with multiple slices, the
+    # gathered tensor's slice dim (dim 0) is non-contiguous: the inner rank
+    # dim is interleaved across world ranks, so `stride(0) != numel //
+    # num_slices` for small per-shard ranks. The combined expand kernel
+    # computes `cur_a_ptr = a_ptr + slice_id * (numel // num_slices)`, which
+    # silently reads the wrong region for slice_id >= 1 (e.g. local rank 1
+    # produces stride(0)=3 vs numel/num_slices=48). Run each slice as an
+    # independent num_slices=1 expand so each slice is addressed via its own
+    # contiguous view. See vllm-project/vllm#42718.
+    if (
+        fully_sharded
+        and num_slices > 1
+        and a_intermediate_cache1.stride(0)
+        != a_intermediate_cache1.numel() // num_slices
+    ):
+        for slice_id in range(num_slices):
+            single_slice = a_intermediate_cache1[
+                slice_id : slice_id + 1
+            ].contiguous()
+            _fused_moe_lora_expand(
+                output,
+                single_slice,
+                [lora_b_stacked[slice_id]],
+                topk_weights,
+                sorted_token_ids,
+                expert_ids,
+                num_tokens_post_padded,
+                token_lora_mapping,
+                top_k_num,
+                lora_ids,
+                adapter_enabled,
+                device,
+                N,
+                M,
+                EM,
+                K,
+                num_tokens,
+                num_experts,
+                1,
+                max_lora_rank,
+                w1_output_dim_size,
+                expand_block_size_m,
+                expand_block_size_n,
+                expand_block_size_k,
+                expand_group_size_m,
+                expand_num_warps,
+                expand_num_stages,
+                expand_split_k,
+                num_active_loras,
+                mul_routed_weight,
+                offset + slice_id * w1_output_dim_size,
+                use_gdc=use_gdc,
+                use_tma=use_tma,
+            )
+        return
+
     _fused_moe_lora_expand(
         output,
         a_intermediate_cache1,
