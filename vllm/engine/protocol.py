@@ -17,7 +17,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
-from vllm.tasks import SupportedTask
+from vllm.tasks import PoolingTask, SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -94,6 +94,7 @@ class EngineClient(ABC):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        pooling_task: PoolingTask | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
