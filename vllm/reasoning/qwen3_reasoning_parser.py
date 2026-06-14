@@ -123,11 +123,9 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         If <think> is present (e.g. from a different template), it is
         stripped before extraction.
 
-        When thinking is explicitly disabled and no </think> appears,
-        returns (None, model_output) — all output is content.
-        Otherwise (thinking enabled, default), a missing </think> means
-        the output was truncated and everything is reasoning:
-        returns (model_output, None).
+        When no </think> appears, returns (None, model_output) so direct
+        answers are routed to content. Truncated responses are indicated
+        separately by finish_reason="length".
 
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
@@ -153,9 +151,9 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
             reasoning = model_output[:tool_call_index]
             content = model_output[tool_call_index:]
             return reasoning or None, content or None
-        # Thinking enabled but no </think>: output was truncated.
-        # Everything generated so far is reasoning.
-        return model_output, None
+        # When thinking is explicitly disabled and no </think> appears,
+        # returns (None, model_output) — all output is content.
+        return None, model_output
 
     def extract_reasoning_streaming(
         self,
