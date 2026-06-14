@@ -2017,13 +2017,11 @@ class GPUModelRunner(
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-
         # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
         self.discard_request_mask.np[:num_reqs] = (
-            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+            self.optimistic_seq_lens_cpu[:num_reqs].numpy()
+            < self.input_batch.num_tokens_no_spec[:num_reqs]
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
