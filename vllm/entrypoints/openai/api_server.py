@@ -573,6 +573,7 @@ async def build_and_serve(
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
+    # This log line is used for benchmarking. Please maintain the format
     logger.info("Starting vLLM server on %s", listen_address)
 
     return await serve_http(
@@ -618,6 +619,7 @@ async def build_and_serve_renderer(
     app = build_app(args, ("render",))
     await init_render_app_state(vllm_config, app.state, args)
 
+    # This log line is used for benchmarking. Please maintain the format
     logger.info("Starting vLLM server on %s", listen_address)
 
     return await serve_http(

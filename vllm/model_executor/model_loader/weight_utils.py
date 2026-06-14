@@ -528,6 +528,7 @@ def download_weights_from_hf(
                 break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
+            # This log line is used for benchmarking. Please maintain the format
             logger.info(
                 "Time spent downloading weights for %s: %.6f seconds",
                 model_name_or_path,
@@ -1012,6 +1013,7 @@ def runai_safetensors_weights_iterator(
         tensor_iter = tqdm(
             streamer.get_tensors(),
             total=total_tensors,
+            # This line is used for benchmarking. Please maintain the format
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not enable_tqdm(use_tqdm_on_load),
