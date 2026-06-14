@@ -7,15 +7,26 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockLoadStoreSpec,
     generate_store_output,
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    GroupOffloadConfig,
     OffloadingConnectorScheduler,
+    RequestOffloadState,
+    SchedulerOffloadConfig,
+    _effective_locally_computed_tokens,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    make_block_hash_with_group_id,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -29,7 +40,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_block_hash,
 )
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1305,6 +1316,228 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
             (1, 7),
         ),
     )
+
+
+def _gpu_block_with_hash(block_id: int) -> KVCacheBlock:
+    block = KVCacheBlock(block_id=block_id)
+    block.block_hash = make_block_hash_with_group_id(
+        BlockHash(bytes([block_id % 256]) * 32), 0
+    )
+    return block
+
+
+def _make_single_group_offload_scheduler(
+    gpu_block_size: int = 4,
+    block_size_factor: int = 3,
+) -> tuple[OffloadingConnectorScheduler, MagicMock]:
+    manager = MagicMock()
+    manager.prepare_load.side_effect = lambda keys, ctx: MockLoadStoreSpec(keys)
+
+    spec = MagicMock()
+    spec.vllm_config.cache_config.enable_prefix_caching = False
+    spec.vllm_config.parallel_config.world_size = 1
+    spec.gpu_block_size = [gpu_block_size]
+    spec.block_size_factor = block_size_factor
+    spec.hash_block_size = gpu_block_size
+    spec.offload_prompt_only = False
+    spec.kv_cache_config.kv_cache_groups = [MagicMock()]
+    spec.kv_cache_config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+        block_size=gpu_block_size,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    spec.get_manager.return_value = manager
+    return OffloadingConnectorScheduler(spec), manager
+
+
+def test_effective_locally_computed_tokens_clamps_unhashed_blocks():
+    """Regression for vLLM #43884: Phase A local count vs unhashed GPU blocks."""
+    gpu_block_size = 4
+    config = SchedulerOffloadConfig(
+        num_workers=1,
+        block_size_factor=3,
+        offload_prompt_only=False,
+        kv_group_configs=(
+            GroupOffloadConfig(
+                group_idx=0,
+                gpu_block_size=gpu_block_size,
+                offloaded_block_size=12,
+                hash_block_size_factor=3,
+                sliding_window_size_in_blocks=None,
+                alignment_block_count=None,
+            ),
+        ),
+    )
+    group_blocks = [
+        _gpu_block_with_hash(0),
+        _gpu_block_with_hash(1),
+        KVCacheBlock(block_id=2),
+        KVCacheBlock(block_id=3),
+        KVCacheBlock(block_id=4),
+        KVCacheBlock(block_id=5),
+    ]
+    assert (
+        _effective_locally_computed_tokens(
+            num_locally_computed_tokens=24,
+            num_external_tokens=8,
+            kv_group_configs=config.kv_group_configs,
+            group_blocks_list=(group_blocks,),
+        )
+        == 8
+    )
+
+
+def test_update_state_after_alloc_clamps_stale_local_tokens():
+    """update_state_after_alloc must not assert when local tokens are stale."""
+    gpu_block_size = 4
+    num_external_tokens = 16
+
+    scheduler, manager = _make_single_group_offload_scheduler(gpu_block_size)
+    req = Request(
+        request_id="r1",
+        prompt_token_ids=[0] * 12,
+        sampling_params=SamplingParams(max_tokens=10),
+        pooling_params=None,
+    )
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=req,
+        req_context=ReqContext(req_id="r1"),
+        offloading_context=RequestOffloadingContext(),
+    )
+    req_status.num_locally_computed_tokens = 24
+    req_status.group_states[0].offload_keys = to_keys([0, 1, 2, 3, 4])
+    scheduler._req_status["r1"] = req_status
+
+    group_blocks = [
+        _gpu_block_with_hash(0),
+        _gpu_block_with_hash(1),
+        KVCacheBlock(block_id=2),
+        KVCacheBlock(block_id=3),
+        KVCacheBlock(block_id=4),
+        KVCacheBlock(block_id=5),
+    ]
+    kv_blocks = KVCacheBlocks((group_blocks,))
+
+    scheduler.update_state_after_alloc(req, kv_blocks, num_external_tokens)
+    assert req_status.num_locally_computed_tokens == 8
+    manager.prepare_load.assert_called_once()
+
+
+def test_update_state_after_alloc_defers_load_when_no_pending_blocks():
+    """T4: all allocated blocks are hash-backed -> no prepare_load this step."""
+    gpu_block_size = 4
+    num_external_tokens = 12
+    num_blocks = 12
+
+    scheduler, manager = _make_single_group_offload_scheduler(gpu_block_size)
+    req = Request(
+        request_id="r1",
+        prompt_token_ids=[0] * 12,
+        sampling_params=SamplingParams(max_tokens=10),
+        pooling_params=None,
+    )
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=req,
+        req_context=ReqContext(req_id="r1"),
+        offloading_context=RequestOffloadingContext(),
+    )
+    req_status.num_locally_computed_tokens = 30
+    req_status.group_states[0].offload_keys = to_keys(list(range(num_blocks)))
+    scheduler._req_status["r1"] = req_status
+
+    group_blocks = [_gpu_block_with_hash(i) for i in range(num_blocks)]
+    kv_blocks = KVCacheBlocks((group_blocks,))
+
+    scheduler.update_state_after_alloc(req, kv_blocks, num_external_tokens)
+    assert req_status.num_locally_computed_tokens == 30
+    manager.prepare_load.assert_not_called()
+
+
+def test_effective_locally_computed_tokens_multi_group_uses_min_cap():
+    config = SchedulerOffloadConfig(
+        num_workers=1,
+        block_size_factor=1,
+        offload_prompt_only=False,
+        kv_group_configs=(
+            GroupOffloadConfig(
+                group_idx=0,
+                gpu_block_size=4,
+                offloaded_block_size=4,
+                hash_block_size_factor=1,
+                sliding_window_size_in_blocks=None,
+                alignment_block_count=None,
+            ),
+            GroupOffloadConfig(
+                group_idx=1,
+                gpu_block_size=8,
+                offloaded_block_size=8,
+                hash_block_size_factor=1,
+                sliding_window_size_in_blocks=None,
+                alignment_block_count=None,
+            ),
+        ),
+    )
+    group0 = [_gpu_block_with_hash(0), _gpu_block_with_hash(1), KVCacheBlock(2)]
+    group1 = [_gpu_block_with_hash(10), KVCacheBlock(11), KVCacheBlock(12)]
+    assert (
+        _effective_locally_computed_tokens(
+            num_locally_computed_tokens=24,
+            num_external_tokens=4,
+            kv_group_configs=config.kv_group_configs,
+            group_blocks_list=(group0, group1),
+        )
+        == 8
+    )
+
+
+@pytest.mark.parametrize("round_idx", list(range(24)))
+def test_update_state_after_alloc_soak_24_rounds_43884(round_idx: int):
+    """Soak: 24 rounds matching campaign B24/D24 length; must never assert."""
+    gpu_block_size = 4
+    num_hashed = 1 + (round_idx % 5)
+    stale_local = gpu_block_size * (num_hashed + 2 + (round_idx % 3))
+    num_external = gpu_block_size * (1 + round_idx % 3)
+    hash_cap = num_hashed * gpu_block_size
+    effective_local = min(stale_local, hash_cap)
+    num_gpu_blocks = (
+        effective_local + num_external + gpu_block_size - 1
+    ) // gpu_block_size
+    num_total = max(num_gpu_blocks, num_hashed)
+
+    scheduler, manager = _make_single_group_offload_scheduler(gpu_block_size)
+    req = Request(
+        request_id=f"soak-{round_idx}",
+        prompt_token_ids=[0] * 48,
+        sampling_params=SamplingParams(max_tokens=10),
+        pooling_params=None,
+    )
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=req,
+        req_context=ReqContext(req_id=req.request_id),
+        offloading_context=RequestOffloadingContext(),
+    )
+    req_status.num_locally_computed_tokens = stale_local
+    req_status.group_states[0].offload_keys = to_keys(list(range(num_total + 2)))
+    scheduler._req_status[req.request_id] = req_status
+
+    group_blocks = [
+        _gpu_block_with_hash(i) if i < num_hashed else KVCacheBlock(block_id=i)
+        for i in range(num_total)
+    ]
+    kv_blocks = KVCacheBlocks((group_blocks,))
+
+    scheduler.update_state_after_alloc(req, kv_blocks, num_external)
+    hash_cap = num_hashed * gpu_block_size
+    assert req_status.num_locally_computed_tokens <= stale_local
+    assert req_status.num_locally_computed_tokens <= hash_cap
+    if num_hashed < num_total:
+        manager.prepare_load.assert_called()
+    else:
+        manager.prepare_load.assert_not_called()
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
