@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock, patch
+
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.loggers import (
+    StatLoggerManager,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -244,3 +249,42 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+# ---------------------------------------------------------------------------
+# StatLoggerManager multi-API-server logging tests (no GPU required)
+# ---------------------------------------------------------------------------
+
+_LOGGERS_MODULE = "vllm.v1.metrics.loggers"
+
+
+def _logging_factory_was_used(client_count: int) -> bool:
+    """Return True if LoggingStatLogger was registered as a factory.
+    Patches out PrometheusStatLogger (needs real config) and
+    LoggingStatLogger (needs real config) so the test runs without GPU.
+    """
+    mock_config = MagicMock()
+    with (
+        patch(f"{_LOGGERS_MODULE}.PrometheusStatLogger"),
+        patch(f"{_LOGGERS_MODULE}.LoggingStatLogger") as mock_logging_cls,
+    ):
+        StatLoggerManager(
+            vllm_config=mock_config,
+            enable_default_loggers=True,
+            client_count=client_count,
+        )
+    return mock_logging_cls.called
+
+
+def test_stat_logger_manager_single_server():
+    """With api_server_count=1 the default logging factory must be active."""
+    assert _logging_factory_was_used(client_count=1), (
+        "LoggingStatLogger should be active for a single API server"
+    )
+
+
+def test_stat_logger_manager_multi_server():
+    """With api_server_count>1 logging must be disabled on all servers."""
+    assert not _logging_factory_was_used(client_count=4), (
+        "LoggingStatLogger should be disabled when api_server_count > 1"
+    )
