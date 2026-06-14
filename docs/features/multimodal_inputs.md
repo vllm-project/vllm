@@ -841,6 +841,33 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### Keyframe-Only Video Sampling (Lossy)
+
+Video frames are sampled by a pluggable loader selected with the `VLLM_VIDEO_LOADER_BACKEND` environment variable (default: `opencv`, uniform sampling). Video codecs store a complete image only at periodic *keyframes* (I-frames), each starting a group of pictures (GOP) of typically 2–10 seconds; the frames in between (P/B-frames) are deltas that can only be reconstructed by decoding forward from the preceding keyframe. The `pyav_keyframes` loader trades temporal accuracy for decode speed: it samples only bitstream keyframes, so decode cost is bounded by the frame budget regardless of clip length — P/B-frames are never decoded.
+
+```bash
+VLLM_VIDEO_LOADER_BACKEND=pyav_keyframes \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"video": {"num_frames": 16}}'
+```
+
+`num_frames` is the regular frame budget from `--media-io-kwargs` (default 32, also settable per request via the `media_io_kwargs` API field); the env variable applies to offline `LLM` use as well. In our measurements decode time is near-constant (tens of milliseconds for 16 frames, whether the clip is 30 seconds or 10 minutes), roughly 4–40× faster than the lossless PyAV decode path, with the gap growing with clip length.
+
+This targets prefill-heavy workloads that generate few tokens, where CPU-side video decoding rather than the GPU dominates the pipeline. Keyframe positions are already indexed in the container, so they can be enumerated without decoding anything. The measured results below come from single-token multiple-choice video QA; treat other workloads as unvalidated.
+
+**Behavior:**
+
+- Returned frames sit on GOP boundaries rather than a uniform stride, so temporal coverage follows the source encoding (typically one frame per 2–10 seconds of video).
+- If a clip has fewer keyframes than `num_frames`, keyframes are duplicated (balanced) to fill the request; `frames_indices` always reports true source indices.
+- It is never selected automatically for any model; the `opencv` codec and `frame_recovery` are rejected.
+- Models with their own model-specific video loader (e.g. GLM-4V/4.6V, Molmo2) ignore `VLLM_VIDEO_LOADER_BACKEND`: the processor-mapped backend takes precedence, so `pyav_keyframes` only ever replaces the default `opencv` loader. It can still be forced per request via `media_io_kwargs` `{"video": {"video_backend": "pyav_keyframes"}}`, which is unvalidated for those models.
+
+!!! warning
+    This is a lossy trade-off. In a Qwen2.5-VL-7B evaluation (NExTQA + MVBench, 16 frames), NExTQA accuracy was unchanged (79.6% → 79.5%) while MVBench dropped 11.3 points overall, concentrated in motion- and temporal-order subtasks (`action_antonym`: −52.7 points). Avoid it for motion counting, temporal ordering, or action recognition; the accuracy impact varies with model, task, and source GOP structure.
+
+!!! tip
+    Because the cost is data-dependent, gate adoption with a label-free A/B on a sample of your own data: run `pyav_keyframes` vs. the default loader at identical settings and compare exact-match agreement on predicted labels (optionally KL divergence of the output distributions). Enable it only where the agreement justifies the speedup.
+
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.

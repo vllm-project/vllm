@@ -71,15 +71,20 @@ def create_long_gop_video(
     fps: int = 30,
     width: int = 64,
     height: int = 64,
+    gop_size: int | None = None,
 ) -> bytes:
-    """Encode an H.264 clip with one keyframe and green-channel = frame index.
+    """Encode an H.264 clip with green-channel = frame index markers.
 
     The marker lets a test recover which frame the decoder actually returned,
-    independent of any metadata label.
+    independent of any metadata label. By default the whole clip is a single
+    GOP (one keyframe at frame 0); pass ``gop_size`` to place a keyframe
+    every ``gop_size`` frames instead.
     """
     import io
 
     import av
+
+    keyint = gop_size or num_frames
 
     buf = io.BytesIO()
     with av.open(buf, mode="w", format="mp4") as container:
@@ -87,10 +92,10 @@ def create_long_gop_video(
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
-        stream.codec_context.gop_size = num_frames
+        stream.codec_context.gop_size = keyint
         stream.codec_context.max_b_frames = 0
         stream.codec_context.options = {
-            "x264-params": (f"scenecut=0:keyint={num_frames}:min-keyint={num_frames}")
+            "x264-params": (f"scenecut=0:keyint={keyint}:min-keyint={keyint}")
         }
         for i in range(num_frames):
             img = np.zeros((height, width, 3), dtype=np.uint8)
