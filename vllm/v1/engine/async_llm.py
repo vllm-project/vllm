@@ -1036,7 +1036,10 @@ class AsyncLLM(EngineClient):
 
         set_scaling_elastic_ep(True)
         try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            await self.engine_core.scale_elastic_ep(
+                new_data_parallel_size,
+                on_removed_requests=self.output_processor.abort_requests_for_removed_engines,
+            )
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)

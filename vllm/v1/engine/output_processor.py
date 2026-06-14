@@ -447,6 +447,33 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
+    def abort_requests_for_removed_engines(
+        self, request_ids: Iterable[str]
+    ) -> list[str]:
+        """Abort removed-engine requests, coalescing parallel-sampling children.
+        
+        Returns internal request IDs that should still be aborted in EngineCore,
+        e.g. surviving siblings of parallel-sampling requests.
+        """
+        target_ids: list[str] = []
+        seen_target_ids: set[str] = set()
+
+        for request_id in request_ids:
+            target_id = request_id
+            if req_state := self.request_states.get(request_id):
+                if req_state.parent_req is not None:
+                    target_id = req_state.parent_req.request_id
+
+            if target_id in seen_target_ids:
+                continue
+            seen_target_ids.add(target_id)
+            target_ids.append(target_id)
+
+        if not target_ids:
+            return []
+
+        return self.abort_requests(target_ids, internal=True)
+
     def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
         """Abort a list of requests.
 
