@@ -38,7 +38,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
+from vllm.model_executor.layers.mamba.mamba2.mamba_mixer2 import (
+    mamba_v2_sharded_weight_loader,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
@@ -287,8 +289,12 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+# --8<-- [start:chunk_gated_delta_rule]
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
+    """Chunk Gated Delta Rule CustomOp."""
+
+    # --8<-- [end:chunk_gated_delta_rule]
     def __init__(self) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
@@ -416,8 +422,14 @@ class ChunkGatedDeltaRule(CustomOp):
         return o, final_state
 
 
+# --8<-- [start:qwen_gated_delta_net_attention]
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    """
+    Qwen Gated Delta Net Attention layer
+    """
+
+    # --8<-- [end:qwen_gated_delta_net_attention]
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
