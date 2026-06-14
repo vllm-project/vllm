@@ -6,7 +6,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
-    parse_chat_messages_async,
 )
 from vllm.logger import init_logger
 from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer
