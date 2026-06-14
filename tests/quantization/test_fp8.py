@@ -14,12 +14,18 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
     Fp8MoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -43,7 +49,7 @@ MODELS = [
 )
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -134,7 +140,7 @@ def test_kv_cache_model_load_and_run(
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize(
-    "force_marlin", [False] if current_platform.is_rocm() else [False, True]
+    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -164,21 +170,27 @@ def test_online_quantization(
 
         def check_model(model):
             fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8LinearMethod)
+            assert isinstance(fc1.quant_method, Fp8PerTensorOnlineLinearMethod)
             if kv_cache_dtype == "fp8":
                 attn = model.model.decoder.layers[0].self_attn.attn
                 assert isinstance(attn.quant_method, Fp8KVCacheMethod)
                 assert attn._k_scale == 1.0
                 assert attn._v_scale == 1.0
 
-            if current_platform.is_cuda():
+            if current_platform.is_cuda() or current_platform.is_xpu():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
                     assert fc1.weight.dtype == torch.float8_e4m3fn
+                    assert not isinstance(
+                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
                 else:
                     # For GPUs without hardware support, we pack the fp8 weights
                     # for weight-only quantization using Marlin kernels
                     assert fc1.weight.dtype == torch.int32
+                    assert isinstance(
+                        fc1.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                    )
             elif current_platform.is_rocm():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
