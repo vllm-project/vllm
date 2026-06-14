@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import psutil
 import regex as re
 import torch
 import zmq
@@ -25,7 +26,8 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
-    make_zmq_socket,
+    is_valid_ipv6_address,
+    split_zmq_path,
 )
 
 if TYPE_CHECKING:
@@ -162,10 +164,18 @@ class TransferError(MoRIIOError):
     pass
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
-    read_mode = str(
-        kv_transfer_config.kv_connector_extra_config.get("read_mode", "false")
-    ).lower().strip() in ("true", "1")
+    read_mode = _as_bool(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", False)
+    )
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -175,6 +185,45 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 
 def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
+
+
+def _normalize_node_hosts(value: Any, config_key: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [host.strip() for host in value.split(",") if host.strip()]
+    try:
+        return [str(host).strip() for host in value if str(host).strip()]
+    except TypeError as exc:
+        raise ValueError(
+            f"{config_key} must be a comma-separated string or iterable of hosts"
+        ) from exc
+
+
+def get_moriio_node_hosts(
+    kv_transfer_config: KVTransferConfig, default_host: str
+) -> list[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    node_hosts = _normalize_node_hosts(
+        extra_config.get("node_hosts"),
+        "kv_connector_extra_config['node_hosts']",
+    )
+    if node_hosts:
+        return node_hosts
+
+    env_node_hosts = os.environ.get("VLLM_MORIIO_NODE_HOSTS", "").strip()
+    if env_node_hosts:
+        logger.warning_once(
+            "The environment variable %s is deprecated. Set %r inside "
+            "kv_transfer_config.kv_connector_extra_config instead.",
+            "VLLM_MORIIO_NODE_HOSTS",
+            "node_hosts",
+        )
+        node_hosts = _normalize_node_hosts(env_node_hosts, "VLLM_MORIIO_NODE_HOSTS")
+        if node_hosts:
+            return node_hosts
+
+    return [default_host]
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
@@ -218,6 +267,8 @@ class MoRIIOConfig:
     post_batch_size: int = -1
     num_workers: int = 1
     backend: str = "rdma"
+    node_hosts: list[str] = field(default_factory=list)
+    handshake_timeout: float = 10.0
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -258,7 +309,7 @@ class MoRIIOConfig:
         base_notify_port = int(extra_config["notify_port"])
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(
@@ -275,8 +326,10 @@ class MoRIIOConfig:
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
         )
 
+        local_ip = get_ip()
+
         return cls(
-            local_ip=get_ip(),
+            local_ip=local_ip,
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -293,8 +346,14 @@ class MoRIIOConfig:
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
             backend=backend,
+            node_hosts=get_moriio_node_hosts(kv_transfer_config, local_ip),
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            handshake_timeout=float(
+                extra_config.get(
+                    "handshake_timeout", MoRIIOConstants.DEFAULT_HANDSHAKE_TIMEOUT
+                )
+            ),
         )
 
 
@@ -322,6 +381,18 @@ class MoRIIOConstants:
     # notification is reaped and its blocks force-freed.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Grace period (seconds) during which has_pending_deferred_sends keeps
+    # scheduler probes active after a deferred send is created.
+    # Overridable via kv_connector_extra_config["defer_drain_grace"].
+    DEFAULT_DEFER_DRAIN_GRACE = 2.0
+    # Timeout (seconds) for a single MoRIIO handshake metadata exchange. Bounds
+    # a dead/slow remote handshake listener so a missing prefill rank fails fast
+    # (HandshakeError) instead of blocking a TP worker forever on recv() and
+    # desyncing the TP collective. The eager all-rank handshake runs at first
+    # request (post health-gate), so the remote listener is already up and
+    # answers in ~ms; this is a safety net for genuine mid-run faults.
+    # Overridable via kv_connector_extra_config["handshake_timeout"].
+    DEFAULT_HANDSHAKE_TIMEOUT = 10.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -396,6 +467,17 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # DP rank that handled the prefill on the remote side. Proxy sets this
+    # from `selected_prefill_dp_rank` in kv_transfer_params. Used by
+    # `_read_blocks` to pick the correct per-rank session/MR instead of
+    # always reading from remote DP0 (which mismatches num_blocks across
+    # ranks and overflows remote DP0's MR at high concurrency).
+    remote_dp_rank: int = 0
+    # Ordered list of all prefill-instance host IPs for multi-node TP.
+    # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
+    # actual peer host for handshake + post-transfer notify. None or len<=1
+    # falls back to single-host behaviour (remote_host).
+    remote_hosts: list[str] | None = None
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -404,13 +486,15 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.freed_transfer_ids: set[TransferId] = set()
 
     def __repr__(self):
         return (
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"freed_transfer_ids={self.freed_transfer_ids}"
         )
 
     def add_new_req(
@@ -423,23 +507,63 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         transfer_id = kv_transfer_params["transfer_id"]
 
         # Parse host/ports from the request_id. The router embeds both zmq_addresses
-        # in the request_id
-        peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
-        remote_host, remote_handshake_port, remote_notify_port = (
-            parse_moriio_zmq_address(peer_zmq)
+        # in the request_id. Some cleanup-path requests (e.g. those that hit the
+        # external prefix cache and take the "aborted before scheduling" branch
+        # in `request_finished`) surface a short internal request_id without
+        # the proxy's `___prefill_addr_...` prefix; `get_peer_zmq_from_request_id`
+        # raises ValueError on those. Fall back to `kv_transfer_params.remote_hosts`
+        # (forwarded for multi-node TP) and MoRIIO's default well-known ports.
+        # Only the request_id parse path is affected; once we have a valid
+        # host/port triple we proceed as before.
+        remote_hosts = _normalize_node_hosts(
+            kv_transfer_params.get("remote_hosts"),
+            "kv_transfer_params['remote_hosts']",
         )
+        try:
+            peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
+            remote_host, remote_handshake_port, remote_notify_port = (
+                parse_moriio_zmq_address(peer_zmq)
+            )
+        except ValueError:
+            # Normalize remote_hosts: callers may pass a list (per-rank host
+            # vector from the proxy) or a single host string from older
+            # proxy versions. A bare string would silently slice into "1."
+            # for "172.30.0.1" if we just did remote_hosts[0].
+            if not remote_hosts:
+                raise ValueError(
+                    f"MoRIIO add_new_req: could not resolve peer host/ports "
+                    f"for {request_id!r}; neither request_id parse nor "
+                    f"kv_transfer_params.remote_hosts provided them"
+                ) from None
+            remote_host = remote_hosts[0]
+            remote_handshake_port = int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT)
+            remote_notify_port = int(MoRIIOConstants.DEFAULT_NOTIFY_PORT)
 
+        # Cleanup-path requests (the same "aborted before scheduling" branch
+        # that surfaces a short request_id) can also omit remote_block_ids
+        # and remote_engine_id. Use .get() defaults so we don't crash the
+        # same EngineCore the request_id fallback above is meant to keep
+        # alive — an empty block list is the correct no-op for an aborted
+        # request.
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_block_ids=kv_transfer_params.get("remote_block_ids", []),
+            remote_engine_id=kv_transfer_params.get("remote_engine_id", ""),
             remote_host=remote_host,
             remote_port=remote_handshake_port,
             remote_handshake_port=remote_handshake_port,
             remote_notify_port=remote_notify_port,
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            # Defense-in-depth: callers (e.g. moriio_toy_proxy_server in
+            # READ-mode multi-node TP) may forward `remote_tp_size` only.
+            # Read `tp_size` first, fall back to `remote_tp_size`, default 1.
+            tp_size=kv_transfer_params.get(
+                "tp_size",
+                kv_transfer_params.get("remote_tp_size", 1),
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=int(kv_transfer_params.get("remote_dp_rank", 0) or 0),
+            remote_hosts=remote_hosts or None,
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
@@ -447,8 +571,74 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_recv[request_id] = _req
 
 
+_MORIIO_ZMQ_KEEPALIVE_OPTS = (
+    (zmq.TCP_KEEPALIVE, 1),
+    (zmq.TCP_KEEPALIVE_IDLE, 30),
+    (zmq.TCP_KEEPALIVE_INTVL, 10),
+    (zmq.TCP_KEEPALIVE_CNT, 3),
+)
+
+
+def _make_moriio_zmq_socket(
+    ctx: zmq.Context,
+    path: str,
+    socket_type: Any,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> zmq.Socket:
+    mem = psutil.virtual_memory()
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+
+    sock = ctx.socket(socket_type)
+
+    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.RCVHWM, 0)
+        sock.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.SNDHWM, 0)
+        sock.setsockopt(zmq.SNDBUF, buf_size)
+
+    if socket_type == zmq.ROUTER and router_handover:
+        sock.setsockopt(zmq.ROUTER_HANDOVER, 1)
+
+    if identity is not None:
+        sock.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        sock.setsockopt(zmq.LINGER, linger)
+
+    # Mgmt-rail notify/handshake streams are sparse; a silently dead TCP peer
+    # can park reads until the retransmit ladder expires. Keepalive applies to
+    # accepted connections too and must be set before bind/connect.
+    for option, value in _MORIIO_ZMQ_KEEPALIVE_OPTS:
+        sock.setsockopt(option, value)
+
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
+
+    if socket_type == zmq.ROUTER:
+        sock.bind(path)
+    else:
+        sock.connect(path)
+
+    return sock
+
+
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(
+    socket_type: Any,
+    addr: str,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
@@ -457,9 +647,15 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(
-            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
+        sock = _make_moriio_zmq_socket(
+            ctx,
+            addr,
+            socket_type,
+            identity=identity,
+            linger=linger,
+            router_handover=router_handover,
         )
+        yield sock
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
