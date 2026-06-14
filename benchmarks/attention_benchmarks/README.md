@@ -108,6 +108,7 @@ python benchmark.py \
     --backends flash triton flashinfer \
     --batch-specs "q2k" "8q1s1k" "2q2k_32q1s1k" \
     --num-layers 10 \
+    --repeats 5 \
     --output-csv results.csv
 ```
 
@@ -163,17 +164,14 @@ python benchmark.py \
 # Model configuration
 --num-layers N                      # Number of layers
 --head-dim N                        # Head dimension
---v-head-dim N                      # Value head dimension (defaults to --head-dim)
 --num-q-heads N                     # Query heads
 --num-kv-heads N                    # KV heads
 --block-size N                      # Block size
---kv-lora-rank N                    # MLA KV LoRA rank
---qk-nope-head-dim N                # MLA non-RoPE QK head dim
---qk-rope-head-dim N                # MLA RoPE QK head dim
 
 # Benchmark settings
 --device DEVICE                     # Device (default: cuda:0)
---warmup-ms N                       # Warmup window in ms for triton do_bench
+--repeats N                         # Repetitions
+--warmup-iters N                    # Warmup iterations
 --profile-memory                    # Profile memory usage
 
 # Parameter sweeps
@@ -213,6 +211,8 @@ config = BenchmarkConfig(
     num_kv_heads=1,
     block_size=128,
     device="cuda:0",
+    repeats=5,
+    warmup_iters=3,
 )
 
 # CUTLASS MLA with specific num_kv_splits
@@ -253,10 +253,14 @@ formatter.save_json(results, "output.json")
 
 ## Tips
 
-**1. Save results** - Always use `--output-csv` or `--output-json`
+**1. Warmup matters** - Use `--warmup-iters 10` for stable results
 
-**2. Test incrementally** - Start with `--num-layers 1`
+**2. Multiple repeats** - Use `--repeats 20` for low variance
 
-**3. Extended grammar** - Leverage spec decode, chunked prefill patterns
+**3. Save results** - Always use `--output-csv` or `--output-json`
 
-**4. Parameter sweeps** - Use `--sweep-param` and `--sweep-values` to find optimal values
+**4. Test incrementally** - Start with `--num-layers 1 --repeats 1`
+
+**5. Extended grammar** - Leverage spec decode, chunked prefill patterns
+
+**6. Parameter sweeps** - Use `--sweep-param` and `--sweep-values` to find optimal values

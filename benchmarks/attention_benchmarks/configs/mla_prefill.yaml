@@ -124,3 +124,5 @@ prefill_backends:
   - tokenspeed
 
 device: "cuda:0"
+repeats: 20
+warmup_iters: 5
