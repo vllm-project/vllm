@@ -546,6 +546,12 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     def _is_encoder_decoder(config: PretrainedConfig) -> bool:
         return getattr(config, "is_encoder_decoder", False)
 
+    # MOSS-VL uses cross-attention over vision encoder outputs and shares the
+    # encoder-decoder scheduling/cache path even though its HF config does not
+    # set the flag.
+    if getattr(config, "model_type", None) == "moss_vl":
+        return True
+
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
 
 
