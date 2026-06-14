@@ -7,6 +7,7 @@ Test:
 """
 
 import itertools
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -249,9 +250,13 @@ def test_mha_attn_varlen_forward(
     "dtype",
     [torch.bfloat16, torch.half],
 )
+@pytest.mark.parametrize("head_size", [64, 72])
+@pytest.mark.parametrize("use_cudnn", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_mha_attn_varlen_forward_flashinfer(
     default_vllm_config,
+    use_cudnn: bool,
+    head_size: int,
     var_seq_len: list[int],
     dtype: torch.dtype,
     device: str,
@@ -265,7 +270,6 @@ def test_mha_attn_varlen_forward_flashinfer(
     pytest.importorskip("flashinfer")
 
     num_heads = 16
-    head_size = 72
     set_random_seed(0)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -325,14 +329,38 @@ def test_mha_attn_varlen_forward_flashinfer(
         )
         assert attn.attn_backend == AttentionBackendEnum.FLASHINFER
 
-        output = attn(
-            q,
-            k,
-            v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            sequence_lengths=sequence_lengths,
+        platform_patch = (
+            patch.object(
+                CudaPlatform,
+                "get_device_capability",
+                return_value=DeviceCapability(major=7, minor=5),
+            )
+            if not use_cudnn
+            else nullcontext()
         )
+
+        unsupported_context = (
+            pytest.raises(
+                ValueError,
+                match=(
+                    "FlashInfer FA2 Prefill kernels require head dimension "
+                    "to be divisible by 64"
+                ),
+            )
+            if not use_cudnn and head_size == 72
+            else nullcontext()
+        )
+        with platform_patch, unsupported_context:
+            output = attn(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
+        if not use_cudnn and head_size == 72:
+            return
 
         ref_output = []
         for q_i, k_i, v_i in zip(
