@@ -159,16 +159,16 @@ class QuickAllReduce:
 
     def init_quick_all_reduce(self):
         # On RocM, bfloat16 kernels are slower than fp16
-        # due to slower match operations
+        # due to slower math operations
         # If environment variable is set to 1, we convert input to fp16
         self.use_fp16_kernels = envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16
         regime_str = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
         if regime_str not in QuickReduceRegime.__members__:
             logger.warning(
-                "Custom quick allreduce:",
-                f"Invalid quantization level: {regime_str}. "
-                "Supported levels: "
-                f"{list(QuickReduceRegime.__members__.keys())}",
+                "Custom quick allreduce: Invalid quantization level: %s. "
+                "Supported levels: %s",
+                regime_str,
+                list(QuickReduceRegime.__members__.keys()),
             )
             return
 
@@ -191,7 +191,7 @@ class QuickAllReduce:
             if dtype not in [torch.float16, torch.bfloat16]:
                 logger.debug(
                     "Custom quick allreduce disabled: only supports "
-                    "float16 and float16, but get %s.",
+                    "float16 and bfloat16, but get %s.",
                     dtype,
                 )
                 return
