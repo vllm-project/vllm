@@ -132,6 +132,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata=replace(
                 sampling_metadata,
                 max_num_logprobs=-1,
+                logprob_token_ids=None,
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -181,7 +182,10 @@ class RejectionSampler(nn.Module):
         )
 
         logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs is not None:
+        if (
+            sampling_metadata.max_num_logprobs is not None
+            or sampling_metadata.logprob_token_ids
+        ):
             logprobs_tensors = self._get_logprobs_tensors(
                 sampling_metadata.max_num_logprobs,
                 metadata,
@@ -189,6 +193,7 @@ class RejectionSampler(nn.Module):
                 target_logits if self.is_processed_logprobs_mode else raw_target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
+                logprob_token_ids=sampling_metadata.logprob_token_ids,
             )
 
         return SamplerOutput(
@@ -198,13 +203,16 @@ class RejectionSampler(nn.Module):
 
     def _get_logprobs_tensors(
         self,
-        max_num_logprobs: int,
+        max_num_logprobs: int | None,
         metadata: SpecDecodeMetadata,
         logits: torch.Tensor,
         target_logits: torch.Tensor,
         bonus_logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
+        logprob_token_ids: dict[int, list[int]] | None = None,
     ) -> LogprobsTensors:
+        from vllm.v1.sample.utils import build_logprob_token_ids_matrix
+
         cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
         cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
 
@@ -239,11 +247,45 @@ class RejectionSampler(nn.Module):
             if self.is_logits_logprobs_mode
             else self.sampler.compute_logprobs(accepted_logits)
         )
-        return self.sampler.gather_logprobs(
-            accepted_logprobs,
-            max_num_logprobs,
-            accepted_tokens.to(torch.int64),
-        )
+
+        # Top-N gather
+        logprobs_tensors = None
+        if max_num_logprobs is not None:
+            logprobs_tensors = self.sampler.gather_logprobs(
+                accepted_logprobs,
+                max_num_logprobs,
+                accepted_tokens.to(torch.int64),
+            )
+
+        # Specific-token gather (overrides top-N if both present)
+        if logprob_token_ids:
+            rows_per_req = sampled_token_ids.shape[-1]
+            token_ids_tensor, valid_mask = build_logprob_token_ids_matrix(
+                logprob_token_ids,
+                num_rows=accepted_logprobs.shape[0],
+                sampled=accepted_tokens,
+                device=accepted_logprobs.device,
+                pin_memory=self.sampler.pin_memory,
+                rows_per_req=rows_per_req,
+            )
+            gathered_logprobs = accepted_logprobs.gather(-1, token_ids_tensor)
+            gathered_logprobs = gathered_logprobs.masked_fill(
+                ~valid_mask, float("-inf")
+            )
+
+            sampled_logprobs = accepted_logprobs.gather(
+                -1, accepted_tokens.unsqueeze(-1).to(torch.int64)
+            )
+            token_ranks = (accepted_logprobs > sampled_logprobs).sum(dim=-1)
+
+            logprobs_tensors = LogprobsTensors(
+                logprob_token_ids=token_ids_tensor.to(torch.int32),
+                logprobs=gathered_logprobs,
+                selected_token_ranks=token_ranks,
+            )
+
+        assert logprobs_tensors is not None
+        return logprobs_tensors
 
     @staticmethod
     def parse_output(

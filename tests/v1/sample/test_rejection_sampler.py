@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import Any
 from unittest.mock import Mock
 
@@ -1150,3 +1151,176 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+########################### Tests for logprob_token_ids + spec decode ###########
+
+
+def _make_real_rejection_sampler() -> RejectionSampler:
+    """Create a RejectionSampler with a real (non-mocked) Sampler."""
+    sampler = Sampler(logprobs_mode="raw_logprobs")
+    return RejectionSampler(sampler)
+
+
+def _create_spec_decode_metadata_with_indices(
+    spec_tokens: list[list[int]],
+    vocab_size: int = 100,
+) -> tuple[SpecDecodeMetadata, torch.Tensor]:
+    """Create SpecDecodeMetadata with properly set target/bonus logits indices.
+
+    Returns metadata and a logits tensor sized to hold all positions.
+    """
+    num_draft_tokens = [len(ids) for ids in spec_tokens]
+    num_sampled_tokens = [n + 1 for n in num_draft_tokens]
+    total_positions = sum(num_sampled_tokens)
+
+    # Build logits: [total_positions, vocab_size]
+    logits = torch.randn(total_positions, vocab_size, device=DEVICE_TYPE)
+
+    # Build target_logits_indices and bonus_logits_indices
+    # Layout: for each request, draft positions first, then bonus
+    target_indices = []
+    bonus_indices = []
+    pos = 0
+    for i, n_draft in enumerate(num_draft_tokens):
+        for j in range(n_draft):
+            target_indices.append(pos + j)
+        bonus_indices.append(pos + n_draft)
+        pos += n_draft + 1
+
+    metadata = SpecDecodeMetadata.make_dummy(spec_tokens, device=logits.device)
+    metadata.target_logits_indices = torch.tensor(
+        target_indices, dtype=torch.int64, device=logits.device
+    )
+    metadata.bonus_logits_indices = torch.tensor(
+        bonus_indices, dtype=torch.int64, device=logits.device
+    )
+
+    return metadata, logits
+
+
+def test_logprob_token_ids_with_spec_decode_no_crash():
+    """Regression test: logprob_token_ids + spec decode should not crash.
+
+    Previously this triggered a shape mismatch error in
+    _get_logprobs_tensors because the bonus sampler call returned a
+    small [batch, num_tokens+1] tensor instead of [batch, vocab_size].
+    """
+    vocab_size = 100
+    spec_tokens = [[1, 2, 3], [4, 5]]
+    batch_size = len(spec_tokens)
+
+    rejection_sampler = _make_real_rejection_sampler()
+    spec_decode_metadata, logits = _create_spec_decode_metadata_with_indices(
+        spec_tokens, vocab_size=vocab_size
+    )
+
+    # Scoring request has logprob_token_ids for specific tokens
+    logprob_token_ids = {0: [10, 20, 30], 1: [40, 50]}
+
+    temperature = torch.ones(batch_size, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(all_greedy=False, temperature=temperature)
+    # Manually set logprob_token_ids and max_num_logprobs
+    metadata = replace(
+        metadata,
+        logprob_token_ids=logprob_token_ids,
+        max_num_logprobs=3,
+    )
+
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # Should not crash and should return logprobs_tensors
+    assert output.logprobs_tensors is not None
+    # logprob_token_ids has max 3 tokens + 1 sampled = 4 columns
+    max_spec_len = max(len(t) for t in spec_tokens)
+    expected_rows = batch_size * (max_spec_len + 1)
+    assert output.logprobs_tensors.logprobs.shape[0] == expected_rows
+    assert output.logprobs_tensors.logprobs.shape[1] == 4  # 3 tokens + 1 sampled
+
+
+def test_logprob_token_ids_values_correct():
+    """Verify that logprob_token_ids returns correct logprob values."""
+    vocab_size = 50
+    spec_tokens = [[1, 2]]
+    batch_size = 1
+
+    rejection_sampler = _make_real_rejection_sampler()
+    spec_decode_metadata, logits = _create_spec_decode_metadata_with_indices(
+        spec_tokens, vocab_size=vocab_size
+    )
+
+    # Make logits deterministic for verification
+    logits.fill_(-10.0)
+    logits[0, 5] = 10.0  # draft pos 0: token 5 is very likely
+    logits[1, 6] = 10.0  # draft pos 1: token 6 is very likely
+    logits[2, 7] = 10.0  # bonus pos: token 7 is very likely
+
+    # Request logprobs for tokens [5, 6, 7]
+    logprob_token_ids = {0: [5, 6, 7]}
+
+    temperature = torch.ones(batch_size, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(all_greedy=False, temperature=temperature)
+    metadata = replace(
+        metadata,
+        logprob_token_ids=logprob_token_ids,
+        max_num_logprobs=None,
+    )
+
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    assert output.logprobs_tensors is not None
+    lp = output.logprobs_tensors.logprobs
+
+    # Row 0 (draft pos 0): token 5 should have highest logprob
+    # Column 0 is sampled token, columns 1-3 are [5, 6, 7]
+    # Token 5 logprob at row 0 should be close to 0 (it's the argmax)
+    assert lp[0, 1] > -1.0  # token 5 at position 0 has high logprob
+
+    # Row 1 (draft pos 1): token 6 should have highest logprob
+    assert lp[1, 2] > -1.0  # token 6 at position 1 has high logprob
+
+    # Row 2 (bonus pos): token 7 should have highest logprob
+    assert lp[2, 3] > -1.0  # token 7 at position 2 has high logprob
+
+
+def test_logprob_token_ids_without_max_num_logprobs():
+    """logprob_token_ids should work even when max_num_logprobs is None."""
+    vocab_size = 100
+    spec_tokens = [[1, 2]]
+    batch_size = 1
+
+    rejection_sampler = _make_real_rejection_sampler()
+    spec_decode_metadata, logits = _create_spec_decode_metadata_with_indices(
+        spec_tokens, vocab_size=vocab_size
+    )
+
+    logprob_token_ids = {0: [10, 20]}
+
+    temperature = torch.ones(batch_size, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(all_greedy=False, temperature=temperature)
+    metadata = replace(
+        metadata,
+        logprob_token_ids=logprob_token_ids,
+        max_num_logprobs=None,
+    )
+
+    output = rejection_sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    # Should still return logprobs because logprob_token_ids is set
+    assert output.logprobs_tensors is not None
+    assert output.logprobs_tensors.logprobs.shape[1] == 3  # 2 tokens + 1 sampled
