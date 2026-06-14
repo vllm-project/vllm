@@ -10,6 +10,7 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     convert_rs_fp16x2,
     softplus,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -82,6 +83,9 @@ def _replay_precompute_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
     HEADS_PER_BLOCK: tl.constexpr,
+    LAUNCH_WITH_PDL: tl.constexpr,
+    LAUNCH_DEPENDENT_KERNELS: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=0)
     pid_hg = tl.program_id(axis=1)
@@ -93,6 +97,9 @@ def _replay_precompute_kernel(
             return
     else:
         cache_batch_idx = pid_b.to(tl.int64)
+
+    if LAUNCH_DEPENDENT_KERNELS:
+        tl.extra.cuda.gdc_launch_dependents()
 
     buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
     buf_write = 1 - buf_read
@@ -148,6 +155,9 @@ def _replay_precompute_kernel(
             decay_vec_ptr + pid_b * stride_dv_batch + head_idx * stride_dv_head
         )
         tl.store(decay_vec_base + offs_t * stride_dv_t, decay_vec, mask=t_mask)
+
+    if LAUNCH_WITH_PDL:
+        tl.extra.cuda.gdc_wait()
 
     group_idx = first_head // nheads_ngroups_ratio
     C_base = C_ptr + pid_b * stride_C_batch + group_idx * stride_C_group
@@ -313,6 +323,8 @@ def _replay_state_update_kernel(
     BLOCK_SIZE_T: tl.constexpr,
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
+    LAUNCH_WITH_PDL: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -444,6 +456,9 @@ def _replay_state_update_kernel(
         state = state.to(state_ptrs.dtype.element_ty)
         tl.store(state_ptrs, state, mask=state_mask)
         state = state.to(tl.float32)
+
+    if LAUNCH_WITH_PDL:
+        tl.extra.cuda.gdc_wait()
 
     x_base = x_ptr + pid_b * stride_x_batch + pid_h * stride_x_head
     C_base = C_ptr + pid_b * stride_C_batch + group_idx * stride_C_group
@@ -610,6 +625,8 @@ def replay_selective_state_update(
     cache_philox_rounds: int = 0,
     cb_scaled: torch.Tensor | None = None,
     decay_vec: torch.Tensor | None = None,
+    launch_with_pdl: bool = False,
+    use_internal_pdl: bool = True,
 ) -> None:
     """Replay-based MTP SSM update.
 
@@ -669,6 +686,12 @@ def replay_selective_state_update(
         and (dt_bias is None or dt_bias.stride(-1) == 0)
     )
     assert tie_hdim
+
+    pdl_supported = (
+        current_platform.is_cuda() and current_platform.has_device_capability(90)
+    )
+    launch_with_pdl = launch_with_pdl and pdl_supported
+    use_internal_pdl = use_internal_pdl and pdl_supported
 
     block_size_t = max(triton.next_power_of_2(T), 16)
     rand_seed = None
@@ -792,6 +815,9 @@ def replay_selective_state_update(
             dt_softplus,
             HAS_CACHE_BATCH_INDICES=has_state_indices,
             HEADS_PER_BLOCK=heads_per_block,
+            LAUNCH_WITH_PDL=launch_with_pdl,
+            LAUNCH_DEPENDENT_KERNELS=use_internal_pdl,
+            launch_pdl=launch_with_pdl or use_internal_pdl,
             num_warps=precompute_num_warps,
         )
 
@@ -863,6 +889,8 @@ def replay_selective_state_update(
             decay_vec.stride(2),
             block_size_m,
             PHILOX_ROUNDS=cache_philox_rounds,
+            LAUNCH_WITH_PDL=use_internal_pdl,
+            launch_pdl=use_internal_pdl,
             num_warps=num_warps,
         )
 

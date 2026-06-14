@@ -1181,6 +1181,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
+            use_mtp_replay = (
+                self._use_mtp_replay
+                and num_accepted_tokens is not None
+                and query_start_loc_d is not None
+                and state_indices_tensor_d.dim() == 2
+                and state_indices_tensor_d.size(1) == 1 + self.num_spec
+            )
+
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
@@ -1194,6 +1202,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
+                launch_dependent_kernels=use_mtp_replay,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -1221,13 +1230,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
-            use_mtp_replay = (
-                self._use_mtp_replay
-                and num_accepted_tokens is not None
-                and query_start_loc_d is not None
-                and state_indices_tensor_d.dim() == 2
-                and state_indices_tensor_d.size(1) == 1 + self.num_spec
-            )
             if use_mtp_replay:
                 assert num_accepted_tokens is not None
                 assert state_indices_tensor_d is not None
@@ -1348,6 +1350,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     enable_stochastic_rounding=False,
                     cb_scaled=self._mtp_replay_cb_scaled,
                     decay_vec=self._mtp_replay_decay_vec,
+                    launch_with_pdl=True,
                 )
                 if num_decode_tokens != num_decodes * num_steps:
                     for decode_idx in range(num_decodes):
