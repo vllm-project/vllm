@@ -1011,6 +1011,94 @@ class VllmBackend:
             ),
         )
 
+    def _write_cache_key_factors(
+        self,
+        local_cache_dir: str,
+        env_factors: dict[str, Any],
+        config_hash: str,
+        code_hash: str,
+        compiler_hash: str,
+        vllm_config: VllmConfig,
+    ) -> None:
+        """Write cache key factors to cache_key_factors.json for debugging.
+
+        Breaks the aggregated config_hash down into per-sub-config hashes so
+        a cache miss can be attributed to a specific config section without
+        rebuilding. Best-effort: failures are logged but never fatal.
+        """
+        try:
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                lazy(partial(pprint.pformat, env_factors, width=120)),
+                config_hash,
+            )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            if not os.path.exists(meta_path):
+                cc = vllm_config
+                # _hash is the aggregated value used for the actual cache key;
+                # individual entries are informational only.
+                config_details: dict[str, str | None] = {
+                    "_hash": config_hash,
+                    "model": (
+                        cc.model_config.compute_hash() if cc.model_config else None
+                    ),
+                    "cache": (
+                        cc.cache_config.compute_hash() if cc.cache_config else None
+                    ),
+                    "parallel": (
+                        cc.parallel_config.compute_hash()
+                        if cc.parallel_config
+                        else None
+                    ),
+                    "scheduler": (
+                        cc.scheduler_config.compute_hash()
+                        if cc.scheduler_config
+                        else None
+                    ),
+                    "device": (
+                        cc.device_config.compute_hash() if cc.device_config else None
+                    ),
+                    "load": (
+                        cc.load_config.compute_hash() if cc.load_config else None
+                    ),
+                    "compilation": (
+                        cc.compilation_config.compute_hash()
+                        if cc.compilation_config
+                        else None
+                    ),
+                    "lora": (
+                        cc.lora_config.compute_hash() if cc.lora_config else None
+                    ),
+                    "speculative": (
+                        cc.speculative_config.compute_hash()
+                        if cc.speculative_config
+                        else None
+                    ),
+                }
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {
+                            "env": env_factors,
+                            "config": config_details,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                        },
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
+        except Exception:
+            # Best-effort only; metadata write failures are non-fatal.
+            logger.warning(
+                (
+                    "Could not write compile cache metadata at %s; continuing without "
+                    "metadata. Compiled cache remains valid; diagnostics may be "
+                    "limited."
+                ),
+                local_cache_dir,
+                exc_info=True,
+            )
+
     @dynamo_timed("vllm_backend")
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
@@ -1032,15 +1120,16 @@ class VllmBackend:
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
+            lazy(lambda: "\n".join(str(f) for f in forward_code_files)),
         )
         hash_content = []
         for filepath in forward_code_files:
-            if filepath == "<string>":
+            filepath_str = str(filepath)
+            if filepath_str == "<string>":
                 # This means the function was dynamically generated, with
                 # e.g. exec(). We can't actually check these.
                 continue
-            hash_content.append(filepath)
+            hash_content.append(filepath_str)
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())
@@ -1106,38 +1195,15 @@ class VllmBackend:
             local_cache_dir,
         )
 
-        # Persist and log only hash-relevant factors together.
-        try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
-            )
-            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
-            if not os.path.exists(meta_path):
-                with open(meta_path, "w") as f:
-                    json.dump(
-                        {
-                            "env": env_factors,  # raw factors used for env_hash
-                            "config_hash": config_hash,
-                            "code_hash": code_hash,
-                            "compiler_hash": compiler_hash,
-                        },
-                        f,
-                        indent=2,
-                        sort_keys=True,
-                    )
-        except Exception:
-            # Best-effort only; metadata write failures are non-fatal.
-            logger.warning(
-                (
-                    "Could not write compile cache metadata at %s; continuing without "
-                    "metadata. Compiled cache remains valid; diagnostics may be "
-                    "limited."
-                ),
-                local_cache_dir,
-                exc_info=True,
-            )
+        # Persist and log hash-relevant factors for cache-miss debugging.
+        self._write_cache_key_factors(
+            local_cache_dir,
+            env_factors,
+            config_hash,
+            code_hash,
+            compiler_hash,
+            vllm_config,
+        )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
