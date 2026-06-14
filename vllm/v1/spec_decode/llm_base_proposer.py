@@ -450,6 +450,9 @@ class SpecDecodeBaseProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
+        # [batch_size] per-request mrope_position_delta for VLM decode
+        # positions; None for non-MRoPE models.
+        mrope_position_deltas: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
@@ -598,6 +601,7 @@ class SpecDecodeBaseProposer:
                     batch_size,
                     input_batch_size,
                     block_size,
+                    mrope_position_deltas=mrope_position_deltas,
                 )
 
             # Rebuild attention metadata. When draft positions are constant
@@ -668,6 +672,7 @@ class SpecDecodeBaseProposer:
         batch_size: int,
         input_batch_size: int,
         block_size: int,
+        mrope_position_deltas: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Update positions, slot mappings, and sequence metadata for the
         next draft step. Returns the updated positions tensor."""
@@ -690,7 +695,29 @@ class SpecDecodeBaseProposer:
         )
         common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
         if self.uses_mrope:
-            self.mrope_positions[1:, :batch_size] = self.mrope_positions[0, :batch_size]
+            if mrope_position_deltas is not None:
+                # Compute MRoPE decode positions using per-request delta,
+                # matching the target model's computation in
+                # MRotaryEmbedding.get_next_input_positions_tensor:
+                #   position = delta + context_len
+                # where context_len is the number of tokens in the KV cache
+                # before the new draft token. The kernel above incremented
+                # seq_lens by 1, so subtracting 1 recovers context_len.
+                # For text decode tokens all 3 MRoPE dims are identical.
+                decode_pos = (
+                    mrope_position_deltas
+                    + common_attn_metadata.seq_lens[:batch_size].long()
+                    - 1
+                )
+                # Clamp to max_model_len - 1, matching the kernel's clamping.
+                decode_pos = decode_pos.clamp(max=self.max_model_len - 1)
+                self.mrope_positions[:, :batch_size] = decode_pos.unsqueeze(0)
+            else:
+                # No delta available: replicate dim 0 into dims 1 and 2.
+                # Correct for text-only tokens where all dims are equal.
+                self.mrope_positions[1:, :batch_size] = (
+                    self.mrope_positions[0, :batch_size]
+                )
             positions = self.mrope_positions[:, :batch_size]
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[

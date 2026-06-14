@@ -493,6 +493,18 @@ class GPUModelRunner(
             model_config
         )
 
+        # Persistent MRoPE delta buffers for the spec-decode proposer. The CPU
+        # buffer (pinned) is updated on batch changes and pruning events; the GPU
+        # copy is refreshed lazily via _mrope_deltas_dirty.
+        if self.uses_mrope:
+            self._mrope_deltas_cpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.long, pin_memory=self.pin_memory
+            )
+            self._mrope_deltas_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.long, device=device
+            )
+            self._mrope_deltas_dirty = False
+
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
             # models.
@@ -1445,6 +1457,23 @@ class GPUModelRunner(
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+        # Rebuild the MRoPE delta CPU buffer whenever the batch changes (requests
+        # added, removed, or reordered by condense/reorder). condense() and
+        # _may_reorder_batch() may shift slot assignments, so we rescan after
+        # both complete. Pruning events update individual slots directly (see
+        # _gather_mm_embeddings). The dirty flag gates the CPU→GPU copy in
+        # propose() so steady-state decode steps pay no allocation cost.
+        if self.uses_mrope and (
+            scheduler_output.finished_req_ids or reqs_to_add
+        ):
+            num_reqs = self.input_batch.num_reqs
+            for i in range(num_reqs):
+                req_id = self.input_batch.req_ids[i]
+                self._mrope_deltas_cpu[i] = (
+                    self.requests[req_id].mrope_position_delta or 0
+                )
+            self._mrope_deltas_dirty = True
 
         # Incrementally update ngram_gpu tensors after batch is stable
         if is_ngram_gpu:
@@ -3175,6 +3204,11 @@ class GPUModelRunner(
                 )
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
+                # Mirror the updated delta into the persistent CPU buffer so
+                # the spec-decode proposer reads the correct value this step.
+                slot = self.input_batch.req_id_to_index[req_id]
+                self._mrope_deltas_cpu[slot] = new_delta or 0
+                self._mrope_deltas_dirty = True
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
@@ -5058,6 +5092,22 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
+            # Pass per-request MRoPE deltas to the proposer for VLM decode-step
+            # position computation. The CPU buffer is kept up-to-date by
+            # _update_states (batch changes) and _gather_mm_embeddings (pruning).
+            # The GPU copy is refreshed only when the dirty flag is set, so
+            # steady-state decode steps pay no allocation or transfer cost.
+            # Non-MRoPE models get None and take the existing fallback path.
+            mrope_position_deltas = None
+            if self.uses_mrope:
+                num_reqs = self.input_batch.num_reqs
+                if self._mrope_deltas_dirty:
+                    self._mrope_deltas_gpu[:num_reqs].copy_(
+                        self._mrope_deltas_cpu[:num_reqs], non_blocking=True
+                    )
+                    self._mrope_deltas_dirty = False
+                mrope_position_deltas = self._mrope_deltas_gpu[:num_reqs]
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -5069,6 +5119,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                mrope_position_deltas=mrope_position_deltas,
             )
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
