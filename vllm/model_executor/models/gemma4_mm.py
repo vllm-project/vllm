@@ -1658,6 +1658,26 @@ class Gemma4ForConditionalGeneration(
     # Weight loading
     # ------------------------------------------------------------------ #
 
+    def get_bnb_quant_state_aliases(self) -> dict[str, str]:
+        # k_eq_v full_attention layers ship no v_proj in the checkpoint;
+        # _weight_iterator copies the k_proj packed buffer into qkv_proj's
+        # V slot, but the bnb QuantState dict is keyed by checkpoint name
+        # and has no v_proj entry. Alias the v_proj QuantState to k_proj's
+        # so the packed parameter's bnb_shard_offsets cover all 3 shards.
+        # Keys use the post-mapper layout (`language_model.model.*`)
+        # since the bnb loader populates quant_state_dict from mapped
+        # names.
+        text_cfg = self.config.text_config
+        if not getattr(text_cfg, "attention_k_eq_v", False):
+            return {}
+        aliases: dict[str, str] = {}
+        for idx, layer_type in enumerate(text_cfg.layer_types):
+            if layer_type != "full_attention":
+                continue
+            prefix = f"language_model.model.layers.{idx}.self_attn"
+            aliases[f"{prefix}.v_proj.weight"] = f"{prefix}.k_proj.weight"
+        return aliases
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Some checkpoints have vestigial embed_vision.embedding and
         # embed_audio.embedding weights from the Gemma3n architecture
