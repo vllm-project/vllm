@@ -47,6 +47,7 @@ from vllm.v1.spec_decode.utils import (
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
     next_power_of_2,
+    first_slot_mapping_if_ubatched
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -1475,8 +1476,9 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
-        slot_mappings: dict[str, torch.Tensor] | None = None,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ) -> None:
+        slot_mappings = first_slot_mapping_if_ubatched(slot_mappings)
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
         only_one_forward_pass = is_graph_capturing or self.parallel_drafting

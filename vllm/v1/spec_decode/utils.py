@@ -600,3 +600,18 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
     rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
+
+
+def first_slot_mapping_if_ubatched(
+    slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+) -> dict[str, torch.Tensor] | None:
+    """Normalize the runner-provided per-layer slot mappings to a single dict.
+
+    When the target model runs with DBO ubatching, the model runner passes
+    slot mappings as a per-ubatch list of dicts. Drafters that run
+    non-ubatched only need a dict (e.g. for layer-membership checks), so
+    return the first ubatch's dict in that case.
+    """
+    if isinstance(slot_mappings, list):
+        return slot_mappings[0] if slot_mappings else None
+    return slot_mappings

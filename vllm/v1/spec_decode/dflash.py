@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
+from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel, first_slot_mapping_if_ubatched
 
 logger = init_logger(__name__)
 
@@ -203,7 +203,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
-        slot_mappings: dict[str, torch.Tensor] | None = None,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     ) -> None:
         """
         Key differences to default dummy_run:
@@ -213,6 +213,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         - max_query_tokens is quite small, DFlash only sees spec tokens as queries
         - Multimodal inputs are not currently supported
         """
+        slot_mappings = first_slot_mapping_if_ubatched(slot_mappings)
         num_query_tokens = min(num_tokens, self.max_query_tokens)
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
