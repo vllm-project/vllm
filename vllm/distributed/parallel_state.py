@@ -409,13 +409,19 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+            from vllm.distributed.utils import (
+                get_cpu_distributed_timeout_or_none,
+                get_distributed_timeout_or_none,
+            )
 
             timeout = get_cpu_distributed_timeout_or_none()
+            device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
                 device_group = torch.distributed.new_group(
-                    ranks, backend=torch_distributed_backend
+                    ranks,
+                    backend=torch_distributed_backend,
+                    timeout=device_timeout,
                 )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.
@@ -489,10 +495,16 @@ class GroupCoordinator:
         This is a collective call: every world rank must invoke it. Used where we
         want to issue ops that can run concurrently with ops on `device_group`.
         """
+        from vllm.distributed.utils import get_distributed_timeout_or_none
+
+        device_timeout = get_distributed_timeout_or_none()
         sibling: ProcessGroup | None = None
         for ranks in self.group_ranks:
             pg = torch.distributed.new_group(
-                ranks, backend=self.torch_distributed_backend, group_desc=group_desc
+                ranks,
+                backend=self.torch_distributed_backend,
+                group_desc=group_desc,
+                timeout=device_timeout,
             )
             if self.rank in ranks:
                 sibling = pg
